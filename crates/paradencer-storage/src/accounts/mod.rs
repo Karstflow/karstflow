@@ -1,5 +1,5 @@
-mod database;
-mod primitives;
+pub(crate) mod database;
+pub(crate) mod primitives;
 mod processor;
 mod record;
 mod transaction;

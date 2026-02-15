@@ -5,7 +5,9 @@ mod clock;
 mod commitment;
 mod compute_budget;
 mod consensus_coordinator;
+pub mod cost_tracker;
 mod epoch_schedule;
+pub mod features;
 mod fee;
 mod fork_choice;
 mod inflation;
@@ -18,6 +20,7 @@ mod stake_history;
 #[cfg(test)]
 mod tests;
 mod tower;
+pub mod transaction_cache;
 mod vote_processor;
 mod vote_state;
 
@@ -59,3 +62,7 @@ pub use vote_state::{
     BlockTimestamp, EpochCredits, LandedVote, VoteError, VoteLockout, VoteState, MAX_EPOCH_CREDITS,
     MAX_LOCKOUT_HISTORY,
 };
+
+pub use cost_tracker::{CostTracker, CostTrackerError, TransactionCost};
+pub use features::{FeatureActivation, FeatureSet};
+pub use transaction_cache::TransactionCache;

@@ -57,3 +57,115 @@ pub const MEMO_PROGRAM_V3_ID: Pubkey = Pubkey::new([
     5, 74, 83, 99, 9, 162, 142, 187, 241, 11, 151, 64, 136, 141, 221, 137, 87, 162, 189, 176, 18,
     198, 137, 128, 137, 180, 63, 143, 34, 123, 73, 165,
 ]);
+
+/// Address Lookup Table Program ID - manages versioned transaction lookup tables
+/// AddressLookupTab1e1111111111111111111111111
+pub const ADDRESS_LOOKUP_TABLE_PROGRAM_ID: Pubkey = Pubkey::new([
+    4, 133, 52, 245, 98, 251, 80, 133, 199, 173, 120, 183, 202, 183, 164, 158, 42, 107, 32, 198,
+    44, 49, 93, 134, 13, 160, 0, 0, 0, 0, 0, 0,
+]);
+
+/// Compute Budget Program ID - sets per-transaction compute limits
+/// ComputeBudget111111111111111111111111111111
+pub const COMPUTE_BUDGET_PROGRAM_ID: Pubkey = Pubkey::new([
+    3, 6, 70, 111, 229, 33, 23, 50, 255, 236, 173, 186, 114, 195, 155, 231, 188, 140, 229, 187,
+    197, 247, 18, 107, 44, 67, 0, 0, 0, 0, 0, 0,
+]);
+
+/// Config Program ID - stores configuration data on-chain
+/// Config1111111111111111111111111111111111111
+pub const CONFIG_PROGRAM_ID: Pubkey = Pubkey::new([
+    3, 6, 18, 108, 178, 137, 242, 44, 249, 84, 157, 82, 6, 234, 105, 62, 97, 119, 1, 192, 120, 69,
+    146, 137, 0, 0, 0, 0, 0, 0, 0, 0,
+]);
+
+/// Ed25519 signature verification precompile
+/// Ed25519SigVerify111111111111111111111111111
+pub const ED25519_PROGRAM_ID: Pubkey = Pubkey::new([
+    3, 125, 70, 166, 52, 91, 247, 32, 14, 208, 73, 151, 48, 86, 222, 124, 200, 134, 133, 33, 163,
+    89, 17, 106, 55, 182, 46, 138, 0, 0, 0, 0,
+]);
+
+/// Secp256k1 ECDSA recovery precompile
+/// KeccakSecp256k11111111111111111111111111111
+pub const SECP256K1_PROGRAM_ID: Pubkey = Pubkey::new([
+    6, 163, 105, 129, 210, 14, 50, 50, 105, 161, 226, 85, 175, 113, 231, 188, 93, 10, 225, 176, 68,
+    94, 13, 94, 116, 92, 75, 127, 0, 0, 0, 0,
+]);
+
+// ---------------------------------------------------------------------------
+// Sysvar account addresses
+// ---------------------------------------------------------------------------
+
+/// Sysvar program owner for all sysvar accounts.
+/// Sysvar1111111111111111111111111111111111111
+pub const SYSVAR_PROGRAM_ID: Pubkey = Pubkey::new([
+    6, 167, 213, 23, 24, 199, 116, 201, 40, 86, 99, 152, 105, 29, 94, 182, 139, 94, 184, 163, 155,
+    75, 109, 92, 115, 85, 91, 42, 0, 0, 0, 0,
+]);
+
+/// Clock sysvar - SysvarC1ock11111111111111111111111111111111
+pub const CLOCK_SYSVAR_ID: Pubkey = Pubkey::new([
+    6, 167, 213, 23, 24, 199, 116, 201, 40, 86, 99, 152, 105, 29, 94, 182, 139, 94, 184, 163, 155,
+    75, 109, 92, 115, 85, 91, 42, 0, 0, 0, 0,
+]);
+
+/// EpochSchedule sysvar - SysvarEpochSchedu1e111111111111111111111111
+pub const EPOCH_SCHEDULE_SYSVAR_ID: Pubkey = Pubkey::new([
+    6, 167, 213, 23, 25, 44, 92, 81, 33, 140, 201, 76, 142, 17, 155, 231, 94, 33, 154, 86, 85, 238,
+    218, 128, 75, 27, 203, 76, 0, 0, 0, 0,
+]);
+
+/// Rent sysvar - SysvarRent111111111111111111111111111111111
+pub const RENT_SYSVAR_ID: Pubkey = Pubkey::new([
+    6, 167, 213, 23, 25, 47, 10, 175, 198, 242, 101, 227, 251, 119, 204, 122, 218, 130, 197, 41,
+    208, 190, 59, 19, 110, 45, 0, 0, 0, 0, 0, 0,
+]);
+
+/// SlotHashes sysvar - SysvarS1otHashes111111111111111111111111111
+pub const SLOT_HASHES_SYSVAR_ID: Pubkey = Pubkey::new([
+    6, 167, 213, 23, 25, 44, 86, 142, 224, 138, 132, 95, 115, 210, 151, 136, 207, 3, 92, 49, 69,
+    178, 26, 179, 68, 216, 6, 46, 0, 0, 0, 0,
+]);
+
+/// SlotHistory sysvar - SysvarS1otHistory11111111111111111111111111
+pub const SLOT_HISTORY_SYSVAR_ID: Pubkey = Pubkey::new([
+    6, 167, 213, 23, 25, 44, 86, 142, 224, 138, 132, 95, 115, 210, 151, 136, 207, 3, 92, 49, 69,
+    178, 26, 180, 68, 216, 6, 46, 0, 0, 0, 0,
+]);
+
+/// StakeHistory sysvar - SysvarStakeHistory1111111111111111111111111
+pub const STAKE_HISTORY_SYSVAR_ID: Pubkey = Pubkey::new([
+    6, 167, 213, 23, 25, 47, 10, 175, 198, 242, 101, 227, 251, 119, 204, 122, 218, 130, 197, 41,
+    208, 190, 59, 19, 110, 45, 0, 0, 0, 1, 0, 0,
+]);
+
+/// RecentBlockhashes sysvar (deprecated) - SysvarRecentB1telephones11111111111111
+pub const RECENT_BLOCKHASHES_SYSVAR_ID: Pubkey = Pubkey::new([
+    6, 167, 213, 23, 25, 47, 10, 175, 198, 242, 101, 227, 251, 119, 204, 122, 218, 130, 197, 41,
+    208, 190, 59, 19, 110, 45, 0, 0, 0, 2, 0, 0,
+]);
+
+/// Instructions sysvar - Sysvar1nstructions1111111111111111111111111
+pub const INSTRUCTIONS_SYSVAR_ID: Pubkey = Pubkey::new([
+    6, 167, 213, 23, 24, 117, 247, 41, 0, 117, 43, 2, 118, 106, 216, 124, 150, 130, 158, 181, 119,
+    90, 0, 114, 63, 124, 0, 0, 0, 0, 0, 0,
+]);
+
+/// EpochRewards sysvar - SysvarEpochRewards1111111111111111111111111
+pub const EPOCH_REWARDS_SYSVAR_ID: Pubkey = Pubkey::new([
+    6, 167, 213, 23, 25, 44, 92, 81, 33, 140, 201, 76, 142, 17, 155, 231, 94, 33, 154, 86, 85, 238,
+    218, 128, 75, 27, 203, 77, 0, 0, 0, 0,
+]);
+
+/// LastRestartSlot sysvar - SysvarLastRestartS1ot1111111111111111111111
+pub const LAST_RESTART_SLOT_SYSVAR_ID: Pubkey = Pubkey::new([
+    6, 167, 213, 23, 24, 226, 173, 203, 107, 100, 198, 181, 229, 149, 30, 159, 68, 129, 202, 165,
+    244, 253, 112, 49, 148, 83, 200, 90, 0, 0, 0, 0,
+]);
+
+/// Fees sysvar (deprecated) - SysvarFees111111111111111111111111111111111
+pub const FEES_SYSVAR_ID: Pubkey = Pubkey::new([
+    6, 167, 213, 23, 24, 199, 116, 201, 40, 86, 99, 152, 105, 29, 94, 182, 139, 94, 184, 163, 155,
+    75, 109, 92, 115, 85, 91, 42, 0, 0, 0, 1,
+]);

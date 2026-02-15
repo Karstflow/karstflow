@@ -9,3 +9,6 @@ authors.workspace = true
 paradencer-constants = { path = "../paradencer-constants" }
 paradencer-ids = { path = "../paradencer-ids" }
 paradencer-types = { path = "../paradencer-types" }
+sha2 = { workspace = true }
+blake3 = { workspace = true }
+ed25519-dalek = { workspace = true }

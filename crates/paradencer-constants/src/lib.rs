@@ -1,3 +1,13 @@
+pub mod address_lookup_table;
+pub mod block_limits;
+pub mod blockstore;
+pub mod compute_budget_program;
+pub mod config_program;
+pub mod features;
+pub mod genesis;
+pub mod precompiles;
+pub mod program_cache;
+
 pub mod economics {
     // Fee constants
     pub const LAMPORTS_PER_SIGNATURE: u64 = 5_000;
@@ -290,6 +300,9 @@ pub mod quic {
     pub const PACKET_CHANNEL_CAPACITY: usize = 4096;
     pub const PROCESSOR_BATCH_SIZE: usize = 256;
 }
+
+pub mod syscalls;
+pub mod sysvars;
 
 pub mod transaction {
     // Transaction format constants

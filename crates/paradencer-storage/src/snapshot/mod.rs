@@ -1,6 +1,6 @@
-mod creator;
-mod loader;
-mod metadata;
+pub(crate) mod creator;
+pub(crate) mod loader;
+pub(crate) mod metadata;
 
 #[cfg(doc)]
 pub mod doc;

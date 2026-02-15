@@ -132,7 +132,7 @@ fn test_incremental_snapshot() {
 
     let mut modified_pubkey_bytes = [0u8; 32];
     modified_pubkey_bytes[0..8].copy_from_slice(&50u64.to_le_bytes());
-    let modified_pubkey = Pubkey::from_bytes(modified_pubkey_bytes);
+    let modified_pubkey = Pubkey::new(modified_pubkey_bytes);
     let modified_account = create_test_account(999999, 200);
     base_accounts.insert(modified_pubkey, modified_account.clone());
 
@@ -362,7 +362,7 @@ fn test_restore_with_incrementals() {
     let mut modified_accounts = db.get_all_published_accounts();
     let mut pubkey_bytes = [0u8; 32];
     pubkey_bytes[0] = 1;
-    let pubkey = Pubkey::from_bytes(pubkey_bytes);
+    let pubkey = Pubkey::new(pubkey_bytes);
     modified_accounts.insert(pubkey, create_test_account(99999, 200));
     db.bulk_insert_published_accounts(modified_accounts)
         .unwrap();

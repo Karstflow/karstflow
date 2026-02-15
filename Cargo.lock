@@ -1162,8 +1162,15 @@ dependencies = [
 name = "paradencer-consensus"
 version = "0.1.0"
 dependencies = [
+ "bincode",
+ "dashmap",
  "paradencer-constants",
+ "paradencer-ids",
  "paradencer-storage",
+ "paradencer-types",
+ "parking_lot 0.12.5",
+ "serde",
+ "sha2",
 ]
 
 [[package]]
@@ -1305,9 +1312,12 @@ dependencies = [
 name = "paradencer-sbpf"
 version = "0.1.0"
 dependencies = [
+ "blake3",
+ "ed25519-dalek",
  "paradencer-constants",
  "paradencer-ids",
  "paradencer-types",
+ "sha2",
 ]
 
 [[package]]

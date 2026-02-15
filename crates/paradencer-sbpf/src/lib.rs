@@ -1,11 +1,16 @@
+mod address_lookup_table;
 mod associated_token_program;
 mod bpf_loader;
+mod compute_budget_program;
+mod config_program;
 #[cfg(test)]
 mod integration_tests;
 mod memo_program;
+pub mod precompiles;
 #[cfg(test)]
 mod spl_integration_tests;
 mod stake_program;
+pub mod syscalls;
 mod system_program;
 mod token_2022_program;
 mod token_program;
@@ -13,13 +18,21 @@ mod transaction_processor;
 mod vm;
 mod vote_program;
 
+pub use address_lookup_table::{
+    AddressLookupTableExecutor, LookupTable, LookupTableMeta, LookupTableStatus,
+};
 pub use associated_token_program::AssociatedTokenProgramExecutor;
 pub use bpf_loader::{BpfLoaderExecutor, ProgramAccountState};
+pub use compute_budget_program::{
+    extract_compute_budget, ComputeBudgetProgramExecutor, ExtractedComputeBudget,
+};
+pub use config_program::ConfigProgramExecutor;
 pub use memo_program::MemoProgramExecutor;
 pub use paradencer_constants::execution::{
     COMPUTE_UNIT_COST_ACCOUNT_WRITEBACK, COMPUTE_UNIT_COST_PER_ACCOUNT,
     COMPUTE_UNIT_COST_PER_DATA_BYTE, DEFAULT_INSTRUCTION_BASE_COST, MAX_COMPUTE_UNITS,
 };
+pub use precompiles::{Ed25519PrecompileExecutor, Secp256k1PrecompileExecutor};
 pub use stake_program::StakeProgramExecutor;
 pub use system_program::SystemProgramExecutor;
 pub use token_2022_program::Token2022ProgramExecutor;

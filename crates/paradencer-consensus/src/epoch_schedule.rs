@@ -31,6 +31,11 @@ impl EpochSchedule {
         Self { config }
     }
 
+    /// Access the underlying configuration.
+    pub fn config(&self) -> &EpochScheduleConfig {
+        &self.config
+    }
+
     pub fn get_epoch(&self, slot: u64) -> u64 {
         if !self.config.warmup || slot >= self.config.first_normal_slot {
             let normal_slot_index = slot.saturating_sub(self.config.first_normal_slot);
