@@ -22,3 +22,10 @@ pub const TOKEN_PROGRAM_ID: Pubkey = Pubkey::new([
     6, 221, 246, 225, 215, 101, 161, 147, 217, 203, 225, 70, 206, 235, 121, 172, 28, 180, 133, 237,
     95, 91, 55, 145, 58, 140, 245, 133, 126, 255, 0, 169,
 ]);
+
+/// BPF Loader Program ID - handles custom BPF program loading and execution
+/// BPFLoaderUpgradeab1e11111111111111111111111
+pub const BPF_LOADER_PROGRAM_ID: Pubkey = Pubkey::new([
+    2, 168, 246, 145, 78, 136, 161, 107, 189, 35, 149, 133, 95, 100, 4, 217, 180, 186, 232, 154,
+    116, 170, 109, 102, 96, 0, 0, 0, 0, 0, 0, 0,
+]);

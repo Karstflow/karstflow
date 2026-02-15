@@ -1,5 +1,6 @@
 #[cfg(test)]
 mod integration_tests;
+mod bpf_loader;
 mod stake_program;
 mod system_program;
 mod token_program;
@@ -7,6 +8,7 @@ mod transaction_processor;
 mod vm;
 mod vote_program;
 
+pub use bpf_loader::{BpfLoaderExecutor, ProgramAccountState};
 pub use paradencer_constants::execution::{
     COMPUTE_UNIT_COST_ACCOUNT_WRITEBACK, COMPUTE_UNIT_COST_PER_ACCOUNT,
     COMPUTE_UNIT_COST_PER_DATA_BYTE, DEFAULT_INSTRUCTION_BASE_COST, MAX_COMPUTE_UNITS,

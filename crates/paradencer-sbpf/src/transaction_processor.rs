@@ -1,5 +1,5 @@
-use crate::{ExecutionContext, ExecutionOutcome, StakeProgramExecutor, SystemProgramExecutor, TokenProgramExecutor, VoteProgramExecutor};
-use paradencer_ids::{STAKE_PROGRAM_ID, SYSTEM_PROGRAM_ID, TOKEN_PROGRAM_ID, VOTE_PROGRAM_ID};
+use crate::{BpfLoaderExecutor, ExecutionContext, ExecutionOutcome, StakeProgramExecutor, SystemProgramExecutor, TokenProgramExecutor, VoteProgramExecutor};
+use paradencer_ids::{BPF_LOADER_PROGRAM_ID, STAKE_PROGRAM_ID, SYSTEM_PROGRAM_ID, TOKEN_PROGRAM_ID, VOTE_PROGRAM_ID};
 use paradencer_types::{Account, Pubkey};
 use std::collections::HashMap;
 
@@ -58,6 +58,7 @@ pub struct TransactionProcessor {
     vote_program: VoteProgramExecutor,
     stake_program: StakeProgramExecutor,
     token_program: TokenProgramExecutor,
+    bpf_loader: BpfLoaderExecutor,
     max_compute_units: u64,
 }
 
@@ -69,6 +70,7 @@ impl TransactionProcessor {
             vote_program: VoteProgramExecutor::new(200),
             stake_program: StakeProgramExecutor::new(250),
             token_program: TokenProgramExecutor::new(300),
+            bpf_loader: BpfLoaderExecutor::new(400),
             max_compute_units: 1_400_000,
         }
     }
@@ -208,6 +210,10 @@ impl TransactionProcessor {
             self.token_program.execute(context).unwrap_or_else(|err| {
                 ExecutionOutcome::failure(300, err)
             })
+        } else if context.program_id == BPF_LOADER_PROGRAM_ID {
+            self.bpf_loader.execute(context).unwrap_or_else(|err| {
+                ExecutionOutcome::failure(400, err)
+            })
         } else {
             // Unknown program
             ExecutionOutcome::failure(
@@ -329,6 +335,14 @@ mod tests {
         // Test Stake Program routing
         let outcome = processor.process_instruction(
             STAKE_PROGRAM_ID,
+            vec![],
+            vec![], // Empty data
+        );
+        assert!(outcome.success);
+
+        // Test BPF Loader Program routing
+        let outcome = processor.process_instruction(
+            BPF_LOADER_PROGRAM_ID,
             vec![],
             vec![], // Empty data
         );

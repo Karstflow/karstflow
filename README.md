@@ -9,7 +9,7 @@ Paradencer is a ground-up Rust implementation of a Solana validator, designed fo
 - **Performance First**: Optimized for high-throughput transaction processing
 - **Clean Architecture**: Multi-crate workspace with clear separation of concerns
 - **Type Safety**: Leveraging Rust's type system for correctness guarantees
-- **Comprehensive Testing**: 824 tests ensuring reliability
+- **Comprehensive Testing**: 829 tests ensuring reliability
 
 ## 🏗️ Architecture
 
@@ -43,6 +43,7 @@ Paradencer is organized as a modular workspace:
 | System Program | 13/13 | ✅ 100% |
 | Vote Program | 17/17 | ✅ 100% |
 | Stake Program | 18/18 | ✅ 100% |
+| Token Program | 18/23 | 🟨 78% |
 
 ### Core Systems
 
@@ -54,9 +55,10 @@ Paradencer is organized as a modular workspace:
 
 ### Test Coverage
 
-- **824 passing tests** across all components
+- **829 passing tests** across all components
 - Comprehensive unit and integration test suites
-- All core programs at 100% instruction coverage
+- Three core programs at 100% instruction coverage
+- Token Program at 78% instruction coverage
 
 ## 🚀 Quick Start
 
