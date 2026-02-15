@@ -1,0 +1,8 @@
+schema_version = 1
+
+max_payload_bytes = 1232
+allow_quic_source = true
+allow_gossip_source = true
+allow_bundle_source = true
+allow_rpc_source = true
+dedup_window_capacity = 32768

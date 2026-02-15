@@ -1,0 +1,62 @@
+[workspace]
+members = [
+  "crates/paradencer-core",
+  "crates/paradencer-runtime",
+  "crates/paradencer-mesh",
+  "crates/paradencer-ingress",
+  "crates/paradencer-execution",
+  "crates/paradencer-storage",
+  "crates/paradencer-constants",
+  "crates/paradencer-stages",
+  "crates/paradencer-config",
+  "crates/paradencer-observability",
+  "crates/paradencer-rpc",
+  "crates/paradencer-control",
+  "crates/paradencer-topology",
+  "crates/paradencer-node", "crates/paradencer-consensus", "crates/paradencer-sbpf", "crates/paradencer-types", "crates/paradencer-ids",
+]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "SEE LICENSE IN LICENSE"
+authors = ["boogvar"]
+
+[workspace.dependencies]
+thiserror = "2"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time"] }
+core_affinity = "0.8"
+crossbeam-channel = "0.5"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.8"
+
+# Cryptography
+sha2 = "0.10"
+ed25519-dalek = { version = "2.1", features = ["rand_core"] }
+blake3 = "1.5"
+
+# Encoding
+bs58 = "0.5"
+bytes = "1.9"
+
+# Utilities
+tracing = "0.1"
+parking_lot = "0.12"
+dashmap = "6.1"
+
+# QUIC/Network
+quinn = "0.11"
+rustls = "0.23"
+rcgen = "0.13"
+
+# Internal crates
+paradencer-constants = { path = "crates/paradencer-constants" }
+paradencer-types = { path = "crates/paradencer-types" }
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+panic = "abort"
+strip = "debuginfo"

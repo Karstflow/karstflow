@@ -1,0 +1,31 @@
+topology_name = "default-pipeline"
+
+[[stages]]
+stage_id = "ingress_gateway"
+stage_kind = "ingress_gateway"
+
+[[stages]]
+stage_id = "transaction_sanitizer"
+stage_kind = "transaction_sanitizer"
+
+[[stages]]
+stage_id = "block_builder"
+stage_kind = "block_builder"
+
+[[stages]]
+stage_id = "telemetry"
+stage_kind = "telemetry"
+
+[[links]]
+link_id = "packet_stream"
+link_kind = "packet_stream"
+source_stage_id = "ingress_gateway"
+destination_stage_id = "transaction_sanitizer"
+capacity = 4096
+
+[[links]]
+link_id = "transaction_stream"
+link_kind = "transaction_stream"
+source_stage_id = "transaction_sanitizer"
+destination_stage_id = "block_builder"
+capacity = 4096

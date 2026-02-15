@@ -1,0 +1,13 @@
+[package]
+name = "paradencer-rpc"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[dependencies]
+thiserror.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+jsonrpsee = { version = "0.24", features = ["server"] }
+paradencer-constants.workspace = true

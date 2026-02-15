@@ -1,0 +1,16 @@
+[package]
+name = "paradencer-storage"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[dependencies]
+paradencer-constants = { path = "../paradencer-constants" }
+paradencer-types = { path = "../paradencer-types" }
+paradencer-sbpf = { path = "../paradencer-sbpf" }
+thiserror.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+dashmap = "6.1"
+ahash = "0.8"

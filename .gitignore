@@ -1,0 +1,20 @@
+# Build artifacts
+/target/
+
+# Documentation (temporary)
+/docs/
+
+# Rust analyzer / IDE
+**/*.rs.bk
+
+# Environment and local overrides
+.env
+.env.*
+!.env.example
+
+# macOS
+.DS_Store
+
+# Logs and temporary files
+*.log
+*.tmp

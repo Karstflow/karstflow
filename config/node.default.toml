@@ -1,0 +1,96 @@
+schema_version = 1
+
+[runtime]
+mode = "tokio"
+workers = 4
+run_for_seconds = 10
+pinned_core_policy = "adaptive"
+pinned_allow_core_sharing = true
+
+[topology]
+topology_path = "config/topology.default.toml"
+packet_link_capacity = 4096
+transaction_link_capacity = 4096
+
+[ingress_policy]
+max_payload_bytes = 1232
+allow_quic_source = true
+allow_gossip_source = true
+allow_bundle_source = true
+allow_rpc_source = true
+dedup_window_capacity = 32768
+# quic_min_gap_ticks = 0
+# gossip_min_gap_ticks = 0
+# bundle_min_gap_ticks = 0
+# rpc_min_gap_ticks = 0
+# quic_burst_capacity = 0
+# gossip_burst_capacity = 0
+# bundle_burst_capacity = 0
+# rpc_burst_capacity = 0
+# quic_burst_refill_ticks = 1
+# gossip_burst_refill_ticks = 1
+# bundle_burst_refill_ticks = 1
+# rpc_burst_refill_ticks = 1
+# quic_cost_budget_per_window = 0
+# gossip_cost_budget_per_window = 0
+# bundle_cost_budget_per_window = 0
+# rpc_cost_budget_per_window = 0
+# quic_cost_budget_window_ticks = 1
+# gossip_cost_budget_window_ticks = 1
+# bundle_cost_budget_window_ticks = 1
+# rpc_cost_budget_window_ticks = 1
+# egress_retry_buffer_capacity = 1024
+# egress_retry_max_wait_ticks = 6
+# synthetic_batch_size_per_tick = 1
+# synthetic_idle_ticks_between_batches = 0
+# synthetic_payload_bytes = 1200
+# synthetic_source_weight_quic = 1
+# synthetic_source_weight_gossip = 0
+# synthetic_source_weight_bundle = 0
+# synthetic_source_weight_rpc = 0
+
+[metrics]
+output_format = "json_lines"
+output_target = "stdout"
+
+[storage]
+startup_policy = "skip_restore"
+# startup_strict_restore_latest_requires_snapshot = false
+# startup_strict_restore_specific_requires_snapshot = false
+snapshot_interval = 256
+# catalog_path = "/var/lib/paradencer/snapshot-catalog.json"
+# assembly_max_fragment_transactions = 64
+# assembly_max_fragment_cost_units = 256000
+# assembly_max_fragment_wait_ticks = 8
+max_retry_attempts = 3
+retry_backoff_cap_millis = 2000
+# execution_replay_conflict_delay_millis = 25
+# execution_transient_base_delay_millis = 30
+# execution_transient_per_failed_tx_delay_millis = 5
+# execution_transient_cap_millis = 250
+# execution_resource_base_delay_millis = 200
+# execution_resource_per_failed_tx_delay_millis = 20
+# execution_resource_cap_millis = 2000
+# execution_fallback_min_delay_millis = 50
+# execution_fallback_per_failed_tx_delay_millis = 10
+# leader_schedule_enabled = false
+# leader_slot_cycle_length = 4
+# leader_slots_per_cycle = 1
+# leader_initial_slot = 0
+# leader_hold_retry_delay_millis = 20
+# scheduler_enabled = false
+# scheduler_slot_duration_millis = 50
+# scheduler_priority_penalty_class_2_millis = 25
+# scheduler_priority_penalty_class_3_millis = 75
+# fork_choice_enabled = false
+# fork_choice_reorg_retry_delay_millis = 100
+# fork_choice_max_reorg_retry_attempts = 2
+# fork_choice_quarantine_enabled = false
+# fork_choice_quarantine_consecutive_reorg_threshold = 2
+# fork_choice_quarantine_ticks = 10
+# execution_health_enabled = false
+# execution_health_transient_failure_threshold = 4
+# execution_health_cooldown_ticks = 16
+# replay_safety_enabled = false
+# replay_safety_conflict_threshold = 3
+# replay_safety_hold_ticks = 12

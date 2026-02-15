@@ -1,0 +1,17 @@
+[package]
+name = "paradencer-stages"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[dependencies]
+thiserror.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+paradencer-consensus = { path = "../paradencer-consensus" }
+paradencer-ingress = { path = "../paradencer-ingress" }
+paradencer-execution = { path = "../paradencer-execution" }
+paradencer-storage = { path = "../paradencer-storage" }
+paradencer-runtime = { path = "../paradencer-runtime" }
+paradencer-mesh = { path = "../paradencer-mesh" }

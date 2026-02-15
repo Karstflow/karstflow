@@ -1,0 +1,18 @@
+[package]
+name = "paradencer-control"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[dependencies]
+thiserror.workspace = true
+paradencer-config = { path = "../paradencer-config" }
+paradencer-core = { path = "../paradencer-core" }
+paradencer-ingress = { path = "../paradencer-ingress" }
+paradencer-runtime = { path = "../paradencer-runtime" }
+paradencer-stages = { path = "../paradencer-stages" }
+paradencer-topology = { path = "../paradencer-topology" }
+
+paradencer-observability = { path = "../paradencer-observability" }
+paradencer-rpc = { path = "../paradencer-rpc" }

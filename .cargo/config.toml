@@ -1,0 +1,3 @@
+[build]
+# Keep incremental dev builds fast in local environments.
+incremental = true
