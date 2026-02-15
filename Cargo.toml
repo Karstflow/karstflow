@@ -13,7 +13,7 @@ members = [
   "crates/paradencer-rpc",
   "crates/paradencer-control",
   "crates/paradencer-topology",
-  "crates/paradencer-node", "crates/paradencer-consensus", "crates/paradencer-sbpf", "crates/paradencer-types", "crates/paradencer-ids",
+  "crates/paradencer-node", "crates/paradencer-consensus", "crates/paradencer-sbpf", "crates/paradencer-types", "crates/paradencer-ids", "crates/paradencer-crypto",
 ]
 resolver = "2"
 
@@ -40,6 +40,7 @@ blake3 = "1.5"
 # Encoding
 bs58 = "0.5"
 bytes = "1.9"
+bincode = "1.3"
 
 # Utilities
 tracing = "0.1"
@@ -54,6 +55,7 @@ rcgen = "0.13"
 # Internal crates
 paradencer-constants = { path = "crates/paradencer-constants" }
 paradencer-types = { path = "crates/paradencer-types" }
+paradencer-crypto = { path = "crates/paradencer-crypto" }
 
 [profile.release]
 lto = "thin"

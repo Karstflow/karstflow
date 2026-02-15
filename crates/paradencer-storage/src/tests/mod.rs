@@ -3,6 +3,7 @@ mod catalog;
 mod hot_state;
 mod processor;
 mod runtime_state;
+mod snapshot;
 
 use std::time::{SystemTime, UNIX_EPOCH};
 

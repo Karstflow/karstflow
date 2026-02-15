@@ -39,4 +39,6 @@ pub enum StageError {
     StorageStartupMissingSpecificSnapshot { fragment_id: u64 },
     #[error("invalid storage runtime policy: {0}")]
     InvalidStoragePolicy(String),
+    #[error("replay stage error: {0}")]
+    ReplayError(String),
 }

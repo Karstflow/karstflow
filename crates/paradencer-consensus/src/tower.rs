@@ -181,6 +181,129 @@ impl Tower {
     pub fn clear_votes(&mut self) {
         self.votes.clear();
     }
+
+    /// Record a vote and check for lockout violations.
+    ///
+    /// This validates that voting on the slot doesn't violate any tower lockouts.
+    /// Returns Err if the vote would violate lockouts.
+    pub fn record_vote(
+        &mut self,
+        slot: u64,
+        is_same_fork: impl Fn(u64, u64) -> bool,
+    ) -> Result<Option<u64>, TowerError> {
+        // Check if we're locked out from voting on this slot
+        if self.is_locked_out(slot, is_same_fork) {
+            return Err(TowerError::LockoutViolation { slot });
+        }
+
+        // Push the vote and potentially get a new root
+        let new_root = self.push_vote(slot);
+        Ok(new_root)
+    }
+
+    /// Check if voting on a candidate slot would violate switching threshold.
+    ///
+    /// Returns true if we can switch to the candidate fork.
+    pub fn can_switch_to(
+        &self,
+        candidate: u64,
+        candidate_stake: u64,
+        is_same_fork: impl Fn(u64, u64) -> bool,
+    ) -> bool {
+        // Get our last vote
+        let last_vote_slot = match self.last_vote_slot() {
+            Some(slot) => slot,
+            None => return true, // No previous vote, can vote anywhere
+        };
+
+        // If candidate is on same fork, no switch needed
+        if is_same_fork(last_vote_slot, candidate) {
+            return true;
+        }
+
+        // Find the stake of our current fork from votes in tower
+        let mut current_fork_stake = 0u64;
+
+        for vote in &self.votes {
+            if is_same_fork(vote.slot, last_vote_slot) {
+                // This is a rough estimation - in practice you'd query actual stake
+                current_fork_stake = current_fork_stake.saturating_add(1);
+            }
+        }
+
+        // Check switching threshold (38% advantage)
+        if current_fork_stake == 0 {
+            return true;
+        }
+
+        let ratio = candidate_stake as f64 / current_fork_stake as f64;
+        ratio >= 1.38
+    }
+
+    /// Get the lockout expiration for the most recent vote.
+    pub fn last_vote_lockout_expiration(&self) -> Option<u64> {
+        self.votes.last().map(|v| v.expiration_slot())
+    }
+
+    /// Get all vote slots in the tower.
+    pub fn vote_slots(&self) -> Vec<u64> {
+        self.votes.iter().map(|v| v.slot).collect()
+    }
+
+    /// Check if a slot is in the tower.
+    pub fn contains_vote(&self, slot: u64) -> bool {
+        self.votes.iter().any(|v| v.slot == slot)
+    }
+
+    /// Get the vote at a specific index.
+    pub fn get_vote(&self, index: usize) -> Option<&TowerVote> {
+        self.votes.get(index)
+    }
+
+    /// Get the total lockout distance of the tower.
+    ///
+    /// This is the sum of all individual vote lockouts.
+    pub fn total_lockout_distance(&self) -> u64 {
+        self.votes.iter().map(|v| v.lockout()).sum()
+    }
+
+    /// Get the highest lockout in the tower.
+    pub fn max_lockout(&self) -> Option<u64> {
+        self.votes.iter().map(|v| v.lockout()).max()
+    }
+
+    /// Check if tower is at maximum capacity.
+    pub fn is_full(&self) -> bool {
+        self.votes.len() >= self.max_size
+    }
+
+    /// Get the number of votes that would remain after voting on a slot.
+    pub fn simulate_vote_count(&self, slot: u64) -> usize {
+        self.simulate_vote(slot)
+    }
+
+    /// Check if any vote locks out a given slot.
+    pub fn is_any_vote_locked_out(&self, slot: u64) -> bool {
+        self.votes.iter().any(|v| v.is_locked_out_at(slot))
+    }
+
+    /// Get threshold for switching from this tower state.
+    ///
+    /// Returns the minimum stake ratio needed to switch forks.
+    pub fn switching_threshold(&self) -> f64 {
+        1.38 // 38% advantage required
+    }
+}
+
+/// Errors that can occur during tower operations.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TowerError {
+    /// Attempted to vote on a slot locked out by tower
+    LockoutViolation { slot: u64 },
+    /// Vote is not newer than last vote
+    VoteNotNewer { slot: u64, last_vote: u64 },
+    /// Cannot vote on slot at or before root
+    VoteBelowRoot { slot: u64, root: u64 },
 }
 
 impl Default for Tower {
@@ -343,5 +466,124 @@ mod tests {
         tower.clear_votes();
         assert!(tower.is_empty());
         assert_eq!(tower.root(), Some(10)); // Root preserved
+    }
+
+    #[test]
+    fn tower_record_vote_success() {
+        let mut tower = Tower::new();
+        let same_fork = |_a: u64, _b: u64| true;
+
+        let result = tower.record_vote(100, same_fork);
+        assert!(result.is_ok());
+        assert_eq!(tower.last_vote_slot(), Some(100));
+    }
+
+    #[test]
+    fn tower_record_vote_lockout_violation() {
+        let mut tower = Tower::new();
+        tower.push_vote(100);
+
+        let different_fork = |a: u64, b: u64| a == b;
+
+        // Try to vote on locked out slot
+        let result = tower.record_vote(101, different_fork);
+        assert!(matches!(result, Err(TowerError::LockoutViolation { .. })));
+    }
+
+    #[test]
+    fn tower_can_switch_to_with_threshold() {
+        let mut tower = Tower::new();
+        tower.push_vote(100);
+
+        let different_fork = |a: u64, b: u64| a == b;
+
+        // Insufficient stake to switch
+        assert!(!tower.can_switch_to(200, 100, different_fork));
+
+        // Sufficient stake to switch (38% advantage)
+        assert!(tower.can_switch_to(200, 1000, different_fork));
+    }
+
+    #[test]
+    fn tower_vote_slots_list() {
+        let mut tower = Tower::new();
+        tower.push_vote(100);
+        tower.push_vote(101);
+        tower.push_vote(102);
+
+        let slots = tower.vote_slots();
+        assert_eq!(slots, vec![100, 101, 102]);
+    }
+
+    #[test]
+    fn tower_contains_vote_check() {
+        let mut tower = Tower::new();
+        tower.push_vote(100);
+        tower.push_vote(102);
+
+        assert!(tower.contains_vote(100));
+        assert!(!tower.contains_vote(101));
+        assert!(tower.contains_vote(102));
+    }
+
+    #[test]
+    fn tower_total_lockout_distance() {
+        let mut tower = Tower::new();
+        tower.push_vote(100); // After push: lockout = 2
+        tower.push_vote(101); // After push: vote 100 lockout = 4, vote 101 lockout = 2
+
+        let total = tower.total_lockout_distance();
+        assert_eq!(total, 6); // 4 + 2
+    }
+
+    #[test]
+    fn tower_max_lockout() {
+        let mut tower = Tower::new();
+        tower.push_vote(100);
+        tower.push_vote(101);
+        tower.push_vote(102);
+
+        // First vote should have highest lockout after 3 votes
+        let max = tower.max_lockout();
+        assert_eq!(max, Some(8)); // 2^3
+    }
+
+    #[test]
+    fn tower_is_full_check() {
+        let mut tower = Tower::new();
+        assert!(!tower.is_full());
+
+        for i in 0..MAX_LOCKOUT_HISTORY {
+            tower.push_vote(i as u64);
+        }
+
+        assert!(tower.is_full());
+    }
+
+    #[test]
+    fn tower_simulate_vote_count() {
+        let mut tower = Tower::new();
+        tower.push_vote(10);
+        tower.push_vote(11);
+
+        // Vote at 13 would expire vote at 11 (expires at 13)
+        let count = tower.simulate_vote_count(13);
+        assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn tower_is_any_vote_locked_out() {
+        let mut tower = Tower::new();
+        tower.push_vote(10);
+
+        assert!(tower.is_any_vote_locked_out(10));
+        assert!(tower.is_any_vote_locked_out(11));
+        assert!(!tower.is_any_vote_locked_out(12));
+    }
+
+    #[test]
+    fn tower_switching_threshold_constant() {
+        let tower = Tower::new();
+        assert_eq!(tower.switching_threshold(), 1.38);
     }
 }

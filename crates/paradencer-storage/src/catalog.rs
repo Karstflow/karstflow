@@ -1,8 +1,12 @@
 use crate::{CommittedFragmentRecord, HotStateStore, SnapshotImage, StorageError};
+use crate::snapshot::{
+    SnapshotConfig, SnapshotCreator, SnapshotLoader, SnapshotManifest, SnapshotMetadata,
+};
+use crate::accounts::database::AccountDatabase;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 const SNAPSHOT_CATALOG_SCHEMA_VERSION: u32 = 2;
 
@@ -11,6 +15,9 @@ pub struct SnapshotCatalog {
     pub last_snapshot_fragment_id: u64,
     pub snapshots_written: u64,
     snapshots: BTreeMap<u64, SnapshotImage>,
+    full_snapshots: BTreeMap<u64, PathBuf>,
+    incremental_snapshots: BTreeMap<u64, PathBuf>,
+    config: Option<SnapshotConfig>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -142,7 +149,19 @@ impl SnapshotCatalog {
             last_snapshot_fragment_id: 0,
             snapshots_written: 0,
             snapshots: BTreeMap::new(),
+            full_snapshots: BTreeMap::new(),
+            incremental_snapshots: BTreeMap::new(),
+            config: None,
         }
+    }
+
+    pub fn with_config(mut self, config: SnapshotConfig) -> Self {
+        self.config = Some(config);
+        self
+    }
+
+    pub fn set_config(&mut self, config: SnapshotConfig) {
+        self.config = Some(config);
     }
 
     pub fn maybe_write_snapshot(
@@ -373,7 +392,221 @@ impl SnapshotCatalog {
             last_snapshot_fragment_id: disk_model.last_snapshot_fragment_id,
             snapshots_written: disk_model.snapshots_written,
             snapshots,
+            full_snapshots: BTreeMap::new(),
+            incremental_snapshots: BTreeMap::new(),
+            config: None,
         })
+    }
+
+    pub fn create_full_snapshot(
+        &mut self,
+        db: &AccountDatabase,
+        slot: u64,
+        snapshot_dir: &Path,
+    ) -> Result<SnapshotManifest, StorageError> {
+        let config = self.config.clone().unwrap_or_default();
+        let creator = SnapshotCreator::new(config);
+
+        let manifest = creator.create_full_snapshot(db, slot, snapshot_dir)?;
+
+        let snapshot_path = snapshot_dir.join(format!("full-{}.snapshot", slot));
+        self.full_snapshots.insert(slot, snapshot_path);
+
+        self.enforce_full_snapshot_retention();
+
+        Ok(manifest)
+    }
+
+    pub fn create_incremental_snapshot(
+        &mut self,
+        db: &AccountDatabase,
+        slot: u64,
+        base_slot: u64,
+        snapshot_dir: &Path,
+    ) -> Result<SnapshotManifest, StorageError> {
+        let base_snapshot_path = self.full_snapshots
+            .get(&base_slot)
+            .ok_or_else(|| StorageError::SnapshotNotFound { fragment_id: base_slot })?;
+
+        let base_manifest_path = snapshot_dir.join(format!("full-{}.snapshot.manifest", base_slot));
+
+        let loader = SnapshotLoader::new();
+        let (base_accounts, _) = loader.load_snapshot_to_map(base_snapshot_path, &base_manifest_path)?;
+
+        let config = self.config.clone().unwrap_or_default();
+        let creator = SnapshotCreator::new(config);
+
+        let manifest = creator.create_incremental_snapshot(
+            db,
+            slot,
+            base_slot,
+            &base_accounts,
+            snapshot_dir,
+        )?;
+
+        let snapshot_path = snapshot_dir.join(format!("incremental-{}.snapshot", slot));
+        self.incremental_snapshots.insert(slot, snapshot_path);
+
+        self.enforce_incremental_snapshot_retention();
+
+        Ok(manifest)
+    }
+
+    pub fn restore_from_full_snapshot(
+        &self,
+        db: &AccountDatabase,
+        slot: u64,
+        snapshot_dir: &Path,
+    ) -> Result<(), StorageError> {
+        let snapshot_path = self.full_snapshots
+            .get(&slot)
+            .ok_or_else(|| StorageError::SnapshotNotFound { fragment_id: slot })?;
+
+        let manifest_path = snapshot_dir.join(format!("full-{}.snapshot.manifest", slot));
+
+        let loader = SnapshotLoader::new();
+        let (accounts, _) = loader.load_snapshot_to_map(snapshot_path, &manifest_path)?;
+
+        db.clear_all_accounts();
+        db.bulk_insert_published_accounts(accounts)?;
+
+        Ok(())
+    }
+
+    pub fn restore_with_incrementals(
+        &self,
+        db: &AccountDatabase,
+        base_slot: u64,
+        incremental_slots: &[u64],
+        snapshot_dir: &Path,
+    ) -> Result<(), StorageError> {
+        self.restore_from_full_snapshot(db, base_slot, snapshot_dir)?;
+
+        let loader = SnapshotLoader::new();
+        let mut accounts = db.get_all_published_accounts();
+
+        for &inc_slot in incremental_slots {
+            let snapshot_path = snapshot_dir.join(format!("incremental-{}.snapshot", inc_slot));
+            let manifest_path = snapshot_dir.join(format!("incremental-{}.snapshot.manifest", inc_slot));
+
+            loader.apply_incremental_snapshot(&mut accounts, &snapshot_path, &manifest_path)?;
+        }
+
+        db.clear_all_accounts();
+        db.bulk_insert_published_accounts(accounts)?;
+
+        Ok(())
+    }
+
+    pub fn verify_snapshot(
+        &self,
+        slot: u64,
+        snapshot_dir: &Path,
+        is_incremental: bool,
+    ) -> Result<bool, StorageError> {
+        let snapshot_filename = if is_incremental {
+            format!("incremental-{}.snapshot", slot)
+        } else {
+            format!("full-{}.snapshot", slot)
+        };
+
+        let snapshot_path = snapshot_dir.join(&snapshot_filename);
+        let manifest_path = snapshot_dir.join(format!("{}.manifest", snapshot_filename));
+
+        let loader = SnapshotLoader::new();
+        let manifest_json = std::fs::read_to_string(&manifest_path)
+            .map_err(|e| StorageError::AccountDatabaseError {
+                details: format!("Failed to read manifest: {}", e),
+            })?;
+
+        let manifest: SnapshotManifest = serde_json::from_str(&manifest_json)
+            .map_err(|e| StorageError::AccountDatabaseError {
+                details: format!("Failed to deserialize manifest: {}", e),
+            })?;
+
+        let snapshot_data = std::fs::read(&snapshot_path)
+            .map_err(|e| StorageError::AccountDatabaseError {
+                details: format!("Failed to read snapshot: {}", e),
+            })?;
+
+        Ok(manifest.verify_chunk(0, &snapshot_data))
+    }
+
+    pub fn should_create_full_snapshot(&self, slot: u64) -> bool {
+        if let Some(ref config) = self.config {
+            if config.full_snapshot_interval == 0 {
+                return false;
+            }
+            slot % config.full_snapshot_interval == 0
+        } else {
+            false
+        }
+    }
+
+    pub fn should_create_incremental_snapshot(&self, slot: u64) -> bool {
+        if let Some(ref config) = self.config {
+            if config.incremental_snapshot_interval == 0 {
+                return false;
+            }
+            slot % config.incremental_snapshot_interval == 0
+                && !self.should_create_full_snapshot(slot)
+        } else {
+            false
+        }
+    }
+
+    fn enforce_full_snapshot_retention(&mut self) {
+        let max_snapshots = self.config
+            .as_ref()
+            .map(|c| c.max_full_snapshots)
+            .unwrap_or(3);
+
+        while self.full_snapshots.len() > max_snapshots {
+            if let Some(oldest_slot) = self.full_snapshots.keys().next().copied() {
+                self.full_snapshots.remove(&oldest_slot);
+            }
+        }
+    }
+
+    fn enforce_incremental_snapshot_retention(&mut self) {
+        let max_snapshots = self.config
+            .as_ref()
+            .map(|c| c.max_incremental_snapshots)
+            .unwrap_or(10);
+
+        while self.incremental_snapshots.len() > max_snapshots {
+            if let Some(oldest_slot) = self.incremental_snapshots.keys().next().copied() {
+                self.incremental_snapshots.remove(&oldest_slot);
+            }
+        }
+    }
+
+    pub fn get_latest_full_snapshot_slot(&self) -> Option<u64> {
+        self.full_snapshots.keys().next_back().copied()
+    }
+
+    pub fn get_incremental_snapshots_after(&self, base_slot: u64) -> Vec<u64> {
+        self.incremental_snapshots
+            .keys()
+            .filter(|&&slot| slot > base_slot)
+            .copied()
+            .collect()
+    }
+
+    pub fn list_full_snapshots(&self) -> Vec<u64> {
+        self.full_snapshots.keys().copied().collect()
+    }
+
+    pub fn list_incremental_snapshots(&self) -> Vec<u64> {
+        self.incremental_snapshots.keys().copied().collect()
+    }
+
+    pub fn register_full_snapshot(&mut self, slot: u64, path: PathBuf) {
+        self.full_snapshots.insert(slot, path);
+    }
+
+    pub fn register_incremental_snapshot(&mut self, slot: u64, path: PathBuf) {
+        self.incremental_snapshots.insert(slot, path);
     }
 }
 

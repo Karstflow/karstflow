@@ -2,11 +2,15 @@ use super::primitives::{Account, Pubkey};
 use super::record::{AccountRecord, RecordKey, TransactionId, VersionCounter};
 use crate::StorageError;
 use dashmap::DashMap;
+use std::collections::HashMap;
 use std::sync::Arc;
+use ahash::AHasher;
+use std::hash::{Hash, Hasher};
 
 pub struct AccountDatabase {
     records: Arc<DashMap<RecordKey, AccountRecord>>,
     versions: Arc<VersionCounter>,
+    account_cache: Arc<DashMap<Pubkey, (Account, u64)>>,
 }
 
 impl AccountDatabase {
@@ -14,6 +18,7 @@ impl AccountDatabase {
         Self {
             records: Arc::new(DashMap::new()),
             versions: Arc::new(VersionCounter::new()),
+            account_cache: Arc::new(DashMap::new()),
         }
     }
 
@@ -21,6 +26,7 @@ impl AccountDatabase {
         Self {
             records: Arc::new(DashMap::with_capacity(capacity)),
             versions: Arc::new(VersionCounter::new()),
+            account_cache: Arc::new(DashMap::with_capacity(capacity / 10)),
         }
     }
 
@@ -29,6 +35,13 @@ impl AccountDatabase {
         xid: TransactionId,
         pubkey: &Pubkey,
     ) -> Result<Option<Account>, StorageError> {
+        // Check cache first for published accounts
+        if xid.is_root() {
+            if let Some(entry) = self.account_cache.get(pubkey) {
+                return Ok(Some(entry.0.clone()));
+            }
+        }
+
         let key = RecordKey::new(xid, *pubkey);
 
         if let Some(entry) = self.records.get(&key) {
@@ -38,7 +51,10 @@ impl AccountDatabase {
         if !xid.is_root() {
             let published_key = RecordKey::published(*pubkey);
             if let Some(entry) = self.records.get(&published_key) {
-                return Ok(Some(entry.account.clone()));
+                let account = entry.account.clone();
+                // Update cache
+                self.account_cache.insert(*pubkey, (account.clone(), entry.version));
+                return Ok(Some(account));
             }
         }
 
@@ -81,8 +97,10 @@ impl AccountDatabase {
 
         for (pubkey, account, version) in published_updates {
             let published_key = RecordKey::published(pubkey);
-            let record = AccountRecord::new(TransactionId::root(), pubkey, account, version);
+            let record = AccountRecord::new(TransactionId::root(), pubkey, account.clone(), version);
             self.records.insert(published_key, record);
+            // Update cache
+            self.account_cache.insert(pubkey, (account, version));
         }
 
         self.records.retain(|key, _| key.xid != xid);
@@ -114,6 +132,78 @@ impl AccountDatabase {
             .filter(|entry| entry.key().xid == xid)
             .count()
     }
+
+    pub fn get_all_published_accounts(&self) -> HashMap<Pubkey, Account> {
+        let mut accounts = HashMap::new();
+        for entry in self.records.iter() {
+            if entry.key().xid.is_root() {
+                accounts.insert(entry.key().pubkey, entry.value().account.clone());
+            }
+        }
+        accounts
+    }
+
+    pub fn bulk_insert_published_accounts(
+        &self,
+        accounts: HashMap<Pubkey, Account>,
+    ) -> Result<(), StorageError> {
+        for (pubkey, account) in accounts {
+            let version = self.versions.next();
+            let published_key = RecordKey::published(pubkey);
+            let record = AccountRecord::new(TransactionId::root(), pubkey, account.clone(), version);
+            self.records.insert(published_key, record);
+            self.account_cache.insert(pubkey, (account, version));
+        }
+        Ok(())
+    }
+
+    pub fn clear_all_accounts(&self) {
+        self.records.clear();
+        self.account_cache.clear();
+    }
+
+    pub fn get_account_count(&self) -> usize {
+        self.records
+            .iter()
+            .filter(|entry| entry.key().xid.is_root())
+            .count()
+    }
+
+    pub fn get_total_lamports(&self) -> u64 {
+        self.records
+            .iter()
+            .filter(|entry| entry.key().xid.is_root())
+            .map(|entry| entry.value().account.meta.lamports)
+            .sum()
+    }
+
+    pub fn invalidate_cache(&self) {
+        self.account_cache.clear();
+    }
+
+    pub fn cache_size(&self) -> usize {
+        self.account_cache.len()
+    }
+
+    pub fn compute_state_hash(&self) -> u64 {
+        let mut hasher = AHasher::default();
+
+        let mut published_accounts: Vec<_> = self.records
+            .iter()
+            .filter(|entry| entry.key().xid.is_root())
+            .collect();
+
+        published_accounts.sort_by_key(|entry| entry.key().pubkey.as_bytes());
+
+        for entry in published_accounts {
+            entry.key().pubkey.hash(&mut hasher);
+            entry.value().account.meta.lamports.hash(&mut hasher);
+            entry.value().account.meta.owner.hash(&mut hasher);
+            entry.value().account.data.as_slice().hash(&mut hasher);
+        }
+
+        hasher.finish()
+    }
 }
 
 impl Default for AccountDatabase {
@@ -127,6 +217,7 @@ impl Clone for AccountDatabase {
         Self {
             records: Arc::clone(&self.records),
             versions: Arc::clone(&self.versions),
+            account_cache: Arc::clone(&self.account_cache),
         }
     }
 }

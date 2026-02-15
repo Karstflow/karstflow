@@ -30,4 +30,12 @@ pub enum IngressError {
     QuicStream { detail: String },
     #[error("quic i/o error: {detail}")]
     QuicIo { detail: String },
+    #[error("configuration error: {detail}")]
+    Configuration { detail: String },
+    #[error("serialization error: {detail}")]
+    Serialization { detail: String },
+    #[error("deserialization error: {detail}")]
+    Deserialization { detail: String },
+    #[error("repair request error: {detail}")]
+    RepairRequest { detail: String },
 }

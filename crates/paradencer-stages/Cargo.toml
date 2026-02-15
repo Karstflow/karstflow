@@ -9,9 +9,17 @@ authors.workspace = true
 thiserror.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+bincode.workspace = true
 paradencer-consensus = { path = "../paradencer-consensus" }
 paradencer-ingress = { path = "../paradencer-ingress" }
 paradencer-execution = { path = "../paradencer-execution" }
 paradencer-storage = { path = "../paradencer-storage" }
 paradencer-runtime = { path = "../paradencer-runtime" }
 paradencer-mesh = { path = "../paradencer-mesh" }
+paradencer-types = { path = "../paradencer-types" }
+paradencer-crypto = { path = "../paradencer-crypto" }
+reed-solomon-erasure = "6.0"
+ed25519-dalek = { version = "2.1", features = ["rand_core"] }
+
+[dev-dependencies]
+rand = "0.8"

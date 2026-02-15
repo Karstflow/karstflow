@@ -4,6 +4,8 @@ use super::domain::{
 };
 use super::policy::IngressPolicy;
 use crate::IngressError;
+use paradencer_crypto::BatchVerifier;
+use paradencer_types::shred::{Shred, ShredParser, ShredParseError};
 use std::hash::{Hash, Hasher};
 
 pub struct PacketDecoder {
@@ -51,6 +53,7 @@ impl ShredDecoder {
         Ok(Self { policy })
     }
 
+    /// Decode a raw frame into a prepared shred
     pub fn decode(&self, frame: &InboundFrame) -> ShredDecodeOutcome {
         if frame.payload_bytes == 0 {
             return ShredDecodeOutcome::Dropped(DropReason::EmptyPayload);
@@ -73,6 +76,41 @@ impl ShredDecoder {
             source: frame.source,
         })
     }
+
+    /// Parse raw bytes into a shred structure
+    pub fn parse_shred(&self, data: &[u8]) -> Result<Shred, ShredParseError> {
+        ShredParser::parse(data)
+    }
+
+    /// Decode and parse in one operation
+    pub fn decode_and_parse(
+        &self,
+        frame: &InboundFrame,
+        data: &[u8],
+    ) -> Result<(PreparedShred, Shred), DecodeError> {
+        // First decode the frame
+        match self.decode(frame) {
+            ShredDecodeOutcome::Accepted(prepared) => {
+                // Then parse the shred
+                let shred = self.parse_shred(data)
+                    .map_err(DecodeError::ParseError)?;
+
+                Ok((prepared, shred))
+            }
+            ShredDecodeOutcome::Dropped(reason) => {
+                Err(DecodeError::Dropped(reason))
+            }
+        }
+    }
+}
+
+/// Errors that can occur during decoding
+#[derive(Debug)]
+pub enum DecodeError {
+    /// Frame was dropped during decode
+    Dropped(DropReason),
+    /// Shred parsing failed
+    ParseError(ShredParseError),
 }
 
 fn fingerprint(packet_id: u64, payload_bytes: usize, source: IngressSource) -> u64 {

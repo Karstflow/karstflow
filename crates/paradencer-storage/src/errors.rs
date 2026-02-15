@@ -98,4 +98,13 @@ pub enum StorageError {
 
     #[error("Account database error: {details}")]
     AccountDatabaseError { details: String },
+
+    #[error("Snapshot creation failed: {details}")]
+    SnapshotCreationFailed { details: String },
+
+    #[error("Snapshot loading failed: {details}")]
+    SnapshotLoadingFailed { details: String },
+
+    #[error("Snapshot verification failed: {details}")]
+    SnapshotVerificationFailed { details: String },
 }

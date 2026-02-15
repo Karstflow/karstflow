@@ -10,8 +10,22 @@ paradencer-constants = { path = "../paradencer-constants" }
 paradencer-types = { path = "../paradencer-types" }
 paradencer-sbpf = { path = "../paradencer-sbpf" }
 paradencer-ids = { path = "../paradencer-ids" }
+paradencer-crypto = { path = "../paradencer-crypto" }
 thiserror.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 dashmap = "6.1"
 ahash = "0.8"
+parking_lot.workspace = true
+zstd = "0.13"
+rayon = "1.8"
+bincode = "1.3"
+sha2 = "0.10"
+
+[dev-dependencies]
+criterion = "0.5"
+tempfile = "3.8"
+
+[[bench]]
+name = "snapshot_bench"
+harness = false

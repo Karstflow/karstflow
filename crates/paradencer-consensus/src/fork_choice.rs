@@ -1,3 +1,4 @@
+use crate::{BankForks, Tower};
 use std::collections::HashMap;
 
 /// Threshold constants for fork choice decisions
@@ -230,6 +231,231 @@ impl ForkChoice {
     pub fn set_root(&mut self, new_root: u64) {
         self.forks.retain(|slot, _| *slot >= new_root);
     }
+
+    /// Select the best fork to vote on using stake-weighted GHOST.
+    ///
+    /// Integrates with Tower for lockout enforcement and BankForks for fork tree.
+    /// Returns the slot to vote on, or None if no valid fork exists.
+    pub fn select_fork(&self, bank_forks: &BankForks, tower: &Tower) -> Option<u64> {
+        // Start from current root or genesis
+        let root = tower.root().or(Some(bank_forks.root_slot()))?;
+
+        // Ensure root fork exists
+        if !self.forks.contains_key(&root) {
+            return None;
+        }
+
+        // Run GHOST from root
+        let mut current = root;
+        let tower_root = tower.root().unwrap_or(0);
+
+        loop {
+            // Get all children of current slot
+            let children: Vec<u64> = self
+                .forks
+                .iter()
+                .filter(|(_, fork)| fork.parent == Some(current))
+                .map(|(slot, _)| *slot)
+                .collect();
+
+            if children.is_empty() {
+                // Reached a leaf - check if we can vote on it
+                if current > tower_root && !self.is_locked_out_by_tower(current, tower, bank_forks) {
+                    return Some(current);
+                }
+                return None;
+            }
+
+            // Filter children based on tower lockouts
+            let valid_children: Vec<u64> = children
+                .into_iter()
+                .filter(|&slot| !self.is_locked_out_by_tower(slot, tower, bank_forks))
+                .collect();
+
+            if valid_children.is_empty() {
+                // No valid children due to lockouts
+                return None;
+            }
+
+            // Pick the child with the most stake (GHOST)
+            let best_child = valid_children
+                .into_iter()
+                .max_by_key(|slot| self.forks.get(slot).map(|f| f.stake_weight).unwrap_or(0))?;
+
+            current = best_child;
+        }
+    }
+
+    /// Check if tower lockouts prevent voting on a slot.
+    fn is_locked_out_by_tower(&self, slot: u64, tower: &Tower, bank_forks: &BankForks) -> bool {
+        tower.is_locked_out(slot, |vote_slot, candidate_slot| {
+            self.is_same_fork(vote_slot, candidate_slot, bank_forks)
+        })
+    }
+
+    /// Check if two slots are on the same fork using BankForks ancestry.
+    fn is_same_fork(&self, slot_a: u64, slot_b: u64, bank_forks: &BankForks) -> bool {
+        if slot_a == slot_b {
+            return true;
+        }
+
+        // Check if one is ancestor of the other
+        bank_forks.is_ancestor(slot_a, slot_b) || bank_forks.is_ancestor(slot_b, slot_a)
+    }
+
+    /// Determine if we should switch from current fork to a candidate fork.
+    ///
+    /// Returns true if the candidate has sufficient stake advantage (38% more).
+    pub fn should_switch_fork(
+        &self,
+        current_slot: u64,
+        candidate_slot: u64,
+        bank_forks: &BankForks,
+    ) -> bool {
+        // Don't switch to same fork
+        if current_slot == candidate_slot {
+            return false;
+        }
+
+        // Don't switch if candidate is ancestor of current (staying on same chain)
+        if bank_forks.is_ancestor(candidate_slot, current_slot) {
+            return false;
+        }
+
+        // Check stake threshold for switching
+        self.can_switch_fork(current_slot, candidate_slot)
+    }
+
+    /// Update root and detect finalization.
+    ///
+    /// Checks if any slot has reached finalization threshold (2/3+ stake + sufficient depth).
+    /// Returns the new root slot if finalization occurred.
+    pub fn update_root(&mut self, bank_forks: &mut BankForks) -> Option<u64> {
+        let current_root = bank_forks.root_slot();
+
+        // Find the highest slot that can be finalized
+        let mut finalization_candidate = None;
+
+        for (slot, fork) in &self.forks {
+            // Must be above current root
+            if *slot <= current_root {
+                continue;
+            }
+
+            // Must have supermajority
+            let ratio = fork.stake_weight as f64 / self.total_stake as f64;
+            if ratio < THRESHOLD_RATIO {
+                continue;
+            }
+
+            // Must be optimistically confirmed (sufficient depth)
+            if !fork.optimistically_confirmed {
+                continue;
+            }
+
+            // Update candidate to highest qualifying slot
+            finalization_candidate = Some(
+                finalization_candidate
+                    .map(|current: u64| current.max(*slot))
+                    .unwrap_or(*slot),
+            );
+        }
+
+        // Set new root if we found a finalization candidate
+        if let Some(new_root) = finalization_candidate {
+            // Update BankForks root
+            if let Ok(()) = bank_forks.set_root(new_root) {
+                // Prune our fork tree
+                self.set_root(new_root);
+                return Some(new_root);
+            }
+        }
+
+        None
+    }
+
+    /// Get all fork tips (slots with no children).
+    pub fn get_fork_tips(&self) -> Vec<u64> {
+        let all_slots: Vec<u64> = self.forks.keys().copied().collect();
+        let mut tips = Vec::new();
+
+        for slot in all_slots {
+            // Check if this slot has any children
+            let has_children = self.forks.values().any(|f| f.parent == Some(slot));
+            if !has_children {
+                tips.push(slot);
+            }
+        }
+
+        tips
+    }
+
+    /// Get the fork path from a slot back to root.
+    pub fn get_fork_path(&self, slot: u64) -> Vec<u64> {
+        let mut path = vec![slot];
+        let mut current = slot;
+
+        while let Some(fork) = self.forks.get(&current) {
+            if let Some(parent) = fork.parent {
+                path.push(parent);
+                current = parent;
+            } else {
+                break;
+            }
+        }
+
+        path.reverse();
+        path
+    }
+
+    /// Calculate stake distribution across all forks.
+    pub fn stake_distribution(&self) -> HashMap<u64, u64> {
+        self.forks
+            .iter()
+            .map(|(slot, fork)| (*slot, fork.stake_weight))
+            .collect()
+    }
+
+    /// Get statistics about the fork choice state.
+    pub fn stats(&self) -> ForkChoiceStats {
+        let total_forks = self.forks.len();
+        let confirmed_forks = self.forks.values().filter(|f| f.confirmed).count();
+        let optimistically_confirmed_forks = self
+            .forks
+            .values()
+            .filter(|f| f.optimistically_confirmed)
+            .count();
+
+        let fork_tips = self.get_fork_tips();
+        let max_stake = self
+            .forks
+            .values()
+            .map(|f| f.stake_weight)
+            .max()
+            .unwrap_or(0);
+
+        ForkChoiceStats {
+            total_forks,
+            confirmed_forks,
+            optimistically_confirmed_forks,
+            fork_tips_count: fork_tips.len(),
+            total_stake: self.total_stake,
+            max_fork_stake: max_stake,
+            best_slot: self.best_slot,
+        }
+    }
+}
+
+/// Statistics about fork choice state.
+#[derive(Debug, Clone)]
+pub struct ForkChoiceStats {
+    pub total_forks: usize,
+    pub confirmed_forks: usize,
+    pub optimistically_confirmed_forks: usize,
+    pub fork_tips_count: usize,
+    pub total_stake: u64,
+    pub max_fork_stake: u64,
+    pub best_slot: Option<u64>,
 }
 
 #[cfg(test)]
@@ -374,5 +600,71 @@ mod tests {
 
         let last_slot = THRESHOLD_DEPTH as u64 + 1;
         assert!(fc.get_fork(last_slot).unwrap().optimistically_confirmed);
+    }
+
+    #[test]
+    fn fork_choice_gets_fork_tips() {
+        let mut fc = ForkChoice::new(1000);
+
+        // Create tree:
+        //     1
+        //    / \
+        //   2   3
+        //   |
+        //   4
+        fc.add_fork(1, None);
+        fc.add_fork(2, Some(1));
+        fc.add_fork(3, Some(1));
+        fc.add_fork(4, Some(2));
+
+        let tips = fc.get_fork_tips();
+        assert_eq!(tips.len(), 2);
+        assert!(tips.contains(&3));
+        assert!(tips.contains(&4));
+    }
+
+    #[test]
+    fn fork_choice_gets_fork_path() {
+        let mut fc = ForkChoice::new(1000);
+
+        fc.add_fork(1, None);
+        fc.add_fork(2, Some(1));
+        fc.add_fork(3, Some(2));
+        fc.add_fork(4, Some(3));
+
+        let path = fc.get_fork_path(4);
+        assert_eq!(path, vec![1, 2, 3, 4]);
+    }
+
+    #[test]
+    fn fork_choice_stake_distribution() {
+        let mut fc = ForkChoice::new(1000);
+
+        fc.add_fork(1, None);
+        fc.add_fork(2, Some(1));
+        fc.add_stake(1, 500);
+        fc.add_stake(2, 700);
+
+        let dist = fc.stake_distribution();
+        assert_eq!(dist.get(&1), Some(&500));
+        assert_eq!(dist.get(&2), Some(&700));
+    }
+
+    #[test]
+    fn fork_choice_provides_stats() {
+        let mut fc = ForkChoice::new(1000);
+
+        fc.add_fork(1, None);
+        fc.add_fork(2, Some(1));
+        fc.add_stake(1, 500);
+        fc.add_stake(2, 700);
+
+        fc.compute_best_fork(1);
+
+        let stats = fc.stats();
+        assert_eq!(stats.total_forks, 2);
+        assert_eq!(stats.total_stake, 1000);
+        assert_eq!(stats.max_fork_stake, 700);
+        assert_eq!(stats.best_slot, Some(2));
     }
 }
