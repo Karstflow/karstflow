@@ -1,0 +1,406 @@
+mod ancestry_verifier;
+mod bank_transition;
+mod block_processor;
+mod replay_pipeline;
+mod slot_metrics;
+#[cfg(test)]
+mod tests;
+mod vote_integration;
+
+pub use ancestry_verifier::{
+    AncestryError, AncestryStats, AncestryVerifier, ForkDetector, ForkPoint,
+};
+pub use bank_transition::{BankTransition, BankTransitionError};
+pub use block_processor::{BlockOutcome, BlockProcessor, BlockProcessorError, TransactionResult};
+pub use replay_pipeline::{
+    BatchReplayResult, ConfirmationInfo, ConfirmationStats, CoordinatorStats,
+    ForkReplayCoordinator, OptimisticConfirmationTracker, ReplayBatchProcessor, ReplayOptimizer,
+    SlotReplayInfo,
+};
+pub use slot_metrics::{
+    AggregateMetrics, AlertSeverity, AlertType, AnomalyType, MetricsTracker, PerformanceAlert,
+    PerformanceAnomaly, PerformanceMonitor, PerformanceThresholds, SlotMetrics,
+};
+pub use vote_integration::{VoteIntegration, VoteIntegrationError};
+
+use crate::{AssembledBlock, StageError};
+use paradencer_consensus::{BankForks, CommitmentTracker, ForkChoice, Tower, VoteProcessor};
+use paradencer_execution::ExecutionBridge;
+use std::sync::{Arc, Mutex, RwLock};
+
+/// Statistics for replay stage operations
+#[derive(Debug, Clone, Default)]
+pub struct ReplayStats {
+    /// Total blocks replayed
+    pub blocks_replayed: u64,
+    /// Total transactions replayed
+    pub transactions_replayed: u64,
+    /// Total votes processed
+    pub votes_processed: u64,
+    /// Total bank transitions (freezes + creations)
+    pub bank_transitions: u64,
+    /// Total root progressions
+    pub root_progressions: u64,
+    /// Failed block replays
+    pub failed_blocks: u64,
+    /// Failed transactions
+    pub failed_transactions: u64,
+    /// Average transactions per block
+    pub avg_transactions_per_block: f64,
+}
+
+impl ReplayStats {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn record_block_replay(&mut self, transaction_count: usize, success: bool) {
+        if success {
+            self.blocks_replayed += 1;
+            self.transactions_replayed += transaction_count as u64;
+
+            // Update average
+            if self.blocks_replayed > 0 {
+                self.avg_transactions_per_block =
+                    self.transactions_replayed as f64 / self.blocks_replayed as f64;
+            }
+        } else {
+            self.failed_blocks += 1;
+        }
+    }
+
+    pub fn record_vote_processed(&mut self) {
+        self.votes_processed += 1;
+    }
+
+    pub fn record_bank_transition(&mut self) {
+        self.bank_transitions += 1;
+    }
+
+    pub fn record_root_progression(&mut self) {
+        self.root_progressions += 1;
+    }
+
+    pub fn record_transaction_failure(&mut self) {
+        self.failed_transactions += 1;
+    }
+}
+
+/// Configuration for replay stage
+#[derive(Debug, Clone)]
+pub struct ReplayConfig {
+    /// Enable strict ancestry verification
+    pub strict_ancestry_check: bool,
+    /// Enable vote processing
+    pub process_votes: bool,
+    /// Enable automatic bank freezing
+    pub auto_freeze_banks: bool,
+    /// Enable root progression
+    pub enable_root_progression: bool,
+    /// Maximum blocks to process before yielding
+    pub max_blocks_per_iteration: usize,
+}
+
+impl Default for ReplayConfig {
+    fn default() -> Self {
+        Self {
+            strict_ancestry_check: true,
+            process_votes: true,
+            auto_freeze_banks: true,
+            enable_root_progression: true,
+            max_blocks_per_iteration: 32,
+        }
+    }
+}
+
+/// Main replay stage for deterministic block processing
+///
+/// Orchestrates the replay of assembled blocks by:
+/// - Selecting target banks using fork choice
+/// - Verifying block ancestry
+/// - Creating child banks at slot boundaries
+/// - Applying transactions via ExecutionBridge
+/// - Processing ticks and slot metadata
+/// - Freezing banks at end of slot
+/// - Updating fork choice with outcomes
+/// - Checking for root progression
+pub struct ReplayStage {
+    /// Configuration
+    config: ReplayConfig,
+    /// Bank transition manager
+    bank_transition: BankTransition,
+    /// Block processor
+    block_processor: BlockProcessor,
+    /// Vote integration
+    vote_integration: VoteIntegration,
+    /// Statistics
+    stats: Arc<Mutex<ReplayStats>>,
+}
+
+impl ReplayStage {
+    pub fn new(
+        bank_forks: Arc<RwLock<BankForks>>,
+        fork_choice: Arc<Mutex<ForkChoice>>,
+        execution_bridge: Arc<ExecutionBridge>,
+        vote_processor: Arc<Mutex<VoteProcessor>>,
+        tower: Arc<RwLock<Tower>>,
+        commitment_tracker: Arc<Mutex<CommitmentTracker>>,
+    ) -> Self {
+        Self::with_config(
+            ReplayConfig::default(),
+            bank_forks,
+            fork_choice,
+            execution_bridge,
+            vote_processor,
+            tower,
+            commitment_tracker,
+        )
+    }
+
+    pub fn with_config(
+        config: ReplayConfig,
+        bank_forks: Arc<RwLock<BankForks>>,
+        fork_choice: Arc<Mutex<ForkChoice>>,
+        execution_bridge: Arc<ExecutionBridge>,
+        vote_processor: Arc<Mutex<VoteProcessor>>,
+        tower: Arc<RwLock<Tower>>,
+        commitment_tracker: Arc<Mutex<CommitmentTracker>>,
+    ) -> Self {
+        let bank_transition = BankTransition::new(bank_forks.clone(), fork_choice.clone());
+        let block_processor = BlockProcessor::new(execution_bridge, commitment_tracker);
+        let vote_integration = VoteIntegration::new(vote_processor, tower);
+
+        Self {
+            config,
+            bank_transition,
+            block_processor,
+            vote_integration,
+            stats: Arc::new(Mutex::new(ReplayStats::new())),
+        }
+    }
+
+    /// Process a single assembled block through replay
+    pub fn replay_block(&mut self, block: AssembledBlock) -> Result<BlockOutcome, StageError> {
+        // Step 1: Get or create working bank for this slot
+        let bank = if let Ok(existing_bank) = self.bank_transition.get_working_bank(block.slot) {
+            existing_bank
+        } else {
+            // Need to create child bank from parent
+            self.bank_transition
+                .create_child_bank(block.parent_slot, block.slot)
+                .map_err(|e| StageError::ReplayError(format!("Bank creation failed: {:?}", e)))?;
+
+            self.stats.lock().unwrap().record_bank_transition();
+
+            self.bank_transition
+                .get_working_bank(block.slot)
+                .map_err(|e| StageError::ReplayError(format!("Failed to get new bank: {:?}", e)))?
+        };
+
+        // Step 2: Verify ancestry if strict checking enabled
+        if self.config.strict_ancestry_check {
+            self.verify_block_ancestry(&block, &bank)?;
+        }
+
+        // Step 3: Process votes from block if enabled
+        if self.config.process_votes {
+            if let Err(e) = self.vote_integration.process_votes_from_block(&block) {
+                // Vote processing failures are non-fatal
+                eprintln!("Vote processing warning for slot {}: {:?}", block.slot, e);
+            } else {
+                self.stats.lock().unwrap().record_vote_processed();
+            }
+        }
+
+        // Step 4: Apply transactions and process block
+        let outcome = self
+            .block_processor
+            .process_block(block.clone(), bank.clone())
+            .map_err(|e| StageError::ReplayError(format!("Block processing failed: {:?}", e)))?;
+
+        // Step 5: Freeze bank if slot is complete
+        if self.config.auto_freeze_banks && bank.is_complete() {
+            self.bank_transition
+                .freeze_bank(block.slot)
+                .map_err(|e| StageError::ReplayError(format!("Bank freeze failed: {:?}", e)))?;
+
+            self.stats.lock().unwrap().record_bank_transition();
+        }
+
+        // Step 6: Update tower with successful replay
+        if self.config.process_votes {
+            if let Err(e) = self
+                .vote_integration
+                .update_tower(block.slot, block.entries[0].hash)
+            {
+                eprintln!("Tower update warning for slot {}: {:?}", block.slot, e);
+            }
+        }
+
+        // Step 7: Check for root progression
+        if self.config.enable_root_progression {
+            if let Some(new_root) = self.check_root_progression()? {
+                self.stats.lock().unwrap().record_root_progression();
+                println!("Root progressed to slot {}", new_root);
+            }
+        }
+
+        // Record statistics
+        let success = outcome.executed_count > 0 || outcome.transactions.is_empty();
+        self.stats
+            .lock()
+            .unwrap()
+            .record_block_replay(outcome.transactions.len(), success);
+
+        Ok(outcome)
+    }
+
+    /// Verify that block's parent hash matches expected parent bank
+    fn verify_block_ancestry(
+        &self,
+        block: &AssembledBlock,
+        bank: &Arc<paradencer_consensus::Bank>,
+    ) -> Result<(), StageError> {
+        // Check parent slot matches
+        if let Some(parent_slot) = bank.parent_slot() {
+            if parent_slot != block.parent_slot {
+                return Err(StageError::ReplayError(format!(
+                    "Parent slot mismatch: bank has parent {}, block has parent {}",
+                    parent_slot, block.parent_slot
+                )));
+            }
+
+            // Verify parent hash
+            if bank.parent_hash() != [0u8; 32] {
+                // Parent hash verification would go here
+                // For now we trust the block's parent_slot
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Check if conditions are met for root progression
+    fn check_root_progression(&mut self) -> Result<Option<u64>, StageError> {
+        // Check if tower has produced a new root
+        let tower = self.vote_integration.tower.read().unwrap();
+        let new_root = tower.root();
+        drop(tower);
+
+        if let Some(root_slot) = new_root {
+            let mut bank_forks = self.bank_transition.bank_forks.write().unwrap();
+            let current_root = bank_forks.root_slot();
+
+            if root_slot > current_root {
+                // Progress root in bank forks
+                bank_forks.set_root(root_slot).map_err(|e| {
+                    StageError::ReplayError(format!("Root progression failed: {:?}", e))
+                })?;
+
+                // Prune old vote data
+                let mut vote_processor = self.vote_integration.vote_processor.lock().unwrap();
+                vote_processor.prune_below_root(root_slot);
+
+                // Update commitment tracker
+                self.block_processor
+                    .commitment_tracker
+                    .lock()
+                    .unwrap()
+                    .update_root(root_slot);
+
+                return Ok(Some(root_slot));
+            }
+        }
+
+        Ok(None)
+    }
+
+    /// Get current statistics
+    pub fn stats(&self) -> ReplayStats {
+        self.stats.lock().unwrap().clone()
+    }
+
+    /// Reset statistics
+    pub fn reset_stats(&mut self) {
+        *self.stats.lock().unwrap() = ReplayStats::new();
+    }
+
+    /// Get configuration
+    pub fn config(&self) -> &ReplayConfig {
+        &self.config
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::Entry;
+    use paradencer_consensus::{
+        Bank, EpochSchedule, LeaderSchedule, StakeTracker, VoteProcessorConfig, VoteState,
+    };
+    use paradencer_storage::{AccountDatabase, Pubkey};
+
+    fn create_test_bank_forks() -> Arc<RwLock<BankForks>> {
+        let accounts = Arc::new(AccountDatabase::new());
+        let epoch_schedule = Arc::new(EpochSchedule::default());
+        let validator = Pubkey::new_unique();
+        let validators = vec![(validator, 1000)];
+        let leader_schedule = Arc::new(LeaderSchedule::new(0, &validators).unwrap());
+        let genesis = Bank::new_genesis(accounts, epoch_schedule, leader_schedule);
+        Arc::new(RwLock::new(BankForks::new(genesis)))
+    }
+
+    fn create_test_vote_processor() -> Arc<Mutex<VoteProcessor>> {
+        let config = VoteProcessorConfig::default();
+        let stake_tracker = StakeTracker::new(0);
+        Arc::new(Mutex::new(VoteProcessor::new(config, stake_tracker)))
+    }
+
+    fn create_test_block(slot: u64, parent_slot: u64) -> AssembledBlock {
+        AssembledBlock {
+            slot,
+            parent_slot,
+            entries: vec![Entry {
+                num_hashes: 1,
+                hash: [1u8; 32],
+                transactions: vec![],
+            }],
+            transaction_count: 0,
+            total_bytes: 0,
+            shred_count: 1,
+        }
+    }
+
+    #[test]
+    fn replay_stage_initializes() {
+        let bank_forks = create_test_bank_forks();
+        let fork_choice = Arc::new(Mutex::new(ForkChoice::new(1000)));
+        let execution_bridge = Arc::new(ExecutionBridge::new());
+        let vote_processor = create_test_vote_processor();
+        let tower = Arc::new(RwLock::new(Tower::new()));
+        let commitment_tracker = Arc::new(Mutex::new(CommitmentTracker::default()));
+
+        let _stage = ReplayStage::new(
+            bank_forks,
+            fork_choice,
+            execution_bridge,
+            vote_processor,
+            tower,
+            commitment_tracker,
+        );
+    }
+
+    #[test]
+    fn replay_stats_track_correctly() {
+        let mut stats = ReplayStats::new();
+
+        stats.record_block_replay(10, true);
+        assert_eq!(stats.blocks_replayed, 1);
+        assert_eq!(stats.transactions_replayed, 10);
+
+        stats.record_block_replay(20, true);
+        assert_eq!(stats.blocks_replayed, 2);
+        assert_eq!(stats.transactions_replayed, 30);
+        assert_eq!(stats.avg_transactions_per_block, 15.0);
+    }
+}

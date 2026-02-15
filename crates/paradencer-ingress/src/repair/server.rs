@@ -1,5 +1,5 @@
 use super::*;
-use crate::gossip::cluster_info::NodeId;
+use crate::gossip::NodeId;
 use crate::repair::protocol::{RepairMessage, RepairRequest, RepairResponse, ShredData};
 use parking_lot::RwLock;
 use std::collections::HashMap;
@@ -194,11 +194,11 @@ impl RepairServer {
         config: RepairServerConfig,
         shred_provider: Arc<dyn ShredProvider>,
     ) -> RepairResult<Self> {
-        let socket = UdpSocket::bind(config.bind_addr)
-            .await
-            .map_err(|e| IngressError::QuicEndpointBind {
+        let socket = UdpSocket::bind(config.bind_addr).await.map_err(|e| {
+            IngressError::QuicEndpointBind {
                 detail: format!("failed to bind repair server socket: {}", e),
-            })?;
+            }
+        })?;
 
         let rate_limiter = RateLimiter::new(config.rate_limit_per_peer, config.rate_limit_window);
 
@@ -217,11 +217,9 @@ impl RepairServer {
     }
 
     pub fn local_addr(&self) -> RepairResult<SocketAddr> {
-        self.socket
-            .local_addr()
-            .map_err(|e| IngressError::QuicIo {
-                detail: format!("failed to get local addr: {}", e),
-            })
+        self.socket.local_addr().map_err(|e| IngressError::QuicIo {
+            detail: format!("failed to get local addr: {}", e),
+        })
     }
 
     /// Start the repair server
@@ -267,12 +265,8 @@ impl RepairServer {
                     if let Ok(RepairMessage::Request(request)) = RepairMessage::decode(data) {
                         stats.requests_received.fetch_add(1, Ordering::Relaxed);
 
-                        let response = Self::handle_request(
-                            node_id,
-                            request,
-                            &shred_provider,
-                            &stats,
-                        );
+                        let response =
+                            Self::handle_request(node_id, request, &shred_provider, &stats);
 
                         if let Ok(encoded) = RepairMessage::Response(response).encode() {
                             let _ = socket.send_to(&encoded, src_addr).await;

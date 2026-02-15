@@ -145,19 +145,14 @@ impl FecReconstructor {
 
         // Prepare shreds for Reed-Solomon
         let shred_size = Self::get_uniform_size(&data_shreds, &coding_shreds)?;
-        let mut all_shreds: Vec<Option<Vec<u8>>> = Vec::with_capacity(self.num_data + self.num_coding);
+        let mut all_shreds: Vec<Option<Vec<u8>>> =
+            Vec::with_capacity(self.num_data + self.num_coding);
         all_shreds.extend(data_shreds.clone());
         all_shreds.extend(coding_shreds.clone());
 
-        // Convert to format expected by reed-solomon-erasure
-        let mut shreds_refs: Vec<_> = all_shreds
-            .iter_mut()
-            .map(|s| s.as_deref_mut())
-            .collect();
-
-        // Perform reconstruction
+        // Perform reconstruction (works in-place on owned data)
         self.codec
-            .reconstruct(&mut shreds_refs)
+            .reconstruct(&mut all_shreds)
             .map_err(|e| FecError::ReconstructionFailed(e.to_string()))?;
 
         // Extract reconstructed data shreds
@@ -167,8 +162,8 @@ impl FecReconstructor {
         for i in 0..self.num_data {
             if data_shreds[i].is_none() {
                 // This shred was reconstructed
-                if let Some(shred_ref) = shreds_refs[i] {
-                    reconstructed_data.push(Some(shred_ref.to_vec()));
+                if let Some(shred) = &all_shreds[i] {
+                    reconstructed_data.push(Some(shred.clone()));
                     num_reconstructed += 1;
                 } else {
                     reconstructed_data.push(None);
@@ -215,21 +210,16 @@ impl FecReconstructor {
             all_shreds[idx] = Some(shred);
         }
 
-        // Reconstruct
-        let mut shreds_refs: Vec<_> = all_shreds
-            .iter_mut()
-            .map(|s| s.as_deref_mut())
-            .collect();
-
+        // Reconstruct (works in-place on owned data)
         self.codec
-            .reconstruct(&mut shreds_refs)
+            .reconstruct(&mut all_shreds)
             .map_err(|e| FecError::ReconstructionFailed(e.to_string()))?;
 
         // Extract all data shreds
         let mut result = Vec::with_capacity(self.num_data);
         for i in 0..self.num_data {
-            if let Some(shred_ref) = shreds_refs[i] {
-                result.push(shred_ref.to_vec());
+            if let Some(shred) = &all_shreds[i] {
+                result.push(shred.clone());
             } else {
                 return Err(FecError::ReconstructionFailed(
                     "Failed to reconstruct all data shreds".to_string(),
@@ -251,10 +241,7 @@ impl FecReconstructor {
             .filter_map(|s| s.as_ref())
             .map(|s| s.len())
             .next()
-            .ok_or_else(|| FecError::InsufficientShreds {
-                have: 0,
-                need: 1,
-            })?;
+            .ok_or_else(|| FecError::InsufficientShreds { have: 0, need: 1 })?;
 
         // Verify all shreds have the same size
         for shred in data_shreds.iter().chain(coding_shreds.iter()) {
@@ -333,7 +320,9 @@ mod tests {
         let data_shreds: Vec<Option<Vec<u8>>> = data.into_iter().map(Some).collect();
         let coding_shreds: Vec<Option<Vec<u8>>> = vec![None; 4];
 
-        let result = reconstructor.reconstruct(data_shreds, coding_shreds).unwrap();
+        let result = reconstructor
+            .reconstruct(data_shreds, coding_shreds)
+            .unwrap();
         assert_eq!(result.num_reconstructed, 0);
     }
 
@@ -354,12 +343,12 @@ mod tests {
         let mut data_shreds: Vec<Option<Vec<u8>>> = vec![None, None];
         data_shreds.extend(original_data[2..].iter().map(|s| Some(s.clone())));
 
-        let coding_shreds: Vec<Option<Vec<u8>>> = all_shreds[4..]
-            .iter()
-            .map(|s| Some(s.clone()))
-            .collect();
+        let coding_shreds: Vec<Option<Vec<u8>>> =
+            all_shreds[4..].iter().map(|s| Some(s.clone())).collect();
 
-        let result = reconstructor.reconstruct(data_shreds, coding_shreds).unwrap();
+        let result = reconstructor
+            .reconstruct(data_shreds, coding_shreds)
+            .unwrap();
         assert_eq!(result.num_reconstructed, 2);
 
         // Verify reconstructed shreds match original
@@ -372,12 +361,8 @@ mod tests {
         let reconstructor = FecReconstructor::new(4, 4).unwrap();
 
         // Only 3 shreds available (need at least 4)
-        let data_shreds: Vec<Option<Vec<u8>>> = vec![
-            Some(vec![0u8; 128]),
-            None,
-            Some(vec![0u8; 128]),
-            None,
-        ];
+        let data_shreds: Vec<Option<Vec<u8>>> =
+            vec![Some(vec![0u8; 128]), None, Some(vec![0u8; 128]), None];
         let coding_shreds: Vec<Option<Vec<u8>>> = vec![Some(vec![0u8; 128]), None, None, None];
 
         let result = reconstructor.reconstruct(data_shreds, coding_shreds);

@@ -68,12 +68,7 @@ async fn test_cluster_info_operations() {
     let node_id = NodeId::random();
     let contact_info = create_test_contact_info(node_id, 8000);
 
-    let cluster_info = ClusterInfo::new(
-        node_id,
-        contact_info,
-        Duration::from_secs(30),
-        1000,
-    );
+    let cluster_info = ClusterInfo::new(node_id, contact_info, Duration::from_secs(30), 1000);
 
     let peer_id = NodeId::random();
     let peer_info = create_test_contact_info(peer_id, 8001);

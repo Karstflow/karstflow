@@ -162,11 +162,7 @@ fn main() {
     let duration = start.elapsed();
     let total_bytes = signatures.len() * 64;
 
-    println!(
-        "Hashed {} signatures in {:?}",
-        signatures.len(),
-        duration
-    );
+    println!("Hashed {} signatures in {:?}", signatures.len(), duration);
     println!("Throughput: {}", format_throughput(total_bytes, duration));
     println!(
         "Average time per signature: {:.2} µs",

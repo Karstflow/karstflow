@@ -51,18 +51,14 @@ impl SystemProgramError {
     fn to_string(&self) -> String {
         match self {
             Self::AccountAlreadyInUse => "Account already in use".to_string(),
-            Self::ResultWithNegativeLamports => {
-                "Result with negative lamports".to_string()
-            }
+            Self::ResultWithNegativeLamports => "Result with negative lamports".to_string(),
             Self::InvalidProgramId => "Invalid program ID".to_string(),
             Self::InvalidAccountDataLength => "Invalid account data length".to_string(),
             Self::MaxSeedLengthExceeded => "Max seed length exceeded".to_string(),
             Self::AddressWithSeedMismatch => "Address with seed mismatch".to_string(),
             Self::NonceNoRecentBlockhashes => "Nonce: no recent blockhashes".to_string(),
             Self::NonceBlockhashNotExpired => "Nonce: blockhash not expired".to_string(),
-            Self::NonceUnexpectedBlockhashValue => {
-                "Nonce: unexpected blockhash value".to_string()
-            }
+            Self::NonceUnexpectedBlockhashValue => "Nonce: unexpected blockhash value".to_string(),
         }
     }
 }
@@ -127,8 +123,7 @@ impl SystemProgramExecutor {
                 self.execute_withdraw_nonce_account(context, &mut modified_accounts, &mut logs)
             }
             SYSTEM_PROGRAM_AUTHORIZE_NONCE_ACCOUNT => {
-                compute_used =
-                    compute_used.saturating_add(constants::COMPUTE_COST_NONCE_AUTHORIZE);
+                compute_used = compute_used.saturating_add(constants::COMPUTE_COST_NONCE_AUTHORIZE);
                 self.execute_authorize_nonce_account(context, &mut modified_accounts, &mut logs)
             }
             SYSTEM_PROGRAM_CREATE_ACCOUNT_WITH_SEED => {
@@ -423,7 +418,10 @@ impl SystemProgramExecutor {
         // 4. Serialize nonce state into account data
 
         modified_accounts.insert(account_pubkey, account);
-        logs.push(format!("Initialized nonce account with authority {}", authority));
+        logs.push(format!(
+            "Initialized nonce account with authority {}",
+            authority
+        ));
 
         Ok(())
     }
@@ -605,8 +603,7 @@ impl SystemProgramExecutor {
 
         // Parse seed
         let seed_bytes = &context.instruction_data[offset..offset + seed_len];
-        let seed = std::str::from_utf8(seed_bytes)
-            .map_err(|_| "Invalid UTF-8 in seed")?;
+        let seed = std::str::from_utf8(seed_bytes).map_err(|_| "Invalid UTF-8 in seed")?;
         offset += seed_len;
 
         // Parse owner
@@ -756,7 +753,10 @@ impl SystemProgramExecutor {
         new_account.data.resize(space as usize, 0);
 
         modified_accounts.insert(*account_pubkey, new_account);
-        logs.push(format!("Allocated {} bytes for account {}", space, account_pubkey));
+        logs.push(format!(
+            "Allocated {} bytes for account {}",
+            space, account_pubkey
+        ));
 
         Ok(())
     }
@@ -819,7 +819,10 @@ impl SystemProgramExecutor {
         new_account.meta.owner = owner_to_assign;
 
         modified_accounts.insert(*account_pubkey, new_account);
-        logs.push(format!("Assigned account {} to owner {}", account_pubkey, owner_to_assign));
+        logs.push(format!(
+            "Assigned account {} to owner {}",
+            account_pubkey, owner_to_assign
+        ));
 
         Ok(())
     }
@@ -893,7 +896,10 @@ impl SystemProgramExecutor {
         modified_accounts.insert(*from_pubkey, new_from);
         modified_accounts.insert(*to_pubkey, new_to);
 
-        logs.push(format!("Transferred {} lamports from {} to {}", lamports, from_pubkey, to_pubkey));
+        logs.push(format!(
+            "Transferred {} lamports from {} to {}",
+            lamports, from_pubkey, to_pubkey
+        ));
 
         Ok(())
     }

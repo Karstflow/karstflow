@@ -30,9 +30,7 @@ fn test_batch_verification_small_batch() {
         let mut sig_bytes = [0u8; SIGNATURE_SIZE];
         sig_bytes.copy_from_slice(&signature.to_bytes());
 
-        verifier
-            .add_signature(pubkey, message, sig_bytes)
-            .unwrap();
+        verifier.add_signature(pubkey, message, sig_bytes).unwrap();
     }
 
     let result = verifier.verify_batch().unwrap();
@@ -62,9 +60,7 @@ fn test_batch_verification_medium_batch() {
         let mut sig_bytes = [0u8; SIGNATURE_SIZE];
         sig_bytes.copy_from_slice(&signature.to_bytes());
 
-        verifier
-            .add_signature(pubkey, message, sig_bytes)
-            .unwrap();
+        verifier.add_signature(pubkey, message, sig_bytes).unwrap();
     }
 
     let result = verifier.verify_batch().unwrap();
@@ -92,9 +88,7 @@ fn test_batch_verification_large_batch() {
         let mut sig_bytes = [0u8; SIGNATURE_SIZE];
         sig_bytes.copy_from_slice(&signature.to_bytes());
 
-        verifier
-            .add_signature(pubkey, message, sig_bytes)
-            .unwrap();
+        verifier.add_signature(pubkey, message, sig_bytes).unwrap();
     }
 
     let result = verifier.verify_batch().unwrap();
@@ -122,9 +116,7 @@ fn test_batch_verification_mixed_valid_invalid() {
         let mut sig_bytes = [0u8; SIGNATURE_SIZE];
         sig_bytes.copy_from_slice(&signature.to_bytes());
 
-        verifier
-            .add_signature(pubkey, message, sig_bytes)
-            .unwrap();
+        verifier.add_signature(pubkey, message, sig_bytes).unwrap();
     }
 
     // Add 1 invalid signature in the middle
@@ -141,9 +133,7 @@ fn test_batch_verification_mixed_valid_invalid() {
     // Corrupt the signature
     sig_bytes[0] ^= 0xFF;
 
-    verifier
-        .add_signature(pubkey, message, sig_bytes)
-        .unwrap();
+    verifier.add_signature(pubkey, message, sig_bytes).unwrap();
 
     // Add 10 more valid signatures
     for i in 10..20 {
@@ -158,9 +148,7 @@ fn test_batch_verification_mixed_valid_invalid() {
         let mut sig_bytes = [0u8; SIGNATURE_SIZE];
         sig_bytes.copy_from_slice(&signature.to_bytes());
 
-        verifier
-            .add_signature(pubkey, message, sig_bytes)
-            .unwrap();
+        verifier.add_signature(pubkey, message, sig_bytes).unwrap();
     }
 
     // Batch verification should fail
@@ -193,9 +181,7 @@ fn test_batch_verification_detailed_identifies_failures() {
         }
         expected_results.push(is_valid);
 
-        verifier
-            .add_signature(pubkey, message, sig_bytes)
-            .unwrap();
+        verifier.add_signature(pubkey, message, sig_bytes).unwrap();
     }
 
     let results = verifier.verify_batch_detailed().unwrap();

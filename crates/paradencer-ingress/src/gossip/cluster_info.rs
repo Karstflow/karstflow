@@ -38,9 +38,13 @@ impl NodeId {
     }
 
     pub fn from_base58(s: &str) -> Result<Self, bs58::decode::Error> {
-        let mut bytes = [0u8; 32];
-        bs58::decode(s).into(&mut bytes)?;
-        Ok(Self(bytes))
+        let bytes = bs58::decode(s).into_vec()?;
+        if bytes.len() != 32 {
+            return Err(bs58::decode::Error::BufferTooSmall);
+        }
+        let mut array = [0u8; 32];
+        array.copy_from_slice(&bytes);
+        Ok(Self(array))
     }
 }
 
@@ -106,6 +110,7 @@ impl ContactInfo {
 pub struct ValidatorInfo {
     pub contact_info: ContactInfo,
     pub stake: u64,
+    #[serde(skip, default = "Instant::now")]
     pub last_seen: Instant,
     pub is_active: bool,
 }

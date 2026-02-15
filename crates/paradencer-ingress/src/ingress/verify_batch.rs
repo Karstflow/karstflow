@@ -64,8 +64,7 @@ impl BatchVerificationStats {
         self.transactions_processed.fetch_add(1, Ordering::Relaxed);
         self.signatures_verified
             .fetch_add(num_signatures as u64, Ordering::Relaxed);
-        self.verifications_succeeded
-            .fetch_add(1, Ordering::Relaxed);
+        self.verifications_succeeded.fetch_add(1, Ordering::Relaxed);
     }
 
     pub fn record_failure(&self, num_signatures: usize) {
@@ -164,9 +163,9 @@ impl TransactionBatchVerifier {
         let mut offset = 0;
 
         // Read signature count (compact-u16 encoded)
-        let (signature_count, compact_len) = self
-            .decode_compact_u16(&transaction_data[offset..])
-            .map_err(|e| BatchVerificationError::ParseError(e.to_string()))?;
+        let (signature_count, compact_len) =
+            self.decode_compact_u16(&transaction_data[offset..])
+                .map_err(|e| BatchVerificationError::ParseError(e.to_string()))?;
         offset += compact_len;
 
         // Validate signature count

@@ -150,11 +150,7 @@ impl CommitmentTracker {
         commitment.total_stake = total_stake;
 
         // Update highest processed
-        self.highest_processed = Some(
-            self.highest_processed
-                .map(|h| h.max(slot))
-                .unwrap_or(slot),
-        );
+        self.highest_processed = Some(self.highest_processed.map(|h| h.max(slot)).unwrap_or(slot));
     }
 
     /// Update stake for a slot (e.g., when new votes arrive).
@@ -214,11 +210,7 @@ impl CommitmentTracker {
         }
 
         // Update highest confirmed
-        self.highest_confirmed = Some(
-            self.highest_confirmed
-                .map(|h| h.max(slot))
-                .unwrap_or(slot),
-        );
+        self.highest_confirmed = Some(self.highest_confirmed.map(|h| h.max(slot)).unwrap_or(slot));
     }
 
     /// Mark a slot as finalized (rooted).
@@ -235,11 +227,7 @@ impl CommitmentTracker {
         }
 
         // Update root
-        self.root_slot = Some(
-            self.root_slot
-                .map(|r| r.max(slot))
-                .unwrap_or(slot),
-        );
+        self.root_slot = Some(self.root_slot.map(|r| r.max(slot)).unwrap_or(slot));
     }
 
     /// Get commitment level for a slot.
@@ -286,15 +274,9 @@ impl CommitmentTracker {
     /// Get all slots at a specific commitment level.
     pub fn slots_at_level(&self, level: CommitmentLevel) -> Vec<u64> {
         match level {
-            CommitmentLevel::Processed => {
-                self.processed_slots.iter().copied().collect()
-            }
-            CommitmentLevel::Confirmed => {
-                self.confirmed_slots.iter().copied().collect()
-            }
-            CommitmentLevel::Finalized => {
-                self.finalized_slots.iter().copied().collect()
-            }
+            CommitmentLevel::Processed => self.processed_slots.iter().copied().collect(),
+            CommitmentLevel::Confirmed => self.confirmed_slots.iter().copied().collect(),
+            CommitmentLevel::Finalized => self.finalized_slots.iter().copied().collect(),
         }
     }
 
@@ -393,11 +375,7 @@ impl CommitmentTracker {
             // Check if sufficient depth
             if let Some(commitment) = self.commitments.get(&slot) {
                 if commitment.confirmation_depth >= self.config.finalization_depth {
-                    candidate = Some(
-                        candidate
-                            .map(|c| c.max(slot))
-                            .unwrap_or(slot),
-                    );
+                    candidate = Some(candidate.map(|c| c.max(slot)).unwrap_or(slot));
                 }
             }
         }
@@ -408,7 +386,11 @@ impl CommitmentTracker {
     /// Get statistics about commitment tracking.
     pub fn stats(&self) -> CommitmentStats {
         let avg_confirmation_depth = if !self.commitments.is_empty() {
-            let total: usize = self.commitments.values().map(|c| c.confirmation_depth).sum();
+            let total: usize = self
+                .commitments
+                .values()
+                .map(|c| c.confirmation_depth)
+                .sum();
             total as f64 / self.commitments.len() as f64
         } else {
             0.0
@@ -462,7 +444,10 @@ mod tests {
 
         tracker.mark_processed(100, 500, 1000);
 
-        assert_eq!(tracker.get_commitment_level(100), Some(CommitmentLevel::Processed));
+        assert_eq!(
+            tracker.get_commitment_level(100),
+            Some(CommitmentLevel::Processed)
+        );
         assert_eq!(tracker.highest_processed, Some(100));
     }
 
@@ -473,7 +458,10 @@ mod tests {
         tracker.mark_processed(100, 700, 1000);
         tracker.mark_confirmed(100);
 
-        assert_eq!(tracker.get_commitment_level(100), Some(CommitmentLevel::Confirmed));
+        assert_eq!(
+            tracker.get_commitment_level(100),
+            Some(CommitmentLevel::Confirmed)
+        );
         assert_eq!(tracker.highest_confirmed, Some(100));
     }
 
@@ -485,7 +473,10 @@ mod tests {
         tracker.mark_confirmed(100);
         tracker.mark_finalized(100);
 
-        assert_eq!(tracker.get_commitment_level(100), Some(CommitmentLevel::Finalized));
+        assert_eq!(
+            tracker.get_commitment_level(100),
+            Some(CommitmentLevel::Finalized)
+        );
         assert_eq!(tracker.root_slot(), Some(100));
     }
 
@@ -564,8 +555,14 @@ mod tests {
         tracker.prune_below_root(101);
 
         assert_eq!(tracker.get_commitment_level(100), None);
-        assert_eq!(tracker.get_commitment_level(101), Some(CommitmentLevel::Finalized));
-        assert_eq!(tracker.get_commitment_level(102), Some(CommitmentLevel::Processed));
+        assert_eq!(
+            tracker.get_commitment_level(101),
+            Some(CommitmentLevel::Finalized)
+        );
+        assert_eq!(
+            tracker.get_commitment_level(102),
+            Some(CommitmentLevel::Processed)
+        );
     }
 
     #[test]
@@ -679,11 +676,17 @@ mod tests {
         tracker.mark_processed(105, 600, 1000);
         tracker.mark_processed(102, 700, 1000);
 
-        assert_eq!(tracker.highest_slot_with_commitment(CommitmentLevel::Processed), Some(105));
+        assert_eq!(
+            tracker.highest_slot_with_commitment(CommitmentLevel::Processed),
+            Some(105)
+        );
 
         tracker.mark_confirmed(102);
         tracker.mark_confirmed(100);
 
-        assert_eq!(tracker.highest_slot_with_commitment(CommitmentLevel::Confirmed), Some(102));
+        assert_eq!(
+            tracker.highest_slot_with_commitment(CommitmentLevel::Confirmed),
+            Some(102)
+        );
     }
 }

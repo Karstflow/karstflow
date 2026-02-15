@@ -4,10 +4,10 @@
 
 #[cfg(test)]
 mod tests {
+    use crate::shred_assembler::*;
     use paradencer_crypto::FecReconstructor;
     use paradencer_storage::{ShredWindowConfig, ShredWindowStore};
     use paradencer_types::shred::*;
-    use crate::shred_assembler::*;
     use reed_solomon_erasure::galois_8::ReedSolomon;
 
     /// Create a deterministic test shred

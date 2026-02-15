@@ -1,5 +1,12 @@
-use crate::{BpfLoaderExecutor, ExecutionContext, ExecutionOutcome, StakeProgramExecutor, SystemProgramExecutor, TokenProgramExecutor, VoteProgramExecutor};
-use paradencer_ids::{BPF_LOADER_PROGRAM_ID, STAKE_PROGRAM_ID, SYSTEM_PROGRAM_ID, TOKEN_PROGRAM_ID, VOTE_PROGRAM_ID};
+use crate::{
+    AssociatedTokenProgramExecutor, BpfLoaderExecutor, ExecutionContext, ExecutionOutcome,
+    MemoProgramExecutor, StakeProgramExecutor, SystemProgramExecutor, Token2022ProgramExecutor,
+    TokenProgramExecutor, VoteProgramExecutor,
+};
+use paradencer_ids::{
+    ASSOCIATED_TOKEN_PROGRAM_ID, BPF_LOADER_PROGRAM_ID, MEMO_PROGRAM_ID, MEMO_PROGRAM_V3_ID,
+    STAKE_PROGRAM_ID, SYSTEM_PROGRAM_ID, TOKEN_2022_PROGRAM_ID, TOKEN_PROGRAM_ID, VOTE_PROGRAM_ID,
+};
 use paradencer_types::{Account, Pubkey};
 use std::collections::HashMap;
 
@@ -58,6 +65,9 @@ pub struct TransactionProcessor {
     vote_program: VoteProgramExecutor,
     stake_program: StakeProgramExecutor,
     token_program: TokenProgramExecutor,
+    token_2022_program: Token2022ProgramExecutor,
+    associated_token_program: AssociatedTokenProgramExecutor,
+    memo_program: MemoProgramExecutor,
     bpf_loader: BpfLoaderExecutor,
     max_compute_units: u64,
 }
@@ -70,6 +80,9 @@ impl TransactionProcessor {
             vote_program: VoteProgramExecutor::new(200),
             stake_program: StakeProgramExecutor::new(250),
             token_program: TokenProgramExecutor::new(300),
+            token_2022_program: Token2022ProgramExecutor::new(320),
+            associated_token_program: AssociatedTokenProgramExecutor::new(180),
+            memo_program: MemoProgramExecutor::new(100),
             bpf_loader: BpfLoaderExecutor::new(400),
             max_compute_units: 1_400_000,
         }
@@ -94,7 +107,11 @@ impl TransactionProcessor {
         // Process each instruction in sequence
         for (idx, compiled_instruction) in transaction.message.instructions.iter().enumerate() {
             // Get program ID
-            let program_id = match transaction.message.account_keys.get(compiled_instruction.program_id_index as usize) {
+            let program_id = match transaction
+                .message
+                .account_keys
+                .get(compiled_instruction.program_id_index as usize)
+            {
                 Some(id) => *id,
                 None => {
                     return TransactionResult {
@@ -102,7 +119,10 @@ impl TransactionProcessor {
                         compute_units_consumed: total_compute_units,
                         modified_accounts,
                         logs: all_logs,
-                        error: Some(format!("Invalid program_id_index: {}", compiled_instruction.program_id_index)),
+                        error: Some(format!(
+                            "Invalid program_id_index: {}",
+                            compiled_instruction.program_id_index
+                        )),
                     };
                 }
             };
@@ -147,7 +167,8 @@ impl TransactionProcessor {
             let outcome = self.execute_instruction(&context);
 
             // Update compute units
-            total_compute_units = total_compute_units.saturating_add(outcome.compute_units_consumed);
+            total_compute_units =
+                total_compute_units.saturating_add(outcome.compute_units_consumed);
 
             // Add logs with instruction prefix
             for log in &outcome.logs {
@@ -195,31 +216,41 @@ impl TransactionProcessor {
     fn execute_instruction(&self, context: &ExecutionContext) -> ExecutionOutcome {
         // Route to appropriate program
         if context.program_id == SYSTEM_PROGRAM_ID {
-            self.system_program.execute(context).unwrap_or_else(|err| {
-                ExecutionOutcome::failure(150, err)
-            })
+            self.system_program
+                .execute(context)
+                .unwrap_or_else(|err| ExecutionOutcome::failure(150, err))
         } else if context.program_id == VOTE_PROGRAM_ID {
-            self.vote_program.execute(context).unwrap_or_else(|err| {
-                ExecutionOutcome::failure(200, err)
-            })
+            self.vote_program
+                .execute(context)
+                .unwrap_or_else(|err| ExecutionOutcome::failure(200, err))
         } else if context.program_id == STAKE_PROGRAM_ID {
-            self.stake_program.execute(context).unwrap_or_else(|err| {
-                ExecutionOutcome::failure(250, err)
-            })
+            self.stake_program
+                .execute(context)
+                .unwrap_or_else(|err| ExecutionOutcome::failure(250, err))
         } else if context.program_id == TOKEN_PROGRAM_ID {
-            self.token_program.execute(context).unwrap_or_else(|err| {
-                ExecutionOutcome::failure(300, err)
-            })
+            self.token_program
+                .execute(context)
+                .unwrap_or_else(|err| ExecutionOutcome::failure(300, err))
+        } else if context.program_id == TOKEN_2022_PROGRAM_ID {
+            self.token_2022_program
+                .execute(context)
+                .unwrap_or_else(|err| ExecutionOutcome::failure(320, err))
+        } else if context.program_id == ASSOCIATED_TOKEN_PROGRAM_ID {
+            self.associated_token_program
+                .execute(context)
+                .unwrap_or_else(|err| ExecutionOutcome::failure(180, err))
+        } else if context.program_id == MEMO_PROGRAM_ID || context.program_id == MEMO_PROGRAM_V3_ID
+        {
+            self.memo_program
+                .execute(context)
+                .unwrap_or_else(|err| ExecutionOutcome::failure(100, err))
         } else if context.program_id == BPF_LOADER_PROGRAM_ID {
-            self.bpf_loader.execute(context).unwrap_or_else(|err| {
-                ExecutionOutcome::failure(400, err)
-            })
+            self.bpf_loader
+                .execute(context)
+                .unwrap_or_else(|err| ExecutionOutcome::failure(400, err))
         } else {
             // Unknown program
-            ExecutionOutcome::failure(
-                0,
-                format!("Unknown program: {}", context.program_id),
-            )
+            ExecutionOutcome::failure(0, format!("Unknown program: {}", context.program_id))
         }
     }
 
@@ -280,16 +311,9 @@ mod tests {
         let mut instruction_data = vec![2, 0, 0, 0]; // instruction type
         instruction_data.extend_from_slice(&100u64.to_le_bytes()); // amount
 
-        let accounts = vec![
-            (from, from_account, true),
-            (to, to_account, true),
-        ];
+        let accounts = vec![(from, from_account, true), (to, to_account, true)];
 
-        let outcome = processor.process_instruction(
-            SYSTEM_PROGRAM_ID,
-            accounts,
-            instruction_data,
-        );
+        let outcome = processor.process_instruction(SYSTEM_PROGRAM_ID, accounts, instruction_data);
 
         assert!(outcome.success);
         assert_eq!(outcome.modified_accounts.len(), 2);
@@ -301,11 +325,7 @@ mod tests {
         let processor = TransactionProcessor::new();
         let unknown_program = Pubkey::new_unique();
 
-        let outcome = processor.process_instruction(
-            unknown_program,
-            vec![],
-            vec![],
-        );
+        let outcome = processor.process_instruction(unknown_program, vec![], vec![]);
 
         assert!(!outcome.success);
         assert!(outcome.logs[0].contains("Unknown program"));

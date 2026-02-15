@@ -249,7 +249,10 @@ impl VoteProcessor {
             .map_err(|e| VoteProcessorError::VoteStateError(e))?;
 
         // Update slot vote aggregation
-        let vote_info = self.slot_votes.entry(slot).or_insert_with(|| SlotVoteInfo::new(slot));
+        let vote_info = self
+            .slot_votes
+            .entry(slot)
+            .or_insert_with(|| SlotVoteInfo::new(slot));
         vote_info.add_vote(vote_account, stake);
         vote_info.update_supermajority(self.total_stake);
 
@@ -266,12 +269,18 @@ impl VoteProcessor {
         &mut self,
         votes: Vec<(Pubkey, u64, i64)>, // (vote_account, slot, timestamp)
         tower: Option<&Tower>,
-        fork_choice: Option<&mut ForkChoice>,
+        mut fork_choice: Option<&mut ForkChoice>,
     ) -> Vec<Result<u64, VoteProcessorError>> {
         let mut results = Vec::with_capacity(votes.len());
 
         for (vote_account, slot, timestamp) in votes {
-            let result = self.process_vote(vote_account, slot, timestamp, tower, fork_choice);
+            let result = self.process_vote(
+                vote_account,
+                slot,
+                timestamp,
+                tower,
+                fork_choice.as_mut().map(|fc| &mut **fc),
+            );
             results.push(result);
         }
 
@@ -423,7 +432,9 @@ mod tests {
         // Add stake delegation
         let stake_account = Pubkey::new_unique();
         let delegation = Delegation::new(vote_account, stake, 0);
-        processor.stake_tracker.add_delegation(stake_account, delegation);
+        processor
+            .stake_tracker
+            .add_delegation(stake_account, delegation);
 
         // Update total stake
         let total = processor.stake_tracker.total_stake();
@@ -459,7 +470,9 @@ mod tests {
         let mut processor = create_test_vote_processor();
         let (vote_account, _) = setup_vote_account(&mut processor, 1000);
 
-        processor.process_vote(vote_account, 100, 1000, None, None).unwrap();
+        processor
+            .process_vote(vote_account, 100, 1000, None, None)
+            .unwrap();
 
         let result = processor.process_vote(vote_account, 99, 1001, None, None);
         assert!(matches!(
@@ -475,9 +488,15 @@ mod tests {
         let (vote2, _) = setup_vote_account(&mut processor, 500);
         let (vote3, _) = setup_vote_account(&mut processor, 800);
 
-        processor.process_vote(vote1, 100, 1000, None, None).unwrap();
-        processor.process_vote(vote2, 100, 1000, None, None).unwrap();
-        processor.process_vote(vote3, 100, 1000, None, None).unwrap();
+        processor
+            .process_vote(vote1, 100, 1000, None, None)
+            .unwrap();
+        processor
+            .process_vote(vote2, 100, 1000, None, None)
+            .unwrap();
+        processor
+            .process_vote(vote3, 100, 1000, None, None)
+            .unwrap();
 
         let vote_info = processor.get_slot_votes(100).unwrap();
         assert_eq!(vote_info.total_stake, 2300);
@@ -493,11 +512,15 @@ mod tests {
         processor.total_stake = 1000;
 
         // 70% stake votes - should reach supermajority
-        processor.process_vote(vote1, 100, 1000, None, None).unwrap();
+        processor
+            .process_vote(vote1, 100, 1000, None, None)
+            .unwrap();
         assert!(processor.has_supermajority(100));
 
         // 30% more votes (total 100%)
-        processor.process_vote(vote2, 100, 1000, None, None).unwrap();
+        processor
+            .process_vote(vote2, 100, 1000, None, None)
+            .unwrap();
         assert!(processor.has_supermajority(100));
     }
 
@@ -507,11 +530,15 @@ mod tests {
         let (vote_account, _) = setup_vote_account(&mut processor, 1000);
 
         // Vote on slot 100
-        processor.process_vote(vote_account, 100, 1000, None, None).unwrap();
+        processor
+            .process_vote(vote_account, 100, 1000, None, None)
+            .unwrap();
         assert_eq!(processor.get_slot_stake(100), 1000);
 
         // Vote on slot 101 (different fork)
-        processor.process_vote(vote_account, 101, 1001, None, None).unwrap();
+        processor
+            .process_vote(vote_account, 101, 1001, None, None)
+            .unwrap();
         assert_eq!(processor.get_slot_stake(101), 1000);
 
         // Old vote should be removed
@@ -524,7 +551,9 @@ mod tests {
         let (vote_account, _) = setup_vote_account(&mut processor, 500);
         processor.total_stake = 1000;
 
-        processor.process_vote(vote_account, 100, 1000, None, None).unwrap();
+        processor
+            .process_vote(vote_account, 100, 1000, None, None)
+            .unwrap();
 
         let ratio = processor.get_slot_stake_ratio(100);
         assert!((ratio - 0.5).abs() < 0.01);
@@ -536,9 +565,15 @@ mod tests {
         let (vote1, _) = setup_vote_account(&mut processor, 1000);
         let (vote2, _) = setup_vote_account(&mut processor, 500);
 
-        processor.process_vote(vote1, 100, 1000, None, None).unwrap();
-        processor.process_vote(vote2, 101, 1001, None, None).unwrap();
-        processor.process_vote(vote1, 102, 1002, None, None).unwrap();
+        processor
+            .process_vote(vote1, 100, 1000, None, None)
+            .unwrap();
+        processor
+            .process_vote(vote2, 101, 1001, None, None)
+            .unwrap();
+        processor
+            .process_vote(vote1, 102, 1002, None, None)
+            .unwrap();
 
         assert_eq!(processor.voted_slots().len(), 3);
 
@@ -556,10 +591,7 @@ mod tests {
         let (vote1, _) = setup_vote_account(&mut processor, 1000);
         let (vote2, _) = setup_vote_account(&mut processor, 500);
 
-        let votes = vec![
-            (vote1, 100, 1000),
-            (vote2, 100, 1000),
-        ];
+        let votes = vec![(vote1, 100, 1000), (vote2, 100, 1000)];
 
         let results = processor.process_votes_batch(votes, None, None);
         assert!(results[0].is_ok());
@@ -576,9 +608,15 @@ mod tests {
         let (vote2, _) = setup_vote_account(&mut processor, 300);
         processor.total_stake = 1000;
 
-        processor.process_vote(vote1, 100, 1000, None, None).unwrap();
-        processor.process_vote(vote2, 101, 1001, None, None).unwrap();
-        processor.process_vote(vote1, 102, 1002, None, None).unwrap();
+        processor
+            .process_vote(vote1, 100, 1000, None, None)
+            .unwrap();
+        processor
+            .process_vote(vote2, 101, 1001, None, None)
+            .unwrap();
+        processor
+            .process_vote(vote1, 102, 1002, None, None)
+            .unwrap();
 
         let stats = processor.get_stats();
         assert_eq!(stats.total_slots_with_votes, 2); // 100 removed by fork switch
@@ -611,8 +649,12 @@ mod tests {
         let (vote1, _) = setup_vote_account(&mut processor, 1000);
         let (vote2, _) = setup_vote_account(&mut processor, 500);
 
-        processor.process_vote(vote1, 100, 1000, None, None).unwrap();
-        processor.process_vote(vote2, 100, 1000, None, None).unwrap();
+        processor
+            .process_vote(vote1, 100, 1000, None, None)
+            .unwrap();
+        processor
+            .process_vote(vote2, 100, 1000, None, None)
+            .unwrap();
 
         let voters = processor.voters_for_slot(100);
         assert_eq!(voters.len(), 2);

@@ -74,8 +74,8 @@ impl ComputeBudget {
             DEFAULT_HEAP_FRAME_BYTES
         };
 
-        let loaded_accounts_data_size_limit = loaded_accounts_data_size_limit
-            .min(MAX_LOADED_ACCOUNTS_DATA_SIZE);
+        let loaded_accounts_data_size_limit =
+            loaded_accounts_data_size_limit.min(MAX_LOADED_ACCOUNTS_DATA_SIZE);
 
         Ok(Self {
             compute_unit_limit,
@@ -196,10 +196,16 @@ mod tests {
     fn compute_budget_creates_with_defaults() {
         let budget = ComputeBudget::new();
 
-        assert_eq!(budget.compute_unit_limit, DEFAULT_INSTRUCTION_COMPUTE_UNIT_LIMIT);
+        assert_eq!(
+            budget.compute_unit_limit,
+            DEFAULT_INSTRUCTION_COMPUTE_UNIT_LIMIT
+        );
         assert_eq!(budget.compute_meter, DEFAULT_INSTRUCTION_COMPUTE_UNIT_LIMIT);
         assert_eq!(budget.heap_size, DEFAULT_HEAP_FRAME_BYTES);
-        assert_eq!(budget.loaded_accounts_data_size_limit, MAX_LOADED_ACCOUNTS_DATA_SIZE);
+        assert_eq!(
+            budget.loaded_accounts_data_size_limit,
+            MAX_LOADED_ACCOUNTS_DATA_SIZE
+        );
         assert_eq!(budget.compute_unit_price, 0);
     }
 
@@ -207,18 +213,19 @@ mod tests {
     fn compute_budget_creates_for_builtin() {
         let budget = ComputeBudget::new_builtin();
 
-        assert_eq!(budget.compute_unit_limit, MAX_BUILTIN_ALLOCATION_COMPUTE_UNIT_LIMIT);
-        assert_eq!(budget.compute_meter, MAX_BUILTIN_ALLOCATION_COMPUTE_UNIT_LIMIT);
+        assert_eq!(
+            budget.compute_unit_limit,
+            MAX_BUILTIN_ALLOCATION_COMPUTE_UNIT_LIMIT
+        );
+        assert_eq!(
+            budget.compute_meter,
+            MAX_BUILTIN_ALLOCATION_COMPUTE_UNIT_LIMIT
+        );
     }
 
     #[test]
     fn compute_budget_creates_with_custom_limits() {
-        let budget = ComputeBudget::with_limits(
-            100_000,
-            50,
-            64 * 1024,
-            10 * 1024 * 1024,
-        ).unwrap();
+        let budget = ComputeBudget::with_limits(100_000, 50, 64 * 1024, 10 * 1024 * 1024).unwrap();
 
         assert_eq!(budget.compute_unit_limit, 100_000);
         assert_eq!(budget.compute_unit_price, 50);
@@ -277,7 +284,10 @@ mod tests {
             0, // Invalid
         );
 
-        assert_eq!(result, Err(ComputeBudgetError::InvalidLoadedAccountsDataSizeLimit));
+        assert_eq!(
+            result,
+            Err(ComputeBudgetError::InvalidLoadedAccountsDataSizeLimit)
+        );
     }
 
     #[test]
@@ -286,7 +296,10 @@ mod tests {
 
         budget.consume(1000).unwrap();
         assert_eq!(budget.consumed(), 1000);
-        assert_eq!(budget.remaining(), DEFAULT_INSTRUCTION_COMPUTE_UNIT_LIMIT - 1000);
+        assert_eq!(
+            budget.remaining(),
+            DEFAULT_INSTRUCTION_COMPUTE_UNIT_LIMIT - 1000
+        );
 
         budget.consume(500).unwrap();
         assert_eq!(budget.consumed(), 1500);
@@ -342,7 +355,9 @@ mod tests {
     fn compute_budget_updates_loaded_accounts_limit() {
         let mut budget = ComputeBudget::new();
 
-        budget.set_loaded_accounts_data_size_limit(32 * 1024 * 1024).unwrap();
+        budget
+            .set_loaded_accounts_data_size_limit(32 * 1024 * 1024)
+            .unwrap();
         assert_eq!(budget.loaded_accounts_data_size_limit, 32 * 1024 * 1024);
     }
 
@@ -350,7 +365,12 @@ mod tests {
     fn compute_budget_caps_loaded_accounts_limit_at_max() {
         let mut budget = ComputeBudget::new();
 
-        budget.set_loaded_accounts_data_size_limit(MAX_LOADED_ACCOUNTS_DATA_SIZE * 2).unwrap();
-        assert_eq!(budget.loaded_accounts_data_size_limit, MAX_LOADED_ACCOUNTS_DATA_SIZE);
+        budget
+            .set_loaded_accounts_data_size_limit(MAX_LOADED_ACCOUNTS_DATA_SIZE * 2)
+            .unwrap();
+        assert_eq!(
+            budget.loaded_accounts_data_size_limit,
+            MAX_LOADED_ACCOUNTS_DATA_SIZE
+        );
     }
 }

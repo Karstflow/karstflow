@@ -62,13 +62,9 @@ impl StakeProgramError {
             Self::CustodianSignatureMissing => "Custodian signature missing".to_string(),
             Self::InsufficientReferenceVotes => "Insufficient reference votes".to_string(),
             Self::VoteAddressMismatch => "Vote address mismatch".to_string(),
-            Self::MinimumDelinquentEpochsNotMet => {
-                "Minimum delinquent epochs not met".to_string()
-            }
+            Self::MinimumDelinquentEpochsNotMet => "Minimum delinquent epochs not met".to_string(),
             Self::InsufficientDelegation => "Insufficient delegation".to_string(),
-            Self::RedelegateTransientOrInactive => {
-                "Redelegate transient or inactive".to_string()
-            }
+            Self::RedelegateTransientOrInactive => "Redelegate transient or inactive".to_string(),
             Self::RedelegateToSameVoteAccount => "Redelegate to same vote account".to_string(),
             Self::RedelegatedStakeMustActivate => "Redelegated stake must activate".to_string(),
             Self::EpochRewardsActive => "Epoch rewards active".to_string(),
@@ -584,7 +580,10 @@ impl StakeProgramExecutor {
         new_account.data.resize(constants::STAKE_STATE_V2_SIZE, 0);
 
         modified_accounts.insert(account_pubkey, new_account);
-        logs.push(format!("Initialized stake account (checked): {}", account_pubkey));
+        logs.push(format!(
+            "Initialized stake account (checked): {}",
+            account_pubkey
+        ));
 
         Ok(())
     }

@@ -26,7 +26,7 @@
 //! // let result = verifier.verify_batch()?;
 //! ```
 
-use crate::{CryptoError, CryptoResult, PUBKEY_SIZE, SIGNATURE_SIZE, MAX_BATCH_SIZE};
+use crate::{CryptoError, CryptoResult, MAX_BATCH_SIZE, PUBKEY_SIZE, SIGNATURE_SIZE};
 use ed25519_dalek::{Signature, Verifier, VerifyingKey};
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -373,10 +373,11 @@ pub fn verify_signatures_parallel(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ed25519_dalek::{SigningKey, Signer};
+    use ed25519_dalek::{Signer, SigningKey};
     use rand::rngs::OsRng;
 
-    fn generate_valid_signature() -> (SigningKey, [u8; PUBKEY_SIZE], Vec<u8>, [u8; SIGNATURE_SIZE]) {
+    fn generate_valid_signature() -> (SigningKey, [u8; PUBKEY_SIZE], Vec<u8>, [u8; SIGNATURE_SIZE])
+    {
         let signing_key = SigningKey::generate(&mut OsRng);
         let verifying_key = signing_key.verifying_key();
         let message = b"test message".to_vec();

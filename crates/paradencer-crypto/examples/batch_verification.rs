@@ -83,7 +83,10 @@ fn main() {
     }
 
     let batch_duration = start.elapsed();
-    println!("Verified {} signatures in {} batches", total_verified, batch_count);
+    println!(
+        "Verified {} signatures in {} batches",
+        total_verified, batch_count
+    );
     println!("Time: {:?}", batch_duration);
     println!(
         "Throughput: {:.0} sigs/sec",
@@ -121,7 +124,10 @@ fn main() {
     }
 
     let batch_duration = start.elapsed();
-    println!("Verified {} signatures in {} batches", total_verified, batch_count);
+    println!(
+        "Verified {} signatures in {} batches",
+        total_verified, batch_count
+    );
     println!("Time: {:?}", batch_duration);
     println!(
         "Throughput: {:.0} sigs/sec",
@@ -153,10 +159,7 @@ fn main() {
         "Total signatures verified: {}",
         stats.get_signatures_verified()
     );
-    println!(
-        "Average batch size: {:.1}",
-        stats.get_average_batch_size()
-    );
+    println!("Average batch size: {:.1}", stats.get_average_batch_size());
     println!("Success rate: {:.1}%", stats.get_success_rate() * 100.0);
     println!(
         "Average time per signature: {:.1} µs",

@@ -49,7 +49,11 @@ fn bench_snapshot_creation(c: &mut Criterion) {
                 let creator = SnapshotCreator::new(config);
 
                 b.iter(|| {
-                    black_box(creator.create_full_snapshot(&db, 100, temp_dir.path()).unwrap());
+                    black_box(
+                        creator
+                            .create_full_snapshot(&db, 100, temp_dir.path())
+                            .unwrap(),
+                    );
                 });
             },
         );
@@ -74,7 +78,9 @@ fn bench_snapshot_loading(c: &mut Criterion) {
                 let config = SnapshotConfig::new();
                 let creator = SnapshotCreator::new(config);
 
-                creator.create_full_snapshot(&db, 100, snapshot_dir).unwrap();
+                creator
+                    .create_full_snapshot(&db, 100, snapshot_dir)
+                    .unwrap();
 
                 let snapshot_path = snapshot_dir.join("full-100.snapshot");
                 let manifest_path = snapshot_dir.join("full-100.snapshot.manifest");
@@ -250,7 +256,8 @@ fn bench_incremental_snapshot(c: &mut Criterion) {
                     modified_accounts.insert(pubkey, account);
                 }
 
-                db.bulk_insert_published_accounts(modified_accounts).unwrap();
+                db.bulk_insert_published_accounts(modified_accounts)
+                    .unwrap();
 
                 let temp_dir = tempfile::tempdir().unwrap();
                 let config = SnapshotConfig::new();
@@ -259,7 +266,13 @@ fn bench_incremental_snapshot(c: &mut Criterion) {
                 b.iter(|| {
                     black_box(
                         creator
-                            .create_incremental_snapshot(&db, 200, 100, &base_accounts, temp_dir.path())
+                            .create_incremental_snapshot(
+                                &db,
+                                200,
+                                100,
+                                &base_accounts,
+                                temp_dir.path(),
+                            )
                             .unwrap(),
                     );
                 });

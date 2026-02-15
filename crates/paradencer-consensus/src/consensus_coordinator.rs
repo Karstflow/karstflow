@@ -97,7 +97,6 @@ impl ConsensusCoordinator {
         }
     }
 
-
     /// Add a new fork to the tree.
     pub fn add_fork(&mut self, slot: u64, parent: Option<u64>) {
         self.fork_choice.add_fork(slot, parent);
@@ -146,7 +145,9 @@ impl ConsensusCoordinator {
         let new_root = self.tower.push_vote(slot);
 
         // Add our stake to this slot in fork choice
-        let our_stake = self.stake_tracker.total_stake_for_voter(&self.validator_identity);
+        let our_stake = self
+            .stake_tracker
+            .total_stake_for_voter(&self.validator_identity);
         if our_stake > 0 {
             self.fork_choice.add_stake(slot, our_stake);
         }

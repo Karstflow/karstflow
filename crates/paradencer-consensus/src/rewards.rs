@@ -75,7 +75,8 @@ pub fn calculate_reward_blocks(num_stake_accounts: usize, slots_in_epoch: u64) -
     }
 
     // Calculate partitions needed (round up division)
-    let num_partitions = (num_stake_accounts + STAKE_ACCOUNTS_PER_BLOCK - 1) / STAKE_ACCOUNTS_PER_BLOCK;
+    let num_partitions =
+        (num_stake_accounts + STAKE_ACCOUNTS_PER_BLOCK - 1) / STAKE_ACCOUNTS_PER_BLOCK;
 
     // Add calculation block + distribution blocks
     let total_blocks = REWARD_CALCULATION_NUM_BLOCKS + num_partitions as u64;
@@ -204,7 +205,8 @@ mod tests {
         let rewards_year_0 = calculate_epoch_rewards(capitalization, &inflation, 0, slots_in_epoch);
 
         // Epoch 730 (year 1, ~2 epochs per day)
-        let rewards_year_1 = calculate_epoch_rewards(capitalization, &inflation, 730, slots_in_epoch);
+        let rewards_year_1 =
+            calculate_epoch_rewards(capitalization, &inflation, 730, slots_in_epoch);
 
         // Rewards should decrease due to tapering
         assert!(rewards_year_1.total_rewards < rewards_year_0.total_rewards);

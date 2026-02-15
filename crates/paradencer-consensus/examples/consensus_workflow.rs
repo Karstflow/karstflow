@@ -49,7 +49,10 @@ fn main() {
     println!("\nSlot 1 results:");
     println!("  Total stake: {}", slot1_stake);
     println!("  Stake ratio: {:.2}%", slot1_ratio * 100.0);
-    println!("  Has supermajority: {}", vote_processor.has_supermajority(1));
+    println!(
+        "  Has supermajority: {}",
+        vote_processor.has_supermajority(1)
+    );
 
     // Update commitment
     commitment_tracker.mark_processed(1, slot1_stake, total_stake);
@@ -91,8 +94,16 @@ fn main() {
     let slot3_stake = vote_processor.get_slot_stake(3);
 
     println!("\nFork comparison:");
-    println!("  Slot 2 stake: {} ({:.1}%)", slot2_stake, (slot2_stake as f64 / total_stake as f64) * 100.0);
-    println!("  Slot 3 stake: {} ({:.1}%)", slot3_stake, (slot3_stake as f64 / total_stake as f64) * 100.0);
+    println!(
+        "  Slot 2 stake: {} ({:.1}%)",
+        slot2_stake,
+        (slot2_stake as f64 / total_stake as f64) * 100.0
+    );
+    println!(
+        "  Slot 3 stake: {} ({:.1}%)",
+        slot3_stake,
+        (slot3_stake as f64 / total_stake as f64) * 100.0
+    );
 
     // Fork choice selects heaviest fork
     let best = fork_choice.compute_best_fork(0).unwrap();
@@ -139,15 +150,25 @@ fn main() {
         // All validators vote on this chain
         for (vote_account, _) in &validators {
             vote_processor
-                .process_vote(*vote_account, i, 1000 + i as i64, None, Some(&mut fork_choice))
+                .process_vote(
+                    *vote_account,
+                    i,
+                    1000 + i as i64,
+                    None,
+                    Some(&mut fork_choice),
+                )
                 .unwrap();
         }
 
         let stake = vote_processor.get_slot_stake(i);
         commitment_tracker.mark_processed(i, stake, total_stake);
 
-        println!("  Slot {} - stake: {} ({:.1}%)",
-            i, stake, (stake as f64 / total_stake as f64) * 100.0);
+        println!(
+            "  Slot {} - stake: {} ({:.1}%)",
+            i,
+            stake,
+            (stake as f64 / total_stake as f64) * 100.0
+        );
     }
 
     // Check optimistic confirmation on slot 4
@@ -155,7 +176,10 @@ fn main() {
     if commitment_tracker.check_optimistic_confirmation(4, has_depth) {
         commitment_tracker.mark_confirmed(4);
         println!("\nSlot 4 is optimistically confirmed!");
-        println!("  Commitment level: {:?}", commitment_tracker.get_commitment_level(4));
+        println!(
+            "  Commitment level: {:?}",
+            commitment_tracker.get_commitment_level(4)
+        );
     }
 
     println!("\n=== Phase 5: Finalization ===\n");
@@ -177,8 +201,10 @@ fn main() {
         commitment_tracker.mark_finalized(finalization_slot);
 
         println!("\nFinalized slot {}!", finalization_slot);
-        println!("  Commitment level: {:?}",
-            commitment_tracker.get_commitment_level(finalization_slot));
+        println!(
+            "  Commitment level: {:?}",
+            commitment_tracker.get_commitment_level(finalization_slot)
+        );
         println!("  New root: {:?}", commitment_tracker.root_slot());
 
         // Update tower root
@@ -191,8 +217,14 @@ fn main() {
     // Vote processor stats
     let vp_stats = vote_processor.get_stats();
     println!("Vote Processor Stats:");
-    println!("  Total slots with votes: {}", vp_stats.total_slots_with_votes);
-    println!("  Slots with supermajority: {}", vp_stats.slots_with_supermajority);
+    println!(
+        "  Total slots with votes: {}",
+        vp_stats.total_slots_with_votes
+    );
+    println!(
+        "  Slots with supermajority: {}",
+        vp_stats.slots_with_supermajority
+    );
     println!("  Total validators: {}", vp_stats.total_validators);
     println!("  Active validators: {}", vp_stats.active_validators);
 
@@ -201,7 +233,10 @@ fn main() {
     println!("\nFork Choice Stats:");
     println!("  Total forks: {}", fc_stats.total_forks);
     println!("  Confirmed forks: {}", fc_stats.confirmed_forks);
-    println!("  Optimistically confirmed: {}", fc_stats.optimistically_confirmed_forks);
+    println!(
+        "  Optimistically confirmed: {}",
+        fc_stats.optimistically_confirmed_forks
+    );
     println!("  Fork tips: {}", fc_stats.fork_tips_count);
     println!("  Best slot: {:?}", fc_stats.best_slot);
 
@@ -220,7 +255,10 @@ fn main() {
     println!("  Votes in tower: {}", tower.len());
     println!("  Root: {:?}", tower.root());
     println!("  Last vote: {:?}", tower.last_vote_slot());
-    println!("  Total lockout distance: {}", tower.total_lockout_distance());
+    println!(
+        "  Total lockout distance: {}",
+        tower.total_lockout_distance()
+    );
     println!("  Max lockout: {:?}", tower.max_lockout());
 
     println!("\n=== Consensus Workflow Complete ===\n");

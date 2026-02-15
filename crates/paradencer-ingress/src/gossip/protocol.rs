@@ -274,14 +274,8 @@ mod tests {
 
     #[test]
     fn test_message_type_conversion() {
-        assert_eq!(
-            GossipMessageType::from_u8(1),
-            Some(GossipMessageType::Push)
-        );
-        assert_eq!(
-            GossipMessageType::from_u8(2),
-            Some(GossipMessageType::Pull)
-        );
+        assert_eq!(GossipMessageType::from_u8(1), Some(GossipMessageType::Push));
+        assert_eq!(GossipMessageType::from_u8(2), Some(GossipMessageType::Pull));
         assert_eq!(GossipMessageType::from_u8(99), None);
     }
 
@@ -299,7 +293,10 @@ mod tests {
     #[test]
     fn test_gossip_message_encode_decode() {
         let sender = NodeId::new([1u8; 32]);
-        let msg = GossipMessage::Ping { sender, nonce: 12345 };
+        let msg = GossipMessage::Ping {
+            sender,
+            nonce: 12345,
+        };
 
         let encoded = msg.encode().unwrap();
         let decoded = GossipMessage::decode(encoded).unwrap();

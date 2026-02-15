@@ -1,5 +1,5 @@
 use super::*;
-use crate::gossip::cluster_info::{ClusterInfo, NodeId};
+use crate::gossip::{ClusterInfo, NodeId};
 use crate::repair::request::RepairRequester;
 use crate::repair::server::{RepairServer, RepairServerConfig, ShredProvider};
 use std::net::SocketAddr;

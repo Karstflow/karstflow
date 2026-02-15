@@ -45,12 +45,20 @@ mod tests {
         fork_choice.add_fork(3, Some(1)); // Competing fork
 
         // Validator 1 (700 stake) votes for fork 1->2
-        vote_processor.process_vote(validator1, 1, 1000, None, Some(&mut fork_choice)).unwrap();
-        vote_processor.process_vote(validator1, 2, 1001, None, Some(&mut fork_choice)).unwrap();
+        vote_processor
+            .process_vote(validator1, 1, 1000, None, Some(&mut fork_choice))
+            .unwrap();
+        vote_processor
+            .process_vote(validator1, 2, 1001, None, Some(&mut fork_choice))
+            .unwrap();
 
         // Validator 2 (200 stake) votes for fork 1->3
-        vote_processor.process_vote(validator2, 1, 1000, None, Some(&mut fork_choice)).unwrap();
-        vote_processor.process_vote(validator2, 3, 1001, None, Some(&mut fork_choice)).unwrap();
+        vote_processor
+            .process_vote(validator2, 1, 1000, None, Some(&mut fork_choice))
+            .unwrap();
+        vote_processor
+            .process_vote(validator2, 3, 1001, None, Some(&mut fork_choice))
+            .unwrap();
 
         // Fork choice should pick fork 1->2 (700 stake) over 1->3 (200 stake)
         let best = fork_choice.compute_best_fork(0);
@@ -94,8 +102,12 @@ mod tests {
         let mut commitment_tracker = CommitmentTracker::default();
 
         // Validator 1 and 2 vote (70% stake - supermajority)
-        vote_processor.process_vote(validator1, 100, 1000, None, None).unwrap();
-        vote_processor.process_vote(validator2, 100, 1000, None, None).unwrap();
+        vote_processor
+            .process_vote(validator1, 100, 1000, None, None)
+            .unwrap();
+        vote_processor
+            .process_vote(validator2, 100, 1000, None, None)
+            .unwrap();
 
         // Check supermajority
         assert!(vote_processor.has_supermajority(100));
@@ -206,11 +218,15 @@ mod tests {
         vote_processor.register_vote_account(validator, state);
 
         // Vote on slot 100
-        vote_processor.process_vote(validator, 100, 1000, None, None).unwrap();
+        vote_processor
+            .process_vote(validator, 100, 1000, None, None)
+            .unwrap();
         assert_eq!(vote_processor.get_slot_stake(100), 1000);
 
         // Switch to slot 101 (different fork)
-        vote_processor.process_vote(validator, 101, 1001, None, None).unwrap();
+        vote_processor
+            .process_vote(validator, 101, 1001, None, None)
+            .unwrap();
         assert_eq!(vote_processor.get_slot_stake(101), 1000);
 
         // Old vote should be removed
@@ -248,7 +264,10 @@ mod tests {
         let stakes = vec![300, 250, 200, 150, 100]; // Total 1000
 
         for (i, validator) in validators.iter().enumerate() {
-            stake_tracker.add_delegation(Pubkey::new_unique(), Delegation::new(*validator, stakes[i], 0));
+            stake_tracker.add_delegation(
+                Pubkey::new_unique(),
+                Delegation::new(*validator, stakes[i], 0),
+            );
         }
 
         let config = VoteProcessorConfig::default();
@@ -266,7 +285,9 @@ mod tests {
 
         // First 3 validators vote (total 750 stake - supermajority)
         for (i, validator) in validators.iter().take(3).enumerate() {
-            vote_processor.process_vote(*validator, 100, 1000, None, None).unwrap();
+            vote_processor
+                .process_vote(*validator, 100, 1000, None, None)
+                .unwrap();
         }
 
         assert_eq!(vote_processor.get_slot_stake(100), 750);
@@ -426,8 +447,12 @@ mod tests {
         );
         vote_processor.register_vote_account(validator, state);
 
-        vote_processor.process_vote(validator, 100, 1000, None, None).unwrap();
-        vote_processor.process_vote(validator, 101, 1001, None, None).unwrap();
+        vote_processor
+            .process_vote(validator, 100, 1000, None, None)
+            .unwrap();
+        vote_processor
+            .process_vote(validator, 101, 1001, None, None)
+            .unwrap();
 
         let stats = vote_processor.get_stats();
         assert_eq!(stats.total_validators, 1);

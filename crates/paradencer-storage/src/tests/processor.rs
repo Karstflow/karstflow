@@ -48,8 +48,10 @@ fn test_transaction_processor_account_modification() {
 
     let from_initial = Account::new(2000, vec![], SYSTEM_PROGRAM_ID);
     let to_initial = Account::new(500, vec![], SYSTEM_PROGRAM_ID);
-    db.write_account(xid, from_account, from_initial.clone()).unwrap();
-    db.write_account(xid, to_account, to_initial.clone()).unwrap();
+    db.write_account(xid, from_account, from_initial.clone())
+        .unwrap();
+    db.write_account(xid, to_account, to_initial.clone())
+        .unwrap();
 
     // Transfer 1000 lamports
     let mut instruction_data = vec![2, 0, 0, 0];

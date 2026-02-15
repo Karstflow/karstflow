@@ -55,8 +55,7 @@ impl VerificationStats {
 
     pub fn record_success(&self) {
         self.transactions_verified.fetch_add(1, Ordering::Relaxed);
-        self.verifications_succeeded
-            .fetch_add(1, Ordering::Relaxed);
+        self.verifications_succeeded.fetch_add(1, Ordering::Relaxed);
     }
 
     pub fn record_failure(&self) {
@@ -94,7 +93,10 @@ impl SignatureVerifier {
     }
 
     /// Verify a transaction's signatures
-    pub fn verify(&self, transaction_data: &Bytes) -> Result<VerificationResult, VerificationError> {
+    pub fn verify(
+        &self,
+        transaction_data: &Bytes,
+    ) -> Result<VerificationResult, VerificationError> {
         // Validate transaction size
         let size = transaction_data.len();
         if size < constants::MIN_TRANSACTION_SIZE {

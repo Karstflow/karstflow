@@ -1,3 +1,4 @@
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::fmt;
 use thiserror::Error;
@@ -14,7 +15,7 @@ pub enum PubkeyError {
     IllegalOwner,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[repr(transparent)]
 pub struct Pubkey([u8; PUBKEY_BYTES]);
 

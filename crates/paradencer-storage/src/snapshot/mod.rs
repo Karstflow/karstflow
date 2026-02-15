@@ -9,6 +9,4 @@ pub use creator::{
     SerializedAccount, SnapshotCreator, SnapshotData, SnapshotProgress, SnapshotProgressInfo,
 };
 pub use loader::{LoadProgress, LoadProgressInfo, LoadedSnapshot, SnapshotLoader};
-pub use metadata::{
-    CompressionType, SnapshotConfig, SnapshotManifest, SnapshotMetadata,
-};
+pub use metadata::{CompressionType, SnapshotConfig, SnapshotManifest, SnapshotMetadata};

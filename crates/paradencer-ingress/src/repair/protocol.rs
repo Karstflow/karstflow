@@ -1,5 +1,5 @@
 use super::*;
-use crate::gossip::cluster_info::NodeId;
+use crate::gossip::NodeId;
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use serde::{Deserialize, Serialize};
 

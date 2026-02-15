@@ -21,7 +21,9 @@ pub use hot_state::HotStateStore;
 pub use runtime_state::{
     RuntimeStateApplyReceipt, RuntimeStateApplyRequest, RuntimeStateSnapshot, RuntimeStateStore,
 };
-pub use shred_window::{ShredWindowConfig, ShredWindowError, ShredWindowResult, ShredWindowStats, ShredWindowStore};
+pub use shred_window::{
+    ShredWindowConfig, ShredWindowError, ShredWindowResult, ShredWindowStats, ShredWindowStore,
+};
 pub use snapshot::{
     CompressionType, LoadProgress, LoadProgressInfo, LoadedSnapshot, SerializedAccount,
     SnapshotConfig, SnapshotCreator, SnapshotData, SnapshotLoader, SnapshotManifest,

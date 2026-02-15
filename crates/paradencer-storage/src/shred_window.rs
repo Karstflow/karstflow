@@ -225,19 +225,13 @@ impl FecSet {
     fn attempt_reconstruction(&mut self) -> FecResult<Vec<Shred>> {
         self.reconstruction_attempted = true;
 
-        let expected_data = self.expected_data_count.ok_or_else(|| {
-            paradencer_crypto::FecError::InvalidParameters {
-                data: 0,
-                coding: 0,
-            }
-        })?;
+        let expected_data = self
+            .expected_data_count
+            .ok_or_else(|| paradencer_crypto::FecError::InvalidParameters { data: 0, coding: 0 })?;
 
-        let expected_coding = self.expected_coding_count.ok_or_else(|| {
-            paradencer_crypto::FecError::InvalidParameters {
-                data: 0,
-                coding: 0,
-            }
-        })?;
+        let expected_coding = self
+            .expected_coding_count
+            .ok_or_else(|| paradencer_crypto::FecError::InvalidParameters { data: 0, coding: 0 })?;
 
         // Build data and coding shred arrays
         let mut data_array: Vec<Option<Vec<u8>>> = vec![None; expected_data as usize];
@@ -337,7 +331,10 @@ impl SlotWindow {
 
         // Check if we have all FEC sets complete
         let all_complete = !self.fec_sets.is_empty()
-            && self.fec_sets.values_mut().all(|fec| fec.check_completeness());
+            && self
+                .fec_sets
+                .values_mut()
+                .all(|fec| fec.check_completeness());
 
         if all_complete {
             self.is_complete = true;
@@ -380,9 +377,10 @@ impl ShredWindowStore {
         }
 
         // Get or create slot window
-        let slot_window = self.windows.entry(slot).or_insert_with(|| {
-            Arc::new(RwLock::new(SlotWindow::new(slot)))
-        });
+        let slot_window = self
+            .windows
+            .entry(slot)
+            .or_insert_with(|| Arc::new(RwLock::new(SlotWindow::new(slot))));
 
         let slot_window = slot_window.clone();
 
@@ -409,6 +407,7 @@ impl ShredWindowStore {
 
         // Attempt reconstruction if enabled
         if self.config.enable_auto_reconstruction {
+            let mut all_reconstructed = Vec::new();
             for fec_set in window.fec_sets.values_mut() {
                 if fec_set.can_reconstruct(self.config.min_shreds_for_reconstruction) {
                     if let Ok(reconstructed) = fec_set.attempt_reconstruction() {
@@ -416,12 +415,14 @@ impl ShredWindowStore {
                         stats.total_shreds_reconstructed += reconstructed.len() as u64;
                         stats.total_fec_sets_reconstructed += 1;
 
-                        // Insert reconstructed shreds
-                        for rec_shred in reconstructed {
-                            window.insert_shred(rec_shred);
-                        }
+                        all_reconstructed.extend(reconstructed);
                     }
                 }
+            }
+
+            // Insert reconstructed shreds after iteration completes
+            for rec_shred in all_reconstructed {
+                window.insert_shred(rec_shred);
             }
         }
 
@@ -665,9 +666,7 @@ mod tests {
 
         // Insert data shreds
         for i in 0..4 {
-            store
-                .insert(create_test_data_shred(100, i, 0))
-                .unwrap();
+            store.insert(create_test_data_shred(100, i, 0)).unwrap();
         }
 
         // Insert coding shred with count info
@@ -692,9 +691,7 @@ mod tests {
 
         // Insert complete FEC set
         for i in 0..4 {
-            store
-                .insert(create_test_data_shred(100, i, 0))
-                .unwrap();
+            store.insert(create_test_data_shred(100, i, 0)).unwrap();
         }
 
         // Add coding shred indicating 4 data shreds expected

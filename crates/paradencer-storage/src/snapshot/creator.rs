@@ -1,6 +1,5 @@
 use super::metadata::{CompressionType, SnapshotConfig, SnapshotManifest, SnapshotMetadata};
-use crate::accounts::primitives::{Account, Pubkey};
-use crate::accounts::database::AccountDatabase;
+use crate::accounts::{Account, AccountDatabase, Pubkey};
 use crate::StorageError;
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
@@ -34,13 +33,13 @@ impl SerializedAccount {
 
     pub fn to_account(&self) -> Account {
         Account {
-            meta: crate::accounts::primitives::AccountMeta {
+            meta: crate::accounts::AccountMeta {
                 lamports: self.lamports,
                 owner: self.owner,
                 executable: self.executable,
                 rent_epoch: self.rent_epoch,
             },
-            data: crate::accounts::primitives::AccountData::new(self.data.clone()),
+            data: crate::accounts::AccountData::new(self.data.clone()),
         }
     }
 
@@ -107,7 +106,8 @@ impl SnapshotProgress {
     }
 
     pub fn increment_processed(&self, accounts: u64, bytes: u64) {
-        self.processed_accounts.fetch_add(accounts, Ordering::Relaxed);
+        self.processed_accounts
+            .fetch_add(accounts, Ordering::Relaxed);
         self.processed_bytes.fetch_add(bytes, Ordering::Relaxed);
     }
 
@@ -190,7 +190,10 @@ impl SnapshotCreator {
         self.write_snapshot(snapshot_data, Some(base_slot), output_dir)
     }
 
-    fn collect_all_accounts(&self, db: &AccountDatabase) -> Result<HashMap<Pubkey, Account>, StorageError> {
+    fn collect_all_accounts(
+        &self,
+        db: &AccountDatabase,
+    ) -> Result<HashMap<Pubkey, Account>, StorageError> {
         Ok(db.get_all_published_accounts())
     }
 
@@ -254,10 +257,9 @@ impl SnapshotCreator {
         base_slot: Option<u64>,
         output_dir: &Path,
     ) -> Result<SnapshotManifest, StorageError> {
-        std::fs::create_dir_all(output_dir)
-            .map_err(|e| StorageError::AccountDatabaseError {
-                details: format!("Failed to create snapshot directory: {}", e),
-            })?;
+        std::fs::create_dir_all(output_dir).map_err(|e| StorageError::AccountDatabaseError {
+            details: format!("Failed to create snapshot directory: {}", e),
+        })?;
 
         let total_accounts = snapshot_data.accounts.len() as u64;
         let total_lamports = snapshot_data.total_lamports();
@@ -272,8 +274,8 @@ impl SnapshotCreator {
             account_data_size,
         );
 
-        let serialized = bincode::serialize(&snapshot_data)
-            .map_err(|e| StorageError::AccountDatabaseError {
+        let serialized =
+            bincode::serialize(&snapshot_data).map_err(|e| StorageError::AccountDatabaseError {
                 details: format!("Failed to serialize snapshot: {}", e),
             })?;
 
@@ -291,33 +293,37 @@ impl SnapshotCreator {
         };
 
         let snapshot_path = output_dir.join(&snapshot_filename);
-        std::fs::write(&snapshot_path, &compressed)
-            .map_err(|e| StorageError::AccountDatabaseError {
+        std::fs::write(&snapshot_path, &compressed).map_err(|e| {
+            StorageError::AccountDatabaseError {
                 details: format!("Failed to write snapshot file: {}", e),
-            })?;
+            }
+        })?;
 
         manifest.add_chunk(hash);
         self.progress.increment_chunks();
 
         let manifest_path = output_dir.join(format!("{}.manifest", snapshot_filename));
-        let manifest_json = serde_json::to_string_pretty(&manifest)
-            .map_err(|e| StorageError::AccountDatabaseError {
+        let manifest_json = serde_json::to_string_pretty(&manifest).map_err(|e| {
+            StorageError::AccountDatabaseError {
                 details: format!("Failed to serialize manifest: {}", e),
-            })?;
+            }
+        })?;
 
-        std::fs::write(&manifest_path, manifest_json)
-            .map_err(|e| StorageError::AccountDatabaseError {
+        std::fs::write(&manifest_path, manifest_json).map_err(|e| {
+            StorageError::AccountDatabaseError {
                 details: format!("Failed to write manifest file: {}", e),
-            })?;
+            }
+        })?;
 
         Ok(manifest)
     }
 
     fn compress_data(&self, data: &[u8]) -> Result<Vec<u8>, StorageError> {
-        zstd::encode_all(data, self.config.compression_level)
-            .map_err(|e| StorageError::AccountDatabaseError {
+        zstd::encode_all(data, self.config.compression_level).map_err(|e| {
+            StorageError::AccountDatabaseError {
                 details: format!("Failed to compress data: {}", e),
-            })
+            }
+        })
     }
 }
 

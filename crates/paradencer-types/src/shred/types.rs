@@ -47,7 +47,8 @@ mod serde_arrays {
             {
                 let mut arr = [0u8; 64];
                 for (i, item) in arr.iter_mut().enumerate() {
-                    *item = seq.next_element()?
+                    *item = seq
+                        .next_element()?
                         .ok_or_else(|| serde::de::Error::invalid_length(i, &self))?;
                 }
                 Ok(arr)
@@ -243,17 +244,26 @@ impl Shred {
 
     /// Check if this is a data shred
     pub fn is_data(&self) -> bool {
-        matches!(self.variant, ShredVariant::LegacyData(_) | ShredVariant::MerkleData(_, _))
+        matches!(
+            self.variant,
+            ShredVariant::LegacyData(_) | ShredVariant::MerkleData(_, _)
+        )
     }
 
     /// Check if this is a coding shred
     pub fn is_coding(&self) -> bool {
-        matches!(self.variant, ShredVariant::LegacyCoding(_) | ShredVariant::MerkleCoding(_, _))
+        matches!(
+            self.variant,
+            ShredVariant::LegacyCoding(_) | ShredVariant::MerkleCoding(_, _)
+        )
     }
 
     /// Check if this shred uses Merkle proofs
     pub fn is_merkle(&self) -> bool {
-        matches!(self.variant, ShredVariant::MerkleData(_, _) | ShredVariant::MerkleCoding(_, _))
+        matches!(
+            self.variant,
+            ShredVariant::MerkleData(_, _) | ShredVariant::MerkleCoding(_, _)
+        )
     }
 
     /// Check if this is the last shred in a slot
@@ -285,7 +295,9 @@ impl Shred {
     /// Get coding shred header if this is a coding shred
     pub fn coding_header(&self) -> Option<&CodingShredHeader> {
         match &self.variant {
-            ShredVariant::LegacyCoding(header) | ShredVariant::MerkleCoding(header, _) => Some(header),
+            ShredVariant::LegacyCoding(header) | ShredVariant::MerkleCoding(header, _) => {
+                Some(header)
+            }
             _ => None,
         }
     }

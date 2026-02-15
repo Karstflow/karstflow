@@ -9,7 +9,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::net::UdpSocket;
-use tokio::sync::mpsc;
+use tokio::sync::{broadcast, mpsc};
 use tokio::time::{interval, sleep};
 
 const GOSSIP_PUSH_FANOUT: usize = 6;
@@ -99,7 +99,7 @@ pub struct GossipService {
     config: GossipConfig,
     stats: GossipServiceStats,
     socket: Arc<UdpSocket>,
-    shutdown_tx: Option<mpsc::Sender<()>>,
+    shutdown_tx: Option<broadcast::Sender<()>>,
 }
 
 impl GossipService {
@@ -108,11 +108,11 @@ impl GossipService {
         contact_info: ContactInfo,
         config: GossipConfig,
     ) -> GossipResult<Self> {
-        let socket = UdpSocket::bind(config.bind_addr)
-            .await
-            .map_err(|e| IngressError::QuicEndpointBind {
+        let socket = UdpSocket::bind(config.bind_addr).await.map_err(|e| {
+            IngressError::QuicEndpointBind {
                 detail: format!("failed to bind gossip socket: {}", e),
-            })?;
+            }
+        })?;
 
         let cluster_info = Arc::new(ClusterInfo::new(
             node_id,
@@ -139,16 +139,14 @@ impl GossipService {
     }
 
     pub fn local_addr(&self) -> GossipResult<SocketAddr> {
-        self.socket
-            .local_addr()
-            .map_err(|e| IngressError::QuicIo {
-                detail: format!("failed to get local addr: {}", e),
-            })
+        self.socket.local_addr().map_err(|e| IngressError::QuicIo {
+            detail: format!("failed to get local addr: {}", e),
+        })
     }
 
     /// Start the gossip service
     pub async fn start(&mut self) -> GossipResult<()> {
-        let (shutdown_tx, mut shutdown_rx) = mpsc::channel(1);
+        let (shutdown_tx, _shutdown_rx) = broadcast::channel(1);
         self.shutdown_tx = Some(shutdown_tx);
 
         // Spawn receive task
@@ -164,7 +162,7 @@ impl GossipService {
         let push_stats = self.stats.clone();
         let push_socket = Arc::clone(&self.socket);
         let push_config = self.config.clone();
-        let mut push_shutdown_rx = shutdown_rx.resubscribe();
+        let mut push_shutdown_rx = self.shutdown_tx.as_ref().unwrap().subscribe();
         tokio::spawn(async move {
             Self::push_loop(
                 push_socket,
@@ -181,7 +179,7 @@ impl GossipService {
         let pull_stats = self.stats.clone();
         let pull_socket = Arc::clone(&self.socket);
         let pull_config = self.config.clone();
-        let mut pull_shutdown_rx = shutdown_rx.resubscribe();
+        let mut pull_shutdown_rx = self.shutdown_tx.as_ref().unwrap().subscribe();
         tokio::spawn(async move {
             Self::pull_loop(
                 pull_socket,
@@ -197,7 +195,7 @@ impl GossipService {
         let prune_cluster_info = Arc::clone(&self.cluster_info);
         let prune_stats = self.stats.clone();
         let prune_config = self.config.clone();
-        let mut prune_shutdown_rx = shutdown_rx.resubscribe();
+        let mut prune_shutdown_rx = self.shutdown_tx.as_ref().unwrap().subscribe();
         tokio::spawn(async move {
             Self::prune_loop(
                 prune_cluster_info,
@@ -214,7 +212,7 @@ impl GossipService {
     /// Stop the gossip service
     pub async fn stop(&mut self) {
         if let Some(tx) = self.shutdown_tx.take() {
-            let _ = tx.send(()).await;
+            let _ = tx.send(());
         }
     }
 
@@ -229,18 +227,14 @@ impl GossipService {
         loop {
             match socket.recv_from(&mut buf).await {
                 Ok((len, src_addr)) => {
-                    stats.bytes_received.fetch_add(len as u64, Ordering::Relaxed);
+                    stats
+                        .bytes_received
+                        .fetch_add(len as u64, Ordering::Relaxed);
 
                     let data = bytes::Bytes::copy_from_slice(&buf[..len]);
                     if let Ok(message) = GossipMessage::decode(data) {
-                        Self::handle_message(
-                            message,
-                            src_addr,
-                            &cluster_info,
-                            &stats,
-                            &socket,
-                        )
-                        .await;
+                        Self::handle_message(message, src_addr, &cluster_info, &stats, &socket)
+                            .await;
                     } else {
                         stats.receive_errors.fetch_add(1, Ordering::Relaxed);
                     }
@@ -263,9 +257,7 @@ impl GossipService {
     ) {
         match message {
             GossipMessage::Push(push_msg) => {
-                stats
-                    .push_messages_received
-                    .fetch_add(1, Ordering::Relaxed);
+                stats.push_messages_received.fetch_add(1, Ordering::Relaxed);
                 let count = cluster_info.insert_batch(push_msg.contact_infos);
                 stats
                     .nodes_discovered
@@ -273,9 +265,7 @@ impl GossipService {
                 cluster_info.update_last_seen(&push_msg.sender);
             }
             GossipMessage::Pull(pull_req) => {
-                stats
-                    .pull_requests_received
-                    .fetch_add(1, Ordering::Relaxed);
+                stats.pull_requests_received.fetch_add(1, Ordering::Relaxed);
 
                 let contact_infos: Vec<_> = cluster_info
                     .get_all()
@@ -290,9 +280,7 @@ impl GossipService {
 
                 if let Ok(encoded) = response.encode() {
                     let _ = socket.send_to(&encoded, src_addr).await;
-                    stats
-                        .pull_responses_sent
-                        .fetch_add(1, Ordering::Relaxed);
+                    stats.pull_responses_sent.fetch_add(1, Ordering::Relaxed);
                     stats
                         .bytes_sent
                         .fetch_add(encoded.len() as u64, Ordering::Relaxed);
@@ -334,7 +322,7 @@ impl GossipService {
         cluster_info: Arc<ClusterInfo>,
         stats: GossipServiceStats,
         config: GossipConfig,
-        shutdown_rx: &mut mpsc::Receiver<()>,
+        shutdown_rx: &mut broadcast::Receiver<()>,
     ) {
         let mut ticker = interval(config.push_interval);
 
@@ -402,7 +390,7 @@ impl GossipService {
         cluster_info: Arc<ClusterInfo>,
         stats: GossipServiceStats,
         config: GossipConfig,
-        shutdown_rx: &mut mpsc::Receiver<()>,
+        shutdown_rx: &mut broadcast::Receiver<()>,
     ) {
         let mut ticker = interval(config.pull_interval);
 
@@ -462,7 +450,7 @@ impl GossipService {
         cluster_info: Arc<ClusterInfo>,
         stats: GossipServiceStats,
         config: GossipConfig,
-        shutdown_rx: &mut mpsc::Receiver<()>,
+        shutdown_rx: &mut broadcast::Receiver<()>,
     ) {
         let mut ticker = interval(config.prune_interval);
 
@@ -506,9 +494,7 @@ mod tests {
     async fn test_gossip_service_stats() {
         let stats = GossipServiceStats::new();
         stats.push_messages_sent.fetch_add(5, Ordering::Relaxed);
-        stats
-            .push_messages_received
-            .fetch_add(3, Ordering::Relaxed);
+        stats.push_messages_received.fetch_add(3, Ordering::Relaxed);
 
         assert_eq!(stats.push_messages_sent.load(Ordering::Relaxed), 5);
         assert_eq!(stats.push_messages_received.load(Ordering::Relaxed), 3);

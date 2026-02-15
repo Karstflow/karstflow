@@ -19,11 +19,18 @@ pub use edge_intake::EdgeIntake;
 pub use errors::StageError;
 pub use metrics_reporter::{LinkTelemetryStats, MetricsReporter, StageTelemetryStats};
 pub use replay_stage::{
-    BankTransition, BankTransitionError, BlockOutcome, BlockProcessor, BlockProcessorError,
-    ReplayConfig, ReplayStage, ReplayStats, TransactionResult, VoteIntegration,
-    VoteIntegrationError,
+    AggregateMetrics, AlertSeverity, AlertType, AncestryError, AncestryStats, AncestryVerifier,
+    AnomalyType, BankTransition, BankTransitionError, BatchReplayResult, BlockOutcome,
+    BlockProcessor, BlockProcessorError, ConfirmationInfo, ConfirmationStats, CoordinatorStats,
+    ForkDetector, ForkPoint, ForkReplayCoordinator, MetricsTracker, OptimisticConfirmationTracker,
+    PerformanceAlert, PerformanceAnomaly, PerformanceMonitor, PerformanceThresholds,
+    ReplayBatchProcessor, ReplayConfig, ReplayOptimizer, ReplayStage, ReplayStats, SlotMetrics,
+    SlotReplayInfo, TransactionResult, VoteIntegration, VoteIntegrationError,
 };
-pub use shred_assembler::{AssembledBlock, Entry, ShredAssembler, ShredAssemblyError, ShredAssemblyResult, ShredAssemblyStats, detect_block_boundary, group_shreds_by_slot};
+pub use shred_assembler::{
+    detect_block_boundary, group_shreds_by_slot, AssembledBlock, Entry, ShredAssembler,
+    ShredAssemblyError, ShredAssemblyResult, ShredAssemblyStats,
+};
 pub use shred_filter::ShredFilter;
 pub use stats::{BlockAssemblyStats, IngressFilterStats, ShredFilterStats};
 pub use tx_filter::TxFilter;

@@ -118,7 +118,7 @@ impl SnapshotManifest {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SnapshotConfig {
     pub full_snapshot_interval: u64,
     pub incremental_snapshot_interval: u64,
@@ -137,7 +137,9 @@ impl SnapshotConfig {
             max_full_snapshots: 3,
             max_incremental_snapshots: 10,
             compression_level: 3,
-            parallel_workers: num_cpus::get(),
+            parallel_workers: std::thread::available_parallelism()
+                .map(|n| n.get())
+                .unwrap_or(4),
             chunk_size: 1024 * 1024,
         }
     }
@@ -196,14 +198,8 @@ mod tests {
 
     #[test]
     fn test_metadata_creation() {
-        let metadata = SnapshotMetadata::new(
-            100,
-            1000,
-            5000000,
-            None,
-            CompressionType::Zstd,
-            10000,
-        );
+        let metadata =
+            SnapshotMetadata::new(100, 1000, 5000000, None, CompressionType::Zstd, 10000);
         assert_eq!(metadata.slot, 100);
         assert_eq!(metadata.total_accounts, 1000);
         assert_eq!(metadata.total_lamports, 5000000);
@@ -213,14 +209,8 @@ mod tests {
 
     #[test]
     fn test_incremental_metadata() {
-        let metadata = SnapshotMetadata::new(
-            200,
-            500,
-            2500000,
-            Some(100),
-            CompressionType::Zstd,
-            5000,
-        );
+        let metadata =
+            SnapshotMetadata::new(200, 500, 2500000, Some(100), CompressionType::Zstd, 5000);
         assert_eq!(metadata.slot, 200);
         assert_eq!(metadata.incremental_base, Some(100));
         assert!(metadata.is_incremental());
@@ -243,14 +233,8 @@ mod tests {
     fn test_hash_verification() {
         let data = b"test data";
         let hash = SnapshotMetadata::compute_content_hash(data);
-        let mut metadata = SnapshotMetadata::new(
-            100,
-            1000,
-            5000000,
-            None,
-            CompressionType::Zstd,
-            10000,
-        );
+        let mut metadata =
+            SnapshotMetadata::new(100, 1000, 5000000, None, CompressionType::Zstd, 10000);
         metadata.update_hash(hash);
         assert!(metadata.verify_hash(data));
         assert!(!metadata.verify_hash(b"wrong data"));
@@ -258,14 +242,8 @@ mod tests {
 
     #[test]
     fn test_manifest_creation() {
-        let metadata = SnapshotMetadata::new(
-            100,
-            1000,
-            5000000,
-            None,
-            CompressionType::Zstd,
-            10000,
-        );
+        let metadata =
+            SnapshotMetadata::new(100, 1000, 5000000, None, CompressionType::Zstd, 10000);
         let mut manifest = SnapshotManifest::new(metadata);
         assert_eq!(manifest.chunk_count, 0);
         assert!(manifest.chunk_hashes.is_empty());

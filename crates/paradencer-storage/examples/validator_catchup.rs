@@ -4,7 +4,6 @@
 /// to the current network state after being offline or falling behind.
 ///
 /// Run with: cargo run --example validator_catchup --release
-
 use paradencer_storage::{
     Account, AccountData, AccountDatabase, AccountMeta, Pubkey, SnapshotCatalog, SnapshotConfig,
     SnapshotCreator, SnapshotLoader,
@@ -23,7 +22,11 @@ fn create_account(lamports: u64, data: Vec<u8>) -> Account {
     }
 }
 
-fn simulate_network_state(slot: u64, base_accounts: usize, modifications: usize) -> AccountDatabase {
+fn simulate_network_state(
+    slot: u64,
+    base_accounts: usize,
+    modifications: usize,
+) -> AccountDatabase {
     let db = AccountDatabase::with_capacity(base_accounts + modifications);
     let mut accounts = HashMap::new();
 
@@ -67,10 +70,18 @@ fn main() {
         .with_compression_level(3);
 
     println!("Configuration:");
-    println!("  Full snapshots every {} slots", config.full_snapshot_interval);
-    println!("  Incremental snapshots every {} slots", config.incremental_snapshot_interval);
-    println!("  Keep {} full + {} incremental snapshots\n",
-             config.max_full_snapshots, config.max_incremental_snapshots);
+    println!(
+        "  Full snapshots every {} slots",
+        config.full_snapshot_interval
+    );
+    println!(
+        "  Incremental snapshots every {} slots",
+        config.incremental_snapshot_interval
+    );
+    println!(
+        "  Keep {} full + {} incremental snapshots\n",
+        config.max_full_snapshots, config.max_incremental_snapshots
+    );
 
     // Simulate validator creating snapshots as it processes blocks
     println!("--- Phase 1: Validator Processing (Creating Snapshots) ---\n");
@@ -86,49 +97,66 @@ fn main() {
         if catalog.should_create_full_snapshot(slot) {
             println!("Slot {}: Creating FULL snapshot", slot);
             let start = std::time::Instant::now();
-            let manifest = creator.create_full_snapshot(&db, slot, snapshot_dir).unwrap();
+            let manifest = creator
+                .create_full_snapshot(&db, slot, snapshot_dir)
+                .unwrap();
             println!("  - Created in {:?}", start.elapsed());
-            println!("  - {} accounts, {} lamports",
-                     manifest.metadata.total_accounts,
-                     manifest.metadata.total_lamports);
-            println!("  - Size: {} bytes (compressed)\n",
-                     std::fs::metadata(snapshot_dir.join(format!("full-{}.snapshot", slot)))
-                         .unwrap().len());
+            println!(
+                "  - {} accounts, {} lamports",
+                manifest.metadata.total_accounts, manifest.metadata.total_lamports
+            );
+            println!(
+                "  - Size: {} bytes (compressed)\n",
+                std::fs::metadata(snapshot_dir.join(format!("full-{}.snapshot", slot)))
+                    .unwrap()
+                    .len()
+            );
 
-            catalog.register_full_snapshot(slot, snapshot_dir.join(format!("full-{}.snapshot", slot)));
-        }
-        else if catalog.should_create_incremental_snapshot(slot) {
+            catalog
+                .register_full_snapshot(slot, snapshot_dir.join(format!("full-{}.snapshot", slot)));
+        } else if catalog.should_create_incremental_snapshot(slot) {
             println!("Slot {}: Creating INCREMENTAL snapshot", slot);
 
             // Find base snapshot
             let base_slot = catalog.get_latest_full_snapshot_slot().unwrap();
             let base_path = snapshot_dir.join(format!("full-{}.snapshot", base_slot));
-            let base_manifest_path = snapshot_dir.join(format!("full-{}.snapshot.manifest", base_slot));
+            let base_manifest_path =
+                snapshot_dir.join(format!("full-{}.snapshot.manifest", base_slot));
 
             let loader = SnapshotLoader::new();
-            let (base_accounts, _) = loader.load_snapshot_to_map(&base_path, &base_manifest_path).unwrap();
+            let (base_accounts, _) = loader
+                .load_snapshot_to_map(&base_path, &base_manifest_path)
+                .unwrap();
 
             let start = std::time::Instant::now();
-            let manifest = creator.create_incremental_snapshot(
-                &db, slot, base_slot, &base_accounts, snapshot_dir
-            ).unwrap();
+            let manifest = creator
+                .create_incremental_snapshot(&db, slot, base_slot, &base_accounts, snapshot_dir)
+                .unwrap();
             println!("  - Created in {:?}", start.elapsed());
-            println!("  - {} modified accounts (from base slot {})",
-                     manifest.metadata.total_accounts, base_slot);
-            println!("  - Size: {} bytes (compressed)\n",
-                     std::fs::metadata(snapshot_dir.join(format!("incremental-{}.snapshot", slot)))
-                         .unwrap().len());
+            println!(
+                "  - {} modified accounts (from base slot {})",
+                manifest.metadata.total_accounts, base_slot
+            );
+            println!(
+                "  - Size: {} bytes (compressed)\n",
+                std::fs::metadata(snapshot_dir.join(format!("incremental-{}.snapshot", slot)))
+                    .unwrap()
+                    .len()
+            );
 
             catalog.register_incremental_snapshot(
                 slot,
-                snapshot_dir.join(format!("incremental-{}.snapshot", slot))
+                snapshot_dir.join(format!("incremental-{}.snapshot", slot)),
             );
         }
     }
 
     println!("Snapshot Summary:");
     println!("  Full snapshots: {:?}", catalog.list_full_snapshots());
-    println!("  Incremental snapshots: {:?}\n", catalog.list_incremental_snapshots());
+    println!(
+        "  Incremental snapshots: {:?}\n",
+        catalog.list_incremental_snapshots()
+    );
 
     // Simulate validator catching up from snapshots
     println!("--- Phase 2: Validator Catchup (Loading Snapshots) ---\n");
@@ -153,19 +181,32 @@ fn main() {
         let full_manifest = snapshot_dir.join(format!("full-{}.snapshot.manifest", latest_full));
 
         let start = std::time::Instant::now();
-        let (mut accounts, metadata) = loader.load_snapshot_to_map(&full_path, &full_manifest).unwrap();
-        println!("  Loaded {} accounts in {:?}", accounts.len(), start.elapsed());
+        let (mut accounts, metadata) = loader
+            .load_snapshot_to_map(&full_path, &full_manifest)
+            .unwrap();
+        println!(
+            "  Loaded {} accounts in {:?}",
+            accounts.len(),
+            start.elapsed()
+        );
         println!("  Total lamports: {}", metadata.total_lamports);
 
         // Apply incremental snapshots
         for &inc_slot in &incremental_slots {
             println!("  Applying incremental snapshot from slot {}...", inc_slot);
             let inc_path = snapshot_dir.join(format!("incremental-{}.snapshot", inc_slot));
-            let inc_manifest = snapshot_dir.join(format!("incremental-{}.snapshot.manifest", inc_slot));
+            let inc_manifest =
+                snapshot_dir.join(format!("incremental-{}.snapshot.manifest", inc_slot));
 
             let start = std::time::Instant::now();
-            let result = loader.apply_incremental_snapshot(&mut accounts, &inc_path, &inc_manifest).unwrap();
-            println!("    Applied {} changes in {:?}", result.metadata.total_accounts, start.elapsed());
+            let result = loader
+                .apply_incremental_snapshot(&mut accounts, &inc_path, &inc_manifest)
+                .unwrap();
+            println!(
+                "    Applied {} changes in {:?}",
+                result.metadata.total_accounts,
+                start.elapsed()
+            );
         }
 
         // Insert into database
@@ -186,12 +227,9 @@ fn main() {
         let catchup_db = AccountDatabase::new();
 
         let start = std::time::Instant::now();
-        catalog.restore_with_incrementals(
-            &catchup_db,
-            latest_full,
-            &incremental_slots,
-            snapshot_dir
-        ).unwrap();
+        catalog
+            .restore_with_incrementals(&catchup_db, latest_full, &incremental_slots, snapshot_dir)
+            .unwrap();
         let duration = start.elapsed();
 
         println!("  Restored complete state in {:?}", duration);
@@ -206,14 +244,20 @@ fn main() {
     // Verify snapshot integrity
     for &slot in catalog.list_full_snapshots().iter() {
         let is_valid = catalog.verify_snapshot(slot, snapshot_dir, false).unwrap();
-        println!("Full snapshot at slot {}: {}",
-                 slot, if is_valid { "VALID ✓" } else { "INVALID ✗" });
+        println!(
+            "Full snapshot at slot {}: {}",
+            slot,
+            if is_valid { "VALID ✓" } else { "INVALID ✗" }
+        );
     }
 
     for &slot in catalog.list_incremental_snapshots().iter() {
         let is_valid = catalog.verify_snapshot(slot, snapshot_dir, true).unwrap();
-        println!("Incremental snapshot at slot {}: {}",
-                 slot, if is_valid { "VALID ✓" } else { "INVALID ✗" });
+        println!(
+            "Incremental snapshot at slot {}: {}",
+            slot,
+            if is_valid { "VALID ✓" } else { "INVALID ✗" }
+        );
     }
 
     // Compare states
@@ -222,19 +266,28 @@ fn main() {
     let current_state = simulate_network_state(*slots.last().unwrap(), 500, 50);
     let catchup_state = AccountDatabase::new();
 
-    catalog.restore_with_incrementals(
-        &catchup_state,
-        latest_full,
-        &incremental_slots,
-        snapshot_dir
-    ).unwrap();
+    catalog
+        .restore_with_incrementals(
+            &catchup_state,
+            latest_full,
+            &incremental_slots,
+            snapshot_dir,
+        )
+        .unwrap();
 
     let current_hash = current_state.compute_state_hash();
     let catchup_hash = catchup_state.compute_state_hash();
 
     println!("Current network state hash:  {:016x}", current_hash);
     println!("Caught-up validator hash:    {:016x}", catchup_hash);
-    println!("States match: {}", if current_hash == catchup_hash { "YES ✓" } else { "NO ✗" });
+    println!(
+        "States match: {}",
+        if current_hash == catchup_hash {
+            "YES ✓"
+        } else {
+            "NO ✗"
+        }
+    );
 
     // Performance summary
     println!("\n--- Performance Summary ---\n");
@@ -247,7 +300,9 @@ fn main() {
     println!("  Full: {}", full_count);
     println!("  Incremental: {}", inc_count);
 
-    let total_size: u64 = catalog.list_full_snapshots().iter()
+    let total_size: u64 = catalog
+        .list_full_snapshots()
+        .iter()
         .chain(catalog.list_incremental_snapshots().iter())
         .map(|&slot| {
             let is_full = catalog.list_full_snapshots().contains(&slot);
@@ -262,9 +317,15 @@ fn main() {
         })
         .sum();
 
-    println!("Total snapshot size: {} bytes ({:.2} MB)",
-             total_size, total_size as f64 / 1_000_000.0);
-    println!("Average snapshot size: {} bytes", total_size / total_snapshots as u64);
+    println!(
+        "Total snapshot size: {} bytes ({:.2} MB)",
+        total_size,
+        total_size as f64 / 1_000_000.0
+    );
+    println!(
+        "Average snapshot size: {} bytes",
+        total_size / total_snapshots as u64
+    );
 
     println!("\nCatchup Benefits:");
     println!("  - No need to replay all transactions");

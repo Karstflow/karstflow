@@ -78,29 +78,29 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Wait for gossip to propagate
     sleep(Duration::from_secs(2)).await;
 
-    println!(
-        "Node 1 cluster size: {}",
-        gossip1.cluster_info().size()
-    );
-    println!(
-        "Node 2 cluster size: {}\n",
-        gossip2.cluster_info().size()
-    );
+    println!("Node 1 cluster size: {}", gossip1.cluster_info().size());
+    println!("Node 2 cluster size: {}\n", gossip2.cluster_info().size());
 
     // Display gossip stats
     let stats1 = gossip1.stats();
     println!("Node 1 Gossip Stats:");
     println!(
         "  Push messages sent: {}",
-        stats1.push_messages_sent.load(std::sync::atomic::Ordering::Relaxed)
+        stats1
+            .push_messages_sent
+            .load(std::sync::atomic::Ordering::Relaxed)
     );
     println!(
         "  Pull requests sent: {}",
-        stats1.pull_requests_sent.load(std::sync::atomic::Ordering::Relaxed)
+        stats1
+            .pull_requests_sent
+            .load(std::sync::atomic::Ordering::Relaxed)
     );
     println!(
         "  Nodes discovered: {}\n",
-        stats1.nodes_discovered.load(std::sync::atomic::Ordering::Relaxed)
+        stats1
+            .nodes_discovered
+            .load(std::sync::atomic::Ordering::Relaxed)
     );
 
     println!("Starting Repair Services...");
@@ -160,7 +160,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .await
     {
         Ok(Some(shred)) => {
-            println!("Received shred: slot={}, index={}, size={} bytes", shred.slot, shred.index, shred.size());
+            println!(
+                "Received shred: slot={}, index={}, size={} bytes",
+                shred.slot,
+                shred.index,
+                shred.size()
+            );
         }
         Ok(None) => {
             println!("Shred not found");
@@ -193,30 +198,42 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let repair1_stats = repair1.server().stats();
     println!(
         "  Requests received: {}",
-        repair1_stats.requests_received.load(std::sync::atomic::Ordering::Relaxed)
+        repair1_stats
+            .requests_received
+            .load(std::sync::atomic::Ordering::Relaxed)
     );
     println!(
         "  Responses sent: {}",
-        repair1_stats.responses_sent.load(std::sync::atomic::Ordering::Relaxed)
+        repair1_stats
+            .responses_sent
+            .load(std::sync::atomic::Ordering::Relaxed)
     );
     println!(
         "  Shreds served: {}",
-        repair1_stats.shreds_served.load(std::sync::atomic::Ordering::Relaxed)
+        repair1_stats
+            .shreds_served
+            .load(std::sync::atomic::Ordering::Relaxed)
     );
 
     println!("\nNode 2 Repair Stats:");
     let repair2_stats = repair2.requester().stats();
     println!(
         "  Requests sent: {}",
-        repair2_stats.requests_sent.load(std::sync::atomic::Ordering::Relaxed)
+        repair2_stats
+            .requests_sent
+            .load(std::sync::atomic::Ordering::Relaxed)
     );
     println!(
         "  Responses received: {}",
-        repair2_stats.responses_received.load(std::sync::atomic::Ordering::Relaxed)
+        repair2_stats
+            .responses_received
+            .load(std::sync::atomic::Ordering::Relaxed)
     );
     println!(
         "  Shreds received: {}",
-        repair2_stats.shreds_received.load(std::sync::atomic::Ordering::Relaxed)
+        repair2_stats
+            .shreds_received
+            .load(std::sync::atomic::Ordering::Relaxed)
     );
 
     println!("\nDemo complete!");

@@ -36,14 +36,7 @@ fn setup_test_database(account_count: usize) -> AccountDatabase {
 
 #[test]
 fn test_snapshot_metadata_creation() {
-    let metadata = SnapshotMetadata::new(
-        100,
-        1000,
-        5000000,
-        None,
-        CompressionType::Zstd,
-        10000,
-    );
+    let metadata = SnapshotMetadata::new(100, 1000, 5000000, None, CompressionType::Zstd, 10000);
 
     assert_eq!(metadata.slot, 100);
     assert_eq!(metadata.total_accounts, 1000);
@@ -55,14 +48,7 @@ fn test_snapshot_metadata_creation() {
 
 #[test]
 fn test_incremental_metadata() {
-    let metadata = SnapshotMetadata::new(
-        200,
-        500,
-        2500000,
-        Some(100),
-        CompressionType::Zstd,
-        5000,
-    );
+    let metadata = SnapshotMetadata::new(200, 500, 2500000, Some(100), CompressionType::Zstd, 5000);
 
     assert_eq!(metadata.slot, 200);
     assert_eq!(metadata.incremental_base, Some(100));
@@ -96,7 +82,9 @@ fn test_full_snapshot_creation_and_restoration() {
     let config = SnapshotConfig::new();
     let creator = SnapshotCreator::new(config);
 
-    let manifest = creator.create_full_snapshot(&db, 100, snapshot_dir).unwrap();
+    let manifest = creator
+        .create_full_snapshot(&db, 100, snapshot_dir)
+        .unwrap();
 
     assert_eq!(manifest.metadata.slot, 100);
     assert_eq!(manifest.metadata.total_accounts, 100);
@@ -113,7 +101,9 @@ fn test_full_snapshot_creation_and_restoration() {
         .load_snapshot_to_map(&snapshot_path, &manifest_path)
         .unwrap();
 
-    new_db.bulk_insert_published_accounts(loaded_accounts).unwrap();
+    new_db
+        .bulk_insert_published_accounts(loaded_accounts)
+        .unwrap();
 
     let restored_accounts = new_db.get_all_published_accounts();
     let restored_lamports = new_db.get_total_lamports();
@@ -133,7 +123,9 @@ fn test_incremental_snapshot() {
     let config = SnapshotConfig::new();
     let creator = SnapshotCreator::new(config);
 
-    let full_manifest = creator.create_full_snapshot(&db, 100, snapshot_dir).unwrap();
+    let full_manifest = creator
+        .create_full_snapshot(&db, 100, snapshot_dir)
+        .unwrap();
     assert!(full_manifest.metadata.is_full());
 
     let mut base_accounts = db.get_all_published_accounts();
@@ -144,7 +136,8 @@ fn test_incremental_snapshot() {
     let modified_account = create_test_account(999999, 200);
     base_accounts.insert(modified_pubkey, modified_account.clone());
 
-    db.bulk_insert_published_accounts(base_accounts.clone()).unwrap();
+    db.bulk_insert_published_accounts(base_accounts.clone())
+        .unwrap();
 
     let snapshot_path = snapshot_dir.join("full-100.snapshot");
     let manifest_path = snapshot_dir.join("full-100.snapshot.manifest");
@@ -172,7 +165,9 @@ fn test_snapshot_verification() {
     let config = SnapshotConfig::new();
     let creator = SnapshotCreator::new(config);
 
-    creator.create_full_snapshot(&db, 100, snapshot_dir).unwrap();
+    creator
+        .create_full_snapshot(&db, 100, snapshot_dir)
+        .unwrap();
 
     let mut catalog = SnapshotCatalog::new().with_config(SnapshotConfig::new());
 
@@ -203,7 +198,9 @@ fn test_snapshot_catalog_integration() {
     assert!(catalog.should_create_incremental_snapshot(100));
     assert!(!catalog.should_create_incremental_snapshot(1000));
 
-    catalog.create_full_snapshot(&db, 1000, snapshot_dir).unwrap();
+    catalog
+        .create_full_snapshot(&db, 1000, snapshot_dir)
+        .unwrap();
 
     let snapshots = catalog.list_full_snapshots();
     assert_eq!(snapshots.len(), 1);
@@ -234,7 +231,9 @@ fn test_snapshot_retention_policy() {
 
     for i in 1..=5 {
         let slot = i * 1000;
-        catalog.create_full_snapshot(&db, slot, snapshot_dir).unwrap();
+        catalog
+            .create_full_snapshot(&db, slot, snapshot_dir)
+            .unwrap();
     }
 
     let snapshots = catalog.list_full_snapshots();
@@ -255,7 +254,9 @@ fn test_large_account_database_snapshot() {
     let creator = SnapshotCreator::new(config);
 
     let start = std::time::Instant::now();
-    let manifest = creator.create_full_snapshot(&db, 100, snapshot_dir).unwrap();
+    let manifest = creator
+        .create_full_snapshot(&db, 100, snapshot_dir)
+        .unwrap();
     let creation_time = start.elapsed();
 
     println!("Created snapshot of 1000 accounts in {:?}", creation_time);
@@ -287,7 +288,9 @@ fn test_snapshot_progress_tracking() {
     let config = SnapshotConfig::new();
     let creator = SnapshotCreator::new(config);
 
-    creator.create_full_snapshot(&db, 100, snapshot_dir).unwrap();
+    creator
+        .create_full_snapshot(&db, 100, snapshot_dir)
+        .unwrap();
 
     let progress = creator.get_progress();
     assert_eq!(progress.total_accounts, 500);
@@ -333,23 +336,11 @@ fn test_account_database_state_hash() {
 
 #[test]
 fn test_compression_types() {
-    let metadata_none = SnapshotMetadata::new(
-        100,
-        1000,
-        5000000,
-        None,
-        CompressionType::None,
-        10000,
-    );
+    let metadata_none =
+        SnapshotMetadata::new(100, 1000, 5000000, None, CompressionType::None, 10000);
 
-    let metadata_zstd = SnapshotMetadata::new(
-        100,
-        1000,
-        5000000,
-        None,
-        CompressionType::Zstd,
-        10000,
-    );
+    let metadata_zstd =
+        SnapshotMetadata::new(100, 1000, 5000000, None, CompressionType::Zstd, 10000);
 
     assert_eq!(metadata_none.compression.as_str(), "none");
     assert_eq!(metadata_zstd.compression.as_str(), "zstd");
@@ -364,14 +355,17 @@ fn test_restore_with_incrementals() {
     let config = SnapshotConfig::new();
     let mut catalog = SnapshotCatalog::new().with_config(config.clone());
 
-    catalog.create_full_snapshot(&db, 1000, snapshot_dir).unwrap();
+    catalog
+        .create_full_snapshot(&db, 1000, snapshot_dir)
+        .unwrap();
 
     let mut modified_accounts = db.get_all_published_accounts();
     let mut pubkey_bytes = [0u8; 32];
     pubkey_bytes[0] = 1;
     let pubkey = Pubkey::from_bytes(pubkey_bytes);
     modified_accounts.insert(pubkey, create_test_account(99999, 200));
-    db.bulk_insert_published_accounts(modified_accounts).unwrap();
+    db.bulk_insert_published_accounts(modified_accounts)
+        .unwrap();
 
     let snapshot_path = snapshot_dir.join("full-1000.snapshot");
     let manifest_path = snapshot_dir.join("full-1000.snapshot.manifest");
@@ -385,10 +379,7 @@ fn test_restore_with_incrementals() {
         .create_incremental_snapshot(&db, 1100, 1000, &base_accounts, snapshot_dir)
         .unwrap();
 
-    catalog.register_incremental_snapshot(
-        1100,
-        snapshot_dir.join("incremental-1100.snapshot"),
-    );
+    catalog.register_incremental_snapshot(1100, snapshot_dir.join("incremental-1100.snapshot"));
     catalog.register_full_snapshot(1000, snapshot_path);
 
     let new_db = AccountDatabase::new();

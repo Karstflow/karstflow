@@ -141,9 +141,7 @@ impl NonceAccount {
         new_durable_nonce: Pubkey,
         new_fee_calculator: FeeCalculator,
     ) -> Result<(), NonceError> {
-        let data = nonce
-            .data_mut()
-            .ok_or(NonceError::NotInitialized)?;
+        let data = nonce.data_mut().ok_or(NonceError::NotInitialized)?;
 
         // Prevent advancing to same nonce (no-op would be dangerous)
         if data.durable_nonce == new_durable_nonce {
@@ -157,13 +155,8 @@ impl NonceAccount {
     }
 
     /// Change the authority of a nonce account.
-    pub fn authorize(
-        nonce: &mut Nonce,
-        new_authority: Pubkey,
-    ) -> Result<(), NonceError> {
-        let data = nonce
-            .data_mut()
-            .ok_or(NonceError::NotInitialized)?;
+    pub fn authorize(nonce: &mut Nonce, new_authority: Pubkey) -> Result<(), NonceError> {
+        let data = nonce.data_mut().ok_or(NonceError::NotInitialized)?;
 
         data.authority = new_authority;
         Ok(())
@@ -171,9 +164,7 @@ impl NonceAccount {
 
     /// Verify that a nonce value matches the current durable nonce.
     pub fn verify_nonce(nonce: &Nonce, expected_nonce: &Pubkey) -> Result<(), NonceError> {
-        let current_nonce = nonce
-            .durable_nonce()
-            .ok_or(NonceError::NotInitialized)?;
+        let current_nonce = nonce.durable_nonce().ok_or(NonceError::NotInitialized)?;
 
         if current_nonce != expected_nonce {
             return Err(NonceError::InvalidNonce);
@@ -184,9 +175,7 @@ impl NonceAccount {
 
     /// Check if authority is valid for this nonce account.
     pub fn verify_authority(nonce: &Nonce, signer: &Pubkey) -> Result<(), NonceError> {
-        let authority = nonce
-            .authority()
-            .ok_or(NonceError::NotInitialized)?;
+        let authority = nonce.authority().ok_or(NonceError::NotInitialized)?;
 
         if authority != signer {
             return Err(NonceError::InvalidAuthority);

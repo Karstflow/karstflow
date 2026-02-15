@@ -50,14 +50,12 @@ pub use rewards::{
     REWARD_CALCULATION_NUM_BLOCKS, STAKE_ACCOUNTS_PER_BLOCK,
 };
 pub use stake::{Delegation, StakeTracker};
-pub use stake_history::{
-    EpochStakeEntry, StakeHistory, StakeHistoryEntry, STAKE_HISTORY_CAP,
-};
+pub use stake_history::{EpochStakeEntry, StakeHistory, StakeHistoryEntry, STAKE_HISTORY_CAP};
 pub use tower::{Tower, TowerError, TowerVote};
 pub use vote_processor::{
     SlotVoteInfo, VoteProcessor, VoteProcessorConfig, VoteProcessorError, VoteProcessorStats,
 };
 pub use vote_state::{
-    BlockTimestamp, EpochCredits, LandedVote, VoteError, VoteLockout, VoteState,
-    MAX_EPOCH_CREDITS, MAX_LOCKOUT_HISTORY,
+    BlockTimestamp, EpochCredits, LandedVote, VoteError, VoteLockout, VoteState, MAX_EPOCH_CREDITS,
+    MAX_LOCKOUT_HISTORY,
 };

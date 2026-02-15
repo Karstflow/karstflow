@@ -446,13 +446,14 @@ impl TokenProgramExecutor {
         let mint_authority = Pubkey::new(mint_authority_bytes);
 
         // Parse optional freeze_authority
-        let freeze_authority = if context.instruction_data.len() >= 67 && context.instruction_data[34] == 1 {
-            let mut freeze_authority_bytes = [0u8; 32];
-            freeze_authority_bytes.copy_from_slice(&context.instruction_data[35..67]);
-            Some(Pubkey::new(freeze_authority_bytes))
-        } else {
-            None
-        };
+        let freeze_authority =
+            if context.instruction_data.len() >= 67 && context.instruction_data[34] == 1 {
+                let mut freeze_authority_bytes = [0u8; 32];
+                freeze_authority_bytes.copy_from_slice(&context.instruction_data[35..67]);
+                Some(Pubkey::new(freeze_authority_bytes))
+            } else {
+                None
+            };
 
         let mint = Mint {
             mint_authority: Some(mint_authority),
@@ -489,8 +490,7 @@ impl TokenProgramExecutor {
             return Err(TokenProgramError::InvalidMint.to_string());
         }
 
-        let _mint = Mint::unpack(mint_account.data.as_slice())
-            .map_err(|e| e.to_string())?;
+        let _mint = Mint::unpack(mint_account.data.as_slice()).map_err(|e| e.to_string())?;
 
         // Check if already initialized
         if !token_account.data.is_empty() {
@@ -515,7 +515,9 @@ impl TokenProgramExecutor {
         token_account.data = AccountData::new(account.pack());
 
         let mut outcome = ExecutionOutcome::success(self.base_cost + 50);
-        outcome.modified_accounts.insert(account_pubkey, token_account);
+        outcome
+            .modified_accounts
+            .insert(account_pubkey, token_account);
 
         Ok(outcome)
     }
@@ -539,10 +541,10 @@ impl TokenProgramExecutor {
 
         let amount = u64::from_le_bytes(context.instruction_data[1..9].try_into().unwrap());
 
-        let mut source_token = TokenAccount::unpack(source_account.data.as_slice())
-            .map_err(|e| e.to_string())?;
-        let mut dest_token = TokenAccount::unpack(dest_account.data.as_slice())
-            .map_err(|e| e.to_string())?;
+        let mut source_token =
+            TokenAccount::unpack(source_account.data.as_slice()).map_err(|e| e.to_string())?;
+        let mut dest_token =
+            TokenAccount::unpack(dest_account.data.as_slice()).map_err(|e| e.to_string())?;
 
         // Verify same mint
         if source_token.mint != dest_token.mint {
@@ -550,7 +552,8 @@ impl TokenProgramExecutor {
         }
 
         // Verify authority
-        if source_token.owner != authority_pubkey && source_token.delegate != Some(authority_pubkey) {
+        if source_token.owner != authority_pubkey && source_token.delegate != Some(authority_pubkey)
+        {
             return Err(TokenProgramError::OwnerMismatch.to_string());
         }
 
@@ -565,9 +568,13 @@ impl TokenProgramExecutor {
         }
 
         // Perform transfer
-        source_token.amount = source_token.amount.checked_sub(amount)
+        source_token.amount = source_token
+            .amount
+            .checked_sub(amount)
             .ok_or_else(|| TokenProgramError::Overflow.to_string())?;
-        dest_token.amount = dest_token.amount.checked_add(amount)
+        dest_token.amount = dest_token
+            .amount
+            .checked_add(amount)
             .ok_or_else(|| TokenProgramError::Overflow.to_string())?;
 
         // If using delegate, reduce delegated amount
@@ -582,7 +589,9 @@ impl TokenProgramExecutor {
         dest_account.data = AccountData::new(dest_token.pack());
 
         let mut outcome = ExecutionOutcome::success(self.base_cost + 100);
-        outcome.modified_accounts.insert(source_pubkey, source_account);
+        outcome
+            .modified_accounts
+            .insert(source_pubkey, source_account);
         outcome.modified_accounts.insert(dest_pubkey, dest_account);
 
         Ok(outcome)
@@ -607,8 +616,8 @@ impl TokenProgramExecutor {
 
         let amount = u64::from_le_bytes(context.instruction_data[1..9].try_into().unwrap());
 
-        let mut source_token = TokenAccount::unpack(source_account.data.as_slice())
-            .map_err(|e| e.to_string())?;
+        let mut source_token =
+            TokenAccount::unpack(source_account.data.as_slice()).map_err(|e| e.to_string())?;
 
         // Verify owner
         if source_token.owner != owner_pubkey {
@@ -626,7 +635,9 @@ impl TokenProgramExecutor {
         source_account.data = AccountData::new(source_token.pack());
 
         let mut outcome = ExecutionOutcome::success(self.base_cost + 50);
-        outcome.modified_accounts.insert(source_pubkey, source_account);
+        outcome
+            .modified_accounts
+            .insert(source_pubkey, source_account);
 
         Ok(outcome)
     }
@@ -644,8 +655,8 @@ impl TokenProgramExecutor {
             return Err("Source account must be writable".to_string());
         }
 
-        let mut source_token = TokenAccount::unpack(source_account.data.as_slice())
-            .map_err(|e| e.to_string())?;
+        let mut source_token =
+            TokenAccount::unpack(source_account.data.as_slice()).map_err(|e| e.to_string())?;
 
         // Verify owner
         if source_token.owner != owner_pubkey {
@@ -658,7 +669,9 @@ impl TokenProgramExecutor {
         source_account.data = AccountData::new(source_token.pack());
 
         let mut outcome = ExecutionOutcome::success(self.base_cost + 30);
-        outcome.modified_accounts.insert(source_pubkey, source_account);
+        outcome
+            .modified_accounts
+            .insert(source_pubkey, source_account);
 
         Ok(outcome)
     }
@@ -682,10 +695,9 @@ impl TokenProgramExecutor {
 
         let amount = u64::from_le_bytes(context.instruction_data[1..9].try_into().unwrap());
 
-        let mut mint = Mint::unpack(mint_account.data.as_slice())
-            .map_err(|e| e.to_string())?;
-        let mut dest_token = TokenAccount::unpack(dest_account.data.as_slice())
-            .map_err(|e| e.to_string())?;
+        let mut mint = Mint::unpack(mint_account.data.as_slice()).map_err(|e| e.to_string())?;
+        let mut dest_token =
+            TokenAccount::unpack(dest_account.data.as_slice()).map_err(|e| e.to_string())?;
 
         // Verify mint authority
         if mint.mint_authority != Some(authority_pubkey) {
@@ -703,9 +715,13 @@ impl TokenProgramExecutor {
         }
 
         // Update supply and amount
-        mint.supply = mint.supply.checked_add(amount)
+        mint.supply = mint
+            .supply
+            .checked_add(amount)
             .ok_or_else(|| TokenProgramError::Overflow.to_string())?;
-        dest_token.amount = dest_token.amount.checked_add(amount)
+        dest_token.amount = dest_token
+            .amount
+            .checked_add(amount)
             .ok_or_else(|| TokenProgramError::Overflow.to_string())?;
 
         mint_account.data = AccountData::new(mint.pack());
@@ -737,10 +753,9 @@ impl TokenProgramExecutor {
 
         let amount = u64::from_le_bytes(context.instruction_data[1..9].try_into().unwrap());
 
-        let mut token = TokenAccount::unpack(token_account.data.as_slice())
-            .map_err(|e| e.to_string())?;
-        let mut mint = Mint::unpack(mint_account.data.as_slice())
-            .map_err(|e| e.to_string())?;
+        let mut token =
+            TokenAccount::unpack(token_account.data.as_slice()).map_err(|e| e.to_string())?;
+        let mut mint = Mint::unpack(mint_account.data.as_slice()).map_err(|e| e.to_string())?;
 
         // Verify authority
         if token.owner != authority_pubkey && token.delegate != Some(authority_pubkey) {
@@ -758,9 +773,13 @@ impl TokenProgramExecutor {
         }
 
         // Update amount and supply
-        token.amount = token.amount.checked_sub(amount)
+        token.amount = token
+            .amount
+            .checked_sub(amount)
             .ok_or_else(|| TokenProgramError::Overflow.to_string())?;
-        mint.supply = mint.supply.checked_sub(amount)
+        mint.supply = mint
+            .supply
+            .checked_sub(amount)
             .ok_or_else(|| TokenProgramError::Overflow.to_string())?;
 
         // If using delegate, reduce delegated amount
@@ -775,7 +794,9 @@ impl TokenProgramExecutor {
         mint_account.data = AccountData::new(mint.pack());
 
         let mut outcome = ExecutionOutcome::success(self.base_cost + 100);
-        outcome.modified_accounts.insert(account_pubkey, token_account);
+        outcome
+            .modified_accounts
+            .insert(account_pubkey, token_account);
         outcome.modified_accounts.insert(mint_pubkey, mint_account);
 
         Ok(outcome)
@@ -795,8 +816,8 @@ impl TokenProgramExecutor {
             return Err("Account and destination must be writable".to_string());
         }
 
-        let token = TokenAccount::unpack(token_account.data.as_slice())
-            .map_err(|e| e.to_string())?;
+        let token =
+            TokenAccount::unpack(token_account.data.as_slice()).map_err(|e| e.to_string())?;
 
         // Verify authority
         let close_authority = token.close_authority.unwrap_or(token.owner);
@@ -811,13 +832,18 @@ impl TokenProgramExecutor {
 
         // Transfer lamports to destination
         let lamports = token_account.meta.lamports;
-        dest_account.meta.lamports = dest_account.meta.lamports.checked_add(lamports)
+        dest_account.meta.lamports = dest_account
+            .meta
+            .lamports
+            .checked_add(lamports)
             .ok_or_else(|| TokenProgramError::Overflow.to_string())?;
         token_account.meta.lamports = 0;
         token_account.data = AccountData::empty();
 
         let mut outcome = ExecutionOutcome::success(self.base_cost + 50);
-        outcome.modified_accounts.insert(account_pubkey, token_account);
+        outcome
+            .modified_accounts
+            .insert(account_pubkey, token_account);
         outcome.modified_accounts.insert(dest_pubkey, dest_account);
 
         Ok(outcome)
@@ -837,10 +863,9 @@ impl TokenProgramExecutor {
             return Err("Token account must be writable".to_string());
         }
 
-        let mut token = TokenAccount::unpack(token_account.data.as_slice())
-            .map_err(|e| e.to_string())?;
-        let mint = Mint::unpack(mint_account.data.as_slice())
-            .map_err(|e| e.to_string())?;
+        let mut token =
+            TokenAccount::unpack(token_account.data.as_slice()).map_err(|e| e.to_string())?;
+        let mint = Mint::unpack(mint_account.data.as_slice()).map_err(|e| e.to_string())?;
 
         // Verify freeze authority
         if mint.freeze_authority != Some(authority_pubkey) {
@@ -856,7 +881,9 @@ impl TokenProgramExecutor {
         token_account.data = AccountData::new(token.pack());
 
         let mut outcome = ExecutionOutcome::success(self.base_cost + 50);
-        outcome.modified_accounts.insert(account_pubkey, token_account);
+        outcome
+            .modified_accounts
+            .insert(account_pubkey, token_account);
 
         Ok(outcome)
     }
@@ -875,10 +902,9 @@ impl TokenProgramExecutor {
             return Err("Token account must be writable".to_string());
         }
 
-        let mut token = TokenAccount::unpack(token_account.data.as_slice())
-            .map_err(|e| e.to_string())?;
-        let mint = Mint::unpack(mint_account.data.as_slice())
-            .map_err(|e| e.to_string())?;
+        let mut token =
+            TokenAccount::unpack(token_account.data.as_slice()).map_err(|e| e.to_string())?;
+        let mint = Mint::unpack(mint_account.data.as_slice()).map_err(|e| e.to_string())?;
 
         // Verify freeze authority
         if mint.freeze_authority != Some(authority_pubkey) {
@@ -894,7 +920,9 @@ impl TokenProgramExecutor {
         token_account.data = AccountData::new(token.pack());
 
         let mut outcome = ExecutionOutcome::success(self.base_cost + 50);
-        outcome.modified_accounts.insert(account_pubkey, token_account);
+        outcome
+            .modified_accounts
+            .insert(account_pubkey, token_account);
 
         Ok(outcome)
     }
@@ -912,8 +940,7 @@ impl TokenProgramExecutor {
         if context.accounts.len() >= 2 {
             let (_, mint_account, _) = &context.accounts[2];
             if !mint_account.data.is_empty() {
-                let mint = Mint::unpack(mint_account.data.as_slice())
-                    .map_err(|e| e.to_string())?;
+                let mint = Mint::unpack(mint_account.data.as_slice()).map_err(|e| e.to_string())?;
                 if mint.decimals != decimals {
                     return Err(TokenProgramError::MintDecimalsMismatch.to_string());
                 }
@@ -936,8 +963,7 @@ impl TokenProgramExecutor {
         if context.accounts.len() >= 2 {
             let (_, mint_account, _) = &context.accounts[2];
             if !mint_account.data.is_empty() {
-                let mint = Mint::unpack(mint_account.data.as_slice())
-                    .map_err(|e| e.to_string())?;
+                let mint = Mint::unpack(mint_account.data.as_slice()).map_err(|e| e.to_string())?;
                 if mint.decimals != decimals {
                     return Err(TokenProgramError::MintDecimalsMismatch.to_string());
                 }
@@ -960,8 +986,7 @@ impl TokenProgramExecutor {
         if !context.accounts.is_empty() {
             let (_, mint_account, _) = &context.accounts[0];
             if !mint_account.data.is_empty() {
-                let mint = Mint::unpack(mint_account.data.as_slice())
-                    .map_err(|e| e.to_string())?;
+                let mint = Mint::unpack(mint_account.data.as_slice()).map_err(|e| e.to_string())?;
                 if mint.decimals != decimals {
                     return Err(TokenProgramError::MintDecimalsMismatch.to_string());
                 }
@@ -984,8 +1009,7 @@ impl TokenProgramExecutor {
         if context.accounts.len() >= 2 {
             let (_, mint_account, _) = &context.accounts[1];
             if !mint_account.data.is_empty() {
-                let mint = Mint::unpack(mint_account.data.as_slice())
-                    .map_err(|e| e.to_string())?;
+                let mint = Mint::unpack(mint_account.data.as_slice()).map_err(|e| e.to_string())?;
                 if mint.decimals != decimals {
                     return Err(TokenProgramError::MintDecimalsMismatch.to_string());
                 }
@@ -1023,8 +1047,7 @@ impl TokenProgramExecutor {
             return Err(TokenProgramError::InvalidMint.to_string());
         }
 
-        let _mint = Mint::unpack(mint_account.data.as_slice())
-            .map_err(|e| e.to_string())?;
+        let _mint = Mint::unpack(mint_account.data.as_slice()).map_err(|e| e.to_string())?;
 
         let account = TokenAccount {
             mint: mint_pubkey,
@@ -1040,7 +1063,9 @@ impl TokenProgramExecutor {
         token_account.data = AccountData::new(account.pack());
 
         let mut outcome = ExecutionOutcome::success(self.base_cost + 50);
-        outcome.modified_accounts.insert(account_pubkey, token_account);
+        outcome
+            .modified_accounts
+            .insert(account_pubkey, token_account);
 
         Ok(outcome)
     }
@@ -1065,7 +1090,8 @@ impl TokenProgramExecutor {
             return Err("InitializeMultisig requires m parameter".to_string());
         }
 
-        let (multisig_pubkey, mut multisig_account, multisig_writable) = context.accounts[0].clone();
+        let (multisig_pubkey, mut multisig_account, multisig_writable) =
+            context.accounts[0].clone();
 
         if !multisig_writable {
             return Err("Multisig account must be writable".to_string());
@@ -1109,7 +1135,9 @@ impl TokenProgramExecutor {
         multisig_account.data = AccountData::new(multisig.pack());
 
         let mut outcome = ExecutionOutcome::success(self.base_cost + 50);
-        outcome.modified_accounts.insert(multisig_pubkey, multisig_account);
+        outcome
+            .modified_accounts
+            .insert(multisig_pubkey, multisig_account);
 
         Ok(outcome)
     }
@@ -1120,7 +1148,10 @@ impl TokenProgramExecutor {
             return Err("InitializeMint2 requires at least 1 account".to_string());
         }
         if context.instruction_data.len() < 35 {
-            return Err("InitializeMint2 requires decimals, mint_authority, and freeze_authority option".to_string());
+            return Err(
+                "InitializeMint2 requires decimals, mint_authority, and freeze_authority option"
+                    .to_string(),
+            );
         }
 
         let (mint_pubkey, mut mint_account, mint_writable) = context.accounts[0].clone();
@@ -1174,7 +1205,10 @@ impl TokenProgramExecutor {
     }
 
     // Instruction 21: GetAccountDataSize
-    fn get_account_data_size(&self, _context: &ExecutionContext) -> Result<ExecutionOutcome, String> {
+    fn get_account_data_size(
+        &self,
+        _context: &ExecutionContext,
+    ) -> Result<ExecutionOutcome, String> {
         // This instruction returns the size needed for an account based on extension types
         // For simplicity, we return the standard sizes
         // In a full implementation, this would check the extension types in instruction_data
@@ -1189,7 +1223,10 @@ impl TokenProgramExecutor {
     }
 
     // Instruction 22: InitializeImmutableOwner
-    fn initialize_immutable_owner(&self, context: &ExecutionContext) -> Result<ExecutionOutcome, String> {
+    fn initialize_immutable_owner(
+        &self,
+        context: &ExecutionContext,
+    ) -> Result<ExecutionOutcome, String> {
         if context.accounts.is_empty() {
             return Err("InitializeImmutableOwner requires at least 1 account".to_string());
         }
@@ -1218,7 +1255,9 @@ impl TokenProgramExecutor {
         // and return success. The immutable owner is more of a metadata flag.
 
         let mut outcome = ExecutionOutcome::success(self.base_cost + 30);
-        outcome.modified_accounts.insert(account_pubkey, token_account);
+        outcome
+            .modified_accounts
+            .insert(account_pubkey, token_account);
 
         Ok(outcome)
     }
@@ -1240,14 +1279,14 @@ impl TokenProgramExecutor {
             return Err(TokenProgramError::InvalidMint.to_string());
         }
 
-        let mint = Mint::unpack(mint_account.data.as_slice())
-            .map_err(|e| e.to_string())?;
+        let mint = Mint::unpack(mint_account.data.as_slice()).map_err(|e| e.to_string())?;
 
         // Convert amount to UI amount using decimals
         // UI amount = amount / 10^decimals
         // In a real implementation, this would return the result to the program
         // For now, we just verify the calculation is possible
-        let _divisor = 10u64.checked_pow(mint.decimals as u32)
+        let _divisor = 10u64
+            .checked_pow(mint.decimals as u32)
             .ok_or_else(|| TokenProgramError::Overflow.to_string())?;
 
         // Since we can't return the actual UI amount in this model, just succeed
@@ -1274,15 +1313,16 @@ impl TokenProgramExecutor {
             return Err(TokenProgramError::InvalidMint.to_string());
         }
 
-        let mint = Mint::unpack(mint_account.data.as_slice())
-            .map_err(|e| e.to_string())?;
+        let mint = Mint::unpack(mint_account.data.as_slice()).map_err(|e| e.to_string())?;
 
         // Convert UI amount to raw amount using decimals
         // amount = ui_amount * 10^decimals
-        let multiplier = 10u64.checked_pow(mint.decimals as u32)
+        let multiplier = 10u64
+            .checked_pow(mint.decimals as u32)
             .ok_or_else(|| TokenProgramError::Overflow.to_string())?;
 
-        let _amount = ui_amount.checked_mul(multiplier)
+        let _amount = ui_amount
+            .checked_mul(multiplier)
             .ok_or_else(|| TokenProgramError::Overflow.to_string())?;
 
         // Since we can't return the actual amount in this model, just succeed
@@ -1496,7 +1536,9 @@ mod tests {
 
         let result = executor.execute(&context);
         assert!(result.is_err());
-        assert!(result.unwrap_err().contains("Invalid number of required signers"));
+        assert!(result
+            .unwrap_err()
+            .contains("Invalid number of required signers"));
     }
 
     #[test]

@@ -51,10 +51,7 @@ pub enum ProgramAccountState {
     /// Uninitialized account
     Uninitialized,
     /// Buffer account - holds program data during upload
-    Buffer {
-        authority: Pubkey,
-        data: Vec<u8>,
-    },
+    Buffer { authority: Pubkey, data: Vec<u8> },
     /// Program account - finalized and ready for deployment
     Program {
         authority: Pubkey,
@@ -174,11 +171,8 @@ impl ProgramAccountState {
                 if bytes.len() < 46 {
                     return Err("Invalid program data state".to_string());
                 }
-                let slot = u64::from_le_bytes(
-                    bytes[1..9]
-                        .try_into()
-                        .map_err(|_| "Failed to parse slot")?,
-                );
+                let slot =
+                    u64::from_le_bytes(bytes[1..9].try_into().map_err(|_| "Failed to parse slot")?);
                 let has_authority = bytes[9] != 0;
                 let upgrade_authority = if has_authority {
                     Some(Pubkey::new_from_array(
@@ -635,9 +629,15 @@ impl BpfLoaderExecutor {
         modified_accounts.insert(account_pubkey, account);
 
         if let Some(auth) = new_authority {
-            logs.push(format!("Set authority to {} for account {}", auth, account_pubkey));
+            logs.push(format!(
+                "Set authority to {} for account {}",
+                auth, account_pubkey
+            ));
         } else {
-            logs.push(format!("Removed authority (immutable) for account {}", account_pubkey));
+            logs.push(format!(
+                "Removed authority (immutable) for account {}",
+                account_pubkey
+            ));
         }
 
         Ok(())
@@ -667,7 +667,10 @@ impl BpfLoaderExecutor {
 
         // Only buffers and non-deployed programs can be closed
         match state {
-            ProgramAccountState::Buffer { .. } | ProgramAccountState::Program { is_deployed: false, .. } => {
+            ProgramAccountState::Buffer { .. }
+            | ProgramAccountState::Program {
+                is_deployed: false, ..
+            } => {
                 // OK to close
             }
             ProgramAccountState::ProgramData { .. } => {
@@ -871,7 +874,10 @@ mod tests {
 
         let finalize_outcome = executor.execute(&finalize_context).unwrap();
         assert!(finalize_outcome.success);
-        assert!(finalize_outcome.logs.iter().any(|log| log.contains("Finalized")));
+        assert!(finalize_outcome
+            .logs
+            .iter()
+            .any(|log| log.contains("Finalized")));
 
         // Get finalized program account
         buffer_account = finalize_outcome.modified_accounts[&buffer_pubkey].clone();
@@ -887,7 +893,10 @@ mod tests {
 
         let deploy_outcome = executor.execute(&deploy_context).unwrap();
         assert!(deploy_outcome.success);
-        assert!(deploy_outcome.logs.iter().any(|log| log.contains("Deployed")));
+        assert!(deploy_outcome
+            .logs
+            .iter()
+            .any(|log| log.contains("Deployed")));
 
         // Verify final state
         let final_account = &deploy_outcome.modified_accounts[&buffer_pubkey];
@@ -934,7 +943,9 @@ mod tests {
         let modified = outcome.modified_accounts.values().next().unwrap();
         let new_state = ProgramAccountState::deserialize(modified.data.as_ref()).unwrap();
         match new_state {
-            ProgramAccountState::Buffer { authority: auth, .. } => {
+            ProgramAccountState::Buffer {
+                authority: auth, ..
+            } => {
                 assert_eq!(auth, new_authority);
             }
             _ => panic!("Expected Buffer state"),

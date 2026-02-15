@@ -27,8 +27,7 @@ impl FeeCalculator {
 
     /// Calculate total fee for a transaction with given signature count.
     pub fn calculate_fee(&self, num_signatures: u64) -> u64 {
-        self.lamports_per_signature
-            .saturating_mul(num_signatures)
+        self.lamports_per_signature.saturating_mul(num_signatures)
     }
 
     /// Check if an account has sufficient balance to pay fee.
@@ -295,6 +294,9 @@ mod tests {
         let calc = governor.create_fee_calculator(0);
 
         // Should use target rate when no signatures
-        assert_eq!(calc.lamports_per_signature, governor.target_lamports_per_signature);
+        assert_eq!(
+            calc.lamports_per_signature,
+            governor.target_lamports_per_signature
+        );
     }
 }

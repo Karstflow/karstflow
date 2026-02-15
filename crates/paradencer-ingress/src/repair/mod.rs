@@ -11,7 +11,9 @@ pub use protocol::{
     REPAIR_PROTOCOL_VERSION,
 };
 pub use request::{RepairRequester, RepairRequesterStats};
-pub use server::{InMemoryShredStore, RepairServer, RepairServerConfig, RepairServerStats, ShredProvider};
+pub use server::{
+    InMemoryShredStore, RepairServer, RepairServerConfig, RepairServerStats, ShredProvider,
+};
 pub use service::{RepairService, RepairServiceConfig};
 
 use crate::IngressError;

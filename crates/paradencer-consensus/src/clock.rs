@@ -48,12 +48,7 @@ impl Clock {
     /// Update clock for a new slot.
     ///
     /// Updates slot, epoch (if crossed boundary), and timestamp estimate.
-    pub fn advance_slot(
-        &mut self,
-        new_slot: u64,
-        slots_per_epoch: u64,
-        estimated_timestamp: i64,
-    ) {
+    pub fn advance_slot(&mut self, new_slot: u64, slots_per_epoch: u64, estimated_timestamp: i64) {
         self.slot = new_slot;
 
         // Calculate new epoch
@@ -77,7 +72,8 @@ impl Clock {
 
     /// Get elapsed time in current epoch (seconds).
     pub fn epoch_elapsed_seconds(&self) -> i64 {
-        self.unix_timestamp.saturating_sub(self.epoch_start_timestamp)
+        self.unix_timestamp
+            .saturating_sub(self.epoch_start_timestamp)
     }
 
     /// Calculate estimated slot time in seconds (approximate).
@@ -144,10 +140,7 @@ pub fn calculate_stake_weighted_timestamp(
     }
 
     // Fallback to last timestamp
-    vote_timestamps
-        .last()
-        .map(|(ts, _)| *ts)
-        .unwrap_or(0)
+    vote_timestamps.last().map(|(ts, _)| *ts).unwrap_or(0)
 }
 
 #[cfg(test)]
@@ -256,9 +249,9 @@ mod tests {
     #[test]
     fn stake_weighted_timestamp_weighted_by_stake() {
         let votes = vec![
-            (1000, 100),  // 10% stake
-            (1005, 800),  // 80% stake
-            (1010, 100),  // 10% stake
+            (1000, 100), // 10% stake
+            (1005, 800), // 80% stake
+            (1010, 100), // 10% stake
         ];
 
         let timestamp = calculate_stake_weighted_timestamp(votes, 1000);

@@ -108,7 +108,10 @@ impl ShredAssembler {
     }
 
     /// Assemble a block from a set of data shreds
-    pub fn assemble_block(&mut self, mut shreds: Vec<Shred>) -> ShredAssemblyResult<AssembledBlock> {
+    pub fn assemble_block(
+        &mut self,
+        mut shreds: Vec<Shred>,
+    ) -> ShredAssemblyResult<AssembledBlock> {
         if shreds.is_empty() {
             return Err(ShredAssemblyError::NoShreds);
         }
@@ -206,25 +209,23 @@ impl ShredAssembler {
         }
 
         // Parse num_hashes
-        let num_hashes = u64::from_le_bytes(
-            data[*offset..*offset + 8]
-                .try_into()
-                .map_err(|_| ShredAssemblyError::InvalidEntryData("Failed to parse num_hashes".to_string()))?,
-        );
+        let num_hashes =
+            u64::from_le_bytes(data[*offset..*offset + 8].try_into().map_err(|_| {
+                ShredAssemblyError::InvalidEntryData("Failed to parse num_hashes".to_string())
+            })?);
         *offset += 8;
 
         // Parse hash
-        let hash: [u8; 32] = data[*offset..*offset + 32]
-            .try_into()
-            .map_err(|_| ShredAssemblyError::InvalidEntryData("Failed to parse hash".to_string()))?;
+        let hash: [u8; 32] = data[*offset..*offset + 32].try_into().map_err(|_| {
+            ShredAssemblyError::InvalidEntryData("Failed to parse hash".to_string())
+        })?;
         *offset += 32;
 
         // Parse number of transactions
-        let num_transactions = u64::from_le_bytes(
-            data[*offset..*offset + 8]
-                .try_into()
-                .map_err(|_| ShredAssemblyError::InvalidEntryData("Failed to parse num_transactions".to_string()))?,
-        );
+        let num_transactions =
+            u64::from_le_bytes(data[*offset..*offset + 8].try_into().map_err(|_| {
+                ShredAssemblyError::InvalidEntryData("Failed to parse num_transactions".to_string())
+            })?);
         *offset += 8;
 
         // Parse transactions
@@ -235,11 +236,12 @@ impl ShredAssembler {
             }
 
             // Read transaction length
-            let tx_len = u64::from_le_bytes(
-                data[*offset..*offset + 8]
-                    .try_into()
-                    .map_err(|_| ShredAssemblyError::InvalidEntryData("Failed to parse transaction length".to_string()))?,
-            ) as usize;
+            let tx_len =
+                u64::from_le_bytes(data[*offset..*offset + 8].try_into().map_err(|_| {
+                    ShredAssemblyError::InvalidEntryData(
+                        "Failed to parse transaction length".to_string(),
+                    )
+                })?) as usize;
             *offset += 8;
 
             if *offset + tx_len > data.len() {
@@ -428,7 +430,10 @@ mod tests {
         let shred2 = create_test_shred(101, 1, vec![4, 5, 6]);
 
         let result = assembler.assemble_block(vec![shred1, shred2]);
-        assert!(matches!(result, Err(ShredAssemblyError::SlotMismatch { .. })));
+        assert!(matches!(
+            result,
+            Err(ShredAssemblyError::SlotMismatch { .. })
+        ));
     }
 
     #[test]

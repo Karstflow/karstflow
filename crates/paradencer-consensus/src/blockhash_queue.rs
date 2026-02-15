@@ -130,9 +130,9 @@ impl BlockhashQueue {
     /// Returns None if blockhash not found, otherwise returns age where
     /// 0 means most recent, 1 means second most recent, etc.
     pub fn get_hash_age(&self, hash: &Hash) -> Option<usize> {
-        self.index.get(hash).map(|&position| {
-            self.queue.len().saturating_sub(1).saturating_sub(position)
-        })
+        self.index
+            .get(hash)
+            .map(|&position| self.queue.len().saturating_sub(1).saturating_sub(position))
     }
 
     /// Get number of blockhashes in queue.
@@ -277,7 +277,11 @@ mod tests {
 
         // Add one more, should evict the first
         let new_hash = Hash::new_unique();
-        queue.register_hash(BlockhashInfo::new(new_hash, 5000, MAX_RECENT_BLOCKHASHES as u64));
+        queue.register_hash(BlockhashInfo::new(
+            new_hash,
+            5000,
+            MAX_RECENT_BLOCKHASHES as u64,
+        ));
 
         // First hash should be gone
         assert!(!queue.is_hash_valid(&hashes[0]));

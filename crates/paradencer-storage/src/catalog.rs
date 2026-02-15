@@ -1,8 +1,8 @@
-use crate::{CommittedFragmentRecord, HotStateStore, SnapshotImage, StorageError};
+use crate::accounts::AccountDatabase;
 use crate::snapshot::{
     SnapshotConfig, SnapshotCreator, SnapshotLoader, SnapshotManifest, SnapshotMetadata,
 };
-use crate::accounts::database::AccountDatabase;
+use crate::{CommittedFragmentRecord, HotStateStore, SnapshotImage, StorageError};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::fs;
@@ -424,14 +424,18 @@ impl SnapshotCatalog {
         base_slot: u64,
         snapshot_dir: &Path,
     ) -> Result<SnapshotManifest, StorageError> {
-        let base_snapshot_path = self.full_snapshots
-            .get(&base_slot)
-            .ok_or_else(|| StorageError::SnapshotNotFound { fragment_id: base_slot })?;
+        let base_snapshot_path =
+            self.full_snapshots
+                .get(&base_slot)
+                .ok_or_else(|| StorageError::SnapshotNotFound {
+                    fragment_id: base_slot,
+                })?;
 
         let base_manifest_path = snapshot_dir.join(format!("full-{}.snapshot.manifest", base_slot));
 
         let loader = SnapshotLoader::new();
-        let (base_accounts, _) = loader.load_snapshot_to_map(base_snapshot_path, &base_manifest_path)?;
+        let (base_accounts, _) =
+            loader.load_snapshot_to_map(base_snapshot_path, &base_manifest_path)?;
 
         let config = self.config.clone().unwrap_or_default();
         let creator = SnapshotCreator::new(config);
@@ -458,7 +462,8 @@ impl SnapshotCatalog {
         slot: u64,
         snapshot_dir: &Path,
     ) -> Result<(), StorageError> {
-        let snapshot_path = self.full_snapshots
+        let snapshot_path = self
+            .full_snapshots
             .get(&slot)
             .ok_or_else(|| StorageError::SnapshotNotFound { fragment_id: slot })?;
 
@@ -487,7 +492,8 @@ impl SnapshotCatalog {
 
         for &inc_slot in incremental_slots {
             let snapshot_path = snapshot_dir.join(format!("incremental-{}.snapshot", inc_slot));
-            let manifest_path = snapshot_dir.join(format!("incremental-{}.snapshot.manifest", inc_slot));
+            let manifest_path =
+                snapshot_dir.join(format!("incremental-{}.snapshot.manifest", inc_slot));
 
             loader.apply_incremental_snapshot(&mut accounts, &snapshot_path, &manifest_path)?;
         }
@@ -514,18 +520,20 @@ impl SnapshotCatalog {
         let manifest_path = snapshot_dir.join(format!("{}.manifest", snapshot_filename));
 
         let loader = SnapshotLoader::new();
-        let manifest_json = std::fs::read_to_string(&manifest_path)
-            .map_err(|e| StorageError::AccountDatabaseError {
+        let manifest_json = std::fs::read_to_string(&manifest_path).map_err(|e| {
+            StorageError::AccountDatabaseError {
                 details: format!("Failed to read manifest: {}", e),
-            })?;
+            }
+        })?;
 
-        let manifest: SnapshotManifest = serde_json::from_str(&manifest_json)
-            .map_err(|e| StorageError::AccountDatabaseError {
+        let manifest: SnapshotManifest = serde_json::from_str(&manifest_json).map_err(|e| {
+            StorageError::AccountDatabaseError {
                 details: format!("Failed to deserialize manifest: {}", e),
-            })?;
+            }
+        })?;
 
-        let snapshot_data = std::fs::read(&snapshot_path)
-            .map_err(|e| StorageError::AccountDatabaseError {
+        let snapshot_data =
+            std::fs::read(&snapshot_path).map_err(|e| StorageError::AccountDatabaseError {
                 details: format!("Failed to read snapshot: {}", e),
             })?;
 
@@ -556,7 +564,8 @@ impl SnapshotCatalog {
     }
 
     fn enforce_full_snapshot_retention(&mut self) {
-        let max_snapshots = self.config
+        let max_snapshots = self
+            .config
             .as_ref()
             .map(|c| c.max_full_snapshots)
             .unwrap_or(3);
@@ -569,7 +578,8 @@ impl SnapshotCatalog {
     }
 
     fn enforce_incremental_snapshot_retention(&mut self) {
-        let max_snapshots = self.config
+        let max_snapshots = self
+            .config
             .as_ref()
             .map(|c| c.max_incremental_snapshots)
             .unwrap_or(10);

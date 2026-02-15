@@ -38,4 +38,6 @@ pub enum IngressError {
     Deserialization { detail: String },
     #[error("repair request error: {detail}")]
     RepairRequest { detail: String },
+    #[error("channel send error: {0}")]
+    ChannelSend(String),
 }

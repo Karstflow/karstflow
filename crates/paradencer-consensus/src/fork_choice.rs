@@ -260,7 +260,8 @@ impl ForkChoice {
 
             if children.is_empty() {
                 // Reached a leaf - check if we can vote on it
-                if current > tower_root && !self.is_locked_out_by_tower(current, tower, bank_forks) {
+                if current > tower_root && !self.is_locked_out_by_tower(current, tower, bank_forks)
+                {
                     return Some(current);
                 }
                 return None;

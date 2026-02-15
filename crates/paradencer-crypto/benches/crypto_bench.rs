@@ -253,27 +253,19 @@ fn bench_blake3_vs_sha256(c: &mut Criterion) {
 
         group.throughput(Throughput::Bytes(*size as u64));
 
-        group.bench_with_input(
-            BenchmarkId::new("blake3", size),
-            size,
-            |b, _| {
-                b.iter(|| {
-                    let hash = Blake3Hasher::hash(black_box(&data));
-                    black_box(hash);
-                })
-            },
-        );
+        group.bench_with_input(BenchmarkId::new("blake3", size), size, |b, _| {
+            b.iter(|| {
+                let hash = Blake3Hasher::hash(black_box(&data));
+                black_box(hash);
+            })
+        });
 
-        group.bench_with_input(
-            BenchmarkId::new("sha256", size),
-            size,
-            |b, _| {
-                b.iter(|| {
-                    let hash = Sha256Hasher::hash(black_box(&data));
-                    black_box(hash);
-                })
-            },
-        );
+        group.bench_with_input(BenchmarkId::new("sha256", size), size, |b, _| {
+            b.iter(|| {
+                let hash = Sha256Hasher::hash(black_box(&data));
+                black_box(hash);
+            })
+        });
     }
 
     group.finish();
@@ -339,7 +331,9 @@ fn bench_realistic_transaction_verification(c: &mut Criterion) {
         all_sig_sets.push(SignatureSet::new(pubkey, message, sig_bytes));
     }
 
-    group.throughput(Throughput::Elements((NUM_TRANSACTIONS * AVG_SIGS_PER_TX) as u64));
+    group.throughput(Throughput::Elements(
+        (NUM_TRANSACTIONS * AVG_SIGS_PER_TX) as u64,
+    ));
 
     group.bench_function("batch_verify_slot", |b| {
         b.iter(|| {
@@ -370,7 +364,8 @@ fn bench_realistic_deduplication_hashing(c: &mut Criterion) {
     c.bench_function("dedup_hash_1000_signatures", |b| {
         b.iter(|| {
             for signature in &signatures {
-                let hash = paradencer_crypto::blake3::hash_transaction_signature(black_box(signature));
+                let hash =
+                    paradencer_crypto::blake3::hash_transaction_signature(black_box(signature));
                 black_box(hash);
             }
         })
@@ -401,10 +396,7 @@ criterion_group!(
     bench_sha256_streaming,
 );
 
-criterion_group!(
-    comparison_benches,
-    bench_blake3_vs_sha256,
-);
+criterion_group!(comparison_benches, bench_blake3_vs_sha256,);
 
 criterion_group!(
     transaction_benches,

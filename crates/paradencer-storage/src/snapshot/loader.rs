@@ -1,8 +1,6 @@
 use super::creator::{SerializedAccount, SnapshotData};
 use super::metadata::{SnapshotManifest, SnapshotMetadata};
-use crate::accounts::database::AccountDatabase;
-use crate::accounts::primitives::{Account, Pubkey};
-use crate::accounts::record::TransactionId;
+use crate::accounts::{Account, AccountDatabase, Pubkey, TransactionId};
 use crate::StorageError;
 use rayon::prelude::*;
 use std::collections::HashMap;
@@ -108,8 +106,8 @@ impl SnapshotLoader {
         db: &AccountDatabase,
     ) -> Result<LoadedSnapshot, StorageError> {
         let manifest = self.load_manifest(manifest_path)?;
-        let compressed_data = std::fs::read(snapshot_path)
-            .map_err(|e| StorageError::AccountDatabaseError {
+        let compressed_data =
+            std::fs::read(snapshot_path).map_err(|e| StorageError::AccountDatabaseError {
                 details: format!("Failed to read snapshot file: {}", e),
             })?;
 
@@ -124,9 +122,11 @@ impl SnapshotLoader {
 
         let decompressed_data = self.decompress_data(&compressed_data)?;
 
-        let snapshot_data: SnapshotData = bincode::deserialize(&decompressed_data)
-            .map_err(|e| StorageError::AccountDatabaseError {
-                details: format!("Failed to deserialize snapshot: {}", e),
+        let snapshot_data: SnapshotData =
+            bincode::deserialize(&decompressed_data).map_err(|e| {
+                StorageError::AccountDatabaseError {
+                    details: format!("Failed to deserialize snapshot: {}", e),
+                }
             })?;
 
         let accounts = self.load_accounts(db, &snapshot_data)?;
@@ -145,8 +145,8 @@ impl SnapshotLoader {
         manifest_path: &Path,
     ) -> Result<(HashMap<Pubkey, Account>, SnapshotMetadata), StorageError> {
         let manifest = self.load_manifest(manifest_path)?;
-        let compressed_data = std::fs::read(snapshot_path)
-            .map_err(|e| StorageError::AccountDatabaseError {
+        let compressed_data =
+            std::fs::read(snapshot_path).map_err(|e| StorageError::AccountDatabaseError {
                 details: format!("Failed to read snapshot file: {}", e),
             })?;
 
@@ -161,9 +161,11 @@ impl SnapshotLoader {
 
         let decompressed_data = self.decompress_data(&compressed_data)?;
 
-        let snapshot_data: SnapshotData = bincode::deserialize(&decompressed_data)
-            .map_err(|e| StorageError::AccountDatabaseError {
-                details: format!("Failed to deserialize snapshot: {}", e),
+        let snapshot_data: SnapshotData =
+            bincode::deserialize(&decompressed_data).map_err(|e| {
+                StorageError::AccountDatabaseError {
+                    details: format!("Failed to deserialize snapshot: {}", e),
+                }
             })?;
 
         let total_accounts = snapshot_data.accounts.len() as u64;
@@ -176,24 +178,25 @@ impl SnapshotLoader {
     }
 
     fn load_manifest(&self, manifest_path: &Path) -> Result<SnapshotManifest, StorageError> {
-        let manifest_json = std::fs::read_to_string(manifest_path)
-            .map_err(|e| StorageError::AccountDatabaseError {
+        let manifest_json = std::fs::read_to_string(manifest_path).map_err(|e| {
+            StorageError::AccountDatabaseError {
                 details: format!("Failed to read manifest file: {}", e),
-            })?;
+            }
+        })?;
 
-        let manifest: SnapshotManifest = serde_json::from_str(&manifest_json)
-            .map_err(|e| StorageError::AccountDatabaseError {
+        let manifest: SnapshotManifest = serde_json::from_str(&manifest_json).map_err(|e| {
+            StorageError::AccountDatabaseError {
                 details: format!("Failed to deserialize manifest: {}", e),
-            })?;
+            }
+        })?;
 
         Ok(manifest)
     }
 
     fn decompress_data(&self, data: &[u8]) -> Result<Vec<u8>, StorageError> {
-        zstd::decode_all(data)
-            .map_err(|e| StorageError::AccountDatabaseError {
-                details: format!("Failed to decompress data: {}", e),
-            })
+        zstd::decode_all(data).map_err(|e| StorageError::AccountDatabaseError {
+            details: format!("Failed to decompress data: {}", e),
+        })
     }
 
     fn load_accounts(
@@ -351,16 +354,14 @@ mod tests {
     fn test_deserialize_accounts() {
         let loader = SnapshotLoader::new();
 
-        let serialized = vec![
-            SerializedAccount {
-                pubkey: Pubkey::zeroed(),
-                lamports: 1000,
-                owner: Pubkey::zeroed(),
-                executable: false,
-                rent_epoch: 0,
-                data: vec![1, 2, 3],
-            },
-        ];
+        let serialized = vec![SerializedAccount {
+            pubkey: Pubkey::zeroed(),
+            lamports: 1000,
+            owner: Pubkey::zeroed(),
+            executable: false,
+            rent_epoch: 0,
+            data: vec![1, 2, 3],
+        }];
 
         let result = loader.deserialize_accounts(&serialized);
         assert!(result.is_ok());

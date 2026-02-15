@@ -20,6 +20,7 @@ paradencer-types = { path = "../paradencer-types" }
 paradencer-crypto = { path = "../paradencer-crypto" }
 reed-solomon-erasure = "6.0"
 ed25519-dalek = { version = "2.1", features = ["rand_core"] }
+blake3.workspace = true
 
 [dev-dependencies]
 rand = "0.8"

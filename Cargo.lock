@@ -1315,6 +1315,7 @@ name = "paradencer-stages"
 version = "0.1.0"
 dependencies = [
  "bincode",
+ "blake3",
  "ed25519-dalek",
  "paradencer-consensus",
  "paradencer-crypto",

@@ -34,9 +34,10 @@ async fn test_gossip_service_push() {
 
     service2.start().await.unwrap();
 
-    service1
-        .cluster_info()
-        .insert(create_test_contact_info(node2_id, service2.local_addr().unwrap().port()));
+    service1.cluster_info().insert(create_test_contact_info(
+        node2_id,
+        service2.local_addr().unwrap().port(),
+    ));
 
     sleep(Duration::from_millis(500)).await;
 

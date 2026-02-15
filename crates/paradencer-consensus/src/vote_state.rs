@@ -39,8 +39,7 @@ impl VoteLockout {
     ///
     /// Lockout doubles with each confirmation: 2^confirmation_count slots.
     pub fn expiration_slot(&self) -> u64 {
-        self.slot
-            .saturating_add(self.lockout_distance())
+        self.slot.saturating_add(self.lockout_distance())
     }
 
     /// Calculate lockout distance: 2^confirmation_count
@@ -175,7 +174,12 @@ impl VoteState {
     /// Process a new vote for a slot.
     ///
     /// Adds the vote to history and updates confirmation counts for existing votes.
-    pub fn process_vote(&mut self, slot: u64, timestamp: i64, latency: u8) -> Result<(), VoteError> {
+    pub fn process_vote(
+        &mut self,
+        slot: u64,
+        timestamp: i64,
+        latency: u8,
+    ) -> Result<(), VoteError> {
         // Verify vote is newer than last vote
         if let Some(last_vote) = self.votes.back() {
             if slot <= last_vote.slot() {
@@ -241,10 +245,7 @@ impl VoteState {
 
     /// Add credits for an epoch.
     pub fn add_epoch_credits(&mut self, epoch: u64, credits: u64) {
-        let prev_credits = self.epoch_credits
-            .back()
-            .map(|ec| ec.credits)
-            .unwrap_or(0);
+        let prev_credits = self.epoch_credits.back().map(|ec| ec.credits).unwrap_or(0);
 
         let total_credits = prev_credits + credits;
         let epoch_credit = EpochCredits::new(epoch, total_credits, prev_credits);

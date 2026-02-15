@@ -53,11 +53,7 @@ pub fn from_hex(hex: &str) -> CryptoResult<Vec<u8>> {
 ///
 /// Panics if slices have different lengths.
 pub fn xor_bytes(a: &[u8], b: &[u8]) -> Vec<u8> {
-    assert_eq!(
-        a.len(),
-        b.len(),
-        "XOR requires equal-length byte slices"
-    );
+    assert_eq!(a.len(), b.len(), "XOR requires equal-length byte slices");
 
     a.iter().zip(b.iter()).map(|(x, y)| x ^ y).collect()
 }

@@ -1,6 +1,6 @@
 mod errors;
-mod ingress;
 pub mod gossip;
+mod ingress;
 pub mod quic;
 pub mod repair;
 pub mod turbine;
@@ -26,7 +26,6 @@ pub use repair::{
 pub use turbine::{
     BroadcastManager, BroadcastShred, BroadcastStats, Neighborhood, NetworkProximity,
     PropagationMetrics, ProximityEstimator, ProximityScore, RetransmitRequest, RetransmitService,
-    RetransmitShred, RetransmitStats, ShredBroadcaster, TurbineConfig, TurbineNode,
-    TurbineResult, TurbineStats, TurbineTree, TurbineTreeBuilder, DEFAULT_FANOUT,
-    DEFAULT_NEIGHBORHOOD_SIZE,
+    RetransmitShred, RetransmitStats, ShredBroadcaster, TurbineConfig, TurbineNode, TurbineResult,
+    TurbineStats, TurbineTree, TurbineTreeBuilder, DEFAULT_FANOUT, DEFAULT_NEIGHBORHOOD_SIZE,
 };

@@ -1,11 +1,11 @@
 use super::primitives::{Account, Pubkey};
 use super::record::{AccountRecord, RecordKey, TransactionId, VersionCounter};
 use crate::StorageError;
+use ahash::AHasher;
 use dashmap::DashMap;
 use std::collections::HashMap;
-use std::sync::Arc;
-use ahash::AHasher;
 use std::hash::{Hash, Hasher};
+use std::sync::Arc;
 
 pub struct AccountDatabase {
     records: Arc<DashMap<RecordKey, AccountRecord>>,
@@ -53,7 +53,8 @@ impl AccountDatabase {
             if let Some(entry) = self.records.get(&published_key) {
                 let account = entry.account.clone();
                 // Update cache
-                self.account_cache.insert(*pubkey, (account.clone(), entry.version));
+                self.account_cache
+                    .insert(*pubkey, (account.clone(), entry.version));
                 return Ok(Some(account));
             }
         }
@@ -97,7 +98,8 @@ impl AccountDatabase {
 
         for (pubkey, account, version) in published_updates {
             let published_key = RecordKey::published(pubkey);
-            let record = AccountRecord::new(TransactionId::root(), pubkey, account.clone(), version);
+            let record =
+                AccountRecord::new(TransactionId::root(), pubkey, account.clone(), version);
             self.records.insert(published_key, record);
             // Update cache
             self.account_cache.insert(pubkey, (account, version));
@@ -150,7 +152,8 @@ impl AccountDatabase {
         for (pubkey, account) in accounts {
             let version = self.versions.next();
             let published_key = RecordKey::published(pubkey);
-            let record = AccountRecord::new(TransactionId::root(), pubkey, account.clone(), version);
+            let record =
+                AccountRecord::new(TransactionId::root(), pubkey, account.clone(), version);
             self.records.insert(published_key, record);
             self.account_cache.insert(pubkey, (account, version));
         }
@@ -188,12 +191,13 @@ impl AccountDatabase {
     pub fn compute_state_hash(&self) -> u64 {
         let mut hasher = AHasher::default();
 
-        let mut published_accounts: Vec<_> = self.records
+        let mut published_accounts: Vec<_> = self
+            .records
             .iter()
             .filter(|entry| entry.key().xid.is_root())
             .collect();
 
-        published_accounts.sort_by_key(|entry| entry.key().pubkey.as_bytes());
+        published_accounts.sort_by(|a, b| a.key().pubkey.as_bytes().cmp(b.key().pubkey.as_bytes()));
 
         for entry in published_accounts {
             entry.key().pubkey.hash(&mut hasher);

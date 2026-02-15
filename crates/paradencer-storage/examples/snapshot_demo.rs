@@ -1,6 +1,5 @@
 /// Demonstration of snapshot functionality
 /// Run with: cargo run --example snapshot_demo --release
-
 use paradencer_storage::{
     Account, AccountData, AccountDatabase, AccountMeta, Pubkey, SnapshotCatalog, SnapshotConfig,
     SnapshotCreator, SnapshotLoader,
@@ -55,8 +54,14 @@ fn main() {
         .with_compression_level(3);
 
     println!("Snapshot Configuration:");
-    println!("  Full snapshot interval: {}", config.full_snapshot_interval);
-    println!("  Incremental interval: {}", config.incremental_snapshot_interval);
+    println!(
+        "  Full snapshot interval: {}",
+        config.full_snapshot_interval
+    );
+    println!(
+        "  Incremental interval: {}",
+        config.incremental_snapshot_interval
+    );
     println!("  Max full snapshots: {}", config.max_full_snapshots);
     println!("  Compression level: {}\n", config.compression_level);
 
@@ -80,14 +85,23 @@ fn main() {
     println!("  Slot: {}", manifest.metadata.slot);
     println!("  Total accounts: {}", manifest.metadata.total_accounts);
     println!("  Total lamports: {}", manifest.metadata.total_lamports);
-    println!("  Account data size: {} bytes", manifest.metadata.account_data_size);
+    println!(
+        "  Account data size: {} bytes",
+        manifest.metadata.account_data_size
+    );
     println!("  Compression: {:?}", manifest.metadata.compression);
     println!("  Chunk count: {}", manifest.chunk_count);
 
     let progress = creator.get_progress();
     println!("Creation progress:");
-    println!("  Processed accounts: {}/{}", progress.processed_accounts, progress.total_accounts);
-    println!("  Processed bytes: {}/{}", progress.processed_bytes, progress.total_bytes);
+    println!(
+        "  Processed accounts: {}/{}",
+        progress.processed_accounts, progress.total_accounts
+    );
+    println!(
+        "  Processed bytes: {}/{}",
+        progress.processed_bytes, progress.total_bytes
+    );
     println!("  Completion: {:.1}%\n", progress.percentage());
 
     // Verify snapshot
@@ -96,7 +110,10 @@ fn main() {
     catalog.register_full_snapshot(1000, snapshot_dir.join("full-1000.snapshot"));
 
     let is_valid = catalog.verify_snapshot(1000, snapshot_dir, false).unwrap();
-    println!("Snapshot verification: {}\n", if is_valid { "PASSED" } else { "FAILED" });
+    println!(
+        "Snapshot verification: {}\n",
+        if is_valid { "PASSED" } else { "FAILED" }
+    );
 
     // Load snapshot into new database
     println!("--- Step 4: Load Snapshot ---");
@@ -115,14 +132,22 @@ fn main() {
 
     let load_progress = loader.get_progress();
     println!("Load progress:");
-    println!("  Loaded accounts: {}/{}", load_progress.loaded_accounts, load_progress.total_accounts);
-    println!("  Loaded bytes: {}/{}", load_progress.loaded_bytes, load_progress.total_bytes);
+    println!(
+        "  Loaded accounts: {}/{}",
+        load_progress.loaded_accounts, load_progress.total_accounts
+    );
+    println!(
+        "  Loaded bytes: {}/{}",
+        load_progress.loaded_bytes, load_progress.total_bytes
+    );
     println!("  Completion: {:.1}%", load_progress.percentage());
     println!("  Validation errors: {}\n", load_progress.validation_errors);
 
     // Restore to new database
     let new_db = AccountDatabase::new();
-    new_db.bulk_insert_published_accounts(loaded_accounts).unwrap();
+    new_db
+        .bulk_insert_published_accounts(loaded_accounts)
+        .unwrap();
 
     let restored_hash = new_db.compute_state_hash();
     println!("Restored state hash: {:016x}", restored_hash);
@@ -142,7 +167,8 @@ fn main() {
         modified_accounts.insert(pubkey, create_test_account(99999, 200));
     }
 
-    db.bulk_insert_published_accounts(modified_accounts).unwrap();
+    db.bulk_insert_published_accounts(modified_accounts)
+        .unwrap();
 
     let base_accounts_map = new_db.get_all_published_accounts();
     let start = std::time::Instant::now();
@@ -156,7 +182,10 @@ fn main() {
     println!("  Slot: {}", inc_manifest.metadata.slot);
     println!("  Base slot: {:?}", inc_manifest.metadata.incremental_base);
     println!("  Delta accounts: {}", inc_manifest.metadata.total_accounts);
-    println!("  Is incremental: {}\n", inc_manifest.metadata.is_incremental());
+    println!(
+        "  Is incremental: {}\n",
+        inc_manifest.metadata.is_incremental()
+    );
 
     // Apply incremental snapshot
     println!("--- Step 6: Apply Incremental Snapshot ---");
@@ -173,7 +202,9 @@ fn main() {
     println!("  Final lamports: {}", loaded_snapshot.total_lamports);
 
     let final_db = AccountDatabase::new();
-    final_db.bulk_insert_published_accounts(base_accounts).unwrap();
+    final_db
+        .bulk_insert_published_accounts(base_accounts)
+        .unwrap();
 
     let final_hash = final_db.compute_state_hash();
     let current_hash = db.compute_state_hash();
@@ -188,8 +219,15 @@ fn main() {
     println!("  Bulk inserts: {} accounts", db.get_account_count());
     println!("  State hash computation: O(n log n)");
     println!("\nSnapshot operations:");
-    println!("  Full snapshot: ~{} ms for 1000 accounts", duration.as_millis());
-    println!("  Incremental: ~{} ms for {} modified accounts", duration.as_millis(), modify_count);
+    println!(
+        "  Full snapshot: ~{} ms for 1000 accounts",
+        duration.as_millis()
+    );
+    println!(
+        "  Incremental: ~{} ms for {} modified accounts",
+        duration.as_millis(),
+        modify_count
+    );
     println!("  Compression: zstd level {}", config.compression_level);
     println!("  Parallel workers: {}", config.parallel_workers);
 

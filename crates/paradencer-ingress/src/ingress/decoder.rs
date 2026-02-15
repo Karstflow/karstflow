@@ -5,7 +5,7 @@ use super::domain::{
 use super::policy::IngressPolicy;
 use crate::IngressError;
 use paradencer_crypto::BatchVerifier;
-use paradencer_types::shred::{Shred, ShredParser, ShredParseError};
+use paradencer_types::shred::{Shred, ShredParseError, ShredParser};
 use std::hash::{Hash, Hasher};
 
 pub struct PacketDecoder {
@@ -92,14 +92,11 @@ impl ShredDecoder {
         match self.decode(frame) {
             ShredDecodeOutcome::Accepted(prepared) => {
                 // Then parse the shred
-                let shred = self.parse_shred(data)
-                    .map_err(DecodeError::ParseError)?;
+                let shred = self.parse_shred(data).map_err(DecodeError::ParseError)?;
 
                 Ok((prepared, shred))
             }
-            ShredDecodeOutcome::Dropped(reason) => {
-                Err(DecodeError::Dropped(reason))
-            }
+            ShredDecodeOutcome::Dropped(reason) => Err(DecodeError::Dropped(reason)),
         }
     }
 }

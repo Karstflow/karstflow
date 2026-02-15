@@ -1,6 +1,7 @@
 use super::{EpochSchedule, Inflation, LeaderSchedule, Rent};
 use paradencer_constants::ledger::{GENESIS_EPOCH, GENESIS_SLOT, TICKS_PER_SLOT};
 use paradencer_storage::{AccountDatabase, Pubkey};
+use std::sync::atomic::{AtomicU64, AtomicU8, Ordering};
 use std::sync::Arc;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -8,6 +9,25 @@ pub enum BankStatus {
     Processing,
     Frozen,
     Rooted,
+}
+
+impl BankStatus {
+    fn to_u8(self) -> u8 {
+        match self {
+            BankStatus::Processing => 0,
+            BankStatus::Frozen => 1,
+            BankStatus::Rooted => 2,
+        }
+    }
+
+    fn from_u8(val: u8) -> Self {
+        match val {
+            0 => BankStatus::Processing,
+            1 => BankStatus::Frozen,
+            2 => BankStatus::Rooted,
+            _ => BankStatus::Processing,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -18,14 +38,14 @@ pub struct SlotInfo {
     pub ticks_per_slot: u64,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct Bank {
     slot: u64,
     parent_slot: Option<u64>,
     parent_hash: [u8; 32],
 
-    status: BankStatus,
-    tick_height: u64,
+    status: AtomicU8,
+    tick_height: AtomicU64,
     max_tick_height: u64,
 
     epoch: u64,
@@ -34,14 +54,14 @@ pub struct Bank {
     leader_schedule: Arc<LeaderSchedule>,
 
     accounts: Arc<AccountDatabase>,
-    transaction_count: u64,
+    transaction_count: AtomicU64,
 
     // Fee collection
-    execution_fees: u64,
-    priority_fees: u64,
+    execution_fees: AtomicU64,
+    priority_fees: AtomicU64,
 
     // Economic configuration
-    capitalization: u64,
+    capitalization: AtomicU64,
     rent: Rent,
     inflation: Inflation,
 }
@@ -80,18 +100,18 @@ impl Bank {
             slot,
             parent_slot: None,
             parent_hash: [0u8; 32],
-            status: BankStatus::Processing,
-            tick_height,
+            status: AtomicU8::new(BankStatus::Processing.to_u8()),
+            tick_height: AtomicU64::new(tick_height),
             max_tick_height,
             epoch,
             slot_index,
             epoch_schedule,
             leader_schedule,
             accounts,
-            transaction_count: 0,
-            execution_fees: 0,
-            priority_fees: 0,
-            capitalization,
+            transaction_count: AtomicU64::new(0),
+            execution_fees: AtomicU64::new(0),
+            priority_fees: AtomicU64::new(0),
+            capitalization: AtomicU64::new(capitalization),
             rent,
             inflation,
         }
@@ -99,7 +119,7 @@ impl Bank {
 
     pub fn new_from_parent(parent: &Bank, slot: u64, leader_schedule: Arc<LeaderSchedule>) -> Self {
         let (epoch, slot_index) = parent.epoch_schedule.get_epoch_and_slot_index(slot);
-        let tick_height = parent.tick_height;
+        let tick_height = parent.tick_height.load(Ordering::Relaxed);
         let max_tick_height = tick_height.saturating_add(TICKS_PER_SLOT);
 
         let parent_hash = parent.hash();
@@ -108,18 +128,18 @@ impl Bank {
             slot,
             parent_slot: Some(parent.slot),
             parent_hash,
-            status: BankStatus::Processing,
-            tick_height,
+            status: AtomicU8::new(BankStatus::Processing.to_u8()),
+            tick_height: AtomicU64::new(tick_height),
             max_tick_height,
             epoch,
             slot_index,
             epoch_schedule: parent.epoch_schedule.clone(),
             leader_schedule,
             accounts: parent.accounts.clone(),
-            transaction_count: 0,
-            execution_fees: 0,
-            priority_fees: 0,
-            capitalization: parent.capitalization,
+            transaction_count: AtomicU64::new(0),
+            execution_fees: AtomicU64::new(0),
+            priority_fees: AtomicU64::new(0),
+            capitalization: AtomicU64::new(parent.capitalization.load(Ordering::Relaxed)),
             rent: parent.rent,
             inflation: parent.inflation,
         }
@@ -146,7 +166,7 @@ impl Bank {
     }
 
     pub fn tick_height(&self) -> u64 {
-        self.tick_height
+        self.tick_height.load(Ordering::Relaxed)
     }
 
     pub fn max_tick_height(&self) -> u64 {
@@ -154,23 +174,25 @@ impl Bank {
     }
 
     pub fn ticks_remaining(&self) -> u64 {
-        self.max_tick_height.saturating_sub(self.tick_height)
+        self.max_tick_height
+            .saturating_sub(self.tick_height.load(Ordering::Relaxed))
     }
 
     pub fn is_complete(&self) -> bool {
-        self.tick_height >= self.max_tick_height
+        self.tick_height.load(Ordering::Relaxed) >= self.max_tick_height
     }
 
     pub fn status(&self) -> BankStatus {
-        self.status
+        BankStatus::from_u8(self.status.load(Ordering::Relaxed))
     }
 
     pub fn is_frozen(&self) -> bool {
-        matches!(self.status, BankStatus::Frozen | BankStatus::Rooted)
+        let status = BankStatus::from_u8(self.status.load(Ordering::Relaxed));
+        matches!(status, BankStatus::Frozen | BankStatus::Rooted)
     }
 
     pub fn transaction_count(&self) -> u64 {
-        self.transaction_count
+        self.transaction_count.load(Ordering::Relaxed)
     }
 
     pub fn accounts(&self) -> &Arc<AccountDatabase> {
@@ -198,7 +220,7 @@ impl Bank {
         self.leader_schedule.get_leader(self.slot_index)
     }
 
-    pub fn register_tick(&mut self) -> Result<(), BankTickError> {
+    pub fn register_tick(&self) -> Result<(), BankTickError> {
         if self.is_frozen() {
             return Err(BankTickError::BankFrozen);
         }
@@ -207,88 +229,86 @@ impl Bank {
             return Err(BankTickError::MaxTickHeightReached);
         }
 
-        self.tick_height = self.tick_height.saturating_add(1);
+        self.tick_height.fetch_add(1, Ordering::Relaxed);
         Ok(())
     }
 
-    pub fn register_transaction(&mut self) -> Result<(), BankTransactionError> {
+    pub fn register_transaction(&self) -> Result<(), BankTransactionError> {
         if self.is_frozen() {
             return Err(BankTransactionError::BankFrozen);
         }
 
-        self.transaction_count = self.transaction_count.saturating_add(1);
+        self.transaction_count.fetch_add(1, Ordering::Relaxed);
         Ok(())
     }
 
-    pub fn freeze(&mut self) -> Result<(), BankFreezeError> {
+    pub fn freeze(&self) -> Result<(), BankFreezeError> {
         if self.is_frozen() {
             return Err(BankFreezeError::AlreadyFrozen);
         }
 
         if !self.is_complete() {
             return Err(BankFreezeError::IncompleteSlot {
-                current_ticks: self.tick_height,
+                current_ticks: self.tick_height(),
                 required_ticks: self.max_tick_height,
             });
         }
 
-        self.status = BankStatus::Frozen;
+        self.status
+            .store(BankStatus::Frozen.to_u8(), Ordering::Relaxed);
         Ok(())
     }
 
-    pub fn mark_rooted(&mut self) -> Result<(), BankRootError> {
-        if self.status != BankStatus::Frozen {
+    pub fn mark_rooted(&self) -> Result<(), BankRootError> {
+        if self.status() != BankStatus::Frozen {
             return Err(BankRootError::NotFrozen);
         }
 
-        self.status = BankStatus::Rooted;
+        self.status
+            .store(BankStatus::Rooted.to_u8(), Ordering::Relaxed);
         Ok(())
     }
 
     // Fee collection methods
 
     /// Add execution fee from a processed transaction.
-    pub fn add_execution_fee(&mut self, fee: u64) {
-        self.execution_fees = self.execution_fees.saturating_add(fee);
+    pub fn add_execution_fee(&self, fee: u64) {
+        self.execution_fees.fetch_add(fee, Ordering::Relaxed);
     }
 
     /// Add priority fee from a processed transaction.
-    pub fn add_priority_fee(&mut self, fee: u64) {
-        self.priority_fees = self.priority_fees.saturating_add(fee);
+    pub fn add_priority_fee(&self, fee: u64) {
+        self.priority_fees.fetch_add(fee, Ordering::Relaxed);
     }
 
     /// Get total execution fees collected this slot.
     pub fn execution_fees(&self) -> u64 {
-        self.execution_fees
+        self.execution_fees.load(Ordering::Relaxed)
     }
 
     /// Get total priority fees collected this slot.
     pub fn priority_fees(&self) -> u64 {
-        self.priority_fees
+        self.priority_fees.load(Ordering::Relaxed)
     }
 
     /// Collect accumulated fees and prepare distribution to leader.
     ///
     /// Burns 50% of execution fees to reduce total supply.
     /// Returns (total_collected, burned_amount, distributed_to_leader).
-    pub fn collect_fees(&mut self, _leader: Pubkey) -> Result<(u64, u64, u64), BankFeeError> {
+    pub fn collect_fees(&self, _leader: Pubkey) -> Result<(u64, u64, u64), BankFeeError> {
         if self.is_frozen() {
             return Err(BankFeeError::BankFrozen);
         }
 
-        let execution_fees = self.execution_fees;
-        let priority_fees = self.priority_fees;
-
-        // Reset fee counters
-        self.execution_fees = 0;
-        self.priority_fees = 0;
+        let execution_fees = self.execution_fees.swap(0, Ordering::Relaxed);
+        let priority_fees = self.priority_fees.swap(0, Ordering::Relaxed);
 
         // Burn 50% of execution fees
         let burn = execution_fees / 2;
         let fees_to_distribute = priority_fees.saturating_add(execution_fees - burn);
 
         // Reduce capitalization by burned amount
-        self.capitalization = self.capitalization.saturating_sub(burn);
+        self.capitalization.fetch_sub(burn, Ordering::Relaxed);
 
         // TODO: Actually credit the leader account when we have account modification
         // For now, just return the amounts
@@ -300,11 +320,11 @@ impl Bank {
     // Economic configuration accessors
 
     pub fn capitalization(&self) -> u64 {
-        self.capitalization
+        self.capitalization.load(Ordering::Relaxed)
     }
 
-    pub fn set_capitalization(&mut self, capitalization: u64) {
-        self.capitalization = capitalization;
+    pub fn set_capitalization(&self, capitalization: u64) {
+        self.capitalization.store(capitalization, Ordering::Relaxed);
     }
 
     pub fn rent(&self) -> &Rent {
@@ -326,7 +346,7 @@ impl Bank {
         let foundation_rate = self.inflation.foundation_rate(year);
 
         // Calculate rewards based on capitalization and rates
-        let validator_rewards = (self.capitalization as f64
+        let validator_rewards = (self.capitalization.load(Ordering::Relaxed) as f64
             * validator_rate
             * (epoch_slots as f64 / slots_per_year)) as u64;
 
@@ -337,17 +357,20 @@ impl Bank {
         use std::collections::hash_map::DefaultHasher;
         use std::hash::{Hash, Hasher};
 
+        let tick_height = self.tick_height.load(Ordering::Relaxed);
+        let transaction_count = self.transaction_count.load(Ordering::Relaxed);
+
         let mut hasher = DefaultHasher::new();
         self.slot.hash(&mut hasher);
         self.parent_hash.hash(&mut hasher);
-        self.tick_height.hash(&mut hasher);
-        self.transaction_count.hash(&mut hasher);
+        tick_height.hash(&mut hasher);
+        transaction_count.hash(&mut hasher);
 
         let hash_u64 = hasher.finish();
         let mut result = [0u8; 32];
         result[0..8].copy_from_slice(&hash_u64.to_le_bytes());
         result[8..16].copy_from_slice(&self.slot.to_le_bytes());
-        result[16..24].copy_from_slice(&self.tick_height.to_le_bytes());
+        result[16..24].copy_from_slice(&tick_height.to_le_bytes());
         result
     }
 }

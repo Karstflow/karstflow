@@ -1,5 +1,5 @@
 use super::*;
-use crate::gossip::cluster_info::{ClusterInfo, NodeId};
+use crate::gossip::{ClusterInfo, NodeId};
 use crate::repair::protocol::{RepairMessage, RepairRequest, RepairResponse, ShredData};
 use std::collections::HashMap;
 use std::net::SocketAddr;
@@ -62,17 +62,12 @@ pub struct RepairRequester {
     pending_requests: Arc<parking_lot::RwLock<HashMap<u64, PendingRequest>>>,
     request_timeout: Duration,
     request_tx: mpsc::Sender<(RepairRequest, SocketAddr, oneshot::Sender<RepairResponse>)>,
-    request_rx: Option<
-        mpsc::Receiver<(RepairRequest, SocketAddr, oneshot::Sender<RepairResponse>)>,
-    >,
+    request_rx:
+        Option<mpsc::Receiver<(RepairRequest, SocketAddr, oneshot::Sender<RepairResponse>)>>,
 }
 
 impl RepairRequester {
-    pub fn new(
-        node_id: NodeId,
-        cluster_info: Arc<ClusterInfo>,
-        socket: Arc<UdpSocket>,
-    ) -> Self {
+    pub fn new(node_id: NodeId, cluster_info: Arc<ClusterInfo>, socket: Arc<UdpSocket>) -> Self {
         let (request_tx, request_rx) = mpsc::channel(REPAIR_REQUEST_CHANNEL_SIZE);
 
         Self {
@@ -100,11 +95,12 @@ impl RepairRequester {
 
     /// Start the repair requester
     pub async fn start(&mut self) -> RepairResult<()> {
-        let request_rx = self.request_rx.take().ok_or_else(|| {
-            IngressError::Configuration {
+        let request_rx = self
+            .request_rx
+            .take()
+            .ok_or_else(|| IngressError::Configuration {
                 detail: "repair requester already started".to_string(),
-            }
-        })?;
+            })?;
 
         let send_socket = Arc::clone(&self.socket);
         let send_stats = self.stats.clone();
@@ -152,9 +148,9 @@ impl RepairRequester {
 
         match response {
             RepairResponse::Shred { shred, .. } => Ok(shred),
-            RepairResponse::Error { message, .. } => Err(IngressError::RepairRequest {
-                detail: message,
-            }),
+            RepairResponse::Error { message, .. } => {
+                Err(IngressError::RepairRequest { detail: message })
+            }
             _ => Err(IngressError::RepairRequest {
                 detail: "unexpected response type".to_string(),
             }),
@@ -178,9 +174,9 @@ impl RepairRequester {
 
         match response {
             RepairResponse::HighestShred { index, .. } => Ok(index),
-            RepairResponse::Error { message, .. } => Err(IngressError::RepairRequest {
-                detail: message,
-            }),
+            RepairResponse::Error { message, .. } => {
+                Err(IngressError::RepairRequest { detail: message })
+            }
             _ => Err(IngressError::RepairRequest {
                 detail: "unexpected response type".to_string(),
             }),
@@ -206,9 +202,9 @@ impl RepairRequester {
 
         match response {
             RepairResponse::Shreds { shreds, .. } => Ok(shreds),
-            RepairResponse::Error { message, .. } => Err(IngressError::RepairRequest {
-                detail: message,
-            }),
+            RepairResponse::Error { message, .. } => {
+                Err(IngressError::RepairRequest { detail: message })
+            }
             _ => Err(IngressError::RepairRequest {
                 detail: "unexpected response type".to_string(),
             }),
@@ -234,9 +230,9 @@ impl RepairRequester {
 
         match response {
             RepairResponse::Shreds { shreds, .. } => Ok(shreds),
-            RepairResponse::Error { message, .. } => Err(IngressError::RepairRequest {
-                detail: message,
-            }),
+            RepairResponse::Error { message, .. } => {
+                Err(IngressError::RepairRequest { detail: message })
+            }
             _ => Err(IngressError::RepairRequest {
                 detail: "unexpected response type".to_string(),
             }),
@@ -338,8 +334,7 @@ impl RepairRequester {
                                     if shred.is_some() {
                                         stats.shreds_received.fetch_add(1, Ordering::Relaxed);
                                     }
-                                } else if let RepairResponse::Shreds { ref shreds, .. } = response
-                                {
+                                } else if let RepairResponse::Shreds { ref shreds, .. } = response {
                                     stats
                                         .shreds_received
                                         .fetch_add(shreds.len() as u64, Ordering::Relaxed);

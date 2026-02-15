@@ -32,7 +32,7 @@
 // Temporarily disabled due to compilation issues in existing codebase
 // pub mod blake3;
 pub mod ed25519_batch;
-// pub mod reed_solomon;
+pub mod reed_solomon;
 // pub mod sha256;
 pub mod utils;
 
@@ -43,6 +43,7 @@ pub use errors::{CryptoError, CryptoResult};
 // Re-export commonly used types
 // pub use blake3::{Blake3Hasher, Blake3StreamingHasher};
 pub use ed25519_batch::{BatchVerifier, SignatureSet, VerificationResult};
+pub use reed_solomon::{FecError, FecReconstructor, FecResult, ReconstructedSet};
 // pub use sha256::{Sha256Hasher, Sha256StreamingHasher};
 pub use utils::{constant_time_eq, from_hex, secure_zero, to_hex, xor_bytes};
 
