@@ -995,6 +995,7 @@ dependencies = [
  "ahash",
  "dashmap",
  "paradencer-constants",
+ "paradencer-ids",
  "paradencer-sbpf",
  "paradencer-types",
  "serde",

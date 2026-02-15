@@ -18,10 +18,10 @@ Paradencer is organized as a modular workspace:
 ### Core Components
 
 - **`paradencer-consensus`** - Consensus layer (Tower BFT, Fork Choice, Stake tracking)
-- **`paradencer-sbpf`** - Solana program runtime and builtin programs
+- **`paradencer-sbpf`** - Transaction processor and builtin program executors (System/Vote/Stake)
+- **`paradencer-storage`** - Account database (MVCC), state management, integrates sbpf for execution
+- **`paradencer-execution`** - Batch execution orchestration and retry logic
 - **`paradencer-ingress`** - QUIC-based transaction ingress with signature verification
-- **`paradencer-storage`** - Account database and state management
-- **`paradencer-execution`** - Transaction execution engine
 
 ### Economic Systems
 
@@ -144,7 +144,7 @@ This software is proprietary and confidential. See `LICENSE` for full terms.
 - [x] System Program (100%)
 - [x] Vote Program (100%)
 - [x] Stake Program (100%)
-- [ ] Runtime integration
+- [x] Runtime integration (transaction processing architecture)
 - [ ] SPL Token Program
 - [ ] Network protocol implementation
 - [ ] Full validator functionality

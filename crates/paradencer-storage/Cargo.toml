@@ -9,6 +9,7 @@ authors.workspace = true
 paradencer-constants = { path = "../paradencer-constants" }
 paradencer-types = { path = "../paradencer-types" }
 paradencer-sbpf = { path = "../paradencer-sbpf" }
+paradencer-ids = { path = "../paradencer-ids" }
 thiserror.workspace = true
 serde.workspace = true
 serde_json.workspace = true

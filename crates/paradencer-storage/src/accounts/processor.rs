@@ -3,9 +3,8 @@ use super::primitives::{Account, Pubkey};
 use super::record::TransactionId;
 use super::transaction::{AccountAccessMode, Transaction, TransactionResult};
 use crate::StorageError;
-use paradencer_sbpf::{ExecutionContext, SbpfVm, StubSbpfVm};
+use paradencer_sbpf::TransactionProcessor as SbpfTransactionProcessor;
 use std::collections::HashMap;
-use std::sync::Arc;
 
 pub struct LoadedAccounts {
     accounts: HashMap<Pubkey, Account>,
@@ -55,16 +54,15 @@ impl Default for LoadedAccounts {
 
 pub struct TransactionProcessor {
     db: AccountDatabase,
-    vm: Arc<dyn SbpfVm>,
+    sbpf_processor: SbpfTransactionProcessor,
 }
 
 impl TransactionProcessor {
     pub fn new(db: AccountDatabase) -> Self {
-        Self::with_vm(db, Arc::new(StubSbpfVm::new()))
-    }
-
-    pub fn with_vm(db: AccountDatabase, vm: Arc<dyn SbpfVm>) -> Self {
-        Self { db, vm }
+        Self {
+            db,
+            sbpf_processor: SbpfTransactionProcessor::new(),
+        }
     }
 
     pub fn load_accounts(
@@ -107,9 +105,16 @@ impl TransactionProcessor {
         let loaded_accounts = self.load_accounts(xid, transaction)?;
         let signature = transaction.fee_payer().cloned().unwrap_or_default();
 
+        // Build account state HashMap for sbpf processor
+        let mut account_state = HashMap::new();
+        for (pubkey, account) in &loaded_accounts.accounts {
+            account_state.insert(*pubkey, account.clone());
+        }
+
         let mut total_compute_units = 0u64;
         let mut all_modified_accounts = HashMap::new();
 
+        // Execute each instruction using the sbpf processor
         for instruction in &transaction.instructions {
             let instruction_accounts: Vec<_> = instruction
                 .accounts
@@ -117,43 +122,34 @@ impl TransactionProcessor {
                 .filter_map(|account_ref| {
                     let account = all_modified_accounts
                         .get(&account_ref.pubkey)
-                        .or_else(|| loaded_accounts.get(&account_ref.pubkey))?
+                        .or_else(|| account_state.get(&account_ref.pubkey))?
                         .clone();
                     let writable = matches!(account_ref.mode, AccountAccessMode::Writable);
                     Some((account_ref.pubkey, account, writable))
                 })
                 .collect();
 
-            let context = ExecutionContext::new(
+            let outcome = self.sbpf_processor.process_instruction(
                 instruction.program_id,
                 instruction_accounts,
                 instruction.data.clone(),
             );
 
-            match self.vm.execute(context) {
-                Ok(outcome) => {
-                    if !outcome.success {
-                        let error_msg = outcome.logs.join("; ");
-                        return Ok(TransactionResult::failed(
-                            signature,
-                            total_compute_units.saturating_add(outcome.compute_units_consumed),
-                            error_msg,
-                        ));
-                    }
-                    total_compute_units =
-                        total_compute_units.saturating_add(outcome.compute_units_consumed);
-                    all_modified_accounts.extend(outcome.modified_accounts);
-                }
-                Err(err) => {
-                    return Ok(TransactionResult::failed(
-                        signature,
-                        total_compute_units,
-                        err.to_string(),
-                    ));
-                }
+            if !outcome.success {
+                let error_msg = outcome.logs.join("; ");
+                return Ok(TransactionResult::failed(
+                    signature,
+                    total_compute_units.saturating_add(outcome.compute_units_consumed),
+                    error_msg,
+                ));
             }
+
+            total_compute_units =
+                total_compute_units.saturating_add(outcome.compute_units_consumed);
+            all_modified_accounts.extend(outcome.modified_accounts);
         }
 
+        // Write modified accounts back to database
         for (pubkey, account) in all_modified_accounts {
             if loaded_accounts.writable_keys.contains(&pubkey) {
                 self.db.write_account(xid, pubkey, account)?;

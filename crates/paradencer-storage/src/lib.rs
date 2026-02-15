@@ -23,6 +23,6 @@ pub use types::{CommittedFragmentRecord, SnapshotImage};
 
 // Re-export sBPF types for convenience
 pub use paradencer_sbpf::{
-    ExecutionContext, ExecutionOutcome, SbpfExecutionError, SbpfExecutionResult, SbpfVm,
-    StubSbpfVm, SystemProgramExecutor,
+    ExecutionContext, ExecutionOutcome, SystemProgramExecutor,
+    TransactionProcessor as SbpfTransactionProcessor,
 };

@@ -2,6 +2,7 @@
 mod integration_tests;
 mod stake_program;
 mod system_program;
+mod transaction_processor;
 mod vm;
 mod vote_program;
 
@@ -11,6 +12,10 @@ pub use paradencer_constants::execution::{
 };
 pub use stake_program::StakeProgramExecutor;
 pub use system_program::SystemProgramExecutor;
+pub use transaction_processor::{
+    AccountMeta as InstructionAccountMeta, CompiledInstruction, Transaction, TransactionInstruction,
+    TransactionMessage, TransactionProcessor, TransactionResult,
+};
 pub use vm::{SbpfExecutionError, SbpfExecutionResult, SbpfVm, StubSbpfVm};
 pub use vote_program::VoteProgramExecutor;
 
