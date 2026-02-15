@@ -15,3 +15,10 @@ pub const STAKE_PROGRAM_ID: Pubkey = Pubkey::new([
     6, 161, 216, 23, 145, 55, 84, 42, 152, 52, 55, 189, 254, 42, 122, 178, 85, 127, 83, 92, 138, 120,
     114, 43, 104, 164, 157, 192, 0, 0, 0, 0,
 ]);
+
+/// SPL Token Program ID - handles fungible token operations
+/// TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA
+pub const TOKEN_PROGRAM_ID: Pubkey = Pubkey::new([
+    6, 221, 246, 225, 215, 101, 161, 147, 217, 203, 225, 70, 206, 235, 121, 172, 28, 180, 133, 237,
+    95, 91, 55, 145, 58, 140, 245, 133, 126, 255, 0, 169,
+]);

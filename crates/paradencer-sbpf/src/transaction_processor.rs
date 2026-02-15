@@ -1,5 +1,5 @@
-use crate::{ExecutionContext, ExecutionOutcome, StakeProgramExecutor, SystemProgramExecutor, VoteProgramExecutor};
-use paradencer_ids::{STAKE_PROGRAM_ID, SYSTEM_PROGRAM_ID, VOTE_PROGRAM_ID};
+use crate::{ExecutionContext, ExecutionOutcome, StakeProgramExecutor, SystemProgramExecutor, TokenProgramExecutor, VoteProgramExecutor};
+use paradencer_ids::{STAKE_PROGRAM_ID, SYSTEM_PROGRAM_ID, TOKEN_PROGRAM_ID, VOTE_PROGRAM_ID};
 use paradencer_types::{Account, Pubkey};
 use std::collections::HashMap;
 
@@ -57,6 +57,7 @@ pub struct TransactionProcessor {
     system_program: SystemProgramExecutor,
     vote_program: VoteProgramExecutor,
     stake_program: StakeProgramExecutor,
+    token_program: TokenProgramExecutor,
     max_compute_units: u64,
 }
 
@@ -67,6 +68,7 @@ impl TransactionProcessor {
             system_program: SystemProgramExecutor::new(150),
             vote_program: VoteProgramExecutor::new(200),
             stake_program: StakeProgramExecutor::new(250),
+            token_program: TokenProgramExecutor::new(300),
             max_compute_units: 1_400_000,
         }
     }
@@ -201,6 +203,10 @@ impl TransactionProcessor {
         } else if context.program_id == STAKE_PROGRAM_ID {
             self.stake_program.execute(context).unwrap_or_else(|err| {
                 ExecutionOutcome::failure(250, err)
+            })
+        } else if context.program_id == TOKEN_PROGRAM_ID {
+            self.token_program.execute(context).unwrap_or_else(|err| {
+                ExecutionOutcome::failure(300, err)
             })
         } else {
             // Unknown program
