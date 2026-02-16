@@ -9,8 +9,9 @@ use crate::memory::MemoryMap;
 use crate::program_cache::ProgramCache;
 use crate::syscall_dispatch::RuntimeSyscallDispatch;
 use crate::validation;
-use paradencer_constants::vm::DEFAULT_HEAP_SIZE;
+use paradencer_constants::vm::{ACCOUNT_SERIALIZED_META_SIZE, DEFAULT_HEAP_SIZE};
 use paradencer_ids::{SYSTEM_PROGRAM_ID, VOTE_PROGRAM_ID};
+use paradencer_types::{Account, AccountData, AccountMeta, Pubkey};
 use std::collections::HashMap;
 use std::sync::Mutex;
 
@@ -208,6 +209,96 @@ impl BytecodeVm {
         buf
     }
 
+    /// Deserialize accounts from the VM input region after execution.
+    ///
+    /// Reads the same format written by `serialize_accounts`, extracting
+    /// only writable accounts whose data actually changed compared to originals.
+    fn deserialize_accounts(
+        input_region: &[u8],
+        original_accounts: &[(Pubkey, Account, bool)],
+    ) -> Result<HashMap<Pubkey, Account>, SbpfExecutionError> {
+        let mut modified = HashMap::new();
+
+        if input_region.len() < 8 {
+            return Ok(modified);
+        }
+
+        let account_count = u64::from_le_bytes(input_region[..8].try_into().unwrap()) as usize;
+
+        if account_count != original_accounts.len() {
+            return Err(SbpfExecutionError::InvalidAccountData);
+        }
+
+        let mut offset = 8;
+
+        for (orig_pubkey, orig_account, orig_writable) in original_accounts {
+            // Ensure enough data for fixed metadata
+            if offset + ACCOUNT_SERIALIZED_META_SIZE > input_region.len() {
+                return Err(SbpfExecutionError::InvalidAccountData);
+            }
+
+            let _is_signer = input_region[offset];
+            let is_writable = input_region[offset + 1];
+            offset += 2;
+
+            // Read pubkey (32 bytes)
+            let mut pubkey_bytes = [0u8; 32];
+            pubkey_bytes.copy_from_slice(&input_region[offset..offset + 32]);
+            let pubkey = Pubkey::new(pubkey_bytes);
+            offset += 32;
+
+            // Read owner (32 bytes)
+            let mut owner_bytes = [0u8; 32];
+            owner_bytes.copy_from_slice(&input_region[offset..offset + 32]);
+            let owner = Pubkey::new(owner_bytes);
+            offset += 32;
+
+            // Read lamports (8 bytes)
+            let lamports = u64::from_le_bytes(input_region[offset..offset + 8].try_into().unwrap());
+            offset += 8;
+
+            // Read data length (8 bytes)
+            let data_len =
+                u64::from_le_bytes(input_region[offset..offset + 8].try_into().unwrap()) as usize;
+            offset += 8;
+
+            // Read data
+            if offset + data_len > input_region.len() {
+                return Err(SbpfExecutionError::InvalidAccountData);
+            }
+            let data = &input_region[offset..offset + data_len];
+            offset += data_len;
+
+            // Skip padding to 8-byte alignment
+            let padding = (8 - (offset % 8)) % 8;
+            offset += padding;
+
+            // Only track writable accounts that changed
+            if is_writable != 0 && *orig_writable {
+                let orig_data = orig_account.data.as_slice();
+                let changed = lamports != orig_account.meta.lamports
+                    || owner != orig_account.meta.owner
+                    || data.len() != orig_data.len()
+                    || data != orig_data;
+
+                if changed {
+                    let account = Account {
+                        meta: AccountMeta {
+                            lamports,
+                            owner,
+                            executable: orig_account.meta.executable,
+                            rent_epoch: orig_account.meta.rent_epoch,
+                        },
+                        data: AccountData::new(data.to_vec()),
+                    };
+                    modified.insert(pubkey, account);
+                }
+            }
+        }
+
+        Ok(modified)
+    }
+
     /// Execute a loaded program with the given context.
     fn run_program(
         &self,
@@ -230,13 +321,19 @@ impl BytecodeVm {
             context.compute_budget,
             &self.syscall_dispatch,
         ) {
-            Ok(result) => Ok(ExecutionOutcome {
-                success: result.return_value == 0,
-                compute_units_consumed: result.compute_units_consumed,
-                modified_accounts: HashMap::new(),
-                logs: result.logs,
-                return_data: result.return_data,
-            }),
+            Ok(result) => {
+                let modified_accounts =
+                    Self::deserialize_accounts(&result.input_region, &context.accounts)
+                        .unwrap_or_default();
+
+                Ok(ExecutionOutcome {
+                    success: result.return_value == 0,
+                    compute_units_consumed: result.compute_units_consumed,
+                    modified_accounts,
+                    logs: result.logs,
+                    return_data: result.return_data,
+                })
+            }
             Err(VmError::ComputeBudgetExceeded) => Err(SbpfExecutionError::ComputeBudgetExceeded),
             Err(e) => Err(SbpfExecutionError::ExecutionFailed {
                 message: e.to_string(),
@@ -607,5 +704,110 @@ mod tests {
         assert!(result.is_ok());
         let outcome = result.unwrap();
         assert!(outcome.success); // r0 = 0
+    }
+
+    // --- Account deserialization tests ---
+
+    #[test]
+    fn deserialize_accounts_roundtrip() {
+        let pubkey_a = Pubkey::new_unique();
+        let pubkey_b = Pubkey::new_unique();
+        let owner = Pubkey::new_unique();
+
+        let account_a = Account {
+            meta: AccountMeta {
+                lamports: 1000,
+                owner,
+                executable: false,
+                rent_epoch: 0,
+            },
+            data: AccountData::new(vec![1, 2, 3, 4]),
+        };
+        let account_b = Account {
+            meta: AccountMeta {
+                lamports: 500,
+                owner,
+                executable: false,
+                rent_epoch: 0,
+            },
+            data: AccountData::new(vec![10, 20]),
+        };
+
+        let accounts = vec![
+            (pubkey_a, account_a.clone(), true),
+            (pubkey_b, account_b.clone(), true),
+        ];
+
+        let context = ExecutionContext::new(Pubkey::new_unique(), accounts.clone(), vec![]);
+        let serialized = BytecodeVm::serialize_accounts(&context);
+
+        // Roundtrip: no modification means no accounts returned
+        let result = BytecodeVm::deserialize_accounts(&serialized, &accounts).unwrap();
+        assert!(result.is_empty(), "Unmodified accounts should not appear");
+    }
+
+    #[test]
+    fn deserialize_modified_lamports() {
+        let pubkey = Pubkey::new_unique();
+        let owner = Pubkey::new_unique();
+
+        let account = Account {
+            meta: AccountMeta {
+                lamports: 1000,
+                owner,
+                executable: false,
+                rent_epoch: 0,
+            },
+            data: AccountData::new(vec![42, 43]),
+        };
+
+        let accounts = vec![(pubkey, account.clone(), true)];
+        let context = ExecutionContext::new(Pubkey::new_unique(), accounts.clone(), vec![]);
+        let mut serialized = BytecodeVm::serialize_accounts(&context);
+
+        // Patch lamports in serialized buffer: offset is 8 (count) + 2 (flags) + 32 (pubkey) + 32 (owner) = 74
+        let lamports_offset = 8 + 2 + 32 + 32;
+        let new_lamports: u64 = 2000;
+        serialized[lamports_offset..lamports_offset + 8]
+            .copy_from_slice(&new_lamports.to_le_bytes());
+
+        let result = BytecodeVm::deserialize_accounts(&serialized, &accounts).unwrap();
+        assert_eq!(result.len(), 1);
+        let modified = result.get(&pubkey).unwrap();
+        assert_eq!(modified.meta.lamports, 2000);
+        assert_eq!(modified.data.as_slice(), &[42, 43]);
+    }
+
+    #[test]
+    fn deserialize_readonly_ignored() {
+        let pubkey = Pubkey::new_unique();
+        let owner = Pubkey::new_unique();
+
+        let account = Account {
+            meta: AccountMeta {
+                lamports: 1000,
+                owner,
+                executable: false,
+                rent_epoch: 0,
+            },
+            data: AccountData::empty(),
+        };
+
+        // Account is NOT writable
+        let accounts = vec![(pubkey, account.clone(), false)];
+        let context = ExecutionContext::new(Pubkey::new_unique(), accounts.clone(), vec![]);
+        let mut serialized = BytecodeVm::serialize_accounts(&context);
+
+        // Patch lamports even though it's read-only
+        let lamports_offset = 8 + 2 + 32 + 32;
+        let new_lamports: u64 = 9999;
+        serialized[lamports_offset..lamports_offset + 8]
+            .copy_from_slice(&new_lamports.to_le_bytes());
+
+        let result = BytecodeVm::deserialize_accounts(&serialized, &accounts).unwrap();
+        assert!(
+            result.is_empty(),
+            "Read-only account changes should be ignored"
+        );
     }
 }

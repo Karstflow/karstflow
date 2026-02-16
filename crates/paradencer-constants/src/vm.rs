@@ -286,6 +286,15 @@ pub const SBPF_VERSION_V2: u32 = 2;
 pub const SBPF_VERSION_V3: u32 = 3;
 
 // ---------------------------------------------------------------------------
+// Account serialization
+// ---------------------------------------------------------------------------
+
+/// Fixed-size metadata per account in the VM input region.
+///
+/// Layout: is_signer(1) + is_writable(1) + pubkey(32) + owner(32) + lamports(8) + data_len(8) = 82
+pub const ACCOUNT_SERIALIZED_META_SIZE: usize = 82;
+
+// ---------------------------------------------------------------------------
 // Compute metering
 // ---------------------------------------------------------------------------
 

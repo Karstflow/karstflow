@@ -89,6 +89,8 @@ pub struct VmResult {
     pub logs: Vec<String>,
     /// Return data set by the program.
     pub return_data: Option<Vec<u8>>,
+    /// Snapshot of the input region after execution, containing modified account data.
+    pub input_region: Vec<u8>,
 }
 
 // ---------------------------------------------------------------------------
@@ -943,11 +945,13 @@ pub fn execute(
                 if vm.call_stack.is_empty() {
                     // Program halt — return r0
                     let consumed = compute_budget - vm.compute_meter;
+                    let input_region = vm.memory.input_data().to_vec();
                     return Ok(VmResult {
                         return_value: vm.registers[0],
                         compute_units_consumed: consumed,
                         logs: vm.logs,
                         return_data: vm.return_data,
+                        input_region,
                     });
                 }
 
