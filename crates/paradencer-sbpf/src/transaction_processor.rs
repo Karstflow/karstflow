@@ -1,3 +1,4 @@
+use crate::vm::{BytecodeVm, SbpfVm};
 use crate::{
     AssociatedTokenProgramExecutor, BpfLoaderExecutor, ExecutionContext, ExecutionOutcome,
     MemoProgramExecutor, StakeProgramExecutor, SystemProgramExecutor, Token2022ProgramExecutor,
@@ -69,6 +70,7 @@ pub struct TransactionProcessor {
     associated_token_program: AssociatedTokenProgramExecutor,
     memo_program: MemoProgramExecutor,
     bpf_loader: BpfLoaderExecutor,
+    bytecode_vm: BytecodeVm,
     max_compute_units: u64,
 }
 
@@ -84,6 +86,7 @@ impl TransactionProcessor {
             associated_token_program: AssociatedTokenProgramExecutor::new(180),
             memo_program: MemoProgramExecutor::new(100),
             bpf_loader: BpfLoaderExecutor::new(400),
+            bytecode_vm: BytecodeVm::new(),
             max_compute_units: 1_400_000,
         }
     }
@@ -249,8 +252,34 @@ impl TransactionProcessor {
                 .execute(context)
                 .unwrap_or_else(|err| ExecutionOutcome::failure(400, err))
         } else {
-            // Unknown program
-            ExecutionOutcome::failure(0, format!("Unknown program: {}", context.program_id))
+            // Try executing as a deployed BPF program via BytecodeVm
+            self.try_execute_bpf(context)
+        }
+    }
+
+    /// Try to execute an instruction as a deployed BPF program.
+    ///
+    /// Looks for an executable program account matching the program_id,
+    /// then delegates execution to the BytecodeVm. Returns a failure
+    /// outcome if no executable program is found.
+    fn try_execute_bpf(&self, context: &ExecutionContext) -> ExecutionOutcome {
+        // Check if any account in the context is the executable program
+        let has_executable = context
+            .accounts
+            .iter()
+            .any(|(pubkey, account, _)| *pubkey == context.program_id && account.meta.executable);
+
+        if !has_executable {
+            return ExecutionOutcome::failure(
+                0,
+                format!("Unknown program: {}", context.program_id),
+            );
+        }
+
+        // Execute via BytecodeVm (handles ELF loading, validation, caching)
+        match self.bytecode_vm.execute(context.clone()) {
+            Ok(outcome) => outcome,
+            Err(e) => ExecutionOutcome::failure(0, format!("BPF execution failed: {}", e)),
         }
     }
 
@@ -327,6 +356,63 @@ mod tests {
 
         let outcome = processor.process_instruction(unknown_program, vec![], vec![]);
 
+        assert!(!outcome.success);
+        assert!(outcome.logs[0].contains("Unknown program"));
+    }
+
+    #[test]
+    fn test_process_deployed_bpf_program() {
+        use crate::elf_loader::TestElfBuilder;
+        use crate::instruction::{Instruction, Opcode};
+
+        let processor = TransactionProcessor::new();
+        let program_id = Pubkey::new_unique();
+
+        // Build a minimal ELF: mov r0, 0; exit (success)
+        let mut text = Vec::new();
+        for insn in &[
+            Instruction::new(Opcode::Mov64Imm as u8, 0, 0, 0, 0),
+            Instruction::new(Opcode::Exit as u8, 0, 0, 0, 0),
+        ] {
+            text.extend_from_slice(&insn.encode().to_le_bytes());
+        }
+        let elf = TestElfBuilder::new().text(text).build();
+
+        let program_account = Account {
+            meta: TypesAccountMeta {
+                lamports: 1,
+                owner: BPF_LOADER_PROGRAM_ID,
+                executable: true,
+                rent_epoch: 0,
+            },
+            data: AccountData::new(elf),
+        };
+
+        let accounts = vec![(program_id, program_account, false)];
+        let outcome = processor.process_instruction(program_id, accounts, vec![]);
+
+        assert!(outcome.success, "BPF program should execute successfully");
+        assert!(outcome.compute_units_consumed > 0);
+    }
+
+    #[test]
+    fn test_non_executable_unknown_program_fails() {
+        let processor = TransactionProcessor::new();
+        let program_id = Pubkey::new_unique();
+
+        // Provide a non-executable account
+        let account = Account {
+            meta: TypesAccountMeta {
+                lamports: 1,
+                owner: Pubkey::default(),
+                executable: false,
+                rent_epoch: 0,
+            },
+            data: AccountData::new(vec![1, 2, 3]),
+        };
+
+        let outcome =
+            processor.process_instruction(program_id, vec![(program_id, account, false)], vec![]);
         assert!(!outcome.success);
         assert!(outcome.logs[0].contains("Unknown program"));
     }
