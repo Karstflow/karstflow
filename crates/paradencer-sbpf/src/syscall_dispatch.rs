@@ -4,7 +4,9 @@
 /// reads arguments from VM registers r1..r5, and writes the return value to r0.
 use crate::interpreter::{SyscallDispatch, VmError, VmState};
 use paradencer_constants::syscalls;
+use sha2::{Digest, Sha256};
 use std::collections::HashMap;
+use tiny_keccak::{Hasher, Keccak};
 
 // ---------------------------------------------------------------------------
 // Syscall handler trait
@@ -81,30 +83,43 @@ impl RuntimeSyscallDispatch {
         dispatch.register_by_name("sol_memset_", Box::new(SolMemsetHandler));
 
         // Hashing
-        dispatch.register_by_name(
-            "sol_sha256",
-            Box::new(SolHashHandler {
-                cost_base: syscalls::SHA256_BASE_COST,
-                cost_per_byte: syscalls::SHA256_PER_BYTE_COST,
-            }),
-        );
-        dispatch.register_by_name(
-            "sol_keccak256",
-            Box::new(SolHashHandler {
-                cost_base: syscalls::KECCAK256_BASE_COST,
-                cost_per_byte: syscalls::KECCAK256_PER_BYTE_COST,
-            }),
-        );
-        dispatch.register_by_name(
-            "sol_blake3",
-            Box::new(SolHashHandler {
-                cost_base: syscalls::BLAKE3_BASE_COST,
-                cost_per_byte: syscalls::BLAKE3_PER_BYTE_COST,
-            }),
-        );
+        dispatch.register_by_name("sol_sha256", Box::new(SolSha256Handler));
+        dispatch.register_by_name("sol_keccak256", Box::new(SolKeccak256Handler));
+        dispatch.register_by_name("sol_blake3", Box::new(SolBlake3Handler));
 
         // Heap allocation
         dispatch.register_by_name("sol_alloc_free_", Box::new(SolAllocHandler));
+
+        // PDA operations
+        dispatch.register_by_name(
+            "sol_create_program_address",
+            Box::new(SolCreateProgramAddressHandler),
+        );
+        dispatch.register_by_name(
+            "sol_try_find_program_address",
+            Box::new(SolTryFindProgramAddressHandler),
+        );
+
+        // Return data
+        dispatch.register_by_name("sol_set_return_data", Box::new(SolSetReturnDataHandler));
+        dispatch.register_by_name("sol_get_return_data", Box::new(SolGetReturnDataHandler));
+
+        // Sysvar access
+        dispatch.register_by_name("sol_get_clock_sysvar", Box::new(SolGetClockSysvarHandler));
+        dispatch.register_by_name("sol_get_rent_sysvar", Box::new(SolGetRentSysvarHandler));
+        dispatch.register_by_name(
+            "sol_get_epoch_schedule_sysvar",
+            Box::new(SolGetEpochScheduleHandler),
+        );
+
+        // Runtime queries
+        dispatch.register_by_name("sol_get_stack_height", Box::new(SolGetStackHeightHandler));
+
+        // Crypto
+        dispatch.register_by_name(
+            "sol_secp256k1_recover",
+            Box::new(SolSecp256k1RecoverHandler),
+        );
 
         dispatch
     }
@@ -425,24 +440,519 @@ impl SyscallHandler for SolMemsetHandler {
     }
 }
 
-/// Generic hash syscall handler (sha256, keccak256, blake3).
-struct SolHashHandler {
-    cost_base: u64,
-    cost_per_byte: u64,
+/// Read hash input pairs from VM memory.
+///
+/// Hash syscalls take an array of (pointer, length) pairs. Each pair
+/// is two u64 values at the given address.
+fn read_hash_inputs(vm: &VmState, pairs_addr: u64, pair_count: usize) -> Result<Vec<u8>, VmError> {
+    let mut combined = Vec::new();
+    for i in 0..pair_count {
+        let pair_offset = pairs_addr + (i as u64) * 16;
+        let ptr_bytes = vm
+            .memory
+            .read_slice(pair_offset, 8)
+            .map_err(|e| VmError::MemoryError(e.to_string()))?;
+        let len_bytes = vm
+            .memory
+            .read_slice(pair_offset + 8, 8)
+            .map_err(|e| VmError::MemoryError(e.to_string()))?;
+
+        let ptr = u64::from_le_bytes(ptr_bytes.try_into().unwrap());
+        let len = u64::from_le_bytes(len_bytes.try_into().unwrap()) as usize;
+
+        if len > 0 {
+            let data = vm
+                .memory
+                .read_slice(ptr, len)
+                .map_err(|e| VmError::MemoryError(e.to_string()))?;
+            combined.extend_from_slice(&data);
+        }
+    }
+    Ok(combined)
 }
 
-impl SyscallHandler for SolHashHandler {
+/// sol_sha256: Compute SHA-256 hash.
+struct SolSha256Handler;
+
+impl SyscallHandler for SolSha256Handler {
     fn call(
         &self,
         vm: &mut VmState,
-        _r1: u64, // input array pointer
-        _r2: u64, // input array count
+        r1: u64, // input pairs pointer
+        r2: u64, // pair count
         _r3: u64,
-        _r4: u64, // result pointer
+        r4: u64, // result pointer (32 bytes)
         _r5: u64,
     ) -> Result<u64, VmError> {
-        // For now, just deduct the base cost
-        deduct_compute(vm, self.cost_base)?;
+        let pair_count = r2 as usize;
+        let data = read_hash_inputs(vm, r1, pair_count)?;
+
+        let cost = syscalls::SHA256_BASE_COST + syscalls::SHA256_PER_BYTE_COST * data.len() as u64;
+        deduct_compute(vm, cost)?;
+
+        let mut hasher = Sha256::new();
+        hasher.update(&data);
+        let hash: [u8; 32] = hasher.finalize().into();
+
+        vm.memory
+            .write_slice(r4, &hash)
+            .map_err(|e| VmError::MemoryError(e.to_string()))?;
+
+        Ok(0)
+    }
+}
+
+/// sol_keccak256: Compute Keccak-256 hash.
+struct SolKeccak256Handler;
+
+impl SyscallHandler for SolKeccak256Handler {
+    fn call(
+        &self,
+        vm: &mut VmState,
+        r1: u64, // input pairs pointer
+        r2: u64, // pair count
+        _r3: u64,
+        r4: u64, // result pointer (32 bytes)
+        _r5: u64,
+    ) -> Result<u64, VmError> {
+        let pair_count = r2 as usize;
+        let data = read_hash_inputs(vm, r1, pair_count)?;
+
+        let cost =
+            syscalls::KECCAK256_BASE_COST + syscalls::KECCAK256_PER_BYTE_COST * data.len() as u64;
+        deduct_compute(vm, cost)?;
+
+        let mut hasher = Keccak::v256();
+        hasher.update(&data);
+        let mut hash = [0u8; 32];
+        hasher.finalize(&mut hash);
+
+        vm.memory
+            .write_slice(r4, &hash)
+            .map_err(|e| VmError::MemoryError(e.to_string()))?;
+
+        Ok(0)
+    }
+}
+
+/// sol_blake3: Compute Blake3 hash.
+struct SolBlake3Handler;
+
+impl SyscallHandler for SolBlake3Handler {
+    fn call(
+        &self,
+        vm: &mut VmState,
+        r1: u64, // input pairs pointer
+        r2: u64, // pair count
+        _r3: u64,
+        r4: u64, // result pointer (32 bytes)
+        _r5: u64,
+    ) -> Result<u64, VmError> {
+        let pair_count = r2 as usize;
+        let data = read_hash_inputs(vm, r1, pair_count)?;
+
+        let cost = syscalls::BLAKE3_BASE_COST + syscalls::BLAKE3_PER_BYTE_COST * data.len() as u64;
+        deduct_compute(vm, cost)?;
+
+        let hash = blake3::hash(&data);
+        let hash_bytes: [u8; 32] = *hash.as_bytes();
+
+        vm.memory
+            .write_slice(r4, &hash_bytes)
+            .map_err(|e| VmError::MemoryError(e.to_string()))?;
+
+        Ok(0)
+    }
+}
+
+/// sol_create_program_address: Derive a PDA from seeds and program ID.
+struct SolCreateProgramAddressHandler;
+
+impl SyscallHandler for SolCreateProgramAddressHandler {
+    fn call(
+        &self,
+        vm: &mut VmState,
+        r1: u64, // seeds pointer (array of (ptr, len) pairs)
+        r2: u64, // seed count
+        r3: u64, // program_id pointer (32 bytes)
+        r4: u64, // result pointer (32 bytes)
+        _r5: u64,
+    ) -> Result<u64, VmError> {
+        deduct_compute(vm, syscalls::CREATE_PROGRAM_ADDRESS_COST)?;
+
+        let seed_count = r2 as usize;
+        if seed_count > syscalls::MAX_SIGNER_SEEDS {
+            return Ok(1); // Error return
+        }
+
+        // Read seeds
+        let mut seed_data = Vec::new();
+        for i in 0..seed_count {
+            let pair_offset = r1 + (i as u64) * 16;
+            let ptr_bytes = vm
+                .memory
+                .read_slice(pair_offset, 8)
+                .map_err(|e| VmError::MemoryError(e.to_string()))?;
+            let len_bytes = vm
+                .memory
+                .read_slice(pair_offset + 8, 8)
+                .map_err(|e| VmError::MemoryError(e.to_string()))?;
+
+            let ptr = u64::from_le_bytes(ptr_bytes.try_into().unwrap());
+            let len = u64::from_le_bytes(len_bytes.try_into().unwrap()) as usize;
+
+            if len > syscalls::MAX_SEED_BYTES {
+                return Ok(1);
+            }
+
+            let seed = vm
+                .memory
+                .read_slice(ptr, len)
+                .map_err(|e| VmError::MemoryError(e.to_string()))?;
+            seed_data.push(seed);
+        }
+
+        // Read program ID
+        let program_id_bytes = vm
+            .memory
+            .read_slice(r3, 32)
+            .map_err(|e| VmError::MemoryError(e.to_string()))?;
+
+        // Hash: seeds || program_id || "ProgramDerivedAddress"
+        let mut hasher = Sha256::new();
+        for seed in &seed_data {
+            hasher.update(seed);
+        }
+        hasher.update(&program_id_bytes);
+        hasher.update(b"ProgramDerivedAddress");
+        let hash: [u8; 32] = hasher.finalize().into();
+
+        // Write result
+        vm.memory
+            .write_slice(r4, &hash)
+            .map_err(|e| VmError::MemoryError(e.to_string()))?;
+
+        Ok(0)
+    }
+}
+
+/// sol_try_find_program_address: Find PDA by iterating bump seeds 255→0.
+struct SolTryFindProgramAddressHandler;
+
+impl SyscallHandler for SolTryFindProgramAddressHandler {
+    fn call(
+        &self,
+        vm: &mut VmState,
+        r1: u64, // seeds pointer
+        r2: u64, // seed count
+        r3: u64, // program_id pointer (32 bytes)
+        r4: u64, // result address pointer (32 bytes)
+        r5: u64, // result bump pointer (1 byte)
+    ) -> Result<u64, VmError> {
+        deduct_compute(vm, syscalls::FIND_PROGRAM_ADDRESS_COST)?;
+
+        let seed_count = r2 as usize;
+        if seed_count >= syscalls::MAX_SIGNER_SEEDS {
+            return Ok(1);
+        }
+
+        // Read seeds
+        let mut seed_data = Vec::new();
+        for i in 0..seed_count {
+            let pair_offset = r1 + (i as u64) * 16;
+            let ptr_bytes = vm
+                .memory
+                .read_slice(pair_offset, 8)
+                .map_err(|e| VmError::MemoryError(e.to_string()))?;
+            let len_bytes = vm
+                .memory
+                .read_slice(pair_offset + 8, 8)
+                .map_err(|e| VmError::MemoryError(e.to_string()))?;
+
+            let ptr = u64::from_le_bytes(ptr_bytes.try_into().unwrap());
+            let len = u64::from_le_bytes(len_bytes.try_into().unwrap()) as usize;
+
+            if len > syscalls::MAX_SEED_BYTES {
+                return Ok(1);
+            }
+
+            let seed = vm
+                .memory
+                .read_slice(ptr, len)
+                .map_err(|e| VmError::MemoryError(e.to_string()))?;
+            seed_data.push(seed);
+        }
+
+        // Read program ID
+        let program_id_bytes = vm
+            .memory
+            .read_slice(r3, 32)
+            .map_err(|e| VmError::MemoryError(e.to_string()))?;
+
+        // Try bumps from 255 down to 0
+        for bump in (0..=255u8).rev() {
+            deduct_compute(vm, syscalls::FIND_PROGRAM_ADDRESS_PER_ITERATION)?;
+
+            let mut hasher = Sha256::new();
+            for seed in &seed_data {
+                hasher.update(seed);
+            }
+            hasher.update([bump]);
+            hasher.update(&program_id_bytes);
+            hasher.update(b"ProgramDerivedAddress");
+            let hash: [u8; 32] = hasher.finalize().into();
+
+            // Simplified: accept on first iteration (real impl checks off-curve)
+            vm.memory
+                .write_slice(r4, &hash)
+                .map_err(|e| VmError::MemoryError(e.to_string()))?;
+            vm.memory
+                .write_slice(r5, &[bump])
+                .map_err(|e| VmError::MemoryError(e.to_string()))?;
+
+            return Ok(0);
+        }
+
+        Ok(1) // No valid PDA found
+    }
+}
+
+/// sol_set_return_data: Store return data from the executing program.
+struct SolSetReturnDataHandler;
+
+impl SyscallHandler for SolSetReturnDataHandler {
+    fn call(
+        &self,
+        vm: &mut VmState,
+        r1: u64, // data pointer
+        r2: u64, // data length
+        _r3: u64,
+        _r4: u64,
+        _r5: u64,
+    ) -> Result<u64, VmError> {
+        let len = r2 as usize;
+        let cost = syscalls::SET_RETURN_DATA_COST + syscalls::SET_RETURN_DATA_PER_BYTE * len as u64;
+        deduct_compute(vm, cost)?;
+
+        if len > syscalls::MAX_RETURN_DATA_SIZE {
+            return Ok(1); // Error
+        }
+
+        if len == 0 {
+            vm.return_data = None;
+        } else {
+            let data = vm
+                .memory
+                .read_slice(r1, len)
+                .map_err(|e| VmError::MemoryError(e.to_string()))?;
+            vm.return_data = Some(data);
+        }
+
+        Ok(0)
+    }
+}
+
+/// sol_get_return_data: Retrieve return data from last CPI call.
+struct SolGetReturnDataHandler;
+
+impl SyscallHandler for SolGetReturnDataHandler {
+    fn call(
+        &self,
+        vm: &mut VmState,
+        r1: u64, // result buffer pointer
+        r2: u64, // max buffer length
+        _r3: u64,
+        _r4: u64,
+        _r5: u64,
+    ) -> Result<u64, VmError> {
+        deduct_compute(vm, syscalls::GET_RETURN_DATA_COST)?;
+
+        match &vm.return_data {
+            Some(data) => {
+                let copy_len = (r2 as usize).min(data.len());
+                if copy_len > 0 {
+                    vm.memory
+                        .write_slice(r1, &data[..copy_len])
+                        .map_err(|e| VmError::MemoryError(e.to_string()))?;
+                }
+                Ok(data.len() as u64)
+            }
+            None => Ok(0),
+        }
+    }
+}
+
+/// sol_get_clock_sysvar: Write Clock sysvar data to VM memory.
+struct SolGetClockSysvarHandler;
+
+impl SyscallHandler for SolGetClockSysvarHandler {
+    fn call(
+        &self,
+        vm: &mut VmState,
+        r1: u64, // destination pointer
+        _r2: u64,
+        _r3: u64,
+        _r4: u64,
+        _r5: u64,
+    ) -> Result<u64, VmError> {
+        deduct_compute(vm, syscalls::GET_SYSVAR_COST)?;
+
+        // Clock sysvar: slot(8) + epoch_start_timestamp(8) + epoch(8) + leader_schedule_epoch(8) + unix_timestamp(8) = 40 bytes
+        let mut buf = [0u8; 40];
+        // All zeros = default values (slot 0, epoch 0, timestamp 0)
+
+        vm.memory
+            .write_slice(r1, &buf)
+            .map_err(|e| VmError::MemoryError(e.to_string()))?;
+
+        Ok(0)
+    }
+}
+
+/// sol_get_rent_sysvar: Write Rent sysvar data to VM memory.
+struct SolGetRentSysvarHandler;
+
+impl SyscallHandler for SolGetRentSysvarHandler {
+    fn call(
+        &self,
+        vm: &mut VmState,
+        r1: u64, // destination pointer
+        _r2: u64,
+        _r3: u64,
+        _r4: u64,
+        _r5: u64,
+    ) -> Result<u64, VmError> {
+        deduct_compute(vm, syscalls::GET_SYSVAR_COST)?;
+
+        // Rent sysvar: lamports_per_byte_year(8) + exemption_threshold(8 as f64) + burn_percent(1) = 17 bytes
+        let lamports_per_byte: u64 =
+            paradencer_constants::economics::RENT_EXEMPTION_LAMPORTS_PER_BYTE;
+        let threshold: f64 = 2.0;
+        let burn: u8 = paradencer_constants::economics::DEFAULT_FEE_BURN_PERCENT;
+
+        let mut buf = Vec::with_capacity(17);
+        buf.extend_from_slice(&lamports_per_byte.to_le_bytes());
+        buf.extend_from_slice(&threshold.to_le_bytes());
+        buf.push(burn);
+
+        vm.memory
+            .write_slice(r1, &buf)
+            .map_err(|e| VmError::MemoryError(e.to_string()))?;
+
+        Ok(0)
+    }
+}
+
+/// sol_get_epoch_schedule_sysvar: Write EpochSchedule sysvar data to VM memory.
+struct SolGetEpochScheduleHandler;
+
+impl SyscallHandler for SolGetEpochScheduleHandler {
+    fn call(
+        &self,
+        vm: &mut VmState,
+        r1: u64, // destination pointer
+        _r2: u64,
+        _r3: u64,
+        _r4: u64,
+        _r5: u64,
+    ) -> Result<u64, VmError> {
+        deduct_compute(vm, syscalls::GET_SYSVAR_COST)?;
+
+        // EpochSchedule: slots_per_epoch(8) + leader_schedule_slot_offset(8) + warmup(1) + first_normal_epoch(8) + first_normal_slot(8) = 33 bytes
+        let slots_per_epoch: u64 = paradencer_constants::ledger::SLOTS_PER_EPOCH;
+        let offset: u64 = paradencer_constants::consensus::LEADER_SCHEDULE_SLOT_OFFSET;
+
+        let mut buf = Vec::with_capacity(33);
+        buf.extend_from_slice(&slots_per_epoch.to_le_bytes());
+        buf.extend_from_slice(&offset.to_le_bytes());
+        buf.push(0); // warmup = false
+        buf.extend_from_slice(&0u64.to_le_bytes()); // first_normal_epoch
+        buf.extend_from_slice(&0u64.to_le_bytes()); // first_normal_slot
+
+        vm.memory
+            .write_slice(r1, &buf)
+            .map_err(|e| VmError::MemoryError(e.to_string()))?;
+
+        Ok(0)
+    }
+}
+
+/// sol_get_stack_height: Return current CPI call stack depth.
+struct SolGetStackHeightHandler;
+
+impl SyscallHandler for SolGetStackHeightHandler {
+    fn call(
+        &self,
+        vm: &mut VmState,
+        _r1: u64,
+        _r2: u64,
+        _r3: u64,
+        _r4: u64,
+        _r5: u64,
+    ) -> Result<u64, VmError> {
+        deduct_compute(vm, syscalls::GET_STACK_HEIGHT_COST)?;
+        Ok(vm.call_stack.len() as u64)
+    }
+}
+
+/// sol_secp256k1_recover: Recover public key from secp256k1 signature.
+struct SolSecp256k1RecoverHandler;
+
+impl SyscallHandler for SolSecp256k1RecoverHandler {
+    fn call(
+        &self,
+        vm: &mut VmState,
+        r1: u64, // hash pointer (32 bytes)
+        r2: u64, // recovery_id
+        r3: u64, // signature pointer (64 bytes)
+        r4: u64, // result pointer (64 bytes)
+        _r5: u64,
+    ) -> Result<u64, VmError> {
+        deduct_compute(vm, syscalls::SECP256K1_RECOVER_COST)?;
+
+        let recovery_id = r2 as u8;
+        if recovery_id > 3 {
+            return Ok(1); // Invalid recovery ID
+        }
+
+        let hash = vm
+            .memory
+            .read_slice(r1, 32)
+            .map_err(|e| VmError::MemoryError(e.to_string()))?;
+        let sig_bytes = vm
+            .memory
+            .read_slice(r3, 64)
+            .map_err(|e| VmError::MemoryError(e.to_string()))?;
+
+        let recid = match k256::ecdsa::RecoveryId::from_byte(recovery_id) {
+            Some(id) => id,
+            None => return Ok(2), // Invalid recovery ID
+        };
+
+        let sig = match k256::ecdsa::Signature::from_slice(&sig_bytes) {
+            Ok(s) => s,
+            Err(_) => return Ok(3), // Invalid signature
+        };
+
+        let hash_arr: [u8; 32] = hash.try_into().unwrap();
+        let recovered =
+            match k256::ecdsa::VerifyingKey::recover_from_prehash(&hash_arr, &sig, recid) {
+                Ok(key) => key,
+                Err(_) => return Ok(4), // Recovery failed
+            };
+
+        use k256::elliptic_curve::sec1::ToEncodedPoint;
+        let point = recovered.to_encoded_point(false);
+        let bytes = point.as_bytes();
+
+        if bytes.len() != 65 {
+            return Ok(5);
+        }
+
+        vm.memory
+            .write_slice(r4, &bytes[1..]) // Skip 0x04 prefix
+            .map_err(|e| VmError::MemoryError(e.to_string()))?;
+
         Ok(0)
     }
 }
@@ -618,6 +1128,75 @@ mod tests {
         assert!(ids.contains(&murmur3_hash("sol_log_")));
         assert!(ids.contains(&murmur3_hash("sol_memcpy_")));
         assert!(ids.contains(&murmur3_hash("sol_alloc_free_")));
+        assert!(ids.contains(&murmur3_hash("sol_sha256")));
+        assert!(ids.contains(&murmur3_hash("sol_keccak256")));
+        assert!(ids.contains(&murmur3_hash("sol_blake3")));
+        assert!(ids.contains(&murmur3_hash("sol_create_program_address")));
+        assert!(ids.contains(&murmur3_hash("sol_try_find_program_address")));
+        assert!(ids.contains(&murmur3_hash("sol_set_return_data")));
+        assert!(ids.contains(&murmur3_hash("sol_get_return_data")));
+        assert!(ids.contains(&murmur3_hash("sol_get_clock_sysvar")));
+        assert!(ids.contains(&murmur3_hash("sol_get_rent_sysvar")));
+        assert!(ids.contains(&murmur3_hash("sol_get_epoch_schedule_sysvar")));
+        assert!(ids.contains(&murmur3_hash("sol_get_stack_height")));
+        assert!(ids.contains(&murmur3_hash("sol_secp256k1_recover")));
         assert!(!ids.contains(&0xDEAD));
+        // 4 log + 4 mem + 3 hash + 1 alloc + 2 PDA + 2 return_data + 3 sysvar + 1 stack + 1 crypto = 21
+        assert!(
+            ids.len() >= 21,
+            "Expected >= 21 syscalls, got {}",
+            ids.len()
+        );
+    }
+
+    #[test]
+    fn sha256_handler_correct_hash() {
+        use sha2::{Digest, Sha256};
+
+        let dispatch = RuntimeSyscallDispatch::with_standard_syscalls();
+        let sha_id = murmur3_hash("sol_sha256");
+
+        // Write test data "hello" to heap, set up input pair pointing to it
+        let bytes = make_program_bytes(&[
+            // Write "hello" (5 bytes) to heap at offset 0
+            Instruction::new(Opcode::Lddw as u8, 1, 0, 0, REGION_HEAP_BASE as i32),
+            Instruction::new(0, 0, 0, 0, (REGION_HEAP_BASE >> 32) as i32),
+            // "hello" = h(0x68) e(0x65) l(0x6C) l(0x6C) o(0x6F)
+            // In LE u32: bytes[0..4] = 0x6C6C6568 ("hell"), byte[4] = 0x6F ("o")
+            Instruction::new(Opcode::Mov64Imm as u8, 2, 0, 0, 0x6C6C6568u32 as i32),
+            Instruction::new(Opcode::StxWord as u8, 1, 2, 0, 0),
+            Instruction::new(Opcode::Mov64Imm as u8, 2, 0, 0, 0x6F), // "o"
+            Instruction::new(Opcode::StxByte as u8, 1, 2, 4, 0),
+            // Store input pair at heap+64: ptr=heap_base, len=5
+            Instruction::new(Opcode::Lddw as u8, 3, 0, 0, (REGION_HEAP_BASE + 64) as i32),
+            Instruction::new(0, 0, 0, 0, ((REGION_HEAP_BASE + 64) >> 32) as i32),
+            // ptr (8 bytes) = HEAP_BASE
+            Instruction::new(Opcode::StxDword as u8, 3, 1, 0, 0), // store heap_base at pair[0]
+            Instruction::new(Opcode::Mov64Imm as u8, 4, 0, 0, 5),
+            Instruction::new(Opcode::StxDword as u8, 3, 4, 8, 0), // store len=5 at pair[1]
+            // Call sha256: r1=pair_ptr(heap+64), r2=1(count), r4=result(heap+128)
+            Instruction::new(Opcode::Lddw as u8, 1, 0, 0, (REGION_HEAP_BASE + 64) as i32),
+            Instruction::new(0, 0, 0, 0, ((REGION_HEAP_BASE + 64) >> 32) as i32),
+            Instruction::new(Opcode::Mov64Imm as u8, 2, 0, 0, 1), // 1 pair
+            Instruction::new(Opcode::Lddw as u8, 4, 0, 0, (REGION_HEAP_BASE + 128) as i32),
+            Instruction::new(0, 0, 0, 0, ((REGION_HEAP_BASE + 128) >> 32) as i32),
+            Instruction::new(Opcode::Call as u8, 0, 0, 0, sha_id as i32),
+            // Read first 8 bytes of hash into r0 for validation
+            Instruction::new(Opcode::Lddw as u8, 1, 0, 0, (REGION_HEAP_BASE + 128) as i32),
+            Instruction::new(0, 0, 0, 0, ((REGION_HEAP_BASE + 128) >> 32) as i32),
+            Instruction::new(Opcode::LdxDword as u8, 0, 1, 0, 0),
+            Instruction::new(Opcode::Exit as u8, 0, 0, 0, 0),
+        ]);
+        let program = load_raw(&bytes).unwrap();
+        let memory = MemoryMap::new(&[], TOTAL_STACK_SIZE, DEFAULT_HEAP_SIZE, vec![]);
+        let result = crate::interpreter::execute(&program, memory, 1_000_000, &dispatch).unwrap();
+
+        // Compute expected SHA-256 of "hello"
+        let mut hasher = Sha256::new();
+        hasher.update(b"hello");
+        let expected: [u8; 32] = hasher.finalize().into();
+        let expected_first_8 = u64::from_le_bytes(expected[..8].try_into().unwrap());
+
+        assert_eq!(result.return_value, expected_first_8);
     }
 }
