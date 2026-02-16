@@ -102,11 +102,10 @@ impl QuicEndpoint {
                 Self::bind_sync(config)
             }
             Err(_) => {
-                let rt = tokio::runtime::Runtime::new().map_err(|e| {
-                    IngressError::QuicEndpointBind {
+                let rt =
+                    tokio::runtime::Runtime::new().map_err(|e| IngressError::QuicEndpointBind {
                         detail: format!("failed to create runtime: {}", e),
-                    }
-                })?;
+                    })?;
                 let _guard = rt.enter();
                 Self::bind_sync(config)
             }

@@ -180,8 +180,7 @@ fn main() {
     for i in 0..iterations {
         let slot = (i / 100) as u64;
         let index = (i % 100) as u32;
-        let _hash =
-            paradencer_crypto::blake3::hash_shred_fingerprint(slot, index, &shred_data);
+        let _hash = paradencer_crypto::blake3::hash_shred_fingerprint(slot, index, &shred_data);
     }
     let duration = start.elapsed();
     let total_bytes = shred_data.len() * iterations;

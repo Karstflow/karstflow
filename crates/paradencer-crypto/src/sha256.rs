@@ -170,9 +170,7 @@ pub struct HmacSha256 {
 impl HmacSha256 {
     /// Create a new HMAC-SHA256 instance with the given key
     pub fn new(key: &[u8]) -> Self {
-        Self {
-            key: key.to_vec(),
-        }
+        Self { key: key.to_vec() }
     }
 
     /// Compute HMAC-SHA256 of the given data
@@ -181,8 +179,8 @@ impl HmacSha256 {
 
         type HmacSha256Type = Hmac<Sha256>;
 
-        let mut mac = HmacSha256Type::new_from_slice(&self.key)
-            .expect("HMAC can take key of any size");
+        let mut mac =
+            HmacSha256Type::new_from_slice(&self.key).expect("HMAC can take key of any size");
         mac.update(data);
         mac.finalize().into_bytes().into()
     }

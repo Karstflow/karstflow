@@ -330,4 +330,3 @@ impl ReplayStage {
         &self.config
     }
 }
-

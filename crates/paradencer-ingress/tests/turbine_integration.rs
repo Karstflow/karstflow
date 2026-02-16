@@ -68,7 +68,15 @@ fn test_turbine_tree_construction_small_network() {
 
     let validators: Vec<_> = (1..=10)
         .map(|i| {
-            create_validator_with_addr(create_node_id(i), 1000 * i as u64, 127, 0, 0, 1, 8000 + i as u16)
+            create_validator_with_addr(
+                create_node_id(i),
+                1000 * i as u64,
+                127,
+                0,
+                0,
+                1,
+                8000 + i as u16,
+            )
         })
         .collect();
 
@@ -395,7 +403,15 @@ async fn test_broadcaster_with_tree() {
 
     let validators: Vec<_> = (1..=20)
         .map(|i| {
-            create_validator_with_addr(create_node_id(i), 1000 * i as u64, 127, 0, 0, 1, 8000 + i as u16)
+            create_validator_with_addr(
+                create_node_id(i),
+                1000 * i as u64,
+                127,
+                0,
+                0,
+                1,
+                8000 + i as u16,
+            )
         })
         .collect();
 
@@ -506,7 +522,15 @@ fn test_tree_rebuild_detection() {
     let root_contact = create_contact_info(root_id, 127, 0, 0, 1, 8000);
     let validators: Vec<_> = (1..=10)
         .map(|i| {
-            create_validator_with_addr(create_node_id(i), 1000 * i as u64, 127, 0, 0, 1, 8000 + i as u16)
+            create_validator_with_addr(
+                create_node_id(i),
+                1000 * i as u64,
+                127,
+                0,
+                0,
+                1,
+                8000 + i as u16,
+            )
         })
         .collect();
 
@@ -530,7 +554,15 @@ fn test_layer_distribution_balance() {
 
     let validators: Vec<_> = (1..=100)
         .map(|i| {
-            create_validator_with_addr(create_node_id(i), 1000 * i as u64, 127, 0, 0, 1, 8000 + i as u16)
+            create_validator_with_addr(
+                create_node_id(i),
+                1000 * i as u64,
+                127,
+                0,
+                0,
+                1,
+                8000 + i as u16,
+            )
         })
         .collect();
 
@@ -603,7 +635,15 @@ fn test_tree_parent_child_consistency() {
 
     let validators: Vec<_> = (1..=50)
         .map(|i| {
-            create_validator_with_addr(create_node_id(i), 1000 * i as u64, 127, 0, 0, 1, 8000 + i as u16)
+            create_validator_with_addr(
+                create_node_id(i),
+                1000 * i as u64,
+                127,
+                0,
+                0,
+                1,
+                8000 + i as u16,
+            )
         })
         .collect();
 
@@ -649,7 +689,15 @@ fn test_multiple_tree_rebuilds() {
 
     let validators: Vec<_> = (1..=20)
         .map(|i| {
-            create_validator_with_addr(create_node_id(i), 1000 * i as u64, 127, 0, 0, 1, 8000 + i as u16)
+            create_validator_with_addr(
+                create_node_id(i),
+                1000 * i as u64,
+                127,
+                0,
+                0,
+                1,
+                8000 + i as u16,
+            )
         })
         .collect();
 
