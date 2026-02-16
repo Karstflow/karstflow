@@ -362,3 +362,139 @@ mod tests {
         assert_eq!(stats.transactions_extracted, 20);
     }
 }
+
+// ---------------------------------------------------------------------------
+// Wave 7: Execution adapter pipeline integration tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod execution_pipeline_tests {
+    use crate::SbpfExecutionAdapter;
+    use paradencer_consensus::{ExecutionBackend, InstructionInfo};
+    use paradencer_ids::{BPF_LOADER_PROGRAM_ID, SYSTEM_PROGRAM_ID};
+    use paradencer_sbpf::elf_loader::TestElfBuilder;
+    use paradencer_sbpf::instruction::{Instruction, Opcode};
+    use paradencer_sbpf::TransactionProcessor;
+    use paradencer_types::{Account, AccountData, AccountMeta, Pubkey};
+    use std::sync::Arc;
+
+    fn build_success_elf() -> Vec<u8> {
+        let mut text = Vec::new();
+        for insn in &[
+            Instruction::new(Opcode::Mov64Imm as u8, 0, 0, 0, 0),
+            Instruction::new(Opcode::Exit as u8, 0, 0, 0, 0),
+        ] {
+            text.extend_from_slice(&insn.encode().to_le_bytes());
+        }
+        TestElfBuilder::new().text(text).build()
+    }
+
+    #[test]
+    fn adapter_system_transfer_end_to_end() {
+        let adapter = SbpfExecutionAdapter::with_defaults();
+
+        let from = Pubkey::new_unique();
+        let to = Pubkey::new_unique();
+
+        let from_account = Account {
+            meta: AccountMeta {
+                lamports: 1_000,
+                owner: SYSTEM_PROGRAM_ID,
+                executable: false,
+                rent_epoch: 0,
+            },
+            data: AccountData::empty(),
+        };
+
+        let to_account = Account {
+            meta: AccountMeta {
+                lamports: 500,
+                owner: SYSTEM_PROGRAM_ID,
+                executable: false,
+                rent_epoch: 0,
+            },
+            data: AccountData::empty(),
+        };
+
+        let mut data = vec![2, 0, 0, 0]; // Transfer instruction
+        data.extend_from_slice(&100u64.to_le_bytes());
+
+        let info = InstructionInfo {
+            program_id: SYSTEM_PROGRAM_ID,
+            accounts: vec![(from, from_account, true), (to, to_account, true)],
+            data,
+        };
+
+        let result = adapter.execute_instruction(&info, 1_400_000);
+
+        assert!(result.success);
+        assert_eq!(result.modified_accounts.len(), 2);
+
+        let from_modified = result.modified_accounts.get(&from).unwrap();
+        assert_eq!(from_modified.meta.lamports, 900);
+
+        let to_modified = result.modified_accounts.get(&to).unwrap();
+        assert_eq!(to_modified.meta.lamports, 600);
+    }
+
+    #[test]
+    fn adapter_bpf_execution_end_to_end() {
+        let adapter = SbpfExecutionAdapter::with_defaults();
+        let program_id = Pubkey::new_unique();
+        let elf = build_success_elf();
+
+        let program_account = Account {
+            meta: AccountMeta {
+                lamports: 1,
+                owner: BPF_LOADER_PROGRAM_ID,
+                executable: true,
+                rent_epoch: 0,
+            },
+            data: AccountData::new(elf),
+        };
+
+        let info = InstructionInfo {
+            program_id,
+            accounts: vec![(program_id, program_account, false)],
+            data: vec![],
+        };
+
+        let result = adapter.execute_instruction(&info, 1_400_000);
+
+        assert!(result.success, "BPF via adapter should succeed");
+        assert!(result.compute_units_consumed > 0);
+    }
+
+    #[test]
+    fn adapter_with_shared_processor() {
+        let processor = Arc::new(TransactionProcessor::new());
+        let adapter = SbpfExecutionAdapter::new(processor);
+
+        // Run both builtin and BPF through the same shared processor
+        let from = Pubkey::new_unique();
+        let to = Pubkey::new_unique();
+
+        let from_account = Account {
+            meta: AccountMeta {
+                lamports: 5_000,
+                owner: SYSTEM_PROGRAM_ID,
+                executable: false,
+                rent_epoch: 0,
+            },
+            data: AccountData::empty(),
+        };
+        let to_account = Account::default();
+
+        let mut data = vec![2, 0, 0, 0];
+        data.extend_from_slice(&1_000u64.to_le_bytes());
+
+        let info = InstructionInfo {
+            program_id: SYSTEM_PROGRAM_ID,
+            accounts: vec![(from, from_account, true), (to, to_account, true)],
+            data,
+        };
+
+        let result = adapter.execute_instruction(&info, 1_400_000);
+        assert!(result.success, "Shared processor transfer should succeed");
+    }
+}
