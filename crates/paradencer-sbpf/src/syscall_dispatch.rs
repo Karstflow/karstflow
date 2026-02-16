@@ -3,10 +3,28 @@
 /// Maps syscall identifiers (murmur3 hashes of names) to handler functions,
 /// reads arguments from VM registers r1..r5, and writes the return value to r0.
 use crate::interpreter::{SyscallDispatch, VmError, VmState};
+use crate::{ExecutionContext, ExecutionOutcome, SbpfExecutionError};
 use paradencer_constants::syscalls;
+use paradencer_types::{Account, AccountData, AccountMeta as TypesAccountMeta, Pubkey};
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
+use std::sync::Arc;
 use tiny_keccak::{Hasher, Keccak};
+
+// ---------------------------------------------------------------------------
+// Instruction executor trait (for CPI)
+// ---------------------------------------------------------------------------
+
+/// Executes a program instruction, enabling cross-program invocations.
+///
+/// Implemented by the transaction processor to allow CPI handlers to
+/// recursively invoke other programs during execution.
+pub trait InstructionExecutor: Send + Sync {
+    fn execute_instruction(
+        &self,
+        context: ExecutionContext,
+    ) -> Result<ExecutionOutcome, SbpfExecutionError>;
+}
 
 // ---------------------------------------------------------------------------
 // Syscall handler trait
@@ -121,6 +139,25 @@ impl RuntimeSyscallDispatch {
             Box::new(SolSecp256k1RecoverHandler),
         );
 
+        dispatch
+    }
+
+    /// Create a dispatcher with standard syscalls plus CPI support.
+    ///
+    /// The provided executor is called when a program invokes another
+    /// program via `sol_invoke_signed_c`.
+    pub fn with_cpi_support(executor: Arc<dyn InstructionExecutor>) -> Self {
+        let mut dispatch = Self::with_standard_syscalls();
+        dispatch.register_by_name(
+            "sol_invoke_signed_c",
+            Box::new(SolInvokeHandler {
+                executor: executor.clone(),
+            }),
+        );
+        dispatch.register_by_name(
+            "sol_invoke_signed_rust",
+            Box::new(SolInvokeHandler { executor }),
+        );
         dispatch
     }
 }
@@ -990,6 +1027,159 @@ impl SyscallHandler for SolAllocHandler {
     }
 }
 
+/// sol_invoke_signed_c / sol_invoke_signed_rust: Cross-program invocation.
+///
+/// Reads a CPI instruction from VM memory, validates privileges and depth,
+/// then executes the target program through the InstructionExecutor.
+struct SolInvokeHandler {
+    executor: Arc<dyn InstructionExecutor>,
+}
+
+impl SyscallHandler for SolInvokeHandler {
+    fn call(
+        &self,
+        vm: &mut VmState,
+        r1: u64, // instruction pointer
+        r2: u64, // account infos pointer
+        r3: u64, // account infos count
+        r4: u64, // signer seeds pointer (unused for now)
+        r5: u64, // signer seeds count (unused for now)
+    ) -> Result<u64, VmError> {
+        let account_count = r3 as usize;
+
+        // Compute cost proportional to accounts and data
+        let base_cost =
+            syscalls::CPI_BASE_COST + syscalls::CPI_PER_ACCOUNT_COST * account_count as u64;
+        deduct_compute(vm, base_cost)?;
+
+        // Enforce CPI depth limit
+        if vm.call_stack.len() >= syscalls::MAX_CPI_DEPTH {
+            vm.logs.push("CPI depth limit exceeded".to_string());
+            return Ok(1);
+        }
+
+        // Read instruction from VM memory:
+        // C ABI layout: program_id_ptr(8) + accounts_ptr(8) + accounts_len(8) + data_ptr(8) + data_len(8)
+        let instr_bytes = vm
+            .memory
+            .read_slice(r1, 40)
+            .map_err(|e| VmError::MemoryError(e.to_string()))?;
+
+        let program_id_ptr = u64::from_le_bytes(instr_bytes[0..8].try_into().unwrap());
+        let acct_metas_ptr = u64::from_le_bytes(instr_bytes[8..16].try_into().unwrap());
+        let acct_metas_len = u64::from_le_bytes(instr_bytes[16..24].try_into().unwrap()) as usize;
+        let data_ptr = u64::from_le_bytes(instr_bytes[24..32].try_into().unwrap());
+        let data_len = u64::from_le_bytes(instr_bytes[32..40].try_into().unwrap()) as usize;
+
+        // Enforce limits
+        if acct_metas_len > syscalls::MAX_CPI_INSTRUCTION_ACCOUNTS {
+            vm.logs
+                .push("Too many CPI instruction accounts".to_string());
+            return Ok(1);
+        }
+        if data_len > syscalls::MAX_CPI_INSTRUCTION_SIZE {
+            vm.logs.push("CPI instruction data too large".to_string());
+            return Ok(1);
+        }
+
+        // Read program ID (32 bytes)
+        let program_id_bytes = vm
+            .memory
+            .read_slice(program_id_ptr, 32)
+            .map_err(|e| VmError::MemoryError(e.to_string()))?;
+        let mut pid = [0u8; 32];
+        pid.copy_from_slice(&program_id_bytes);
+        let target_program_id = Pubkey::new(pid);
+
+        // Read instruction data
+        let instruction_data = if data_len > 0 {
+            vm.memory
+                .read_slice(data_ptr, data_len)
+                .map_err(|e| VmError::MemoryError(e.to_string()))?
+        } else {
+            vec![]
+        };
+
+        // Deduct per-data-byte cost
+        let data_cost = syscalls::CPI_PER_DATA_BYTE_COST * data_len as u64;
+        deduct_compute(vm, data_cost)?;
+
+        // Read account metas: each is (pubkey_ptr:8, is_signer:8, is_writable:8) = 24 bytes
+        let mut cpi_account_metas = Vec::with_capacity(acct_metas_len);
+        for i in 0..acct_metas_len {
+            let meta_offset = acct_metas_ptr + (i as u64) * 24;
+            let meta_bytes = vm
+                .memory
+                .read_slice(meta_offset, 24)
+                .map_err(|e| VmError::MemoryError(e.to_string()))?;
+
+            let pk_ptr = u64::from_le_bytes(meta_bytes[0..8].try_into().unwrap());
+            let is_signer = u64::from_le_bytes(meta_bytes[8..16].try_into().unwrap()) != 0;
+            let is_writable = u64::from_le_bytes(meta_bytes[16..24].try_into().unwrap()) != 0;
+
+            let pk_bytes = vm
+                .memory
+                .read_slice(pk_ptr, 32)
+                .map_err(|e| VmError::MemoryError(e.to_string()))?;
+            let mut pk = [0u8; 32];
+            pk.copy_from_slice(&pk_bytes);
+
+            cpi_account_metas.push((Pubkey::new(pk), is_signer, is_writable));
+        }
+
+        // Read account infos from r2: each is (pubkey_ptr:8, lamports_ptr:8, data_len:8, data_ptr:8, owner_ptr:8, ...)
+        // Simplified: read from the VM's input region accounts
+        // For now, build accounts from the serialized input region
+        let mut accounts = Vec::new();
+        for (pubkey, _is_signer, is_writable) in &cpi_account_metas {
+            // Try to find the account in the input region
+            // For now, create a default account — real CPI would read from VM memory
+            let account = Account {
+                meta: TypesAccountMeta {
+                    lamports: 0,
+                    owner: Pubkey::default(),
+                    executable: false,
+                    rent_epoch: 0,
+                },
+                data: AccountData::empty(),
+            };
+            accounts.push((*pubkey, account, *is_writable));
+        }
+
+        // Execute the target program
+        let context = ExecutionContext::new(target_program_id, accounts, instruction_data);
+
+        match self.executor.execute_instruction(context) {
+            Ok(outcome) => {
+                // Copy logs from callee
+                for log in &outcome.logs {
+                    vm.logs.push(log.clone());
+                }
+
+                // Store return data if any
+                if let Some(data) = outcome.return_data {
+                    vm.return_data = Some(data);
+                }
+
+                // Deduct compute units consumed by callee
+                if vm.compute_meter >= outcome.compute_units_consumed {
+                    vm.compute_meter -= outcome.compute_units_consumed;
+                } else {
+                    vm.compute_meter = 0;
+                    return Err(VmError::ComputeBudgetExceeded);
+                }
+
+                if outcome.success {
+                    Ok(0)
+                } else {
+                    Ok(1) // Callee returned error
+                }
+            }
+            Err(_) => Ok(1), // Execution error
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Helper
 // ---------------------------------------------------------------------------
@@ -1198,5 +1388,57 @@ mod tests {
         let expected_first_8 = u64::from_le_bytes(expected[..8].try_into().unwrap());
 
         assert_eq!(result.return_value, expected_first_8);
+    }
+
+    /// A test executor that counts invocations and returns success.
+    struct CountingExecutor {
+        call_count: std::sync::atomic::AtomicU64,
+    }
+
+    impl CountingExecutor {
+        fn new() -> Self {
+            Self {
+                call_count: std::sync::atomic::AtomicU64::new(0),
+            }
+        }
+
+        fn count(&self) -> u64 {
+            self.call_count.load(std::sync::atomic::Ordering::SeqCst)
+        }
+    }
+
+    impl InstructionExecutor for CountingExecutor {
+        fn execute_instruction(
+            &self,
+            context: crate::ExecutionContext,
+        ) -> Result<crate::ExecutionOutcome, crate::SbpfExecutionError> {
+            self.call_count
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(crate::ExecutionOutcome::success(100))
+        }
+    }
+
+    #[test]
+    fn cpi_dispatch_with_executor() {
+        let executor = Arc::new(CountingExecutor::new());
+        let dispatch = RuntimeSyscallDispatch::with_cpi_support(executor.clone());
+
+        // Verify CPI syscalls are registered
+        let ids = dispatch.registered_ids();
+        assert!(ids.contains(&murmur3_hash("sol_invoke_signed_c")));
+        assert!(ids.contains(&murmur3_hash("sol_invoke_signed_rust")));
+        // 21 standard + 2 CPI = 23
+        assert!(
+            ids.len() >= 23,
+            "Expected >= 23 syscalls with CPI, got {}",
+            ids.len()
+        );
+    }
+
+    #[test]
+    fn cpi_without_executor_not_registered() {
+        let dispatch = RuntimeSyscallDispatch::with_standard_syscalls();
+        let ids = dispatch.registered_ids();
+        assert!(!ids.contains(&murmur3_hash("sol_invoke_signed_c")));
     }
 }

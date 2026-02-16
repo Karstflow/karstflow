@@ -7,13 +7,13 @@ use crate::elf_loader::LoadedProgram;
 use crate::interpreter::{self, VmError};
 use crate::memory::MemoryMap;
 use crate::program_cache::ProgramCache;
-use crate::syscall_dispatch::RuntimeSyscallDispatch;
+use crate::syscall_dispatch::{InstructionExecutor, RuntimeSyscallDispatch};
 use crate::validation;
 use paradencer_constants::vm::{ACCOUNT_SERIALIZED_META_SIZE, DEFAULT_HEAP_SIZE};
 use paradencer_ids::{SYSTEM_PROGRAM_ID, VOTE_PROGRAM_ID};
 use paradencer_types::{Account, AccountData, AccountMeta, Pubkey};
 use std::collections::HashMap;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SbpfExecutionError {
@@ -138,6 +138,14 @@ impl BytecodeVm {
         Self {
             cache: Mutex::new(ProgramCache::new()),
             syscall_dispatch: RuntimeSyscallDispatch::with_standard_syscalls(),
+        }
+    }
+
+    /// Create a VM with CPI support, using the given executor for nested invocations.
+    pub fn with_cpi(executor: Arc<dyn InstructionExecutor>) -> Self {
+        Self {
+            cache: Mutex::new(ProgramCache::new()),
+            syscall_dispatch: RuntimeSyscallDispatch::with_cpi_support(executor),
         }
     }
 
