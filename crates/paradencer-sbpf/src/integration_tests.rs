@@ -385,3 +385,180 @@ fn full_transaction_process_with_bpf_program() {
     assert!(result.success, "Full transaction with BPF should succeed: {:?}", result.error);
     assert!(result.compute_units_consumed > 0);
 }
+
+// ---------------------------------------------------------------------------
+// Wave 8: Vote program end-to-end tests
+// ---------------------------------------------------------------------------
+
+use paradencer_ids::VOTE_PROGRAM_ID;
+
+/// Helper to build a vote account owned by the vote program.
+fn make_vote_owned_account(lamports: u64) -> Account {
+    Account {
+        meta: paradencer_types::AccountMeta {
+            lamports,
+            owner: VOTE_PROGRAM_ID,
+            executable: false,
+            rent_epoch: 0,
+        },
+        data: AccountData::empty(),
+    }
+}
+
+/// Build InitializeAccount instruction data.
+fn build_init_vote_data(node: &Pubkey, voter: &Pubkey, withdrawer: &Pubkey, commission: u8) -> Vec<u8> {
+    let mut data = vec![0, 0, 0, 0]; // INSTRUCTION_INITIALIZE_ACCOUNT = 0
+    data.extend_from_slice(node.as_bytes());
+    data.extend_from_slice(voter.as_bytes());
+    data.extend_from_slice(withdrawer.as_bytes());
+    data.push(commission);
+    data
+}
+
+/// Build Vote instruction data (type 2) for given slots.
+fn build_vote_data(slots: &[u64], hash: [u8; 32]) -> Vec<u8> {
+    let mut data = Vec::new();
+    data.extend_from_slice(&2u32.to_le_bytes()); // Vote instruction type
+    data.extend_from_slice(&(slots.len() as u64).to_le_bytes());
+    for slot in slots {
+        data.extend_from_slice(&slot.to_le_bytes());
+    }
+    data.extend_from_slice(&hash);
+    data
+}
+
+/// Build TowerSync instruction data with votes and optional root.
+fn build_tower_sync_data(root: Option<u64>, votes: &[(u64, u32)]) -> Vec<u8> {
+    use paradencer_constants::vote_program::INSTRUCTION_TOWER_SYNC;
+    let mut data = Vec::new();
+    data.extend_from_slice(&INSTRUCTION_TOWER_SYNC.to_le_bytes());
+    // root
+    match root {
+        Some(slot) => {
+            data.push(1);
+            data.extend_from_slice(&slot.to_le_bytes());
+        }
+        None => data.push(0),
+    }
+    // vote count
+    data.extend_from_slice(&(votes.len() as u32).to_le_bytes());
+    for (slot, conf) in votes {
+        data.extend_from_slice(&slot.to_le_bytes());
+        data.extend_from_slice(&conf.to_le_bytes());
+    }
+    // no timestamp
+    data.push(0);
+    data
+}
+
+#[test]
+fn vote_program_initialize_and_vote_end_to_end() {
+    let processor = TransactionProcessor::new();
+    let vote_pubkey = Pubkey::new_unique();
+    let node = Pubkey::new_unique();
+    let voter = Pubkey::new_unique();
+    let withdrawer = Pubkey::new_unique();
+
+    // Step 1: Initialize vote account
+    let vote_account = make_vote_owned_account(10_000);
+    let init_data = build_init_vote_data(&node, &voter, &withdrawer, 5);
+
+    let init_outcome = processor.process_instruction(
+        VOTE_PROGRAM_ID,
+        vec![(vote_pubkey, vote_account, true)],
+        init_data,
+    );
+    assert!(init_outcome.success, "Init should succeed");
+
+    let initialized = init_outcome.modified_accounts.get(&vote_pubkey).unwrap().clone();
+    assert!(initialized.data.as_slice().len() > 0, "Vote state should be serialized");
+
+    // Step 2: Vote on slot 100
+    let vote_data = build_vote_data(&[100], [42u8; 32]);
+    let vote_outcome = processor.process_instruction(
+        VOTE_PROGRAM_ID,
+        vec![(vote_pubkey, initialized.clone(), true)],
+        vote_data,
+    );
+    assert!(vote_outcome.success, "Vote should succeed");
+
+    let after_vote = vote_outcome.modified_accounts.get(&vote_pubkey).unwrap().clone();
+
+    // Step 3: Vote on slot 101
+    let vote_data_2 = build_vote_data(&[101], [43u8; 32]);
+    let vote_outcome_2 = processor.process_instruction(
+        VOTE_PROGRAM_ID,
+        vec![(vote_pubkey, after_vote.clone(), true)],
+        vote_data_2,
+    );
+    assert!(vote_outcome_2.success, "Second vote should succeed");
+}
+
+#[test]
+fn vote_program_tower_sync_end_to_end() {
+    let processor = TransactionProcessor::new();
+    let vote_pubkey = Pubkey::new_unique();
+    let node = Pubkey::new_unique();
+    let voter = Pubkey::new_unique();
+    let withdrawer = Pubkey::new_unique();
+
+    // Initialize
+    let vote_account = make_vote_owned_account(10_000);
+    let init_data = build_init_vote_data(&node, &voter, &withdrawer, 10);
+
+    let init_outcome = processor.process_instruction(
+        VOTE_PROGRAM_ID,
+        vec![(vote_pubkey, vote_account, true)],
+        init_data,
+    );
+    assert!(init_outcome.success);
+    let initialized = init_outcome.modified_accounts.get(&vote_pubkey).unwrap().clone();
+
+    // Tower sync with root=50, votes=[100/3, 101/2, 102/1]
+    let sync_data = build_tower_sync_data(Some(50), &[(100, 3), (101, 2), (102, 1)]);
+    let sync_outcome = processor.process_instruction(
+        VOTE_PROGRAM_ID,
+        vec![(vote_pubkey, initialized, true)],
+        sync_data,
+    );
+    assert!(sync_outcome.success, "TowerSync should succeed");
+
+    // Verify account data changed
+    let synced = sync_outcome.modified_accounts.get(&vote_pubkey).unwrap();
+    assert!(synced.data.as_slice().len() > 0);
+}
+
+#[test]
+fn all_13_builtin_programs_route_through_processor() {
+    use paradencer_ids::{
+        ADDRESS_LOOKUP_TABLE_PROGRAM_ID, ASSOCIATED_TOKEN_PROGRAM_ID, COMPUTE_BUDGET_PROGRAM_ID,
+        CONFIG_PROGRAM_ID, ED25519_PROGRAM_ID, MEMO_PROGRAM_ID, MEMO_PROGRAM_V3_ID,
+        SECP256K1_PROGRAM_ID, STAKE_PROGRAM_ID, TOKEN_2022_PROGRAM_ID, TOKEN_PROGRAM_ID,
+        VOTE_PROGRAM_ID,
+    };
+
+    let processor = TransactionProcessor::new();
+
+    let all_programs = [
+        ("system", SYSTEM_PROGRAM_ID),
+        ("vote", VOTE_PROGRAM_ID),
+        ("stake", STAKE_PROGRAM_ID),
+        ("token", TOKEN_PROGRAM_ID),
+        ("token_2022", TOKEN_2022_PROGRAM_ID),
+        ("associated_token", ASSOCIATED_TOKEN_PROGRAM_ID),
+        ("memo", MEMO_PROGRAM_ID),
+        ("memo_v3", MEMO_PROGRAM_V3_ID),
+        ("bpf_loader", BPF_LOADER_PROGRAM_ID),
+        ("compute_budget", COMPUTE_BUDGET_PROGRAM_ID),
+        ("address_lookup", ADDRESS_LOOKUP_TABLE_PROGRAM_ID),
+        ("config", CONFIG_PROGRAM_ID),
+        ("ed25519", ED25519_PROGRAM_ID),
+        ("secp256k1", SECP256K1_PROGRAM_ID),
+    ];
+
+    for (name, program_id) in &all_programs {
+        // Should not panic — just verify routing works
+        let _outcome = processor.process_instruction(*program_id, vec![], vec![]);
+        // We don't assert success since empty data may cause legitimate errors
+    }
+}

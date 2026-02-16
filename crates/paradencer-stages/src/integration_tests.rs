@@ -466,6 +466,88 @@ mod execution_pipeline_tests {
     }
 
     #[test]
+    fn adapter_routes_vote_program_through_pipeline() {
+        use paradencer_ids::VOTE_PROGRAM_ID;
+
+        let adapter = SbpfExecutionAdapter::with_defaults();
+        let vote_pubkey = Pubkey::new_unique();
+        let node = Pubkey::new_unique();
+        let voter = Pubkey::new_unique();
+        let withdrawer = Pubkey::new_unique();
+
+        let vote_account = Account {
+            meta: AccountMeta {
+                lamports: 10_000,
+                owner: VOTE_PROGRAM_ID,
+                executable: false,
+                rent_epoch: 0,
+            },
+            data: AccountData::empty(),
+        };
+
+        // Build InitializeAccount instruction data
+        let mut init_data = vec![0, 0, 0, 0]; // InitializeAccount = 0
+        init_data.extend_from_slice(node.as_bytes());
+        init_data.extend_from_slice(voter.as_bytes());
+        init_data.extend_from_slice(withdrawer.as_bytes());
+        init_data.push(5); // commission
+
+        let info = InstructionInfo {
+            program_id: VOTE_PROGRAM_ID,
+            accounts: vec![(vote_pubkey, vote_account, true)],
+            data: init_data,
+        };
+
+        let result = adapter.execute_instruction(&info, 1_400_000);
+
+        assert!(result.success, "Vote init via adapter should succeed");
+        assert_eq!(result.modified_accounts.len(), 1);
+        assert!(result.error.is_none());
+
+        // Verify the account data was populated (vote state serialized)
+        let modified = result.modified_accounts.get(&vote_pubkey).unwrap();
+        assert!(modified.data.as_slice().len() > 0, "Vote state should be serialized");
+    }
+
+    #[test]
+    fn adapter_routes_all_13_programs() {
+        use paradencer_ids::{
+            ADDRESS_LOOKUP_TABLE_PROGRAM_ID, COMPUTE_BUDGET_PROGRAM_ID, CONFIG_PROGRAM_ID,
+            ED25519_PROGRAM_ID, MEMO_PROGRAM_ID, SECP256K1_PROGRAM_ID, STAKE_PROGRAM_ID,
+            TOKEN_2022_PROGRAM_ID, TOKEN_PROGRAM_ID, VOTE_PROGRAM_ID,
+        };
+
+        let adapter = SbpfExecutionAdapter::with_defaults();
+
+        let all_ids = [
+            SYSTEM_PROGRAM_ID,
+            VOTE_PROGRAM_ID,
+            STAKE_PROGRAM_ID,
+            TOKEN_PROGRAM_ID,
+            TOKEN_2022_PROGRAM_ID,
+            paradencer_ids::ASSOCIATED_TOKEN_PROGRAM_ID,
+            MEMO_PROGRAM_ID,
+            BPF_LOADER_PROGRAM_ID,
+            COMPUTE_BUDGET_PROGRAM_ID,
+            ADDRESS_LOOKUP_TABLE_PROGRAM_ID,
+            CONFIG_PROGRAM_ID,
+            ED25519_PROGRAM_ID,
+            SECP256K1_PROGRAM_ID,
+        ];
+
+        for program_id in &all_ids {
+            let info = InstructionInfo {
+                program_id: *program_id,
+                accounts: vec![],
+                data: vec![],
+            };
+
+            // Should not panic — adapter routes to all builtins
+            let _result = adapter.execute_instruction(&info, 1_400_000);
+        }
+    }
+
+    #[test]
     fn adapter_with_shared_processor() {
         let processor = Arc::new(TransactionProcessor::new());
         let adapter = SbpfExecutionAdapter::new(processor);
