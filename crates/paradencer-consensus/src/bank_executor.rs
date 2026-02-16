@@ -570,6 +570,7 @@ fn extract_voted_slot(data: &[u8]) -> Option<u64> {
 mod tests {
     use super::*;
     use crate::{EpochSchedule, LeaderSchedule};
+    use paradencer_constants::execution::MAX_COMPUTE_UNITS;
     use paradencer_storage::Pubkey;
     use std::sync::Arc;
 
@@ -734,7 +735,7 @@ mod tests {
         store_test_account(&bank, &payer, &payer_account);
 
         let tx = create_simple_transaction(payer, program, vec![payer], vec![]);
-        let result = bank.process_transaction(&tx, &backend, 1_400_000);
+        let result = bank.process_transaction(&tx, &backend, MAX_COMPUTE_UNITS);
 
         assert!(
             result.success,
@@ -756,7 +757,7 @@ mod tests {
 
         // Payer has 0 lamports — can't pay fee
         let tx = create_simple_transaction(payer, program, vec![payer], vec![]);
-        let result = bank.process_transaction(&tx, &backend, 1_400_000);
+        let result = bank.process_transaction(&tx, &backend, MAX_COMPUTE_UNITS);
 
         assert!(!result.success);
         assert!(matches!(
@@ -777,7 +778,7 @@ mod tests {
         store_test_account(&bank, &payer, &payer_account);
 
         let tx = create_simple_transaction(payer, program, vec![payer], vec![]);
-        let result = bank.process_transaction(&tx, &backend, 1_400_000);
+        let result = bank.process_transaction(&tx, &backend, MAX_COMPUTE_UNITS);
 
         assert!(!result.success);
         assert!(matches!(
@@ -809,7 +810,7 @@ mod tests {
             transfer_amount.to_le_bytes().to_vec(),
         );
 
-        let result = bank.process_transaction(&tx, &backend, 1_400_000);
+        let result = bank.process_transaction(&tx, &backend, MAX_COMPUTE_UNITS);
         assert!(
             result.success,
             "transfer should succeed: {:?}",
@@ -840,7 +841,7 @@ mod tests {
             .map(|_| create_simple_transaction(payer, program, vec![payer], vec![]))
             .collect();
 
-        let summary = bank.process_transactions(&transactions, &backend, 1_400_000);
+        let summary = bank.process_transactions(&transactions, &backend, MAX_COMPUTE_UNITS);
 
         assert_eq!(summary.total, 5);
         assert_eq!(summary.succeeded, 5);
@@ -867,7 +868,7 @@ mod tests {
         store_test_account(&bank, &payer, &payer_account);
 
         let tx = create_simple_transaction(payer, program, vec![payer], vec![]);
-        let result = bank.process_transaction(&tx, &backend, 1_400_000);
+        let result = bank.process_transaction(&tx, &backend, MAX_COMPUTE_UNITS);
 
         assert!(!result.success);
         assert!(matches!(
@@ -967,7 +968,7 @@ mod tests {
             num_signatures: 1,
         };
 
-        let result = bank.process_transaction(&tx, &backend, 1_400_000);
+        let result = bank.process_transaction(&tx, &backend, MAX_COMPUTE_UNITS);
         assert!(result.success, "vote tx should succeed: {:?}", result.error);
         assert_eq!(result.vote_updates.len(), 1);
         assert_eq!(result.vote_updates[0].vote_account, vote_account);
@@ -986,7 +987,7 @@ mod tests {
         store_test_account(&bank, &payer, &payer_account);
 
         let tx = create_simple_transaction(payer, program, vec![payer], vec![]);
-        let result = bank.process_transaction(&tx, &backend, 1_400_000);
+        let result = bank.process_transaction(&tx, &backend, MAX_COMPUTE_UNITS);
 
         assert!(result.success);
         assert!(result.vote_updates.is_empty());
@@ -1028,7 +1029,7 @@ mod tests {
         let other_program = Pubkey::new_unique();
         transactions.push(create_simple_transaction(payer, other_program, vec![payer], vec![]));
 
-        let summary = bank.process_transactions(&transactions, &backend, 1_400_000);
+        let summary = bank.process_transactions(&transactions, &backend, MAX_COMPUTE_UNITS);
 
         assert_eq!(summary.succeeded, 3);
         assert_eq!(summary.vote_updates.len(), 2);

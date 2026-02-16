@@ -19,6 +19,7 @@ paradencer-mesh = { path = "../paradencer-mesh" }
 paradencer-types = { path = "../paradencer-types" }
 paradencer-crypto = { path = "../paradencer-crypto" }
 paradencer-sbpf = { path = "../paradencer-sbpf" }
+paradencer-constants = { path = "../paradencer-constants" }
 reed-solomon-erasure = "6.0"
 ed25519-dalek = { version = "2.1", features = ["rand_core"] }
 blake3.workspace = true

@@ -64,6 +64,7 @@ impl ExecutionBackend for SbpfExecutionAdapter {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use paradencer_constants::execution::MAX_COMPUTE_UNITS;
     use paradencer_ids::SYSTEM_PROGRAM_ID;
     use paradencer_types::{Account, AccountData, AccountMeta, Pubkey};
 
@@ -104,7 +105,7 @@ mod tests {
             data,
         };
 
-        let result = adapter.execute_instruction(&info, 1_400_000);
+        let result = adapter.execute_instruction(&info, MAX_COMPUTE_UNITS);
 
         assert!(result.success);
         assert_eq!(result.modified_accounts.len(), 2);
@@ -123,7 +124,7 @@ mod tests {
             data: vec![],
         };
 
-        let result = adapter.execute_instruction(&info, 1_400_000);
+        let result = adapter.execute_instruction(&info, MAX_COMPUTE_UNITS);
 
         assert!(!result.success);
         assert!(result.error.is_some());
@@ -164,7 +165,7 @@ mod tests {
             data: vec![],
         };
 
-        let result = adapter.execute_instruction(&info, 1_400_000);
+        let result = adapter.execute_instruction(&info, MAX_COMPUTE_UNITS);
 
         assert!(result.success, "BPF program via adapter should succeed");
         assert!(result.compute_units_consumed > 0);

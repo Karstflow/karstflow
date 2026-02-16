@@ -1457,6 +1457,7 @@ dependencies = [
  "blake3",
  "ed25519-dalek",
  "paradencer-consensus",
+ "paradencer-constants",
  "paradencer-crypto",
  "paradencer-execution",
  "paradencer-ids",

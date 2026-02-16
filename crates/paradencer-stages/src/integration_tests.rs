@@ -371,6 +371,7 @@ mod tests {
 mod execution_pipeline_tests {
     use crate::SbpfExecutionAdapter;
     use paradencer_consensus::{ExecutionBackend, InstructionInfo};
+    use paradencer_constants::execution::MAX_COMPUTE_UNITS;
     use paradencer_ids::{BPF_LOADER_PROGRAM_ID, SYSTEM_PROGRAM_ID};
     use paradencer_sbpf::elf_loader::TestElfBuilder;
     use paradencer_sbpf::instruction::{Instruction, Opcode};
@@ -425,7 +426,7 @@ mod execution_pipeline_tests {
             data,
         };
 
-        let result = adapter.execute_instruction(&info, 1_400_000);
+        let result = adapter.execute_instruction(&info, MAX_COMPUTE_UNITS);
 
         assert!(result.success);
         assert_eq!(result.modified_accounts.len(), 2);
@@ -459,7 +460,7 @@ mod execution_pipeline_tests {
             data: vec![],
         };
 
-        let result = adapter.execute_instruction(&info, 1_400_000);
+        let result = adapter.execute_instruction(&info, MAX_COMPUTE_UNITS);
 
         assert!(result.success, "BPF via adapter should succeed");
         assert!(result.compute_units_consumed > 0);
@@ -498,7 +499,7 @@ mod execution_pipeline_tests {
             data: init_data,
         };
 
-        let result = adapter.execute_instruction(&info, 1_400_000);
+        let result = adapter.execute_instruction(&info, MAX_COMPUTE_UNITS);
 
         assert!(result.success, "Vote init via adapter should succeed");
         assert_eq!(result.modified_accounts.len(), 1);
@@ -543,7 +544,7 @@ mod execution_pipeline_tests {
             };
 
             // Should not panic — adapter routes to all builtins
-            let _result = adapter.execute_instruction(&info, 1_400_000);
+            let _result = adapter.execute_instruction(&info, MAX_COMPUTE_UNITS);
         }
     }
 
@@ -576,7 +577,7 @@ mod execution_pipeline_tests {
             data,
         };
 
-        let result = adapter.execute_instruction(&info, 1_400_000);
+        let result = adapter.execute_instruction(&info, MAX_COMPUTE_UNITS);
         assert!(result.success, "Shared processor transfer should succeed");
     }
 }

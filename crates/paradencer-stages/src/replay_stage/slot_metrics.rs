@@ -5,6 +5,7 @@
 /// - Transaction throughput tracking
 /// - Resource utilization monitoring
 /// - Performance degradation detection
+use paradencer_constants::execution::MAX_COMPUTE_UNITS;
 use std::collections::{HashMap, VecDeque};
 use std::time::{Duration, Instant};
 
@@ -549,7 +550,7 @@ impl Default for PerformanceThresholds {
             max_slot_time_micros: 500_000, // 500ms
             min_success_rate: 0.95,        // 95%
             min_tps: 1000.0,
-            max_compute_per_tx: 1_400_000,
+            max_compute_per_tx: MAX_COMPUTE_UNITS,
         }
     }
 }

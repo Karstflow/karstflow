@@ -4,7 +4,7 @@ use crate::{
     ComputeBudgetProgramExecutor, ConfigProgramExecutor, Ed25519PrecompileExecutor,
     ExecutionContext, ExecutionOutcome, MemoProgramExecutor, Secp256k1PrecompileExecutor,
     StakeProgramExecutor, SystemProgramExecutor, Token2022ProgramExecutor, TokenProgramExecutor,
-    VoteProgramExecutor,
+    VoteProgramExecutor, MAX_COMPUTE_UNITS,
 };
 use paradencer_ids::{
     ADDRESS_LOOKUP_TABLE_PROGRAM_ID, ASSOCIATED_TOKEN_PROGRAM_ID, BPF_LOADER_PROGRAM_ID,
@@ -101,7 +101,7 @@ impl TransactionProcessor {
             ed25519_precompile: Ed25519PrecompileExecutor::new(200),
             secp256k1_precompile: Secp256k1PrecompileExecutor::new(200),
             bytecode_vm: BytecodeVm::new(),
-            max_compute_units: 1_400_000,
+            max_compute_units: MAX_COMPUTE_UNITS,
         }
     }
 
