@@ -5,6 +5,7 @@
 /// account loading, fee validation, instruction execution, account writeback,
 /// and fee collection.
 use crate::{Bank, BankStatus, FeeCalculator};
+use paradencer_ids::VOTE_PROGRAM_ID;
 use paradencer_storage::{Account, AccountDatabase, Pubkey, TransactionId};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -99,6 +100,8 @@ pub struct TransactionExecutionResult {
     pub logs: Vec<String>,
     /// Error description when `success` is false.
     pub error: Option<TransactionExecutionError>,
+    /// Vote updates extracted from vote program instructions.
+    pub vote_updates: Vec<VoteUpdate>,
 }
 
 /// Errors that can occur during transaction execution.
@@ -145,6 +148,20 @@ impl std::fmt::Display for TransactionExecutionError {
 
 impl std::error::Error for TransactionExecutionError {}
 
+/// Information extracted from a successful vote transaction.
+///
+/// After the execution backend processes a vote program instruction,
+/// this struct captures the vote account key and the slot that was
+/// voted on, allowing the consensus layer to update stake-weighted
+/// aggregation without re-parsing account data.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VoteUpdate {
+    /// The vote account that cast the vote.
+    pub vote_account: Pubkey,
+    /// The slot that was voted on (highest slot in the instruction).
+    pub voted_slot: Option<u64>,
+}
+
 /// Summary of a batch of transaction executions.
 #[derive(Debug, Clone, Default)]
 pub struct BatchExecutionSummary {
@@ -160,6 +177,8 @@ pub struct BatchExecutionSummary {
     pub total_fees: u64,
     /// Per-transaction results.
     pub results: Vec<TransactionExecutionResult>,
+    /// All vote updates extracted from successful vote transactions.
+    pub vote_updates: Vec<VoteUpdate>,
 }
 
 // ---------------------------------------------------------------------------
@@ -192,6 +211,7 @@ impl Bank {
                 modified_accounts: HashMap::new(),
                 logs: vec![],
                 error: Some(TransactionExecutionError::BankNotProcessing),
+                vote_updates: vec![],
             };
         }
 
@@ -206,6 +226,7 @@ impl Bank {
                     modified_accounts: HashMap::new(),
                     logs: vec![],
                     error: Some(err),
+                    vote_updates: vec![],
                 };
             }
         };
@@ -225,6 +246,7 @@ impl Bank {
                     modified_accounts: HashMap::new(),
                     logs: vec![],
                     error: Some(TransactionExecutionError::FeePayerNotFound),
+                    vote_updates: vec![],
                 };
             }
         };
@@ -240,6 +262,7 @@ impl Bank {
                     required: fee,
                     available: payer_account.meta.lamports,
                 }),
+                vote_updates: vec![],
             };
         }
 
@@ -276,6 +299,7 @@ impl Bank {
                                 instruction.program_id_index
                             ),
                         }),
+                        vote_updates: vec![],
                     };
                 }
             };
@@ -296,6 +320,7 @@ impl Bank {
                                 index: idx,
                                 message: format!("invalid account index {ai}"),
                             }),
+                            vote_updates: vec![],
                         };
                     }
                 };
@@ -339,6 +364,7 @@ impl Bank {
                         index: idx,
                         message: result.error.unwrap_or_else(|| "unknown error".to_string()),
                     }),
+                    vote_updates: vec![],
                 };
             }
 
@@ -359,6 +385,7 @@ impl Bank {
                         consumed: total_compute,
                         limit: compute_limit,
                     }),
+                    vote_updates: vec![],
                 };
             }
         }
@@ -379,6 +406,9 @@ impl Bank {
         // Step 7: Record transaction
         let _ = self.register_transaction();
 
+        // Step 8: Extract vote updates from successful vote transactions
+        let vote_updates = self.extract_vote_updates(transaction);
+
         TransactionExecutionResult {
             success: true,
             compute_units_consumed: total_compute,
@@ -386,6 +416,7 @@ impl Bank {
             modified_accounts: modified,
             logs: all_logs,
             error: None,
+            vote_updates,
         }
     }
 
@@ -408,6 +439,7 @@ impl Bank {
             let result = self.process_transaction(tx, backend, compute_limit);
             if result.success {
                 summary.succeeded += 1;
+                summary.vote_updates.extend(result.vote_updates.clone());
             } else {
                 summary.failed += 1;
             }
@@ -435,6 +467,55 @@ impl Bank {
         Ok(loaded)
     }
 
+    /// Extract vote updates from a successfully executed transaction.
+    ///
+    /// Scans instructions for vote program invocations and extracts the
+    /// vote account pubkey and the voted slot from the instruction data.
+    fn extract_vote_updates(
+        &self,
+        transaction: &SanitizedTransaction,
+    ) -> Vec<VoteUpdate> {
+        let mut updates = Vec::new();
+
+        for instruction in &transaction.instructions {
+            let program_id = match transaction
+                .account_keys
+                .get(instruction.program_id_index as usize)
+            {
+                Some(id) => *id,
+                None => continue,
+            };
+
+            if program_id != VOTE_PROGRAM_ID {
+                continue;
+            }
+
+            // Vote account is always the first account in vote instructions
+            let vote_account = match instruction
+                .account_indices
+                .first()
+                .and_then(|&idx| transaction.account_keys.get(idx as usize))
+            {
+                Some(key) => *key,
+                None => continue,
+            };
+
+            // Try to extract the voted slot from instruction data.
+            // Vote instructions have a 4-byte type discriminant. For Vote/VoteSwitch
+            // (types 2/4), slots follow after the discriminant. For update/tower
+            // instructions, the slot is embedded in the tower data.
+            // We extract the highest slot when possible.
+            let voted_slot = extract_voted_slot(&instruction.data);
+
+            updates.push(VoteUpdate {
+                vote_account,
+                voted_slot,
+            });
+        }
+
+        updates
+    }
+
     /// Write modified accounts back to the account database.
     fn write_accounts(&self, accounts: &HashMap<Pubkey, Account>) {
         let db = self.accounts();
@@ -449,6 +530,36 @@ impl Bank {
         }
         let _ = db.publish_transaction(xid);
     }
+}
+
+/// Extract the highest voted slot from vote instruction data.
+///
+/// Returns `Some(slot)` for Vote/VoteSwitch instructions that encode
+/// slot count + slots. Returns `None` for other instruction types or
+/// if the data is too short to parse.
+fn extract_voted_slot(data: &[u8]) -> Option<u64> {
+    if data.len() < 12 {
+        return None;
+    }
+
+    let instruction_type = u32::from_le_bytes(data[0..4].try_into().ok()?);
+
+    // Vote (2) and VoteSwitch (4) have slot_count(u64) + slots(u64 each)
+    if instruction_type == 2 || instruction_type == 4 {
+        let slot_count = u64::from_le_bytes(data[4..12].try_into().ok()?) as usize;
+        if slot_count == 0 {
+            return None;
+        }
+        // Last slot is the highest
+        let last_slot_offset = 12 + (slot_count - 1) * 8;
+        if data.len() < last_slot_offset + 8 {
+            return None;
+        }
+        let slot = u64::from_le_bytes(data[last_slot_offset..last_slot_offset + 8].try_into().ok()?);
+        return Some(slot);
+    }
+
+    None
 }
 
 // ---------------------------------------------------------------------------
@@ -823,5 +934,138 @@ mod tests {
             result.error,
             Some(TransactionExecutionError::ComputeBudgetExceeded { .. })
         ));
+    }
+
+    // Vote extraction tests
+
+    #[test]
+    fn extract_vote_updates_from_vote_transaction() {
+        let bank = create_test_bank();
+        let backend = PassthroughBackend;
+
+        let payer = Pubkey::new_unique();
+        let vote_account = Pubkey::new_unique();
+
+        let payer_account = Account::new(10_000_000, vec![], Pubkey::default());
+        store_test_account(&bank, &payer, &payer_account);
+
+        // Build a Vote instruction (type 2): slot_count=1, slot=42, hash
+        let mut vote_data = vec![];
+        vote_data.extend_from_slice(&2u32.to_le_bytes()); // Vote instruction type
+        vote_data.extend_from_slice(&1u64.to_le_bytes()); // 1 slot
+        vote_data.extend_from_slice(&42u64.to_le_bytes()); // slot 42
+        vote_data.extend_from_slice(&[0u8; 32]); // hash
+
+        let tx = SanitizedTransaction {
+            account_keys: vec![payer, VOTE_PROGRAM_ID, vote_account],
+            recent_blockhash: [0u8; 32],
+            instructions: vec![CompiledInstruction {
+                program_id_index: 1, // VOTE_PROGRAM_ID
+                account_indices: vec![2], // vote_account
+                data: vote_data,
+            }],
+            num_signatures: 1,
+        };
+
+        let result = bank.process_transaction(&tx, &backend, 1_400_000);
+        assert!(result.success, "vote tx should succeed: {:?}", result.error);
+        assert_eq!(result.vote_updates.len(), 1);
+        assert_eq!(result.vote_updates[0].vote_account, vote_account);
+        assert_eq!(result.vote_updates[0].voted_slot, Some(42));
+    }
+
+    #[test]
+    fn no_vote_updates_for_non_vote_transaction() {
+        let bank = create_test_bank();
+        let backend = PassthroughBackend;
+
+        let payer = Pubkey::new_unique();
+        let program = Pubkey::new_unique();
+
+        let payer_account = Account::new(10_000_000, vec![], Pubkey::default());
+        store_test_account(&bank, &payer, &payer_account);
+
+        let tx = create_simple_transaction(payer, program, vec![payer], vec![]);
+        let result = bank.process_transaction(&tx, &backend, 1_400_000);
+
+        assert!(result.success);
+        assert!(result.vote_updates.is_empty());
+    }
+
+    #[test]
+    fn batch_aggregates_vote_updates() {
+        let bank = create_test_bank();
+        let backend = PassthroughBackend;
+
+        let payer = Pubkey::new_unique();
+        let payer_account = Account::new(100_000_000, vec![], Pubkey::default());
+        store_test_account(&bank, &payer, &payer_account);
+
+        let mut transactions = Vec::new();
+
+        // 2 vote transactions + 1 non-vote
+        for slot in [100u64, 101] {
+            let vote_account = Pubkey::new_unique();
+            let mut vote_data = vec![];
+            vote_data.extend_from_slice(&2u32.to_le_bytes());
+            vote_data.extend_from_slice(&1u64.to_le_bytes());
+            vote_data.extend_from_slice(&slot.to_le_bytes());
+            vote_data.extend_from_slice(&[0u8; 32]);
+
+            transactions.push(SanitizedTransaction {
+                account_keys: vec![payer, VOTE_PROGRAM_ID, vote_account],
+                recent_blockhash: [0u8; 32],
+                instructions: vec![CompiledInstruction {
+                    program_id_index: 1,
+                    account_indices: vec![2],
+                    data: vote_data,
+                }],
+                num_signatures: 1,
+            });
+        }
+
+        // Non-vote transaction
+        let other_program = Pubkey::new_unique();
+        transactions.push(create_simple_transaction(payer, other_program, vec![payer], vec![]));
+
+        let summary = bank.process_transactions(&transactions, &backend, 1_400_000);
+
+        assert_eq!(summary.succeeded, 3);
+        assert_eq!(summary.vote_updates.len(), 2);
+        assert_eq!(summary.vote_updates[0].voted_slot, Some(100));
+        assert_eq!(summary.vote_updates[1].voted_slot, Some(101));
+    }
+
+    #[test]
+    fn extract_voted_slot_from_instruction_data() {
+        // Vote instruction type 2, 1 slot, slot=999
+        let mut data = vec![];
+        data.extend_from_slice(&2u32.to_le_bytes());
+        data.extend_from_slice(&1u64.to_le_bytes());
+        data.extend_from_slice(&999u64.to_le_bytes());
+        data.extend_from_slice(&[0u8; 32]);
+
+        assert_eq!(super::extract_voted_slot(&data), Some(999));
+
+        // Vote instruction type 2, 3 slots — should return last (highest)
+        let mut data = vec![];
+        data.extend_from_slice(&2u32.to_le_bytes());
+        data.extend_from_slice(&3u64.to_le_bytes());
+        data.extend_from_slice(&100u64.to_le_bytes());
+        data.extend_from_slice(&101u64.to_le_bytes());
+        data.extend_from_slice(&102u64.to_le_bytes());
+        data.extend_from_slice(&[0u8; 32]);
+
+        assert_eq!(super::extract_voted_slot(&data), Some(102));
+
+        // Non-vote instruction type
+        let mut data = vec![];
+        data.extend_from_slice(&0u32.to_le_bytes()); // InitializeAccount
+        data.extend_from_slice(&[0u8; 100]);
+
+        assert_eq!(super::extract_voted_slot(&data), None);
+
+        // Too short
+        assert_eq!(super::extract_voted_slot(&[1, 2, 3]), None);
     }
 }

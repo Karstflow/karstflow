@@ -82,7 +82,7 @@ pub use vote_state::{
 
 pub use bank_executor::{
     BatchExecutionSummary, ExecutionBackend, InstructionInfo, InstructionResult,
-    TransactionExecutionError, TransactionExecutionResult,
+    TransactionExecutionError, TransactionExecutionResult, VoteUpdate,
 };
 pub use cost_tracker::{CostTracker, CostTrackerError, TransactionCost};
 pub use features::{FeatureActivation, FeatureSet};
