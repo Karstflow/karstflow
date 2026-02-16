@@ -1,5 +1,5 @@
 use super::{ExecutionContext, SbpfVm, StubSbpfVm};
-use paradencer_ids::SYSTEM_PROGRAM_ID;
+use paradencer_ids::{STAKE_PROGRAM_ID, SYSTEM_PROGRAM_ID, VOTE_PROGRAM_ID};
 use paradencer_types::{Account, AccountData, AccountMeta, Pubkey};
 
 #[test]
@@ -390,8 +390,6 @@ fn full_transaction_process_with_bpf_program() {
 // Wave 8: Vote program end-to-end tests
 // ---------------------------------------------------------------------------
 
-use paradencer_ids::VOTE_PROGRAM_ID;
-
 /// Helper to build a vote account owned by the vote program.
 fn make_vote_owned_account(lamports: u64) -> Account {
     Account {
@@ -561,4 +559,293 @@ fn all_13_builtin_programs_route_through_processor() {
         let _outcome = processor.process_instruction(*program_id, vec![], vec![]);
         // We don't assert success since empty data may cause legitimate errors
     }
+}
+
+// ---------------------------------------------------------------------------
+// Stake program integration tests
+// ---------------------------------------------------------------------------
+
+fn make_stake_account_for_test(lamports: u64) -> Account {
+    use crate::stake::{serialize_stake_state, StakeState};
+    use paradencer_constants::stake_program::STAKE_STATE_V2_SIZE;
+
+    let mut buf = serialize_stake_state(&StakeState::Uninitialized);
+    buf.resize(STAKE_STATE_V2_SIZE, 0);
+    Account {
+        meta: AccountMeta {
+            lamports,
+            owner: STAKE_PROGRAM_ID,
+            executable: false,
+            rent_epoch: 0,
+        },
+        data: AccountData::new(buf),
+    }
+}
+
+fn make_vote_account_for_test() -> Account {
+    Account {
+        meta: AccountMeta {
+            lamports: 10_000,
+            owner: VOTE_PROGRAM_ID,
+            executable: false,
+            rent_epoch: 0,
+        },
+        data: AccountData::empty(),
+    }
+}
+
+fn build_clock_for_test(epoch: u64, timestamp: i64) -> Account {
+    let mut data = vec![0u8; 40];
+    data[16..24].copy_from_slice(&epoch.to_le_bytes());
+    data[32..40].copy_from_slice(&timestamp.to_le_bytes());
+    Account {
+        meta: AccountMeta {
+            lamports: 1,
+            owner: Pubkey::zeroed(),
+            executable: false,
+            rent_epoch: 0,
+        },
+        data: AccountData::new(data),
+    }
+}
+
+fn stake_minimum_balance() -> u64 {
+    use paradencer_constants::economics::{
+        DEFAULT_EXEMPTION_THRESHOLD, DEFAULT_LAMPORTS_PER_BYTE_YEAR,
+    };
+    use paradencer_constants::stake_program::STAKE_STATE_V2_SIZE;
+    ((DEFAULT_LAMPORTS_PER_BYTE_YEAR * STAKE_STATE_V2_SIZE as u64) as f64
+        * DEFAULT_EXEMPTION_THRESHOLD) as u64
+}
+
+fn make_stake_executor() -> super::StakeProgramExecutor {
+    super::StakeProgramExecutor::new(150)
+}
+
+/// Full lifecycle: Initialize → Delegate → Deactivate → Withdraw.
+#[test]
+fn stake_full_lifecycle() {
+    use crate::stake::deserialize_stake_state;
+
+    let executor = make_stake_executor();
+    let staker = Pubkey::new_unique();
+    let withdrawer = Pubkey::new_unique();
+    let voter = Pubkey::new_unique();
+    let stake_pk = Pubkey::new_unique();
+    let lamports = 5_000_000_000u64;
+
+    // 1. Initialize
+    let mut init_data = vec![0u8; 116];
+    init_data[0..4].copy_from_slice(&0u32.to_le_bytes());
+    init_data[4..36].copy_from_slice(staker.as_bytes());
+    init_data[36..68].copy_from_slice(withdrawer.as_bytes());
+
+    let stake_account = make_stake_account_for_test(lamports);
+    let init_ctx = ExecutionContext::new(
+        STAKE_PROGRAM_ID,
+        vec![(stake_pk, stake_account, true)],
+        init_data,
+    );
+    let init_outcome = executor.execute(&init_ctx).unwrap();
+    assert!(init_outcome.success);
+    let initialized_account = init_outcome.modified_accounts[&stake_pk].clone();
+    let init_state = deserialize_stake_state(initialized_account.data.as_ref()).unwrap();
+    assert!(init_state.is_initialized());
+
+    // 2. Delegate
+    let delegate_data = 2u32.to_le_bytes().to_vec();
+    let delegate_ctx = ExecutionContext::new(
+        STAKE_PROGRAM_ID,
+        vec![
+            (stake_pk, initialized_account.clone(), true),
+            (voter, make_vote_account_for_test(), false),
+            (Pubkey::new_unique(), build_clock_for_test(5, 0), false),
+            (Pubkey::new_unique(), Account::zeroed(), false),
+            (Pubkey::new_unique(), Account::zeroed(), false),
+            (staker, Account::zeroed(), false),
+        ],
+        delegate_data,
+    );
+    let delegate_outcome = executor.execute(&delegate_ctx).unwrap();
+    assert!(delegate_outcome.success);
+    let delegated_account = delegate_outcome.modified_accounts[&stake_pk].clone();
+    let del_state = deserialize_stake_state(delegated_account.data.as_ref()).unwrap();
+    assert!(del_state.is_delegated());
+    assert_eq!(del_state.stake().unwrap().delegation.voter_pubkey, voter);
+
+    // 3. Deactivate
+    let deactivate_data = 5u32.to_le_bytes().to_vec();
+    let deactivate_ctx = ExecutionContext::new(
+        STAKE_PROGRAM_ID,
+        vec![
+            (stake_pk, delegated_account.clone(), true),
+            (Pubkey::new_unique(), build_clock_for_test(20, 0), false),
+            (staker, Account::zeroed(), false),
+        ],
+        deactivate_data,
+    );
+    let deactivate_outcome = executor.execute(&deactivate_ctx).unwrap();
+    assert!(deactivate_outcome.success);
+    let deactivated_account = deactivate_outcome.modified_accounts[&stake_pk].clone();
+    let deact_state = deserialize_stake_state(deactivated_account.data.as_ref()).unwrap();
+    assert!(deact_state.stake().unwrap().delegation.is_deactivated());
+    assert_eq!(
+        deact_state.stake().unwrap().delegation.deactivation_epoch,
+        20
+    );
+
+    // 4. Withdraw all
+    let recipient_pk = Pubkey::new_unique();
+    let mut withdraw_data = 4u32.to_le_bytes().to_vec();
+    withdraw_data.extend_from_slice(&lamports.to_le_bytes());
+
+    let withdraw_ctx = ExecutionContext::new(
+        STAKE_PROGRAM_ID,
+        vec![
+            (stake_pk, deactivated_account, true),
+            (recipient_pk, Account::zeroed(), true),
+            (Pubkey::new_unique(), build_clock_for_test(100, 0), false),
+            (Pubkey::new_unique(), Account::zeroed(), false),
+            (withdrawer, Account::zeroed(), false),
+        ],
+        withdraw_data,
+    );
+    let withdraw_outcome = executor.execute(&withdraw_ctx).unwrap();
+    assert!(withdraw_outcome.success);
+    let final_stake = &withdraw_outcome.modified_accounts[&stake_pk];
+    assert_eq!(final_stake.meta.lamports, 0);
+    let final_state = deserialize_stake_state(final_stake.data.as_ref()).unwrap();
+    assert!(final_state.is_uninitialized());
+    let final_recipient = &withdraw_outcome.modified_accounts[&recipient_pk];
+    assert_eq!(final_recipient.meta.lamports, lamports);
+}
+
+/// Split and merge cycle.
+#[test]
+fn stake_split_and_merge_cycle() {
+    use crate::stake::{
+        deserialize_stake_state, Authorized, Delegation, Lockup, Meta, StakeAccount, StakeFlags,
+        StakeState,
+    };
+    use paradencer_constants::stake_program::STAKE_STATE_V2_SIZE;
+
+    let executor = make_stake_executor();
+    let staker = Pubkey::new_unique();
+    let withdrawer = Pubkey::new_unique();
+    let voter = Pubkey::new_unique();
+    let min_balance = stake_minimum_balance();
+
+    // Create a delegated account
+    let total_lamports = 10_000_000_000u64;
+    let stake_amount = total_lamports - min_balance;
+    let delegation = Delegation::new(voter, stake_amount, 0);
+    let state = StakeState::Delegated(
+        Meta::new(
+            min_balance,
+            Authorized::new(staker, withdrawer),
+            Lockup::default(),
+        ),
+        StakeAccount::new(delegation, 0),
+        StakeFlags::EMPTY,
+    );
+    let mut src_data = crate::stake::serialize_stake_state(&state);
+    src_data.resize(STAKE_STATE_V2_SIZE, 0);
+    let src_account = Account {
+        meta: AccountMeta {
+            lamports: total_lamports,
+            owner: STAKE_PROGRAM_ID,
+            executable: false,
+            rent_epoch: 0,
+        },
+        data: AccountData::new(src_data),
+    };
+
+    let src_pk = Pubkey::new_unique();
+    let dst_pk = Pubkey::new_unique();
+
+    // Split 4 SOL
+    let split_amount = 4_000_000_000u64;
+    let mut split_data = 3u32.to_le_bytes().to_vec();
+    split_data.extend_from_slice(&split_amount.to_le_bytes());
+
+    let dst_account = make_stake_account_for_test(0);
+    let split_ctx = ExecutionContext::new(
+        STAKE_PROGRAM_ID,
+        vec![
+            (src_pk, src_account, true),
+            (dst_pk, dst_account, true),
+            (staker, Account::zeroed(), false),
+        ],
+        split_data,
+    );
+    let split_outcome = executor.execute(&split_ctx).unwrap();
+    assert!(split_outcome.success);
+
+    let src_after_split = split_outcome.modified_accounts[&src_pk].clone();
+    let dst_after_split = split_outcome.modified_accounts[&dst_pk].clone();
+    assert_eq!(src_after_split.meta.lamports, total_lamports - split_amount);
+    assert_eq!(dst_after_split.meta.lamports, split_amount);
+
+    // Merge back
+    let merge_data = 7u32.to_le_bytes().to_vec();
+    let merge_ctx = ExecutionContext::new(
+        STAKE_PROGRAM_ID,
+        vec![
+            (src_pk, src_after_split, true),
+            (dst_pk, dst_after_split, true),
+            (Pubkey::new_unique(), build_clock_for_test(0, 0), false),
+            (Pubkey::new_unique(), Account::zeroed(), false),
+            (staker, Account::zeroed(), false),
+        ],
+        merge_data,
+    );
+    let merge_outcome = executor.execute(&merge_ctx).unwrap();
+    assert!(merge_outcome.success);
+
+    let src_after_merge = &merge_outcome.modified_accounts[&src_pk];
+    let dst_after_merge = &merge_outcome.modified_accounts[&dst_pk];
+    assert_eq!(src_after_merge.meta.lamports, total_lamports);
+    assert_eq!(dst_after_merge.meta.lamports, 0);
+}
+
+/// Stake state binary serialization roundtrip.
+#[test]
+fn stake_serialize_deserialize_roundtrip() {
+    use crate::stake::{
+        deserialize_stake_state, serialize_stake_state, Authorized, Delegation, Lockup, Meta,
+        StakeAccount, StakeFlags, StakeState,
+    };
+
+    let voter = Pubkey::new_unique();
+    let staker = Pubkey::new_unique();
+    let withdrawer = Pubkey::new_unique();
+
+    let state = StakeState::Delegated(
+        Meta::new(
+            stake_minimum_balance(),
+            Authorized::new(staker, withdrawer),
+            Lockup::default(),
+        ),
+        StakeAccount::new(Delegation::new(voter, 3_000_000_000, 5), 100),
+        StakeFlags::EMPTY,
+    );
+
+    let serialized = serialize_stake_state(&state);
+    let deserialized = deserialize_stake_state(&serialized).unwrap();
+    assert!(deserialized.is_delegated());
+    assert_eq!(deserialized.stake().unwrap().delegation.voter_pubkey, voter);
+    assert_eq!(
+        deserialized.stake().unwrap().delegation.stake_amount,
+        3_000_000_000
+    );
+    assert_eq!(
+        deserialized.stake().unwrap().delegation.activation_epoch,
+        5
+    );
+    assert_eq!(deserialized.stake().unwrap().credits_observed, 100);
+    assert_eq!(deserialized.meta().unwrap().authorized.staker, staker);
+    assert_eq!(
+        deserialized.meta().unwrap().authorized.withdrawer,
+        withdrawer
+    );
 }
