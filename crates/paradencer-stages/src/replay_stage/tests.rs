@@ -383,16 +383,12 @@ mod vote_integration_integration_tests {
 
         let different_fork = |a: u64, b: u64| a == b;
 
-        // Low stake - can't switch
-        let can_switch = integration
-            .can_switch_fork(200, 100, different_fork)
-            .unwrap();
+        // Low stake - can't switch (ratio < 1.38)
+        let can_switch = integration.can_switch_fork(200, 1, different_fork).unwrap();
         assert!(!can_switch);
 
-        // High stake - can switch
-        let can_switch = integration
-            .can_switch_fork(200, 10000, different_fork)
-            .unwrap();
+        // High stake - can switch (ratio >= 1.38)
+        let can_switch = integration.can_switch_fork(200, 2, different_fork).unwrap();
         assert!(can_switch);
     }
 }

@@ -21,8 +21,14 @@ impl NodeId {
 
     pub fn random() -> Self {
         use sha2::{Digest, Sha256};
+        use std::sync::atomic::{AtomicU64, Ordering};
+
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        let count = COUNTER.fetch_add(1, Ordering::Relaxed);
+
         let mut hasher = Sha256::new();
-        hasher.update(Instant::now().elapsed().as_nanos().to_le_bytes());
+        hasher.update(count.to_le_bytes());
+        hasher.update(std::process::id().to_le_bytes());
         let result = hasher.finalize();
         let mut bytes = [0u8; 32];
         bytes.copy_from_slice(&result);

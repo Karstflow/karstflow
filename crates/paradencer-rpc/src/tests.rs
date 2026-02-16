@@ -377,12 +377,12 @@ mod integration_tests {
         let manager = SubscriptionManager::new();
         let _sub_id = manager.subscribe_program("program_id".to_string(), RpcCommitment::Confirmed);
 
+        let mut rx = manager.subscribe_notifications();
+
         let account = Account::new(1000000, vec![1, 2, 3], Pubkey::zeroed());
         let snapshot = test_snapshot();
-
         manager.notify_program("program_id", "account_pubkey", &account, snapshot);
 
-        let mut rx = manager.subscribe_notifications();
         let notif = rx.try_recv();
         assert!(notif.is_ok());
     }

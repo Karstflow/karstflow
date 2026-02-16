@@ -437,12 +437,14 @@ impl PerformanceMonitor {
 
     /// Complete monitoring a slot and check thresholds
     pub fn complete_slot(&mut self) -> Vec<PerformanceAlert> {
+        // Save current slot before complete clears it
+        let slot = self.tracker.current_slot;
         self.tracker.complete_slot();
 
         let mut alerts = Vec::new();
 
-        // Check thresholds
-        if let Some(slot) = self.tracker.current_slot {
+        // Check thresholds against the just-completed slot
+        if let Some(slot) = slot {
             if let Some(metrics) = self.tracker.get_slot_metrics(slot) {
                 if let Some(alert) = self.check_thresholds(metrics) {
                     self.add_alert(alert.clone());

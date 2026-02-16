@@ -227,8 +227,8 @@ impl AncestryVerifier {
             path.push(current);
 
             match self.ancestry_map.get(&current) {
-                Some(&parent) => current = parent,
-                None => break,
+                Some(&parent) if parent != current => current = parent,
+                _ => break, // Stop at genesis (self-referencing) or missing parent
             }
         }
 
@@ -319,14 +319,13 @@ impl ForkDetector {
 
         self.verifier.register_block(slot, parent_slot);
 
-        // Check if parent already has children
+        // Check if parent already has children (exclude genesis self-reference)
         let siblings: Vec<u64> = self
             .verifier
             .ancestry_map
             .iter()
-            .filter(|(_, &p)| p == parent_slot)
+            .filter(|(&s, &p)| p == parent_slot && s != slot && s != p)
             .map(|(&s, _)| s)
-            .filter(|&s| s != slot)
             .collect();
 
         if !siblings.is_empty() {

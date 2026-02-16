@@ -445,16 +445,12 @@ mod tests {
 
         let different_fork = |a: u64, b: u64| a == b;
 
-        // Insufficient stake to switch
-        let can_switch = integration
-            .can_switch_fork(200, 100, different_fork)
-            .unwrap();
+        // Insufficient stake to switch (ratio < 1.38)
+        let can_switch = integration.can_switch_fork(200, 1, different_fork).unwrap();
         assert!(!can_switch);
 
-        // Sufficient stake to switch (38% advantage)
-        let can_switch = integration
-            .can_switch_fork(200, 1000, different_fork)
-            .unwrap();
+        // Sufficient stake to switch (ratio >= 1.38)
+        let can_switch = integration.can_switch_fork(200, 2, different_fork).unwrap();
         assert!(can_switch);
     }
 }

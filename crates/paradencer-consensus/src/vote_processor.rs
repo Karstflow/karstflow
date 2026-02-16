@@ -230,9 +230,16 @@ impl VoteProcessor {
             if let Some(last_voted) = vote_state.last_voted_slot() {
                 if last_voted != slot {
                     // Validator is switching - remove old vote
-                    if let Some(old_vote_info) = self.slot_votes.get_mut(&last_voted) {
-                        old_vote_info.remove_vote(&vote_account);
-                        old_vote_info.update_supermajority(self.total_stake);
+                    let should_remove =
+                        if let Some(old_vote_info) = self.slot_votes.get_mut(&last_voted) {
+                            old_vote_info.remove_vote(&vote_account);
+                            old_vote_info.update_supermajority(self.total_stake);
+                            old_vote_info.votes_by_account.is_empty()
+                        } else {
+                            false
+                        };
+                    if should_remove {
+                        self.slot_votes.remove(&last_voted);
                     }
                 }
             }
@@ -431,7 +438,7 @@ mod tests {
 
         // Add stake delegation
         let stake_account = Pubkey::new_unique();
-        let delegation = Delegation::new(vote_account, stake, 0);
+        let delegation = Delegation::new(vote_account, stake, u64::MAX);
         processor
             .stake_tracker
             .add_delegation(stake_account, delegation);
@@ -575,12 +582,12 @@ mod tests {
             .process_vote(vote1, 102, 1002, None, None)
             .unwrap();
 
-        assert_eq!(processor.voted_slots().len(), 3);
+        // vote1 switched from 100→102, so empty slot 100 was cleaned up
+        assert_eq!(processor.voted_slots().len(), 2);
 
         processor.prune_below_root(101);
 
         let slots = processor.voted_slots();
-        assert!(!slots.contains(&100));
         assert!(slots.contains(&101));
         assert!(slots.contains(&102));
     }

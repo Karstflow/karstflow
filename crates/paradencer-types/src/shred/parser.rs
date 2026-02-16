@@ -488,10 +488,9 @@ mod tests {
 
     #[test]
     fn test_parse_invalid_variant() {
-        let mut buffer = Vec::new();
-        buffer.extend_from_slice(&[0u8; SIGNATURE_SIZE]);
-        buffer.push(0xFF); // Invalid variant
-        buffer.extend_from_slice(&[0u8; 18]); // Rest of header
+        // Buffer must be at least SHRED_HEADER_SIZE (88 bytes) to pass length check
+        let mut buffer = vec![0u8; SHRED_HEADER_SIZE];
+        buffer[SIGNATURE_SIZE] = 0xFF; // Invalid variant byte
 
         let result = ShredParser::parse(&buffer);
         assert!(matches!(result, Err(ShredParseError::InvalidVariant(_))));

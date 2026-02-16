@@ -437,9 +437,12 @@ fn test_block_producer_channels() {
     producer.stop().unwrap();
 
     // Check that shreds were produced
-    let mut shred_count = 0;
+    let mut shred_count: usize = 0;
     while shred_receiver.try_recv().is_ok() {
         shred_count += 1;
+        if shred_count > 100_000 {
+            break;
+        }
     }
 
     assert!(shred_count > 0, "Should have produced some shreds");
@@ -484,9 +487,12 @@ fn test_multi_slot_production() {
     assert!(stats.total_ticks >= 4); // At least one full slot
 
     // Verify shreds were sent
-    let mut shred_count = 0;
+    let mut shred_count: usize = 0;
     while shred_receiver.try_recv().is_ok() {
         shred_count += 1;
+        if shred_count > 100_000 {
+            break;
+        }
     }
     assert!(shred_count > 0);
 }
@@ -563,9 +569,12 @@ fn test_empty_slot_production() {
     assert!(stats.total_ticks >= 8); // But ticks were generated
 
     // Should still produce shreds (for tick entries)
-    let mut shred_count = 0;
+    let mut shred_count: usize = 0;
     while shred_receiver.try_recv().is_ok() {
         shred_count += 1;
+        if shred_count > 100_000 {
+            break; // Safety limit
+        }
     }
     assert!(shred_count > 0, "Even empty slots should produce shreds");
 }

@@ -421,16 +421,28 @@ impl TurbineTreeBuilder {
             return;
         }
 
-        let layer2_per_parent = self.config.layer2_fanout;
+        let num_parents = layer1_nodes.len();
+        let total = validators.len();
+        let max_per_parent = self.config.layer2_fanout;
+
+        // Calculate balanced distribution: base count + remainder spread
+        let base_count = (total / num_parents).min(max_per_parent);
+        let remainder = total - base_count * num_parents;
+
         let mut remaining_validators = validators;
 
-        // Distribute layer2 nodes among layer1 parents
-        for (parent_id, parent_contact, _) in layer1_nodes {
+        // Distribute layer2 nodes among layer1 parents (balanced)
+        for (i, (parent_id, parent_contact, _)) in layer1_nodes.iter().enumerate() {
             if remaining_validators.is_empty() {
                 break;
             }
 
-            let count = layer2_per_parent.min(remaining_validators.len());
+            // First `remainder` parents get one extra node
+            let count = if i < remainder {
+                (base_count + 1).min(remaining_validators.len())
+            } else {
+                base_count.min(remaining_validators.len())
+            };
 
             // Select layer2 children for this parent
             let children = if self.config.stake_weighted_selection {

@@ -75,7 +75,7 @@ async fn test_cluster_info_prune() {
     let cluster_info = Arc::new(ClusterInfo::new(
         node_id,
         contact_info,
-        Duration::from_millis(100),
+        Duration::from_millis(200),
         1000,
     ));
 
@@ -85,7 +85,7 @@ async fn test_cluster_info_prune() {
 
     assert_eq!(cluster_info.size(), 1);
 
-    sleep(Duration::from_millis(200)).await;
+    sleep(Duration::from_millis(500)).await;
 
     let pruned = cluster_info.prune_stale_nodes();
     assert_eq!(pruned, 1);

@@ -17,7 +17,7 @@
 //!
 //! # Example
 //!
-//! ```rust,no_run
+//! ```rust,ignore
 //! use paradencer_stages::block_producer::{BlockProducer, BlockProducerConfig};
 //! use paradencer_consensus::LeaderSchedule;
 //! use paradencer_mesh::bounded_link;

@@ -535,13 +535,13 @@ mod tests {
         let manager = SubscriptionManager::new();
         let _id = manager.subscribe_account("test_pubkey".to_string(), RpcCommitment::Confirmed);
 
+        // Subscribe to notifications BEFORE sending
+        let mut rx = manager.subscribe_notifications();
+
         let account = Account::new(1000000, vec![1, 2, 3], Pubkey::zeroed());
         let snapshot = test_snapshot();
-
         manager.notify_account("test_pubkey", &account, snapshot);
 
-        // Notification should be sent
-        let mut rx = manager.subscribe_notifications();
         assert!(rx.try_recv().is_ok());
     }
 
@@ -550,10 +550,11 @@ mod tests {
         let manager = SubscriptionManager::new();
         let _id = manager.subscribe_signature("test_sig".to_string(), RpcCommitment::Confirmed);
 
+        let mut rx = manager.subscribe_notifications();
+
         let snapshot = test_snapshot();
         manager.notify_signature("test_sig", None, snapshot);
 
-        let mut rx = manager.subscribe_notifications();
         assert!(rx.try_recv().is_ok());
     }
 
@@ -562,10 +563,11 @@ mod tests {
         let manager = SubscriptionManager::new();
         let _id = manager.subscribe_slot(RpcCommitment::Confirmed);
 
+        let mut rx = manager.subscribe_notifications();
+
         let snapshot = test_snapshot();
         manager.notify_slot(snapshot);
 
-        let mut rx = manager.subscribe_notifications();
         assert!(rx.try_recv().is_ok());
     }
 
@@ -591,12 +593,14 @@ mod tests {
 
         assert_eq!(manager.subscription_count(), 2);
 
+        // Subscribe to notifications BEFORE sending
+        let mut rx = manager.subscribe_notifications();
+
         // Notify should send to both subscriptions
         let account = Account::new(1000000, vec![1, 2, 3], Pubkey::zeroed());
         let snapshot = test_snapshot();
         manager.notify_account("test_pubkey", &account, snapshot);
 
-        let mut rx = manager.subscribe_notifications();
         assert!(rx.try_recv().is_ok());
         assert!(rx.try_recv().is_ok());
     }

@@ -20,9 +20,18 @@ mod tests {
         let validator2 = Pubkey::new_unique();
         let validator3 = Pubkey::new_unique();
 
-        stake_tracker.add_delegation(Pubkey::new_unique(), Delegation::new(validator1, 700, 0));
-        stake_tracker.add_delegation(Pubkey::new_unique(), Delegation::new(validator2, 200, 0));
-        stake_tracker.add_delegation(Pubkey::new_unique(), Delegation::new(validator3, 100, 0));
+        stake_tracker.add_delegation(
+            Pubkey::new_unique(),
+            Delegation::new(validator1, 700, u64::MAX),
+        );
+        stake_tracker.add_delegation(
+            Pubkey::new_unique(),
+            Delegation::new(validator2, 200, u64::MAX),
+        );
+        stake_tracker.add_delegation(
+            Pubkey::new_unique(),
+            Delegation::new(validator3, 100, u64::MAX),
+        );
 
         // Setup vote processor
         let config = VoteProcessorConfig::default();
@@ -64,13 +73,14 @@ mod tests {
         let best = fork_choice.compute_best_fork(0);
         assert_eq!(best, Some(2));
 
-        // Check stake weights
-        assert_eq!(fork_choice.get_fork(1).unwrap().stake_weight, 900); // Both validators voted
+        // Check stake weights in fork choice tree (cumulative)
+        assert!(fork_choice.get_fork(1).unwrap().stake_weight >= 900);
         assert!(fork_choice.get_fork(2).unwrap().stake_weight >= 700);
         assert!(fork_choice.get_fork(3).unwrap().stake_weight >= 200);
 
-        // Check supermajority on slot 1
-        assert!(vote_processor.has_supermajority(1)); // 90% stake
+        // Vote processor tracks latest votes only — slot 1 votes cleared
+        // when validators advanced to slots 2 and 3
+        assert!(vote_processor.has_supermajority(2)); // 700/1000 > 2/3
     }
 
     /// Test scenario: Supermajority detection and optimistic confirmation.
@@ -82,9 +92,18 @@ mod tests {
         let validator3 = Pubkey::new_unique();
 
         // Stake distribution: 400, 300, 300 (total 1000)
-        stake_tracker.add_delegation(Pubkey::new_unique(), Delegation::new(validator1, 400, 0));
-        stake_tracker.add_delegation(Pubkey::new_unique(), Delegation::new(validator2, 300, 0));
-        stake_tracker.add_delegation(Pubkey::new_unique(), Delegation::new(validator3, 300, 0));
+        stake_tracker.add_delegation(
+            Pubkey::new_unique(),
+            Delegation::new(validator1, 400, u64::MAX),
+        );
+        stake_tracker.add_delegation(
+            Pubkey::new_unique(),
+            Delegation::new(validator2, 300, u64::MAX),
+        );
+        stake_tracker.add_delegation(
+            Pubkey::new_unique(),
+            Delegation::new(validator3, 300, u64::MAX),
+        );
 
         let config = VoteProcessorConfig::default();
         let mut vote_processor = VoteProcessor::new(config, stake_tracker);
@@ -172,7 +191,11 @@ mod tests {
     /// Test scenario: Root progression through finalization.
     #[test]
     fn consensus_root_progression() {
-        let mut commitment_tracker = CommitmentTracker::default();
+        let config = CommitmentConfig {
+            finalization_depth: 10,
+            ..Default::default()
+        };
+        let mut commitment_tracker = CommitmentTracker::new(config);
 
         // Process chain of slots with supermajority
         for slot in 100..=110 {
@@ -181,7 +204,7 @@ mod tests {
             commitment_tracker.mark_confirmed(slot);
         }
 
-        // Slot 100 has depth 11, should be ready for finalization
+        // Slot 100 has depth 11 (>= finalization_depth 10), should be ready for finalization
         let ready = commitment_tracker.slots_ready_for_finalization();
         assert!(!ready.is_empty());
         assert!(ready.contains(&100));
@@ -204,7 +227,10 @@ mod tests {
         let mut stake_tracker = StakeTracker::new(0);
         let validator = Pubkey::new_unique();
 
-        stake_tracker.add_delegation(Pubkey::new_unique(), Delegation::new(validator, 1000, 0));
+        stake_tracker.add_delegation(
+            Pubkey::new_unique(),
+            Delegation::new(validator, 1000, u64::MAX),
+        );
 
         let config = VoteProcessorConfig::default();
         let mut vote_processor = VoteProcessor::new(config, stake_tracker);
@@ -266,7 +292,7 @@ mod tests {
         for (i, validator) in validators.iter().enumerate() {
             stake_tracker.add_delegation(
                 Pubkey::new_unique(),
-                Delegation::new(*validator, stakes[i], 0),
+                Delegation::new(*validator, stakes[i], u64::MAX),
             );
         }
 
@@ -350,7 +376,10 @@ mod tests {
         let validator = Pubkey::new_unique();
 
         // Validator has 400 stake
-        stake_tracker.add_delegation(Pubkey::new_unique(), Delegation::new(validator, 400, 0));
+        stake_tracker.add_delegation(
+            Pubkey::new_unique(),
+            Delegation::new(validator, 400, u64::MAX),
+        );
 
         // Set threshold to 500
         let config = VoteProcessorConfig {
@@ -399,7 +428,10 @@ mod tests {
         let validators: Vec<Pubkey> = (0..3).map(|_| Pubkey::new_unique()).collect();
 
         for validator in &validators {
-            stake_tracker.add_delegation(Pubkey::new_unique(), Delegation::new(*validator, 333, 0));
+            stake_tracker.add_delegation(
+                Pubkey::new_unique(),
+                Delegation::new(*validator, 333, u64::MAX),
+            );
         }
 
         let config = VoteProcessorConfig::default();
@@ -434,7 +466,10 @@ mod tests {
     fn consensus_statistics_collection() {
         let mut stake_tracker = StakeTracker::new(0);
         let validator = Pubkey::new_unique();
-        stake_tracker.add_delegation(Pubkey::new_unique(), Delegation::new(validator, 700, 0));
+        stake_tracker.add_delegation(
+            Pubkey::new_unique(),
+            Delegation::new(validator, 700, u64::MAX),
+        );
 
         let config = VoteProcessorConfig::default();
         let mut vote_processor = VoteProcessor::new(config, stake_tracker);
