@@ -22,6 +22,7 @@ pub mod rewards_calculator;
 pub mod rewards_distribution;
 mod stake;
 mod stake_history;
+pub mod sysvars;
 #[cfg(test)]
 mod tests;
 mod tower;
@@ -79,6 +80,8 @@ pub use vote_state::{
     AuthorizedVoters, BlockTimestamp, EpochCredits, LandedVote, PriorVoters, VoteError,
     VoteLockout, VoteState, MAX_EPOCH_CREDITS,
 };
+
+pub use sysvars::SysvarCache;
 
 pub use bank_executor::{
     BatchExecutionSummary, ExecutionBackend, InstructionInfo, InstructionResult,

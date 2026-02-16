@@ -452,6 +452,9 @@ impl Bank {
     }
 
     /// Load accounts referenced by a transaction from the account database.
+    ///
+    /// Checks the sysvar cache first for sysvar accounts, then falls back
+    /// to the account database.
     fn load_transaction_accounts(
         &self,
         transaction: &SanitizedTransaction,
@@ -460,7 +463,12 @@ impl Bank {
         let mut loaded = HashMap::with_capacity(transaction.account_keys.len());
 
         for key in &transaction.account_keys {
-            let account = db.get_published_account(key).unwrap_or_default();
+            // Check sysvar cache first for sysvar accounts
+            let account = self
+                .sysvar_cache()
+                .and_then(|cache| cache.get_sysvar_account(key))
+                .or_else(|| db.get_published_account(key))
+                .unwrap_or_default();
             loaded.insert(*key, account);
         }
 

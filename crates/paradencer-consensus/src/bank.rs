@@ -1,5 +1,6 @@
 use super::{EpochSchedule, Inflation, LeaderSchedule, Rent};
-use paradencer_constants::economics::FEE_BURN_PERCENT;
+use crate::sysvars::SysvarCache;
+use paradencer_constants::economics::{FEE_BURN_PERCENT, LAMPORTS_PER_SIGNATURE};
 use paradencer_constants::ledger::{GENESIS_EPOCH, GENESIS_SLOT, TICKS_PER_SLOT};
 use paradencer_storage::{AccountDatabase, Pubkey};
 use std::sync::atomic::{AtomicU64, AtomicU8, Ordering};
@@ -65,6 +66,9 @@ pub struct Bank {
     capitalization: AtomicU64,
     rent: Rent,
     inflation: Inflation,
+
+    // Sysvar cache (shared across the runtime)
+    sysvars: Option<Arc<SysvarCache>>,
 }
 
 impl Bank {
@@ -115,6 +119,7 @@ impl Bank {
             capitalization: AtomicU64::new(capitalization),
             rent,
             inflation,
+            sysvars: None,
         }
     }
 
@@ -143,6 +148,7 @@ impl Bank {
             capitalization: AtomicU64::new(parent.capitalization.load(Ordering::Relaxed)),
             rent: parent.rent,
             inflation: parent.inflation,
+            sysvars: parent.sysvars.clone(),
         }
     }
 
@@ -206,6 +212,16 @@ impl Bank {
 
     pub fn epoch_schedule(&self) -> &Arc<EpochSchedule> {
         &self.epoch_schedule
+    }
+
+    /// Attach a sysvar cache to this bank.
+    pub fn set_sysvar_cache(&mut self, cache: Arc<SysvarCache>) {
+        self.sysvars = Some(cache);
+    }
+
+    /// Get a reference to the sysvar cache, if one is attached.
+    pub fn sysvar_cache(&self) -> Option<&Arc<SysvarCache>> {
+        self.sysvars.as_ref()
     }
 
     pub fn slot_info(&self) -> SlotInfo {
@@ -284,6 +300,18 @@ impl Bank {
         let (leader_share, burn_share) = self
             .distribute_fees()
             .map_err(|_| BankFreezeError::AlreadyFrozen)?;
+
+        // Update sysvars for this slot
+        if let Some(sysvars) = &self.sysvars {
+            let timestamp = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs() as i64)
+                .unwrap_or(0);
+            sysvars.update_clock(self.slot, self.epoch, timestamp);
+            sysvars.update_slot_hashes(self.slot, self.hash());
+            sysvars.update_slot_history(self.slot);
+            sysvars.update_recent_blockhashes(self.hash(), LAMPORTS_PER_SIGNATURE);
+        }
 
         // Check and process epoch boundary
         let epoch_boundary = self.is_epoch_boundary();

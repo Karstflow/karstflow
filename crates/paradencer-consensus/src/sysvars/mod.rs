@@ -65,7 +65,7 @@ impl SysvarCache {
             rent: RwLock::new(RentSysvar::new(rent)),
             slot_hashes: RwLock::new(SlotHashesSysvar::new()),
             slot_history: RwLock::new(SlotHistorySysvar::new()),
-            stake_history: RwLock::new(StakeHistorySysvar::new()),
+            stake_history: RwLock::new(StakeHistorySysvar::default()),
             recent_blockhashes: RwLock::new(RecentBlockhashesSysvar::new()),
             epoch_rewards: RwLock::new(EpochRewardsSysvar::inactive()),
             last_restart_slot: RwLock::new(LastRestartSlotSysvar::default()),

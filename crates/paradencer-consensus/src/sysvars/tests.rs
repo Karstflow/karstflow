@@ -542,9 +542,9 @@ fn recent_blockhashes_add_and_iterate() {
 #[test]
 fn recent_blockhashes_capacity_limit() {
     let mut rbh = RecentBlockhashesSysvar::new();
-    for i in 0..(MAX_RECENT_BLOCKHASHES + 50) as u8 {
+    for i in 0..(MAX_RECENT_BLOCKHASHES + 50) {
         let mut hash = [0u8; 32];
-        hash[0] = i;
+        hash[0..8].copy_from_slice(&(i as u64).to_le_bytes());
         rbh.add(hash, 5000);
     }
     assert_eq!(rbh.len(), MAX_RECENT_BLOCKHASHES);
