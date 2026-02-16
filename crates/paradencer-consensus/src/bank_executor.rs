@@ -5,7 +5,7 @@
 /// account loading, fee validation, instruction execution, account writeback,
 /// and fee collection.
 use crate::{Bank, BankStatus, FeeCalculator};
-use paradencer_storage::{Account, AccountDatabase, Pubkey};
+use paradencer_storage::{Account, AccountDatabase, Pubkey, TransactionId};
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -428,7 +428,7 @@ impl Bank {
         let mut loaded = HashMap::with_capacity(transaction.account_keys.len());
 
         for key in &transaction.account_keys {
-            let account = db.get(key).unwrap_or_default();
+            let account = db.get_published_account(key).unwrap_or_default();
             loaded.insert(*key, account);
         }
 
@@ -438,9 +438,16 @@ impl Bank {
     /// Write modified accounts back to the account database.
     fn write_accounts(&self, accounts: &HashMap<Pubkey, Account>) {
         let db = self.accounts();
+        // Use a non-root XID derived from the bank's slot
+        let mut xid_bytes = [0u8; 16];
+        xid_bytes[0..8].copy_from_slice(&self.slot().to_le_bytes());
+        xid_bytes[15] = 1; // Ensure non-root
+        let xid = TransactionId::new(xid_bytes);
+
         for (pubkey, account) in accounts {
-            db.store(pubkey, account);
+            let _ = db.write_account(xid, *pubkey, account.clone());
         }
+        let _ = db.publish_transaction(xid);
     }
 }
 
@@ -564,6 +571,14 @@ mod tests {
         Bank::new_genesis(accounts, epoch_schedule, leader_schedule)
     }
 
+    /// Store an account in the database as a published record for testing.
+    fn store_test_account(bank: &Bank, pubkey: &Pubkey, account: &Account) {
+        let db = bank.accounts();
+        let xid = TransactionId::new([0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0]);
+        db.write_account(xid, *pubkey, account.clone()).unwrap();
+        db.publish_transaction(xid).unwrap();
+    }
+
     fn create_simple_transaction(
         payer: Pubkey,
         program: Pubkey,
@@ -605,7 +620,7 @@ mod tests {
 
         // Fund payer
         let payer_account = Account::new(1_000_000, vec![], Pubkey::default());
-        bank.accounts().store(&payer, &payer_account);
+        store_test_account(&bank, &payer, &payer_account);
 
         let tx = create_simple_transaction(payer, program, vec![payer], vec![]);
         let result = bank.process_transaction(&tx, &backend, 1_400_000);
@@ -648,7 +663,7 @@ mod tests {
         let program = Pubkey::new_unique();
 
         let payer_account = Account::new(1_000_000, vec![], Pubkey::default());
-        bank.accounts().store(&payer, &payer_account);
+        store_test_account(&bank, &payer, &payer_account);
 
         let tx = create_simple_transaction(payer, program, vec![payer], vec![]);
         let result = bank.process_transaction(&tx, &backend, 1_400_000);
@@ -673,7 +688,7 @@ mod tests {
 
         // Fund payer with enough for fee + transfer
         let payer_account = Account::new(10_000_000, vec![], Pubkey::default());
-        bank.accounts().store(&payer, &payer_account);
+        store_test_account(&bank, &payer, &payer_account);
 
         let transfer_amount = 1_000_000u64;
         let tx = create_simple_transaction(
@@ -691,11 +706,11 @@ mod tests {
         );
 
         // Check that payer lost fee + transfer
-        let updated_payer = bank.accounts().get(&payer).unwrap();
+        let updated_payer = bank.accounts().get_published_account(&payer).unwrap();
         assert!(updated_payer.meta.lamports < 10_000_000 - transfer_amount);
 
         // Check recipient received lamports
-        let updated_recipient = bank.accounts().get(&recipient).unwrap();
+        let updated_recipient = bank.accounts().get_published_account(&recipient).unwrap();
         assert_eq!(updated_recipient.meta.lamports, transfer_amount);
     }
 
@@ -708,7 +723,7 @@ mod tests {
         let program = Pubkey::new_unique();
 
         let payer_account = Account::new(100_000_000, vec![], Pubkey::default());
-        bank.accounts().store(&payer, &payer_account);
+        store_test_account(&bank, &payer, &payer_account);
 
         let transactions: Vec<_> = (0..5)
             .map(|_| create_simple_transaction(payer, program, vec![payer], vec![]))
@@ -738,7 +753,7 @@ mod tests {
         let payer = Pubkey::new_unique();
         let program = Pubkey::new_unique();
         let payer_account = Account::new(1_000_000, vec![], Pubkey::default());
-        bank.accounts().store(&payer, &payer_account);
+        store_test_account(&bank, &payer, &payer_account);
 
         let tx = create_simple_transaction(payer, program, vec![payer], vec![]);
         let result = bank.process_transaction(&tx, &backend, 1_400_000);
@@ -775,7 +790,7 @@ mod tests {
         let payer = Pubkey::new_unique();
         let program = Pubkey::new_unique();
         let payer_account = Account::new(1_000_000, vec![], Pubkey::default());
-        bank.accounts().store(&payer, &payer_account);
+        store_test_account(&bank, &payer, &payer_account);
 
         // 3 instructions × 500K CU = 1.5M > 1M limit
         let tx = SanitizedTransaction {

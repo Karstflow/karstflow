@@ -2,6 +2,7 @@ mod block_assembler;
 mod block_producer;
 mod edge_intake;
 mod errors;
+mod execution_adapter;
 #[cfg(test)]
 mod integration_tests;
 mod metrics_reporter;
@@ -31,6 +32,7 @@ pub use shred_assembler::{
     detect_block_boundary, group_shreds_by_slot, AssembledBlock, Entry, ShredAssembler,
     ShredAssemblyError, ShredAssemblyResult, ShredAssemblyStats,
 };
+pub use execution_adapter::SbpfExecutionAdapter;
 pub use shred_filter::ShredFilter;
 pub use stats::{BlockAssemblyStats, IngressFilterStats, ShredFilterStats};
 pub use tx_filter::TxFilter;

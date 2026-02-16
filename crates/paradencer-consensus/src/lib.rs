@@ -1,4 +1,5 @@
 mod bank;
+mod bank_executor;
 mod bank_forks;
 mod blockhash_queue;
 mod clock;
@@ -79,6 +80,10 @@ pub use vote_state::{
     VoteLockout, VoteState, MAX_EPOCH_CREDITS,
 };
 
+pub use bank_executor::{
+    BatchExecutionSummary, ExecutionBackend, InstructionInfo, InstructionResult,
+    TransactionExecutionError, TransactionExecutionResult,
+};
 pub use cost_tracker::{CostTracker, CostTrackerError, TransactionCost};
 pub use features::{FeatureActivation, FeatureSet};
 pub use transaction_cache::TransactionCache;
