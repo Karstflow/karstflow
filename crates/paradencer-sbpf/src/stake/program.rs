@@ -1,4 +1,4 @@
-use super::{ExecutionContext, ExecutionOutcome};
+use crate::{ExecutionContext, ExecutionOutcome};
 use paradencer_constants::stake_program as constants;
 use paradencer_ids::STAKE_PROGRAM_ID;
 use paradencer_types::{Account, AccountData, Pubkey};

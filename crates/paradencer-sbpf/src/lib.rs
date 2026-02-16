@@ -29,7 +29,7 @@ pub mod precompiles;
 mod program_cache;
 #[cfg(test)]
 mod spl_integration_tests;
-mod stake_program;
+mod stake;
 pub mod syscall_dispatch;
 pub mod syscalls;
 mod system_program;
@@ -56,7 +56,7 @@ pub use paradencer_constants::execution::{
 };
 pub use precompiles::{Ed25519PrecompileExecutor, Secp256k1PrecompileExecutor};
 pub use program_cache::{CacheError, CachedProgram, ProgramCache};
-pub use stake_program::StakeProgramExecutor;
+pub use stake::StakeProgramExecutor;
 pub use syscall_dispatch::InstructionExecutor;
 pub use system_program::SystemProgramExecutor;
 pub use token_2022_program::Token2022ProgramExecutor;

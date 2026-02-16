@@ -348,6 +348,7 @@ pub mod stake_program {
 
     // Minimum delegation (1 SOL in lamports)
     pub const MINIMUM_DELEGATION_SOL: u64 = 1;
+    pub const MINIMUM_DELEGATION_LAMPORTS: u64 = MINIMUM_DELEGATION_SOL * LAMPORTS_PER_SOL;
 
     // Minimum delinquent epochs before forced deactivation is allowed
     pub const MINIMUM_DELINQUENT_EPOCHS_FOR_DEACTIVATION: u64 = 5;
