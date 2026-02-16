@@ -262,6 +262,63 @@ impl Bank {
         Ok(())
     }
 
+    /// Complete slot processing: distribute fees, run epoch boundary processing
+    /// if applicable, and freeze the bank.
+    ///
+    /// This is the high-level slot finalization method that should be called
+    /// when all ticks and transactions for the slot have been processed.
+    /// Returns the epoch boundary flag and distributed fee amounts.
+    pub fn finish_slot(&self) -> Result<SlotFinalizationResult, BankFreezeError> {
+        if self.is_frozen() {
+            return Err(BankFreezeError::AlreadyFrozen);
+        }
+
+        if !self.is_complete() {
+            return Err(BankFreezeError::IncompleteSlot {
+                current_ticks: self.tick_height(),
+                required_ticks: self.max_tick_height,
+            });
+        }
+
+        // Distribute accumulated fees before freezing
+        let (leader_share, burn_share) = self
+            .distribute_fees()
+            .map_err(|_| BankFreezeError::AlreadyFrozen)?;
+
+        // Check and process epoch boundary
+        let epoch_boundary = self.is_epoch_boundary();
+        if epoch_boundary {
+            self.process_epoch_boundary();
+        }
+
+        // Freeze the bank
+        self.status
+            .store(BankStatus::Frozen.to_u8(), Ordering::Relaxed);
+
+        Ok(SlotFinalizationResult {
+            slot: self.slot,
+            epoch: self.epoch,
+            epoch_boundary,
+            leader_share,
+            burn_share,
+            transaction_count: self.transaction_count(),
+        })
+    }
+
+    /// Run epoch boundary processing.
+    ///
+    /// Called when the bank's epoch differs from its parent's epoch.
+    /// Hooks for rewards distribution, stake warmup/cooldown, feature
+    /// activation, and leader schedule rotation will be wired here as
+    /// those subsystems are integrated.
+    fn process_epoch_boundary(&self) {
+        // Future hooks:
+        // 1. Calculate and distribute epoch rewards (RewardsCalculator + RewardsDistributor)
+        // 2. Process stake warmup/cooldown
+        // 3. Activate pending features (FeatureSet)
+        // 4. Update leader schedule for next epoch
+    }
+
     pub fn freeze(&self) -> Result<(), BankFreezeError> {
         if self.is_frozen() {
             return Err(BankFreezeError::AlreadyFrozen);
@@ -422,6 +479,17 @@ impl Bank {
         result[16..24].copy_from_slice(&tick_height.to_le_bytes());
         result
     }
+}
+
+/// Result of slot finalization via `finish_slot()`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SlotFinalizationResult {
+    pub slot: u64,
+    pub epoch: u64,
+    pub epoch_boundary: bool,
+    pub leader_share: u64,
+    pub burn_share: u64,
+    pub transaction_count: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -909,5 +977,90 @@ mod tests {
         bank.freeze().unwrap();
 
         assert_eq!(bank.distribute_fees(), Err(BankFeeError::BankFrozen));
+    }
+
+    // finish_slot() tests
+
+    #[test]
+    fn finish_slot_freezes_bank_and_distributes_fees() {
+        let accounts = Arc::new(AccountDatabase::new());
+        let epoch_schedule = Arc::new(EpochSchedule::default());
+        let leader_schedule = create_test_leader_schedule(0);
+
+        let bank = Bank::new_genesis_with_config(
+            accounts,
+            epoch_schedule,
+            leader_schedule,
+            1_000_000,
+            Rent::default(),
+            Inflation::default(),
+        );
+
+        bank.add_execution_fee(2000);
+        bank.add_priority_fee(1000);
+
+        for _ in 0..TICKS_PER_SLOT {
+            bank.register_tick().unwrap();
+        }
+
+        let result = bank.finish_slot().unwrap();
+
+        assert_eq!(result.slot, GENESIS_SLOT);
+        assert_eq!(result.epoch, GENESIS_EPOCH);
+        assert!(!result.epoch_boundary);
+        assert!(result.burn_share > 0);
+        assert!(result.leader_share > 0);
+        assert_eq!(bank.status(), BankStatus::Frozen);
+    }
+
+    #[test]
+    fn finish_slot_rejects_incomplete() {
+        let accounts = Arc::new(AccountDatabase::new());
+        let epoch_schedule = Arc::new(EpochSchedule::default());
+        let leader_schedule = create_test_leader_schedule(0);
+
+        let bank = Bank::new_genesis(accounts, epoch_schedule, leader_schedule);
+
+        assert!(matches!(
+            bank.finish_slot(),
+            Err(BankFreezeError::IncompleteSlot { .. })
+        ));
+    }
+
+    #[test]
+    fn finish_slot_rejects_already_frozen() {
+        let accounts = Arc::new(AccountDatabase::new());
+        let epoch_schedule = Arc::new(EpochSchedule::default());
+        let leader_schedule = create_test_leader_schedule(0);
+
+        let bank = Bank::new_genesis(accounts, epoch_schedule, leader_schedule);
+
+        for _ in 0..TICKS_PER_SLOT {
+            bank.register_tick().unwrap();
+        }
+
+        bank.finish_slot().unwrap();
+        assert_eq!(bank.finish_slot(), Err(BankFreezeError::AlreadyFrozen));
+    }
+
+    #[test]
+    fn finish_slot_detects_epoch_boundary() {
+        let accounts = Arc::new(AccountDatabase::new());
+        let epoch_schedule = Arc::new(EpochSchedule::default());
+        let leader_schedule = create_test_leader_schedule(0);
+
+        let parent = Bank::new_genesis(accounts, epoch_schedule, leader_schedule);
+
+        // Create child at first slot of epoch 1
+        let child_schedule = create_test_leader_schedule(1);
+        let child = Bank::new_from_parent(&parent, SLOTS_PER_EPOCH, child_schedule);
+
+        for _ in 0..TICKS_PER_SLOT {
+            child.register_tick().unwrap();
+        }
+
+        let result = child.finish_slot().unwrap();
+        assert!(result.epoch_boundary);
+        assert_eq!(result.epoch, 1);
     }
 }

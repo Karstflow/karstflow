@@ -32,7 +32,7 @@ mod vote_state;
 
 pub use bank::{
     Bank, BankFeeError, BankFreezeError, BankRootError, BankStatus, BankTickError,
-    BankTransactionError, SlotInfo,
+    BankTransactionError, SlotFinalizationResult, SlotInfo,
 };
 pub use bank_forks::{BankForks, BankForksError};
 pub use blockhash_queue::{BlockhashInfo, BlockhashQueue, Hash, MAX_RECENT_BLOCKHASHES};
