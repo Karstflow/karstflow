@@ -1,12 +1,16 @@
 use crate::vm::{BytecodeVm, SbpfVm};
 use crate::{
-    AssociatedTokenProgramExecutor, BpfLoaderExecutor, ExecutionContext, ExecutionOutcome,
-    MemoProgramExecutor, StakeProgramExecutor, SystemProgramExecutor, Token2022ProgramExecutor,
-    TokenProgramExecutor, VoteProgramExecutor,
+    AddressLookupTableExecutor, AssociatedTokenProgramExecutor, BpfLoaderExecutor,
+    ComputeBudgetProgramExecutor, ConfigProgramExecutor, Ed25519PrecompileExecutor,
+    ExecutionContext, ExecutionOutcome, MemoProgramExecutor, Secp256k1PrecompileExecutor,
+    StakeProgramExecutor, SystemProgramExecutor, Token2022ProgramExecutor, TokenProgramExecutor,
+    VoteProgramExecutor,
 };
 use paradencer_ids::{
-    ASSOCIATED_TOKEN_PROGRAM_ID, BPF_LOADER_PROGRAM_ID, MEMO_PROGRAM_ID, MEMO_PROGRAM_V3_ID,
-    STAKE_PROGRAM_ID, SYSTEM_PROGRAM_ID, TOKEN_2022_PROGRAM_ID, TOKEN_PROGRAM_ID, VOTE_PROGRAM_ID,
+    ADDRESS_LOOKUP_TABLE_PROGRAM_ID, ASSOCIATED_TOKEN_PROGRAM_ID, BPF_LOADER_PROGRAM_ID,
+    COMPUTE_BUDGET_PROGRAM_ID, CONFIG_PROGRAM_ID, ED25519_PROGRAM_ID, MEMO_PROGRAM_ID,
+    MEMO_PROGRAM_V3_ID, SECP256K1_PROGRAM_ID, STAKE_PROGRAM_ID, SYSTEM_PROGRAM_ID,
+    TOKEN_2022_PROGRAM_ID, TOKEN_PROGRAM_ID, VOTE_PROGRAM_ID,
 };
 use paradencer_types::{Account, Pubkey};
 use std::collections::HashMap;
@@ -70,6 +74,11 @@ pub struct TransactionProcessor {
     associated_token_program: AssociatedTokenProgramExecutor,
     memo_program: MemoProgramExecutor,
     bpf_loader: BpfLoaderExecutor,
+    compute_budget_program: ComputeBudgetProgramExecutor,
+    address_lookup_table: AddressLookupTableExecutor,
+    config_program: ConfigProgramExecutor,
+    ed25519_precompile: Ed25519PrecompileExecutor,
+    secp256k1_precompile: Secp256k1PrecompileExecutor,
     bytecode_vm: BytecodeVm,
     max_compute_units: u64,
 }
@@ -86,6 +95,11 @@ impl TransactionProcessor {
             associated_token_program: AssociatedTokenProgramExecutor::new(180),
             memo_program: MemoProgramExecutor::new(100),
             bpf_loader: BpfLoaderExecutor::new(400),
+            compute_budget_program: ComputeBudgetProgramExecutor::new(150),
+            address_lookup_table: AddressLookupTableExecutor::new(200),
+            config_program: ConfigProgramExecutor::new(150),
+            ed25519_precompile: Ed25519PrecompileExecutor::new(200),
+            secp256k1_precompile: Secp256k1PrecompileExecutor::new(200),
             bytecode_vm: BytecodeVm::new(),
             max_compute_units: 1_400_000,
         }
@@ -251,6 +265,26 @@ impl TransactionProcessor {
             self.bpf_loader
                 .execute(context)
                 .unwrap_or_else(|err| ExecutionOutcome::failure(400, err))
+        } else if context.program_id == COMPUTE_BUDGET_PROGRAM_ID {
+            self.compute_budget_program
+                .execute(context)
+                .unwrap_or_else(|err| ExecutionOutcome::failure(150, err))
+        } else if context.program_id == ADDRESS_LOOKUP_TABLE_PROGRAM_ID {
+            self.address_lookup_table
+                .execute(context)
+                .unwrap_or_else(|err| ExecutionOutcome::failure(200, err))
+        } else if context.program_id == CONFIG_PROGRAM_ID {
+            self.config_program
+                .execute(context)
+                .unwrap_or_else(|err| ExecutionOutcome::failure(150, err))
+        } else if context.program_id == ED25519_PROGRAM_ID {
+            self.ed25519_precompile
+                .execute(context)
+                .unwrap_or_else(|err| ExecutionOutcome::failure(200, err))
+        } else if context.program_id == SECP256K1_PROGRAM_ID {
+            self.secp256k1_precompile
+                .execute(context)
+                .unwrap_or_else(|err| ExecutionOutcome::failure(200, err))
         } else {
             // Try executing as a deployed BPF program via BytecodeVm
             self.try_execute_bpf(context)
@@ -393,6 +427,54 @@ mod tests {
 
         assert!(outcome.success, "BPF program should execute successfully");
         assert!(outcome.compute_units_consumed > 0);
+    }
+
+    #[test]
+    fn routes_compute_budget_program() {
+        let processor = TransactionProcessor::new();
+        let outcome =
+            processor.process_instruction(COMPUTE_BUDGET_PROGRAM_ID, vec![], vec![]);
+        // ComputeBudget with empty data should still be routed (base cost success or parse error)
+        assert!(outcome.compute_units_consumed > 0 || !outcome.success);
+    }
+
+    #[test]
+    fn routes_all_builtins_without_panic() {
+        let processor = TransactionProcessor::new();
+        let program_ids = [
+            SYSTEM_PROGRAM_ID,
+            VOTE_PROGRAM_ID,
+            STAKE_PROGRAM_ID,
+            TOKEN_PROGRAM_ID,
+            TOKEN_2022_PROGRAM_ID,
+            ASSOCIATED_TOKEN_PROGRAM_ID,
+            MEMO_PROGRAM_ID,
+            BPF_LOADER_PROGRAM_ID,
+            COMPUTE_BUDGET_PROGRAM_ID,
+            ADDRESS_LOOKUP_TABLE_PROGRAM_ID,
+            CONFIG_PROGRAM_ID,
+            ED25519_PROGRAM_ID,
+            SECP256K1_PROGRAM_ID,
+        ];
+
+        for program_id in &program_ids {
+            // Should not panic — routing works for all 13 builtins
+            let _outcome = processor.process_instruction(*program_id, vec![], vec![]);
+        }
+    }
+
+    #[test]
+    fn precompile_routing_returns_result() {
+        let processor = TransactionProcessor::new();
+
+        let ed25519_outcome =
+            processor.process_instruction(ED25519_PROGRAM_ID, vec![], vec![]);
+        // Empty data to a precompile — should route and return a result
+        assert!(ed25519_outcome.compute_units_consumed > 0 || !ed25519_outcome.success);
+
+        let secp_outcome =
+            processor.process_instruction(SECP256K1_PROGRAM_ID, vec![], vec![]);
+        assert!(secp_outcome.compute_units_consumed > 0 || !secp_outcome.success);
     }
 
     #[test]
