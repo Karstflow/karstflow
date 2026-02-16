@@ -3,6 +3,7 @@ pub mod block_limits;
 pub mod blockstore;
 pub mod compute_budget_program;
 pub mod config_program;
+pub mod crypto;
 pub mod features;
 pub mod genesis;
 pub mod precompiles;
@@ -16,14 +17,28 @@ pub mod economics {
     pub const MIN_LAMPORTS_PER_SIGNATURE: u64 = 0;
     pub const MAX_LAMPORTS_PER_SIGNATURE: u64 = 100_000;
 
-    // Rent and stake constants
+    /// Percentage of execution fees distributed to the slot leader.
+    pub const FEE_LEADER_SHARE_PERCENT: u64 = 50;
+    /// Percentage of execution fees burned to reduce total supply.
+    pub const FEE_BURN_PERCENT: u64 = 50;
+
+    // Rent constants
     pub const RENT_EXEMPTION_BASE_LAMPORTS: u64 = 890_880;
     pub const RENT_EXEMPTION_LAMPORTS_PER_BYTE: u64 = 6_960;
+    /// Default annual rent cost per byte in lamports.
+    pub const DEFAULT_LAMPORTS_PER_BYTE_YEAR: u64 = 3_480;
+    /// Default multiplier for rent exemption (2 years of rent).
+    pub const DEFAULT_EXEMPTION_THRESHOLD: f64 = 2.0;
+    /// Approximate number of slots per year at 400ms slot time.
+    pub const DEFAULT_SLOTS_PER_YEAR: f64 = 78_892_314.984;
+
+    // Stake constants
     pub const MIN_STAKE_DELEGATION_LAMPORTS: u64 = 1_000_000_000;
     pub const BASE_NETWORK_SUPPLY_LAMPORTS: u64 = 1_000_000_000;
     pub const TOKEN_UI_DECIMALS_DIVISOR: f64 = 1_000_000_000_f64;
     pub const DEFAULT_VOTE_COMMISSION_PERCENT: u8 = 5;
 
+    // Inflation constants
     pub const INFLATION_FOUNDATION_RATE: f64 = 0.05_f64;
     pub const INFLATION_FOUNDATION_TERM: f64 = 7.0_f64;
     pub const INFLATION_INITIAL_RATE: f64 = 0.08_f64;
@@ -34,6 +49,12 @@ pub mod economics {
 
     pub const INFLATION_REWARD_MODULUS: u64 = 10_000;
     pub const INFLATION_REWARD_BASE_AMOUNT: i64 = 1_000;
+
+    // Partitioned rewards distribution constants
+    /// Number of slots over which epoch rewards are distributed.
+    pub const PARTITIONED_REWARDS_DISTRIBUTION_SLOTS: u64 = 4_096;
+    /// Maximum number of reward entries distributed per slot.
+    pub const MAX_REWARDS_PER_SLOT: usize = 4_096;
 }
 
 pub mod ledger {
@@ -60,6 +81,24 @@ pub mod consensus {
     pub const VOTE_THRESHOLD_DEPTH: usize = 8;
     pub const INITIAL_LOCKOUT: u32 = 2;
     pub const MAX_EPOCH_CREDITS_HISTORY: usize = 64;
+
+    /// Supermajority threshold: 2/3 of stake required for finalization.
+    pub const SUPERMAJORITY_THRESHOLD: f64 = 2.0_f64 / 3.0_f64;
+
+    /// Maximum confirmation count before a vote is considered rooted.
+    pub const MAX_CONFIRMATION_COUNT: u32 = MAX_LOCKOUT_HISTORY as u32;
+
+    /// Threshold for duplicate confirmation via gossip (52% of stake).
+    pub const DUPLICATE_CONFIRMATION_THRESHOLD: f64 = 0.52_f64;
+
+    /// Maximum number of slots to retain equivocation history for pruning.
+    pub const MAX_EQUIVOCATION_HISTORY_SLOTS: u64 = 1_024;
+
+    /// Default file name for persisted tower state.
+    pub const TOWER_FILE_NAME: &str = "tower.bin";
+
+    /// Current version for tower persistence format.
+    pub const TOWER_PERSISTENCE_VERSION: u32 = 1;
 }
 
 pub mod rpc {
@@ -144,6 +183,8 @@ pub mod execution {
 pub mod vote_program {
     // Vote program instruction types
     pub const INSTRUCTION_INITIALIZE_ACCOUNT: u32 = 0;
+    /// Alias for backward compatibility with vote program executor.
+    pub const INSTRUCTION_INITIALIZE: u32 = INSTRUCTION_INITIALIZE_ACCOUNT;
     pub const INSTRUCTION_AUTHORIZE: u32 = 1;
     pub const INSTRUCTION_VOTE: u32 = 2;
     pub const INSTRUCTION_WITHDRAW: u32 = 3;
@@ -160,6 +201,10 @@ pub mod vote_program {
     pub const INSTRUCTION_AUTHORIZE_WITH_SEED: u32 = 14;
     pub const INSTRUCTION_AUTHORIZE_CHECKED_WITH_SEED: u32 = 15;
     pub const INSTRUCTION_INITIALIZE_ACCOUNT_V2: u32 = 16;
+
+    // Vote authorize types (discriminants in instruction data)
+    pub const VOTE_AUTHORIZE_VOTER: u32 = 0;
+    pub const VOTE_AUTHORIZE_WITHDRAWER: u32 = 1;
 
     // Vote program error codes
     pub const ERR_VOTE_TOO_OLD: u32 = 0;
@@ -186,12 +231,25 @@ pub mod vote_program {
     // Vote state constants
     pub const VOTE_CREDITS_MAXIMUM_PER_SLOT: u64 = 16;
     pub const VOTE_CREDITS_GRACE_SLOTS: u64 = 2;
+    pub const VOTE_CREDITS_MAXIMUM_PER_SLOT_OLD: u64 = 8;
     pub const DEFAULT_BLOCK_REVENUE_COMMISSION_BPS: u64 = 10_000;
+
+    // Maximum number of authorized voters to track across epoch boundaries.
+    pub const MAX_AUTHORIZED_VOTERS: usize = 32;
+
+    // Maximum number of prior voters to track in the circular buffer.
+    pub const MAX_PRIOR_VOTERS: usize = 32;
+
+    // Minimum epochs between reauthorization of vote account.
+    pub const MIN_EPOCHS_TO_REAUTHORIZE: u64 = 0;
 
     // Vote state sizes
     pub const VOTE_STATE_V2_SIZE: usize = 3731;
     pub const VOTE_STATE_V3_SIZE: usize = 3762;
     pub const VOTE_STATE_V4_SIZE: usize = 3762;
+
+    // Default compute units consumed by vote program.
+    pub const DEFAULT_COMPUTE_UNITS: u64 = 2100;
 
     // Vote program compute costs
     pub const COMPUTE_COST_INITIALIZE: u64 = 500;
@@ -274,6 +332,39 @@ pub mod stake_program {
     // Stake state constants
     pub const STAKE_STATE_V2_SIZE: usize = 200;
 
+    // StakeState discriminant values (bincode enum tags)
+    pub const STATE_UNINITIALIZED: u32 = 0;
+    pub const STATE_INITIALIZED: u32 = 1;
+    pub const STATE_DELEGATED: u32 = 2;
+    pub const STATE_REWARDS_POOL: u32 = 3;
+
+    // Stake authorize types
+    pub const AUTHORIZE_STAKER: u32 = 0;
+    pub const AUTHORIZE_WITHDRAWER: u32 = 1;
+
+    // Warmup/cooldown rates
+    pub const DEFAULT_WARMUP_COOLDOWN_RATE: f64 = 0.25;
+    pub const NEW_WARMUP_COOLDOWN_RATE: f64 = 0.09;
+
+    // Minimum delegation (1 SOL in lamports)
+    pub const MINIMUM_DELEGATION_SOL: u64 = 1;
+
+    // Minimum delinquent epochs before forced deactivation is allowed
+    pub const MINIMUM_DELINQUENT_EPOCHS_FOR_DEACTIVATION: u64 = 5;
+
+    // Default slash penalty percentage
+    pub const DEFAULT_SLASH_PENALTY: u8 = 12;
+
+    // Stake flags bitmask values
+    pub const STAKE_FLAG_MUST_FULLY_ACTIVATE_BEFORE_DEACTIVATION: u8 = 1;
+    pub const STAKE_FLAG_EMPTY: u8 = 0;
+
+    // Maximum stake history entries
+    pub const STAKE_HISTORY_CAP: usize = 512;
+
+    // Lamports per SOL
+    pub const LAMPORTS_PER_SOL: u64 = 1_000_000_000;
+
     // Stake program compute costs
     pub const COMPUTE_COST_INITIALIZE: u64 = 500;
     pub const COMPUTE_COST_DELEGATE: u64 = 1000;
@@ -283,6 +374,7 @@ pub mod stake_program {
     pub const COMPUTE_COST_SPLIT: u64 = 800;
     pub const COMPUTE_COST_MERGE: u64 = 900;
     pub const COMPUTE_COST_BASE_INSTRUCTION: u64 = 250;
+    pub const DEFAULT_COMPUTE_UNITS: u64 = 750;
 }
 
 pub mod quic {

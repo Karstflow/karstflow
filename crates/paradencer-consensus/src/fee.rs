@@ -1,4 +1,4 @@
-/// Fee calculation and rate governance for transactions.
+/// Fee calculation, rate governance, and collection for transactions.
 ///
 /// Manages transaction fee rates based on network congestion and economic policy.
 /// Fees serve multiple purposes:
@@ -137,6 +137,86 @@ impl Default for FeeRateGovernor {
             MAX_LAMPORTS_PER_SIGNATURE,
             DEFAULT_FEE_BURN_PERCENT,
         )
+    }
+}
+
+/// Accumulates transaction fees collected during a slot and tracks distribution.
+///
+/// Separates execution fees (subject to burning) from priority fees (fully
+/// distributed to the leader). At slot boundary, fees are split between the
+/// slot leader and the burn account according to protocol rules.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FeeCollector {
+    /// Total execution fees collected this slot
+    pub total_fees: u64,
+    /// Total lamports burned from execution fees
+    pub total_burned: u64,
+    /// Total lamports distributed to the slot leader
+    pub leader_rewards: u64,
+}
+
+impl FeeCollector {
+    /// Create a new fee collector with zero balances.
+    pub fn new() -> Self {
+        Self {
+            total_fees: 0,
+            total_burned: 0,
+            leader_rewards: 0,
+        }
+    }
+
+    /// Record a fee payment from a processed transaction.
+    ///
+    /// The fee is added to the running total. Distribution happens
+    /// when `distribute` is called at the end of the slot.
+    pub fn collect_fee(&mut self, fee: u64) {
+        self.total_fees = self.total_fees.saturating_add(fee);
+    }
+
+    /// Calculate how fees should be split between leader and burn.
+    ///
+    /// Returns (leader_share, burn_share). The leader receives
+    /// `FEE_LEADER_SHARE_PERCENT` of collected fees; the remainder is burned
+    /// to reduce total supply.
+    pub fn distribute(&self) -> (u64, u64) {
+        let burn_share = self
+            .total_fees
+            .saturating_mul(FEE_BURN_PERCENT)
+            .checked_div(100)
+            .unwrap_or(0);
+
+        let leader_share = self.total_fees.saturating_sub(burn_share);
+
+        (leader_share, burn_share)
+    }
+
+    /// Finalize distribution: compute shares, record them, and return amounts.
+    ///
+    /// After calling this, `total_burned` and `leader_rewards` reflect the
+    /// actual distribution. Returns (leader_share, burn_share).
+    pub fn finalize(&mut self) -> (u64, u64) {
+        let (leader_share, burn_share) = self.distribute();
+        self.leader_rewards = self.leader_rewards.saturating_add(leader_share);
+        self.total_burned = self.total_burned.saturating_add(burn_share);
+        (leader_share, burn_share)
+    }
+
+    /// Reset collector state for a new slot.
+    pub fn reset(&mut self) {
+        self.total_fees = 0;
+        self.total_burned = 0;
+        self.leader_rewards = 0;
+    }
+
+    /// Check if any fees have been collected.
+    pub fn has_fees(&self) -> bool {
+        self.total_fees > 0
+    }
+}
+
+impl Default for FeeCollector {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -298,5 +378,96 @@ mod tests {
             calc.lamports_per_signature,
             governor.target_lamports_per_signature
         );
+    }
+
+    // FeeCollector tests
+
+    #[test]
+    fn fee_collector_starts_empty() {
+        let collector = FeeCollector::new();
+        assert_eq!(collector.total_fees, 0);
+        assert_eq!(collector.total_burned, 0);
+        assert_eq!(collector.leader_rewards, 0);
+        assert!(!collector.has_fees());
+    }
+
+    #[test]
+    fn fee_collector_accumulates_fees() {
+        let mut collector = FeeCollector::new();
+        collector.collect_fee(1000);
+        collector.collect_fee(2000);
+        collector.collect_fee(500);
+
+        assert_eq!(collector.total_fees, 3500);
+        assert!(collector.has_fees());
+    }
+
+    #[test]
+    fn fee_collector_distributes_evenly_at_50_percent() {
+        let mut collector = FeeCollector::new();
+        collector.collect_fee(10000);
+
+        let (leader, burned) = collector.distribute();
+        assert_eq!(leader, 5000);
+        assert_eq!(burned, 5000);
+        assert_eq!(leader + burned, 10000);
+    }
+
+    #[test]
+    fn fee_collector_handles_odd_amounts() {
+        let mut collector = FeeCollector::new();
+        collector.collect_fee(101);
+
+        let (leader, burned) = collector.distribute();
+        // 101 * 50 / 100 = 50 burned, 51 to leader
+        assert_eq!(burned, 50);
+        assert_eq!(leader, 51);
+        assert_eq!(leader + burned, 101);
+    }
+
+    #[test]
+    fn fee_collector_finalize_records_distribution() {
+        let mut collector = FeeCollector::new();
+        collector.collect_fee(10000);
+
+        let (leader, burned) = collector.finalize();
+        assert_eq!(leader, 5000);
+        assert_eq!(burned, 5000);
+        assert_eq!(collector.leader_rewards, 5000);
+        assert_eq!(collector.total_burned, 5000);
+    }
+
+    #[test]
+    fn fee_collector_resets_to_zero() {
+        let mut collector = FeeCollector::new();
+        collector.collect_fee(10000);
+        collector.finalize();
+
+        collector.reset();
+
+        assert_eq!(collector.total_fees, 0);
+        assert_eq!(collector.total_burned, 0);
+        assert_eq!(collector.leader_rewards, 0);
+        assert!(!collector.has_fees());
+    }
+
+    #[test]
+    fn fee_collector_handles_zero_fees() {
+        let collector = FeeCollector::new();
+        let (leader, burned) = collector.distribute();
+        assert_eq!(leader, 0);
+        assert_eq!(burned, 0);
+    }
+
+    #[test]
+    fn fee_collector_handles_large_amounts() {
+        let mut collector = FeeCollector::new();
+        collector.collect_fee(u64::MAX / 2);
+        collector.collect_fee(u64::MAX / 2);
+
+        // Should saturate, not overflow
+        let (leader, burned) = collector.distribute();
+        assert!(leader > 0);
+        assert!(burned > 0);
     }
 }

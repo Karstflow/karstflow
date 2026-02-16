@@ -1,12 +1,8 @@
 //! Secp256k1 signature recovery precompile.
 //!
 //! Recovers a public key from a secp256k1 ECDSA signature and message
-//! hash, verifying that the recovered key matches the expected one.
-//! This is used for Ethereum-compatible signature verification.
-//!
-//! Note: actual secp256k1 recovery is deferred to a later implementation
-//! phase. This executor validates the instruction format and deducts
-//! the correct compute costs.
+//! hash, then verifies that the derived Ethereum address matches the
+//! expected one. This enables Ethereum-compatible signature verification.
 
 use crate::{ExecutionContext, ExecutionOutcome};
 use paradencer_constants::precompiles;
@@ -71,7 +67,7 @@ impl Secp256k1PrecompileExecutor {
             ));
         }
 
-        // Validate each entry has valid offsets
+        // Verify each entry: recover the public key and compare the Ethereum address
         for i in 0..num_signatures {
             let entry_offset = 1 + i * ENTRY_HEADER_SIZE;
 
@@ -103,14 +99,64 @@ impl Secp256k1PrecompileExecutor {
             if msg_hash_offset + MESSAGE_HASH_SIZE > ctx.instruction_data.len() {
                 return Err(format!("Secp256k1: message hash #{} out of bounds", i));
             }
-        }
 
-        // Actual secp256k1 recovery will be implemented in a later phase.
-        // For now, we validate the format and deduct correct compute costs.
+            // Extract data
+            let expected_eth_address =
+                &ctx.instruction_data[eth_address_offset..eth_address_offset + ETH_ADDRESS_SIZE];
+            let sig_bytes = &ctx.instruction_data[sig_offset..sig_offset + SIGNATURE_SIZE];
+            let msg_hash =
+                &ctx.instruction_data[msg_hash_offset..msg_hash_offset + MESSAGE_HASH_SIZE];
+
+            // The signature is r (32 bytes) || s (32 bytes) || recovery_id (1 byte)
+            let recovery_id = sig_bytes[64];
+            let signature = &sig_bytes[..64];
+
+            // Perform secp256k1 ECDSA recovery
+            let recid = k256::ecdsa::RecoveryId::from_byte(recovery_id).ok_or_else(|| {
+                format!(
+                    "Secp256k1: invalid recovery id {} for signature #{}",
+                    recovery_id, i
+                )
+            })?;
+
+            let ecdsa_sig = k256::ecdsa::Signature::from_slice(signature)
+                .map_err(|e| format!("Secp256k1: invalid signature #{}: {}", i, e))?;
+
+            let msg_hash_arr: [u8; 32] = msg_hash
+                .try_into()
+                .map_err(|_| format!("Secp256k1: invalid message hash size for #{}", i))?;
+
+            let recovered_key = k256::ecdsa::VerifyingKey::recover_from_prehash(
+                &msg_hash_arr,
+                &ecdsa_sig,
+                recid,
+            )
+            .map_err(|e| format!("Secp256k1: recovery failed for signature #{}: {}", i, e))?;
+
+            // Derive Ethereum address: keccak256 of uncompressed pubkey (sans 0x04 prefix), last 20 bytes
+            use k256::elliptic_curve::sec1::ToEncodedPoint;
+            let pubkey_point = recovered_key.to_encoded_point(false);
+            let pubkey_bytes = &pubkey_point.as_bytes()[1..]; // skip 0x04 prefix
+
+            use tiny_keccak::{Hasher, Keccak};
+            let mut keccak = Keccak::v256();
+            keccak.update(pubkey_bytes);
+            let mut hash_output = [0u8; 32];
+            keccak.finalize(&mut hash_output);
+
+            let derived_address = &hash_output[12..]; // last 20 bytes
+
+            if derived_address != expected_eth_address {
+                return Err(format!(
+                    "Secp256k1: recovered address does not match expected for signature #{}",
+                    i
+                ));
+            }
+        }
 
         let mut outcome = ExecutionOutcome::success(compute_used);
         outcome.logs.push(format!(
-            "Secp256k1: processed {} signature(s)",
+            "Secp256k1: verified {} signature(s)",
             num_signatures
         ));
         Ok(outcome)
@@ -121,42 +167,62 @@ impl Secp256k1PrecompileExecutor {
 mod tests {
     use super::*;
     use paradencer_ids::SECP256K1_PROGRAM_ID;
-    use paradencer_types::Pubkey;
 
-    fn build_secp256k1_instruction(num_signatures: u8) -> Vec<u8> {
-        // Build a minimal valid instruction with proper offsets
+    /// Build an instruction with a real secp256k1 signature for end-to-end testing.
+    fn build_real_secp256k1_instruction() -> Vec<u8> {
+        use k256::ecdsa::SigningKey;
+        use k256::elliptic_curve::rand_core::OsRng;
+        use k256::elliptic_curve::sec1::ToEncodedPoint;
+
+        let signing_key = SigningKey::random(&mut OsRng);
+        let verifying_key = signing_key.verifying_key();
+
+        // Message hash
+        let message_hash = [0x42u8; 32];
+
+        // Sign
+        use k256::ecdsa::signature::hazmat::PrehashSigner;
+        let (signature, recid): (k256::ecdsa::Signature, k256::ecdsa::RecoveryId) =
+            signing_key.sign_prehash_recoverable(&message_hash).unwrap();
+
+        // Derive Ethereum address
+        let pubkey_point = verifying_key.to_encoded_point(false);
+        let pubkey_bytes = &pubkey_point.as_bytes()[1..];
+
+        use tiny_keccak::{Hasher, Keccak};
+        let mut keccak = Keccak::v256();
+        keccak.update(pubkey_bytes);
+        let mut hash_output = [0u8; 32];
+        keccak.finalize(&mut hash_output);
+        let eth_address = &hash_output[12..];
+
+        // Build instruction
+        let num_signatures: u8 = 1;
+        let header_total = 1 + ENTRY_HEADER_SIZE;
+
+        let eth_offset = header_total as u16;
+        let sig_offset = (header_total + ETH_ADDRESS_SIZE) as u16;
+        let msg_offset = (header_total + ETH_ADDRESS_SIZE + SIGNATURE_SIZE) as u16;
+
         let mut data = Vec::new();
         data.push(num_signatures);
 
-        let header_total = 1 + num_signatures as usize * ENTRY_HEADER_SIZE;
+        // Entry header
+        data.extend_from_slice(&eth_offset.to_le_bytes());
+        data.push(0xFF); // eth_address_instruction_index
+        data.extend_from_slice(&sig_offset.to_le_bytes());
+        data.push(0xFF); // signature_instruction_index
+        data.extend_from_slice(&msg_offset.to_le_bytes());
+        data.extend_from_slice(&(MESSAGE_HASH_SIZE as u16).to_le_bytes());
+        data.push(0xFF); // message_instruction_index
 
-        for i in 0..num_signatures as usize {
-            // Calculate where to place the data for this entry
-            let base = header_total + i * (ETH_ADDRESS_SIZE + SIGNATURE_SIZE + MESSAGE_HASH_SIZE);
-
-            let eth_offset = base as u16;
-            let eth_instr_index: u8 = 0xFF;
-            let sig_offset = (base + ETH_ADDRESS_SIZE) as u16;
-            let sig_instr_index: u8 = 0xFF;
-            let msg_offset = (base + ETH_ADDRESS_SIZE + SIGNATURE_SIZE) as u16;
-            let msg_size: u16 = MESSAGE_HASH_SIZE as u16;
-            let msg_instr_index: u8 = 0xFF;
-
-            data.extend_from_slice(&eth_offset.to_le_bytes());
-            data.push(eth_instr_index);
-            data.extend_from_slice(&sig_offset.to_le_bytes());
-            data.push(sig_instr_index);
-            data.extend_from_slice(&msg_offset.to_le_bytes());
-            data.extend_from_slice(&msg_size.to_le_bytes());
-            data.push(msg_instr_index);
-        }
-
-        // Append dummy data for each entry
-        for _ in 0..num_signatures {
-            data.extend_from_slice(&[0u8; ETH_ADDRESS_SIZE]); // eth address
-            data.extend_from_slice(&[0u8; SIGNATURE_SIZE]); // signature
-            data.extend_from_slice(&[0u8; MESSAGE_HASH_SIZE]); // message hash
-        }
+        // Eth address
+        data.extend_from_slice(eth_address);
+        // Signature: r || s || recovery_id
+        data.extend_from_slice(&signature.to_bytes());
+        data.push(recid.to_byte());
+        // Message hash
+        data.extend_from_slice(&message_hash);
 
         data
     }
@@ -165,14 +231,13 @@ mod tests {
     fn deducts_per_signature_cost() {
         let executor = Secp256k1PrecompileExecutor::new(150);
 
-        let instruction_data = build_secp256k1_instruction(2);
+        let instruction_data = build_real_secp256k1_instruction();
 
         let ctx = ExecutionContext::new(SECP256K1_PROGRAM_ID, vec![], instruction_data);
 
         let outcome = executor.execute(&ctx).unwrap();
-        let expected_cost = 150
-            + precompiles::SECP256K1_VERIFY_COST
-            + precompiles::SECP256K1_VERIFY_PER_SIGNATURE * 2;
+        let expected_cost =
+            150 + precompiles::SECP256K1_VERIFY_COST + precompiles::SECP256K1_VERIFY_PER_SIGNATURE;
         assert_eq!(outcome.compute_units_consumed, expected_cost);
     }
 
@@ -198,17 +263,15 @@ mod tests {
     }
 
     #[test]
-    fn single_signature_computes_correctly() {
+    fn real_signature_verifies() {
         let executor = Secp256k1PrecompileExecutor::new(150);
 
-        let instruction_data = build_secp256k1_instruction(1);
+        let instruction_data = build_real_secp256k1_instruction();
         let ctx = ExecutionContext::new(SECP256K1_PROGRAM_ID, vec![], instruction_data);
 
         let outcome = executor.execute(&ctx).unwrap();
         assert!(outcome.success);
-        let expected =
-            150 + precompiles::SECP256K1_VERIFY_COST + precompiles::SECP256K1_VERIFY_PER_SIGNATURE;
-        assert_eq!(outcome.compute_units_consumed, expected);
+        assert!(outcome.logs[0].contains("verified 1 signature"));
     }
 
     #[test]
@@ -222,5 +285,21 @@ mod tests {
         let result = executor.execute(&ctx);
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("too short"));
+    }
+
+    #[test]
+    fn rejects_wrong_eth_address() {
+        let executor = Secp256k1PrecompileExecutor::new(150);
+
+        let mut instruction_data = build_real_secp256k1_instruction();
+        // Corrupt the eth address (located at offset = 1 + ENTRY_HEADER_SIZE)
+        let eth_start = 1 + ENTRY_HEADER_SIZE;
+        instruction_data[eth_start] ^= 0xFF;
+
+        let ctx = ExecutionContext::new(SECP256K1_PROGRAM_ID, vec![], instruction_data);
+
+        let result = executor.execute(&ctx);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("does not match"));
     }
 }

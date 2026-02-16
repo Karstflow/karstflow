@@ -16,7 +16,7 @@ mod token_2022_program;
 mod token_program;
 mod transaction_processor;
 mod vm;
-mod vote_program;
+mod vote;
 
 pub use address_lookup_table::{
     AddressLookupTableExecutor, LookupTable, LookupTableMeta, LookupTableStatus,
@@ -42,7 +42,7 @@ pub use transaction_processor::{
     TransactionInstruction, TransactionMessage, TransactionProcessor, TransactionResult,
 };
 pub use vm::{SbpfExecutionError, SbpfExecutionResult, SbpfVm, StubSbpfVm};
-pub use vote_program::VoteProgramExecutor;
+pub use vote::VoteProgramExecutor;
 
 use paradencer_types::{Account, Pubkey};
 use std::collections::HashMap;

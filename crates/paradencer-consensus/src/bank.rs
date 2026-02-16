@@ -1,4 +1,5 @@
 use super::{EpochSchedule, Inflation, LeaderSchedule, Rent};
+use paradencer_constants::economics::FEE_BURN_PERCENT;
 use paradencer_constants::ledger::{GENESIS_EPOCH, GENESIS_SLOT, TICKS_PER_SLOT};
 use paradencer_storage::{AccountDatabase, Pubkey};
 use std::sync::atomic::{AtomicU64, AtomicU8, Ordering};
@@ -220,6 +221,25 @@ impl Bank {
         self.leader_schedule.get_leader(self.slot_index)
     }
 
+    /// Check whether this bank is at an epoch boundary.
+    ///
+    /// Returns true when the bank's epoch differs from its parent's epoch,
+    /// indicating that epoch-boundary processing (rewards, feature activation,
+    /// leader schedule rotation, etc.) should be triggered.
+    pub fn is_epoch_boundary(&self) -> bool {
+        if self.slot == GENESIS_SLOT {
+            return false;
+        }
+
+        match self.parent_slot {
+            Some(parent_slot) => {
+                let parent_epoch = self.epoch_schedule.get_epoch(parent_slot);
+                self.epoch > parent_epoch
+            }
+            None => false,
+        }
+    }
+
     pub fn register_tick(&self) -> Result<(), BankTickError> {
         if self.is_frozen() {
             return Err(BankTickError::BankFrozen);
@@ -317,6 +337,35 @@ impl Bank {
         Ok((total_collected, burn, fees_to_distribute))
     }
 
+    /// Distribute accumulated fees: burn a portion and credit the leader.
+    ///
+    /// This is a higher-level convenience that combines fee collection and
+    /// capitalization adjustment. Returns (leader_share, burn_share).
+    pub fn distribute_fees(&self) -> Result<(u64, u64), BankFeeError> {
+        if self.is_frozen() {
+            return Err(BankFeeError::BankFrozen);
+        }
+
+        let execution_fees = self.execution_fees.swap(0, Ordering::Relaxed);
+        let priority_fees = self.priority_fees.swap(0, Ordering::Relaxed);
+        let total_fees = execution_fees.saturating_add(priority_fees);
+
+        if total_fees == 0 {
+            return Ok((0, 0));
+        }
+
+        let burn_share = total_fees
+            .saturating_mul(FEE_BURN_PERCENT)
+            .checked_div(100)
+            .unwrap_or(0);
+        let leader_share = total_fees.saturating_sub(burn_share);
+
+        // Reduce capitalization by burned amount
+        self.capitalization.fetch_sub(burn_share, Ordering::Relaxed);
+
+        Ok((leader_share, burn_share))
+    }
+
     // Economic configuration accessors
 
     pub fn capitalization(&self) -> u64 {
@@ -408,6 +457,7 @@ pub enum BankFeeError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use paradencer_constants::ledger::SLOTS_PER_EPOCH;
     use paradencer_storage::Pubkey;
 
     fn create_test_leader_schedule(epoch: u64) -> Arc<LeaderSchedule> {
@@ -748,5 +798,116 @@ mod tests {
         let rent = bank.rent();
         assert!(rent.minimum_balance(100) > 0);
         assert!(rent.is_exempt(1_000_000, 100));
+    }
+
+    // New tests for is_epoch_boundary and distribute_fees
+
+    #[test]
+    fn bank_genesis_is_not_epoch_boundary() {
+        let accounts = Arc::new(AccountDatabase::new());
+        let epoch_schedule = Arc::new(EpochSchedule::default());
+        let leader_schedule = create_test_leader_schedule(0);
+
+        let bank = Bank::new_genesis(accounts, epoch_schedule, leader_schedule);
+        assert!(!bank.is_epoch_boundary());
+    }
+
+    #[test]
+    fn bank_mid_epoch_is_not_epoch_boundary() {
+        let accounts = Arc::new(AccountDatabase::new());
+        let epoch_schedule = Arc::new(EpochSchedule::default());
+        let leader_schedule = create_test_leader_schedule(0);
+
+        let parent = Bank::new_genesis(accounts, epoch_schedule, leader_schedule.clone());
+
+        // Slot 1 is still in epoch 0
+        let child = Bank::new_from_parent(&parent, 1, leader_schedule);
+        assert!(!child.is_epoch_boundary());
+    }
+
+    #[test]
+    fn bank_first_slot_of_new_epoch_is_epoch_boundary() {
+        let accounts = Arc::new(AccountDatabase::new());
+        let epoch_schedule = Arc::new(EpochSchedule::default());
+        let leader_schedule = create_test_leader_schedule(0);
+
+        let parent = Bank::new_genesis(accounts, epoch_schedule, leader_schedule.clone());
+
+        // First slot of epoch 1
+        let epoch_1_start = SLOTS_PER_EPOCH;
+        let child_schedule = create_test_leader_schedule(1);
+        let child = Bank::new_from_parent(&parent, epoch_1_start, child_schedule);
+
+        assert!(child.is_epoch_boundary());
+        assert_eq!(child.epoch(), 1);
+    }
+
+    #[test]
+    fn bank_distribute_fees_splits_correctly() {
+        let accounts = Arc::new(AccountDatabase::new());
+        let epoch_schedule = Arc::new(EpochSchedule::default());
+        let leader_schedule = create_test_leader_schedule(0);
+
+        let bank = Bank::new_genesis_with_config(
+            accounts,
+            epoch_schedule,
+            leader_schedule,
+            1_000_000_000,
+            Rent::default(),
+            Inflation::default(),
+        );
+
+        bank.add_execution_fee(6000);
+        bank.add_priority_fee(4000);
+
+        let (leader, burned) = bank.distribute_fees().unwrap();
+
+        // Total = 10000, burn 50% = 5000
+        assert_eq!(burned, 5000);
+        assert_eq!(leader, 5000);
+
+        // Capitalization reduced
+        assert_eq!(bank.capitalization(), 1_000_000_000 - 5000);
+
+        // Fees cleared
+        assert_eq!(bank.execution_fees(), 0);
+        assert_eq!(bank.priority_fees(), 0);
+    }
+
+    #[test]
+    fn bank_distribute_fees_with_zero() {
+        let accounts = Arc::new(AccountDatabase::new());
+        let epoch_schedule = Arc::new(EpochSchedule::default());
+        let leader_schedule = create_test_leader_schedule(0);
+
+        let bank = Bank::new_genesis_with_config(
+            accounts,
+            epoch_schedule,
+            leader_schedule,
+            1_000_000,
+            Rent::default(),
+            Inflation::default(),
+        );
+
+        let (leader, burned) = bank.distribute_fees().unwrap();
+        assert_eq!(leader, 0);
+        assert_eq!(burned, 0);
+        assert_eq!(bank.capitalization(), 1_000_000);
+    }
+
+    #[test]
+    fn bank_distribute_fees_rejects_when_frozen() {
+        let accounts = Arc::new(AccountDatabase::new());
+        let epoch_schedule = Arc::new(EpochSchedule::default());
+        let leader_schedule = create_test_leader_schedule(0);
+
+        let bank = Bank::new_genesis(accounts, epoch_schedule, leader_schedule);
+
+        for _ in 0..TICKS_PER_SLOT {
+            bank.register_tick().unwrap();
+        }
+        bank.freeze().unwrap();
+
+        assert_eq!(bank.distribute_fees(), Err(BankFeeError::BankFrozen));
     }
 }

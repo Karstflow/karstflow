@@ -13,7 +13,12 @@ members = [
   "crates/paradencer-rpc",
   "crates/paradencer-control",
   "crates/paradencer-topology",
-  "crates/paradencer-node", "crates/paradencer-consensus", "crates/paradencer-sbpf", "crates/paradencer-types", "crates/paradencer-ids", "crates/paradencer-crypto",
+  "crates/paradencer-node",
+  "crates/paradencer-consensus",
+  "crates/paradencer-sbpf",
+  "crates/paradencer-types",
+  "crates/paradencer-ids",
+  "crates/paradencer-crypto",
 ]
 resolver = "2"
 
@@ -25,7 +30,12 @@ authors = ["boogvar"]
 
 [workspace.dependencies]
 thiserror = "2"
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time"] }
+tokio = { version = "1", features = [
+  "rt-multi-thread",
+  "macros",
+  "sync",
+  "time",
+] }
 core_affinity = "0.8"
 crossbeam-channel = "0.5"
 serde = { version = "1", features = ["derive"] }
@@ -36,6 +46,10 @@ toml = "0.8"
 sha2 = "0.10"
 ed25519-dalek = { version = "2.1", features = ["rand_core"] }
 blake3 = "1.5"
+tiny-keccak = { version = "2", features = ["keccak"] }
+k256 = { version = "0.13", features = ["ecdsa"] }
+p256 = { version = "0.13", features = ["ecdsa"] }
+substrate-bn = "0.6"
 
 # Encoding
 bs58 = "0.5"

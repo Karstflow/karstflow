@@ -6,6 +6,10 @@
 //! - **Batch Ed25519 verification**: Critical for shred and transaction validation
 //! - **Blake3 hashing**: Fast cryptographic hashing with streaming support
 //! - **SHA256**: Optimized wrapper for legacy compatibility
+//! - **Keccak-256**: Ethereum-compatible hashing
+//! - **Secp256k1**: ECDSA recovery and verification (Ethereum signatures)
+//! - **Secp256r1**: NIST P-256 ECDSA verification (WebAuthn / passkeys)
+//! - **BN254**: alt_bn128 curve operations for zero-knowledge proofs
 //!
 //! # Performance Characteristics
 //!
@@ -29,11 +33,12 @@
 //! // let result = verifier.verify_batch();
 //! ```
 
-// Temporarily disabled due to compilation issues in existing codebase
-// pub mod blake3;
+pub mod bn254;
 pub mod ed25519_batch;
+pub mod keccak256;
 pub mod reed_solomon;
-// pub mod sha256;
+pub mod secp256k1;
+pub mod secp256r1;
 pub mod utils;
 
 mod errors;
@@ -41,10 +46,8 @@ mod errors;
 pub use errors::{CryptoError, CryptoResult};
 
 // Re-export commonly used types
-// pub use blake3::{Blake3Hasher, Blake3StreamingHasher};
 pub use ed25519_batch::{BatchVerifier, SignatureSet, VerificationResult};
 pub use reed_solomon::{FecError, FecReconstructor, FecResult, ReconstructedSet};
-// pub use sha256::{Sha256Hasher, Sha256StreamingHasher};
 pub use utils::{constant_time_eq, from_hex, secure_zero, to_hex, xor_bytes};
 
 // Re-export blake3 and sha2 directly for now

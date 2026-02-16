@@ -344,15 +344,16 @@ mod tests {
         // Should execute (will return base cost for empty instruction)
         assert!(outcome.success);
 
-        // Test Vote Program routing
+        // Test Vote Program routing (empty data returns error, but is routed correctly)
         let outcome = processor.process_instruction(
             VOTE_PROGRAM_ID,
             vec![],
-            vec![], // Empty data
+            vec![], // Empty data - vote program rejects this
         );
-        assert!(outcome.success);
+        // Vote program returns error for empty instruction data, which is correct
+        assert!(!outcome.success);
 
-        // Test Stake Program routing
+        // Test Stake Program routing (empty data returns base cost success)
         let outcome = processor.process_instruction(
             STAKE_PROGRAM_ID,
             vec![],

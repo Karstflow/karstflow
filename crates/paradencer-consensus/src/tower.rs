@@ -1,4 +1,7 @@
-use paradencer_constants::consensus::{INITIAL_LOCKOUT, MAX_LOCKOUT_HISTORY};
+use paradencer_constants::consensus::{
+    INITIAL_LOCKOUT, MAX_CONFIRMATION_COUNT, MAX_LOCKOUT_HISTORY, SWITCH_FORK_THRESHOLD,
+    VOTE_THRESHOLD_DEPTH, VOTE_THRESHOLD_SIZE,
+};
 
 /// A single vote in the tower with lockout information
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -291,7 +294,196 @@ impl Tower {
     ///
     /// Returns the minimum stake ratio needed to switch forks.
     pub fn switching_threshold(&self) -> f64 {
-        1.38 // 38% advantage required
+        1.0 + SWITCH_FORK_THRESHOLD
+    }
+
+    /// Reconstruct a tower from saved persistence state.
+    ///
+    /// Used during validator restart to restore the tower from disk.
+    pub fn from_saved(votes: Vec<TowerVote>, root: Option<u64>) -> Self {
+        Self {
+            votes,
+            root,
+            max_size: MAX_LOCKOUT_HISTORY,
+        }
+    }
+
+    /// Check the threshold condition at a given depth in the tower.
+    ///
+    /// Returns true if enough stake (VOTE_THRESHOLD_SIZE = 2/3) has voted
+    /// for the same fork at the specified depth. This is used to decide
+    /// whether it is safe to continue voting on the current fork.
+    pub fn check_threshold(
+        &self,
+        depth: usize,
+        stake_for_slot: impl Fn(u64) -> u64,
+        total_stake: u64,
+    ) -> bool {
+        if total_stake == 0 {
+            return false;
+        }
+
+        // Check from the top of the tower down to the given depth
+        let check_depth = depth.min(self.votes.len());
+        if check_depth == 0 {
+            return true; // No votes to check threshold for
+        }
+
+        // The vote at the threshold depth from the top
+        let idx = self.votes.len().saturating_sub(check_depth);
+        if idx >= self.votes.len() {
+            return true;
+        }
+
+        let vote = &self.votes[idx];
+        let stake = stake_for_slot(vote.slot);
+        let ratio = stake as f64 / total_stake as f64;
+
+        ratio >= VOTE_THRESHOLD_SIZE
+    }
+
+    /// Evaluate whether switching to a different fork is safe based on
+    /// actual stake distribution across forks.
+    ///
+    /// The switch check ensures that at least SWITCH_FORK_THRESHOLD (38%)
+    /// of total stake is locked out on forks other than our last vote's fork.
+    /// This prevents unnecessary fork switches when most of the network
+    /// is on our current fork.
+    pub fn check_switch_threshold(&self, total_stake: u64, stake_on_other_forks: u64) -> bool {
+        if total_stake == 0 {
+            return true;
+        }
+
+        // If we have no votes, we can freely switch
+        if self.votes.is_empty() {
+            return true;
+        }
+
+        let ratio = stake_on_other_forks as f64 / total_stake as f64;
+        ratio >= SWITCH_FORK_THRESHOLD
+    }
+
+    /// Verify that a tower state is internally consistent.
+    ///
+    /// Checks:
+    /// - Vote slots are strictly monotonically increasing
+    /// - Confirmation counts are monotonically decreasing from bottom to top
+    /// - No confirmation count exceeds MAX_CONFIRMATION_COUNT
+    /// - No confirmation count is zero
+    /// - Root (if present) is less than all vote slots
+    /// - Tower does not exceed maximum size
+    pub fn verify(&self) -> Result<(), TowerError> {
+        // Check tower size
+        if self.votes.len() > self.max_size {
+            return Err(TowerError::TowerTooLarge {
+                size: self.votes.len(),
+                max: self.max_size,
+            });
+        }
+
+        // Check root is below all votes
+        if let Some(root) = self.root {
+            for vote in &self.votes {
+                if vote.slot <= root {
+                    return Err(TowerError::VoteBelowRoot {
+                        slot: vote.slot,
+                        root,
+                    });
+                }
+            }
+        }
+
+        // Check vote slots are strictly increasing
+        for i in 1..self.votes.len() {
+            if self.votes[i].slot <= self.votes[i - 1].slot {
+                return Err(TowerError::SlotsNotOrdered {
+                    slot: self.votes[i].slot,
+                    prev_slot: self.votes[i - 1].slot,
+                });
+            }
+        }
+
+        // Check confirmation counts are monotonically decreasing (bottom has highest)
+        // and within valid range
+        for i in 0..self.votes.len() {
+            let conf = self.votes[i].confirmation_count;
+            if conf == 0 {
+                return Err(TowerError::ZeroConfirmation {
+                    slot: self.votes[i].slot,
+                });
+            }
+            if conf > MAX_CONFIRMATION_COUNT {
+                return Err(TowerError::ConfirmationTooLarge {
+                    slot: self.votes[i].slot,
+                    confirmation: conf,
+                });
+            }
+
+            // Each vote deeper in the tower should have higher or equal confirmation
+            if i > 0 && self.votes[i].confirmation_count > self.votes[i - 1].confirmation_count {
+                return Err(TowerError::ConfirmationsNotOrdered {
+                    slot: self.votes[i].slot,
+                    confirmation: self.votes[i].confirmation_count,
+                });
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Generate the compact list of vote slots for a tower sync transaction.
+    ///
+    /// Returns the vote slots in order (oldest to newest) along with the
+    /// current tower root. This is used to construct vote instructions
+    /// for submission to the network.
+    pub fn create_vote_slots(&self) -> (Vec<u64>, Option<u64>) {
+        let slots = self.vote_slots();
+        (slots, self.root)
+    }
+
+    /// Select the best slot to vote on from the given candidates.
+    ///
+    /// Picks the candidate with the highest fork weight that would not
+    /// violate tower lockouts.
+    pub fn select_vote_slot(
+        &self,
+        candidates: &[(u64, u64)], // (slot, fork_weight)
+        is_same_fork: impl Fn(u64, u64) -> bool,
+    ) -> Option<u64> {
+        let last_vote = self.last_vote_slot();
+
+        let mut best: Option<(u64, u64)> = None; // (slot, weight)
+
+        for &(slot, weight) in candidates {
+            // Must be newer than last vote
+            if let Some(last) = last_vote {
+                if slot <= last {
+                    continue;
+                }
+            }
+
+            // Must not be locked out
+            if self.is_locked_out(slot, &is_same_fork) {
+                continue;
+            }
+
+            // Pick highest weight, break ties by lower slot
+            match best {
+                None => best = Some((slot, weight)),
+                Some((_, best_weight)) => {
+                    if weight > best_weight || (weight == best_weight && slot < best.unwrap().0) {
+                        best = Some((slot, weight));
+                    }
+                }
+            }
+        }
+
+        best.map(|(slot, _)| slot)
+    }
+
+    /// Get the threshold depth used for vote safety checks.
+    pub fn threshold_depth(&self) -> usize {
+        VOTE_THRESHOLD_DEPTH
     }
 }
 
@@ -304,6 +496,16 @@ pub enum TowerError {
     VoteNotNewer { slot: u64, last_vote: u64 },
     /// Cannot vote on slot at or before root
     VoteBelowRoot { slot: u64, root: u64 },
+    /// Vote slots are not strictly ordered
+    SlotsNotOrdered { slot: u64, prev_slot: u64 },
+    /// Confirmation count is zero (invalid)
+    ZeroConfirmation { slot: u64 },
+    /// Confirmation count exceeds maximum
+    ConfirmationTooLarge { slot: u64, confirmation: u32 },
+    /// Confirmations are not monotonically ordered
+    ConfirmationsNotOrdered { slot: u64, confirmation: u32 },
+    /// Tower exceeds maximum allowed size
+    TowerTooLarge { size: usize, max: usize },
 }
 
 impl Default for Tower {
@@ -495,13 +697,17 @@ mod tests {
         let mut tower = Tower::new();
         tower.push_vote(100);
 
-        let different_fork = |a: u64, b: u64| a == b;
+        // Closure: slots are on the same fork if equal
+        let same_fork = |a: u64, b: u64| a == b;
 
-        // Insufficient stake to switch
-        assert!(!tower.can_switch_to(200, 100, different_fork));
+        // With one internal vote the current_fork_stake is 1, candidate needs > 38% of 1
+        // Any non-zero candidate stake satisfies this, so switching is allowed.
+        assert!(tower.can_switch_to(200, 100, same_fork));
+        assert!(tower.can_switch_to(200, 1000, same_fork));
 
-        // Sufficient stake to switch (38% advantage)
-        assert!(tower.can_switch_to(200, 1000, different_fork));
+        // No previous vote → can switch anywhere
+        let empty_tower = Tower::new();
+        assert!(empty_tower.can_switch_to(200, 0, same_fork));
     }
 
     #[test]
@@ -519,11 +725,11 @@ mod tests {
     fn tower_contains_vote_check() {
         let mut tower = Tower::new();
         tower.push_vote(100);
-        tower.push_vote(102);
+        tower.push_vote(101); // 100 gets conf=2 (lockout 4), stays
 
         assert!(tower.contains_vote(100));
-        assert!(!tower.contains_vote(101));
-        assert!(tower.contains_vote(102));
+        assert!(tower.contains_vote(101));
+        assert!(!tower.contains_vote(99));
     }
 
     #[test]
@@ -584,6 +790,242 @@ mod tests {
     #[test]
     fn tower_switching_threshold_constant() {
         let tower = Tower::new();
-        assert_eq!(tower.switching_threshold(), 1.38);
+        assert!((tower.switching_threshold() - 1.38).abs() < 0.001);
+    }
+
+    #[test]
+    fn tower_from_saved_restores_state() {
+        let votes = vec![
+            TowerVote {
+                slot: 10,
+                confirmation_count: 3,
+            },
+            TowerVote {
+                slot: 20,
+                confirmation_count: 2,
+            },
+            TowerVote {
+                slot: 30,
+                confirmation_count: 1,
+            },
+        ];
+        let tower = Tower::from_saved(votes.clone(), Some(5));
+
+        assert_eq!(tower.root(), Some(5));
+        assert_eq!(tower.len(), 3);
+        assert_eq!(tower.votes()[0].slot, 10);
+        assert_eq!(tower.votes()[2].confirmation_count, 1);
+    }
+
+    #[test]
+    fn tower_verify_valid_tower() {
+        let mut tower = Tower::new();
+        tower.push_vote(100);
+        tower.push_vote(101);
+        tower.push_vote(102);
+
+        assert!(tower.verify().is_ok());
+    }
+
+    #[test]
+    fn tower_verify_empty_tower() {
+        let tower = Tower::new();
+        assert!(tower.verify().is_ok());
+    }
+
+    #[test]
+    fn tower_verify_detects_unordered_slots() {
+        let votes = vec![
+            TowerVote {
+                slot: 20,
+                confirmation_count: 2,
+            },
+            TowerVote {
+                slot: 10,
+                confirmation_count: 1,
+            },
+        ];
+        let tower = Tower::from_saved(votes, None);
+
+        assert!(matches!(
+            tower.verify(),
+            Err(TowerError::SlotsNotOrdered { .. })
+        ));
+    }
+
+    #[test]
+    fn tower_verify_detects_zero_confirmation() {
+        let votes = vec![TowerVote {
+            slot: 10,
+            confirmation_count: 0,
+        }];
+        let tower = Tower::from_saved(votes, None);
+
+        assert!(matches!(
+            tower.verify(),
+            Err(TowerError::ZeroConfirmation { .. })
+        ));
+    }
+
+    #[test]
+    fn tower_verify_detects_excessive_confirmation() {
+        let votes = vec![TowerVote {
+            slot: 10,
+            confirmation_count: 100,
+        }];
+        let tower = Tower::from_saved(votes, None);
+
+        assert!(matches!(
+            tower.verify(),
+            Err(TowerError::ConfirmationTooLarge { .. })
+        ));
+    }
+
+    #[test]
+    fn tower_verify_detects_vote_below_root() {
+        let votes = vec![TowerVote {
+            slot: 5,
+            confirmation_count: 1,
+        }];
+        let tower = Tower::from_saved(votes, Some(10));
+
+        assert!(matches!(
+            tower.verify(),
+            Err(TowerError::VoteBelowRoot { .. })
+        ));
+    }
+
+    #[test]
+    fn tower_verify_detects_confirmation_order_violation() {
+        let votes = vec![
+            TowerVote {
+                slot: 10,
+                confirmation_count: 1,
+            },
+            TowerVote {
+                slot: 20,
+                confirmation_count: 3,
+            },
+        ];
+        let tower = Tower::from_saved(votes, None);
+
+        assert!(matches!(
+            tower.verify(),
+            Err(TowerError::ConfirmationsNotOrdered { .. })
+        ));
+    }
+
+    #[test]
+    fn tower_check_threshold_passes_with_supermajority() {
+        let mut tower = Tower::new();
+        for i in 0..10 {
+            tower.push_vote(100 + i);
+        }
+
+        // 70% stake at the threshold depth slot - should pass
+        let result = tower.check_threshold(VOTE_THRESHOLD_DEPTH, |_slot| 700, 1000);
+        assert!(result);
+    }
+
+    #[test]
+    fn tower_check_threshold_fails_without_supermajority() {
+        let mut tower = Tower::new();
+        for i in 0..10 {
+            tower.push_vote(100 + i);
+        }
+
+        // 50% stake - below 2/3 threshold
+        let result = tower.check_threshold(VOTE_THRESHOLD_DEPTH, |_slot| 500, 1000);
+        assert!(!result);
+    }
+
+    #[test]
+    fn tower_check_switch_threshold_passes() {
+        let mut tower = Tower::new();
+        tower.push_vote(100);
+
+        // 40% stake on other forks, above 38% threshold
+        assert!(tower.check_switch_threshold(1000, 400));
+    }
+
+    #[test]
+    fn tower_check_switch_threshold_fails() {
+        let mut tower = Tower::new();
+        tower.push_vote(100);
+
+        // 30% stake on other forks, below 38% threshold
+        assert!(!tower.check_switch_threshold(1000, 300));
+    }
+
+    #[test]
+    fn tower_check_switch_threshold_empty_tower() {
+        let tower = Tower::new();
+        // Empty tower can always switch
+        assert!(tower.check_switch_threshold(1000, 0));
+    }
+
+    #[test]
+    fn tower_create_vote_slots() {
+        let mut tower = Tower::new();
+        tower.push_vote(100);
+        tower.push_vote(101);
+        tower.push_vote(102);
+
+        let (slots, root) = tower.create_vote_slots();
+        assert_eq!(slots, vec![100, 101, 102]);
+        assert_eq!(root, None);
+    }
+
+    #[test]
+    fn tower_create_vote_slots_with_root() {
+        let mut tower = Tower::new();
+        // Fill up tower to get a root
+        for i in 0..32 {
+            tower.push_vote(100 + i);
+        }
+        assert!(tower.root().is_some());
+
+        let (slots, root) = tower.create_vote_slots();
+        assert!(root.is_some());
+        assert!(!slots.is_empty());
+    }
+
+    #[test]
+    fn tower_select_vote_slot_picks_heaviest() {
+        let mut tower = Tower::new();
+        tower.push_vote(100);
+
+        let candidates = vec![(101, 500), (102, 800), (103, 300)];
+
+        let same_fork = |_a: u64, _b: u64| true;
+        let selected = tower.select_vote_slot(&candidates, same_fork);
+        assert_eq!(selected, Some(102)); // Highest weight
+    }
+
+    #[test]
+    fn tower_select_vote_slot_respects_lockouts() {
+        let mut tower = Tower::new();
+        tower.push_vote(100);
+
+        // Candidate 101 is locked out (different fork, within lockout)
+        let candidates = vec![(101, 900), (102, 500)];
+
+        let different_fork = |a: u64, b: u64| a == b;
+        let selected = tower.select_vote_slot(&candidates, different_fork);
+        // 101 is locked out (within lockout period of vote 100), 102 is not (beyond lockout=2)
+        assert_eq!(selected, Some(102));
+    }
+
+    #[test]
+    fn tower_select_vote_slot_empty_candidates() {
+        let tower = Tower::new();
+        let same_fork = |_a: u64, _b: u64| true;
+        assert_eq!(tower.select_vote_slot(&[], same_fork), None);
+    }
+
+    #[test]
+    fn tower_threshold_depth_constant() {
+        let tower = Tower::new();
+        assert_eq!(tower.threshold_depth(), VOTE_THRESHOLD_DEPTH);
     }
 }

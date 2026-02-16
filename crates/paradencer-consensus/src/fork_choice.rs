@@ -1,11 +1,9 @@
 use crate::{BankForks, Tower};
+use paradencer_constants::consensus::{
+    SUPERMAJORITY_THRESHOLD, SWITCH_FORK_THRESHOLD, VOTE_THRESHOLD_DEPTH, VOTE_THRESHOLD_SIZE,
+};
+use paradencer_storage::Pubkey;
 use std::collections::HashMap;
-
-/// Threshold constants for fork choice decisions
-/// Based on Firedancer's tower implementation
-const THRESHOLD_DEPTH: usize = 8;
-const THRESHOLD_RATIO: f64 = 2.0 / 3.0; // 66.67% supermajority
-const SWITCH_RATIO: f64 = 0.38; // 38% switch threshold
 
 /// Fork metadata for fork choice algorithm
 #[derive(Debug, Clone)]
@@ -44,6 +42,9 @@ pub struct ForkChoice {
     total_stake: u64,
     /// Current best slot (heaviest fork tip)
     best_slot: Option<u64>,
+    /// Per-validator latest vote slot (LMD rule: only latest vote counts).
+    /// Maps validator pubkey to (voted_slot, stake).
+    validator_latest_votes: HashMap<Pubkey, (u64, u64)>,
 }
 
 impl ForkChoice {
@@ -52,6 +53,7 @@ impl ForkChoice {
             forks: HashMap::new(),
             total_stake,
             best_slot: None,
+            validator_latest_votes: HashMap::new(),
         }
     }
 
@@ -78,7 +80,7 @@ impl ForkChoice {
             let stake_ratio = fork.stake_weight as f64 / self.total_stake as f64;
 
             // Mark as confirmed if >= 66.67% stake
-            if stake_ratio >= THRESHOLD_RATIO {
+            if stake_ratio >= VOTE_THRESHOLD_SIZE {
                 fork.confirmed = true;
             }
 
@@ -90,7 +92,7 @@ impl ForkChoice {
     }
 
     /// Check if a fork meets optimistic confirmation criteria
-    /// Requires THRESHOLD_DEPTH consecutive votes with supermajority
+    /// Requires VOTE_THRESHOLD_DEPTH consecutive votes with supermajority
     fn check_optimistic_confirmation(&self, slot: u64) -> bool {
         let mut current = Some(slot);
         let mut depth = 0;
@@ -98,11 +100,11 @@ impl ForkChoice {
         while let Some(slot) = current {
             if let Some(fork) = self.forks.get(&slot) {
                 let stake_ratio = fork.stake_weight as f64 / self.total_stake as f64;
-                if stake_ratio < THRESHOLD_RATIO {
+                if stake_ratio < VOTE_THRESHOLD_SIZE {
                     return false;
                 }
                 depth += 1;
-                if depth >= THRESHOLD_DEPTH {
+                if depth >= VOTE_THRESHOLD_DEPTH {
                     return true;
                 }
                 current = fork.parent;
@@ -174,7 +176,7 @@ impl ForkChoice {
         }
 
         let ratio = candidate_weight as f64 / current_weight as f64;
-        ratio >= (1.0 + SWITCH_RATIO)
+        ratio >= (1.0 + SWITCH_FORK_THRESHOLD)
     }
 
     /// Compute the best fork to vote on using GHOST algorithm
@@ -345,7 +347,7 @@ impl ForkChoice {
 
             // Must have supermajority
             let ratio = fork.stake_weight as f64 / self.total_stake as f64;
-            if ratio < THRESHOLD_RATIO {
+            if ratio < VOTE_THRESHOLD_SIZE {
                 continue;
             }
 
@@ -415,6 +417,179 @@ impl ForkChoice {
             .iter()
             .map(|(slot, fork)| (*slot, fork.stake_weight))
             .collect()
+    }
+
+    /// Record a validator's vote with LMD (Latest Message Driven) semantics.
+    ///
+    /// If the validator already has a recorded vote, the old vote's stake is
+    /// subtracted from its slot (and all ancestors), and the new vote's stake
+    /// is added to the new slot (and all ancestors). This implements the core
+    /// LMD-GHOST rule: only the latest vote from each validator counts.
+    pub fn record_validator_vote(&mut self, validator: Pubkey, slot: u64, stake: u64) {
+        // Remove old vote's stake from its ancestry
+        if let Some(&(old_slot, old_stake)) = self.validator_latest_votes.get(&validator) {
+            if old_slot == slot {
+                // Same slot, just update stake if changed
+                if old_stake != stake {
+                    self.subtract_stake_from_ancestry(old_slot, old_stake);
+                    self.add_stake_to_ancestry(slot, stake);
+                    self.validator_latest_votes.insert(validator, (slot, stake));
+                }
+                return;
+            }
+            self.subtract_stake_from_ancestry(old_slot, old_stake);
+        }
+
+        // Add new vote's stake to its ancestry
+        self.add_stake_to_ancestry(slot, stake);
+        self.validator_latest_votes.insert(validator, (slot, stake));
+    }
+
+    /// Add stake to a slot and all of its ancestors.
+    fn add_stake_to_ancestry(&mut self, slot: u64, stake: u64) {
+        let mut current = Some(slot);
+        while let Some(s) = current {
+            if let Some(fork) = self.forks.get_mut(&s) {
+                fork.stake_weight = fork.stake_weight.saturating_add(stake);
+                current = fork.parent;
+            } else {
+                break;
+            }
+        }
+    }
+
+    /// Subtract stake from a slot and all of its ancestors.
+    fn subtract_stake_from_ancestry(&mut self, slot: u64, stake: u64) {
+        let mut current = Some(slot);
+        while let Some(s) = current {
+            if let Some(fork) = self.forks.get_mut(&s) {
+                fork.stake_weight = fork.stake_weight.saturating_sub(stake);
+                current = fork.parent;
+            } else {
+                break;
+            }
+        }
+    }
+
+    /// Calculate the subtree weight for a slot by summing the stake
+    /// of all descendants (including self).
+    pub fn subtree_weight(&self, slot: u64) -> u64 {
+        let own_weight = self.forks.get(&slot).map(|f| f.stake_weight).unwrap_or(0);
+        let children_weight: u64 = self
+            .forks
+            .iter()
+            .filter(|(_, f)| f.parent == Some(slot))
+            .map(|(child_slot, _)| self.subtree_weight(*child_slot))
+            .sum();
+        own_weight.saturating_add(children_weight)
+    }
+
+    /// Select the heaviest fork using proper GHOST traversal with subtree weights.
+    ///
+    /// Starting from the root, at each level picks the child with the
+    /// heaviest subtree (ties broken by lower slot number). Traverses
+    /// until reaching a leaf node.
+    pub fn select_heaviest_fork(&mut self, root: u64) -> Option<u64> {
+        if !self.forks.contains_key(&root) {
+            return None;
+        }
+
+        let mut current = root;
+
+        loop {
+            // Find all children of current slot
+            let children: Vec<u64> = self
+                .forks
+                .iter()
+                .filter(|(_, fork)| fork.parent == Some(current))
+                .map(|(slot, _)| *slot)
+                .collect();
+
+            if children.is_empty() {
+                self.best_slot = Some(current);
+                return Some(current);
+            }
+
+            // Pick child with heaviest subtree, break ties by lower slot
+            let mut best_child = children[0];
+            let mut best_weight = self.subtree_weight(children[0]);
+
+            for &child in &children[1..] {
+                let weight = self.subtree_weight(child);
+                if weight > best_weight || (weight == best_weight && child < best_child) {
+                    best_child = child;
+                    best_weight = weight;
+                }
+            }
+
+            current = best_child;
+        }
+    }
+
+    /// Compute the highest slot that has achieved supermajority (2/3+ stake).
+    ///
+    /// Walks from the highest slot downward to find the highest slot
+    /// with at least SUPERMAJORITY_THRESHOLD of total stake.
+    /// This slot is a candidate for becoming the new root.
+    pub fn compute_supermajority_root(&self, current_root: Option<u64>) -> Option<u64> {
+        if self.total_stake == 0 {
+            return current_root;
+        }
+
+        let mut candidate = current_root;
+
+        for (&slot, fork) in &self.forks {
+            // Must be above current root
+            if let Some(root) = current_root {
+                if slot <= root {
+                    continue;
+                }
+            }
+
+            let ratio = fork.stake_weight as f64 / self.total_stake as f64;
+            if ratio >= SUPERMAJORITY_THRESHOLD {
+                candidate = Some(match candidate {
+                    Some(c) => c.max(slot),
+                    None => slot,
+                });
+            }
+        }
+
+        candidate
+    }
+
+    /// Prune the fork tree to only contain descendants of the new root.
+    ///
+    /// Also prunes validator vote records that point to pruned slots.
+    pub fn prune_non_descendants(&mut self, new_root: u64) {
+        // Keep only descendants of new_root (and the root itself)
+        let slots_to_keep: Vec<u64> = self
+            .forks
+            .keys()
+            .copied()
+            .filter(|&slot| slot == new_root || self.is_descendant(slot, new_root))
+            .collect();
+
+        self.forks.retain(|slot, _| slots_to_keep.contains(slot));
+
+        // Prune validator votes pointing to removed slots
+        self.validator_latest_votes
+            .retain(|_, (slot, _)| self.forks.contains_key(slot));
+    }
+
+    /// Get the number of tracked validator votes.
+    pub fn validator_vote_count(&self) -> usize {
+        self.validator_latest_votes.len()
+    }
+
+    /// Get the latest vote slot for a specific validator.
+    pub fn validator_vote_slot(&self, validator: &Pubkey) -> Option<u64> {
+        self.validator_latest_votes.get(validator).map(|(s, _)| *s)
+    }
+
+    /// Get all validator vote entries.
+    pub fn all_validator_votes(&self) -> &HashMap<Pubkey, (u64, u64)> {
+        &self.validator_latest_votes
     }
 
     /// Get statistics about the fork choice state.
@@ -588,18 +763,18 @@ mod tests {
     fn fork_choice_optimistic_confirmation() {
         let mut fc = ForkChoice::new(1000);
 
-        // Create a chain of THRESHOLD_DEPTH slots
+        // Create a chain of VOTE_THRESHOLD_DEPTH slots
         fc.add_fork(1, None);
-        for i in 2..=(THRESHOLD_DEPTH as u64 + 1) {
+        for i in 2..=(VOTE_THRESHOLD_DEPTH as u64 + 1) {
             fc.add_fork(i, Some(i - 1));
         }
 
         // Add supermajority stake to all
-        for i in 1..=(THRESHOLD_DEPTH as u64 + 1) {
+        for i in 1..=(VOTE_THRESHOLD_DEPTH as u64 + 1) {
             fc.add_stake(i, 700); // 70% > threshold
         }
 
-        let last_slot = THRESHOLD_DEPTH as u64 + 1;
+        let last_slot = VOTE_THRESHOLD_DEPTH as u64 + 1;
         assert!(fc.get_fork(last_slot).unwrap().optimistically_confirmed);
     }
 
