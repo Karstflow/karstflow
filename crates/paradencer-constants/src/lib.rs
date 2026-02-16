@@ -395,6 +395,7 @@ pub mod quic {
 
 pub mod syscalls;
 pub mod sysvars;
+pub mod vm;
 
 pub mod transaction {
     // Transaction format constants

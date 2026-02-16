@@ -1,4 +1,4 @@
-/// Constants for persistent ledger storage (blockstore).
+//! Constants for persistent ledger storage (blockstore).
 
 /// Maximum shreds per slot (data + coding).
 pub const MAX_SHREDS_PER_SLOT: usize = 32_768;

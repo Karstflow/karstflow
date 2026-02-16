@@ -121,7 +121,7 @@ pub struct RetransmitService {
     pending_requests: Arc<RwLock<HashMap<(u64, u32), RetransmitRequest>>>,
 
     /// Shred cache for fulfilling retransmit requests
-    shred_cache: Arc<RwLock<HashMap<(u64, u32), Arc<Shred>>>>,
+    pub shred_cache: Arc<RwLock<HashMap<(u64, u32), Arc<Shred>>>>,
 }
 
 impl RetransmitService {

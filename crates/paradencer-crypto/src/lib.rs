@@ -33,12 +33,14 @@
 //! // let result = verifier.verify_batch();
 //! ```
 
+pub mod blake3;
 pub mod bn254;
 pub mod ed25519_batch;
 pub mod keccak256;
 pub mod reed_solomon;
 pub mod secp256k1;
 pub mod secp256r1;
+pub mod sha256;
 pub mod utils;
 
 mod errors;
@@ -47,12 +49,9 @@ pub use errors::{CryptoError, CryptoResult};
 
 // Re-export commonly used types
 pub use ed25519_batch::{BatchVerifier, SignatureSet, VerificationResult};
+pub use ed25519_batch::{verify_signature, verify_signatures_parallel};
 pub use reed_solomon::{FecError, FecReconstructor, FecResult, ReconstructedSet};
 pub use utils::{constant_time_eq, from_hex, secure_zero, to_hex, xor_bytes};
-
-// Re-export blake3 and sha2 directly for now
-pub use blake3::Hasher as Blake3Hasher;
-pub use sha2::Sha256;
 
 /// Ed25519 signature size in bytes
 pub const SIGNATURE_SIZE: usize = 64;

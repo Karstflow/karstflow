@@ -178,7 +178,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         retransmit_stats,
         runtime,
     );
-    retransmit_service.update_tree(tree);
+    retransmit_service.update_tree(tree.clone());
 
     println!("  Retransmit service initialized\n");
 

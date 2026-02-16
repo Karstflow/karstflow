@@ -1,4 +1,4 @@
-/// Constants for genesis configuration parsing and validation.
+//! Constants for genesis configuration parsing and validation.
 
 /// Maximum number of accounts in genesis.
 pub const MAX_GENESIS_ACCOUNTS: usize = 1_000_000;

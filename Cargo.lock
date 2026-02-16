@@ -1330,6 +1330,7 @@ dependencies = [
  "curve25519-dalek",
  "ed25519-dalek",
  "hex-literal",
+ "hmac",
  "k256",
  "p256",
  "rand 0.8.5",

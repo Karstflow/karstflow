@@ -1,7 +1,7 @@
-/// Constants for syscall operations in the sBPF virtual machine.
-///
-/// These define compute costs, limits, and thresholds for all syscalls
-/// available to on-chain programs during execution.
+//! Constants for syscall operations in the sBPF virtual machine.
+//!
+//! These define compute costs, limits, and thresholds for all syscalls
+//! available to on-chain programs during execution.
 
 // CPI limits
 pub const MAX_CPI_DEPTH: usize = 4;

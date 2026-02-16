@@ -1,7 +1,7 @@
-/// Constants for the feature gate system.
-///
-/// Features control runtime behavior changes across the network.
-/// Once activated at a given slot, a feature cannot be deactivated.
+//! Constants for the feature gate system.
+//!
+//! Features control runtime behavior changes across the network.
+//! Once activated at a given slot, a feature cannot be deactivated.
 
 /// Number of slots after activation before a feature takes effect.
 pub const FEATURE_ACTIVATION_DELAY_SLOTS: u64 = 0;

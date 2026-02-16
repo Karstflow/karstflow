@@ -1,8 +1,8 @@
-/// Constants for the Address Lookup Table (ALT) program.
-///
-/// Address lookup tables allow transactions to reference more accounts
-/// than the message format would otherwise permit by storing reusable
-/// address lists on-chain.
+//! Constants for the Address Lookup Table (ALT) program.
+//!
+//! Address lookup tables allow transactions to reference more accounts
+//! than the message format would otherwise permit by storing reusable
+//! address lists on-chain.
 
 /// Maximum number of addresses in a single lookup table.
 pub const MAX_ADDRESSES: usize = 256;

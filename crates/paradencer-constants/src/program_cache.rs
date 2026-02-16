@@ -1,4 +1,4 @@
-/// Constants for compiled program cache.
+//! Constants for compiled program cache.
 
 /// Default maximum entries in program cache.
 pub const DEFAULT_MAX_CACHE_ENTRIES: usize = 256;

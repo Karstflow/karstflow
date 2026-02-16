@@ -92,6 +92,44 @@ pub struct QuicEndpoint {
 }
 
 impl QuicEndpoint {
+    /// Create a QuicEndpoint synchronously using a temporary tokio runtime.
+    pub fn new(config: QuicConfig, _stats: Arc<QuicEndpointStats>) -> QuicResult<Self> {
+        // Try current runtime first, fall back to creating temporary one
+        let rt = tokio::runtime::Handle::try_current();
+        match rt {
+            Ok(handle) => {
+                let _guard = handle.enter();
+                Self::bind_sync(config)
+            }
+            Err(_) => {
+                let rt = tokio::runtime::Runtime::new().map_err(|e| {
+                    IngressError::QuicEndpointBind {
+                        detail: format!("failed to create runtime: {}", e),
+                    }
+                })?;
+                let _guard = rt.enter();
+                Self::bind_sync(config)
+            }
+        }
+    }
+
+    fn bind_sync(config: QuicConfig) -> QuicResult<Self> {
+        let endpoint = Endpoint::server((*config.server_config).clone(), config.bind_addr)
+            .map_err(|e| IngressError::QuicEndpointBind {
+                detail: format!("failed to bind endpoint: {}", e),
+            })?;
+
+        let (packet_tx, packet_rx) = mpsc::channel(PACKET_CHANNEL_CAPACITY);
+
+        Ok(Self {
+            endpoint,
+            stats: QuicEndpointStats::new(),
+            stream_stats: StreamStats::new(),
+            packet_tx,
+            packet_rx,
+        })
+    }
+
     pub async fn bind(config: QuicConfig) -> QuicResult<Self> {
         let endpoint = Endpoint::server((*config.server_config).clone(), config.bind_addr)
             .map_err(|e| IngressError::QuicEndpointBind {

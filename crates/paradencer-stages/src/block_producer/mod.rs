@@ -54,6 +54,6 @@ mod shredder;
 mod tests;
 
 pub use entry_creator::{EntryCreator, EntryCreatorConfig};
-pub use poh::{PohRecord, PohService};
+pub use poh::{PohEntry, PohRecord, PohService};
 pub use service::{BlockProducer, BlockProducerConfig, BlockProducerError, BlockProducerResult};
 pub use shredder::{EntryShredder, ShredderConfig, ShredderError};

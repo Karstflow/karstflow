@@ -1,8 +1,8 @@
-/// Constants for sysvar accounts and their data sizes.
-///
-/// System variables (sysvars) are special accounts maintained by the runtime
-/// that provide network state to on-chain programs. These constants define
-/// capacity limits and serialized data sizes for each sysvar.
+//! Constants for sysvar accounts and their data sizes.
+//!
+//! System variables (sysvars) are special accounts maintained by the runtime
+//! that provide network state to on-chain programs. These constants define
+//! capacity limits and serialized data sizes for each sysvar.
 
 /// Maximum number of slot hashes stored in the SlotHashes sysvar.
 pub const MAX_SLOT_HASHES: usize = 512;

@@ -589,7 +589,7 @@ mod tests {
         let mut coordinator = ForkReplayCoordinator::new(10);
 
         assert!(!coordinator.has_replayed(100));
-        assert_eq!(coordinator.get_replay_info(100), None);
+        assert!(coordinator.get_replay_info(100).is_none());
 
         coordinator.prune_below_slot(50);
         assert_eq!(coordinator.replay_stats().total_replayed, 0);

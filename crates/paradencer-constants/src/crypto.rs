@@ -1,7 +1,7 @@
-/// Constants for cryptographic operations across the validator.
-///
-/// Defines key/hash/signature sizes for all supported algorithms and
-/// compute unit costs for on-chain cryptographic syscalls.
+//! Constants for cryptographic operations across the validator.
+//!
+//! Defines key/hash/signature sizes for all supported algorithms and
+//! compute unit costs for on-chain cryptographic syscalls.
 
 // --- Hash output sizes ---
 

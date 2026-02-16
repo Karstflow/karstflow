@@ -1,8 +1,8 @@
-/// Block-level resource limits for transaction scheduling.
-///
-/// These constants define the maximum compute units, account data growth,
-/// and other per-block limits that prevent any single block from consuming
-/// excessive resources.
+//! Block-level resource limits for transaction scheduling.
+//!
+//! These constants define the maximum compute units, account data growth,
+//! and other per-block limits that prevent any single block from consuming
+//! excessive resources.
 
 /// Maximum total compute units per block.
 pub const MAX_BLOCK_COMPUTE_UNITS: u64 = 48_000_000;
@@ -33,3 +33,19 @@ pub const TRANSACTION_BASE_COST: u64 = 3000;
 
 /// Cost per instruction in a transaction.
 pub const INSTRUCTION_BASE_COST: u64 = 200;
+
+// ---------------------------------------------------------------------------
+// Pack / scheduler constants
+// ---------------------------------------------------------------------------
+
+/// Maximum data bytes per block (derived from shred limits).
+pub const MAX_DATA_BYTES_PER_BLOCK: u64 = 27_539_200; // ~26.3 MiB
+
+/// Fee per signature used by the pack scheduler.
+pub const PACK_FEE_PER_SIGNATURE: u64 = 5000;
+
+/// Default capacity of the pending transaction pool.
+pub const DEFAULT_PENDING_POOL_CAPACITY: usize = 32_768;
+
+/// Maximum age (in slots) before a pending transaction is expired.
+pub const MAX_PENDING_TRANSACTION_AGE_SLOTS: u64 = 150;

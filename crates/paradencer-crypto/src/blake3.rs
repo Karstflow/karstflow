@@ -46,7 +46,7 @@ impl Blake3Hasher {
     ///
     /// This is the most efficient way to hash a complete message.
     pub fn hash(data: &[u8]) -> Blake3Hash {
-        let hash = blake3::hash(data);
+        let hash = ::blake3::hash(data);
         *hash.as_bytes()
     }
 
@@ -54,7 +54,7 @@ impl Blake3Hasher {
     ///
     /// More efficient than concatenating slices first.
     pub fn hash_chunks(chunks: &[&[u8]]) -> Blake3Hash {
-        let mut hasher = blake3::Hasher::new();
+        let mut hasher = ::blake3::Hasher::new();
         for chunk in chunks {
             hasher.update(chunk);
         }
@@ -65,7 +65,7 @@ impl Blake3Hasher {
     ///
     /// The key must be exactly 32 bytes.
     pub fn hash_keyed(key: &[u8; 32], data: &[u8]) -> Blake3Hash {
-        let hash = blake3::keyed_hash(key, data);
+        let hash = ::blake3::keyed_hash(key, data);
         *hash.as_bytes()
     }
 
@@ -73,8 +73,7 @@ impl Blake3Hasher {
     ///
     /// This is useful for key derivation functions (KDF).
     pub fn derive_key(context: &str, key_material: &[u8]) -> Blake3Hash {
-        let hash = blake3::derive_key(context, key_material);
-        *hash.as_bytes()
+        ::blake3::derive_key(context, key_material)
     }
 
     /// Verify a Blake3 hash
@@ -97,7 +96,7 @@ impl Blake3StreamingHasher {
     /// Create a new streaming hasher
     pub fn new() -> Self {
         Self {
-            hasher: blake3::Hasher::new(),
+            hasher: ::blake3::Hasher::new(),
             bytes_hashed: 0,
         }
     }
@@ -105,7 +104,7 @@ impl Blake3StreamingHasher {
     /// Create a new keyed streaming hasher
     pub fn new_keyed(key: &[u8; 32]) -> Self {
         Self {
-            hasher: blake3::Hasher::new_keyed(key),
+            hasher: ::blake3::Hasher::new_keyed(key),
             bytes_hashed: 0,
         }
     }
@@ -113,7 +112,7 @@ impl Blake3StreamingHasher {
     /// Create a new key derivation hasher
     pub fn new_derive_key(context: &str) -> Self {
         Self {
-            hasher: blake3::Hasher::new_derive_key(context),
+            hasher: ::blake3::Hasher::new_derive_key(context),
             bytes_hashed: 0,
         }
     }
@@ -198,7 +197,7 @@ impl Blake3ParallelHasher {
             .collect();
 
         // Hash the concatenated chunk hashes
-        let mut hasher = blake3::Hasher::new();
+        let mut hasher = ::blake3::Hasher::new();
         for chunk_hash in chunk_hashes {
             hasher.update(&chunk_hash);
         }
@@ -232,7 +231,7 @@ pub fn hash_transaction_signature(signature: &[u8; 64]) -> Blake3Hash {
 ///
 /// Hashes the critical parts of a shred for efficient deduplication.
 pub fn hash_shred_fingerprint(slot: u64, index: u32, data: &[u8]) -> Blake3Hash {
-    let mut hasher = blake3::Hasher::new();
+    let mut hasher = ::blake3::Hasher::new();
     hasher.update(&slot.to_le_bytes());
     hasher.update(&index.to_le_bytes());
     hasher.update(data);

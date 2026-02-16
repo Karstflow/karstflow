@@ -147,7 +147,7 @@ fn main() {
     println!("\n--- Transaction Signature Hashing (64 bytes) ---");
     println!("Simulating deduplication cache lookups for 10,000 transactions\n");
 
-    let signatures: Vec<[u8; 64]> = (0..10000)
+    let signatures: Vec<[u8; 64]> = (0..10000u64)
         .map(|i| {
             let mut sig = [0u8; 64];
             sig[0..8].copy_from_slice(&i.to_le_bytes());
@@ -174,14 +174,14 @@ fn main() {
     println!("Simulating deduplication for 1,000 shreds (1 KB each)\n");
 
     let shred_data = vec![0u8; 1024]; // 1 KB shred
-    let iterations = 1000;
+    let iterations: usize = 1000;
 
     let start = Instant::now();
     for i in 0..iterations {
-        let slot = i / 100;
-        let index = i % 100;
+        let slot = (i / 100) as u64;
+        let index = (i % 100) as u32;
         let _hash =
-            paradencer_crypto::blake3::hash_shred_fingerprint(slot, index as u32, &shred_data);
+            paradencer_crypto::blake3::hash_shred_fingerprint(slot, index, &shred_data);
     }
     let duration = start.elapsed();
     let total_bytes = shred_data.len() * iterations;

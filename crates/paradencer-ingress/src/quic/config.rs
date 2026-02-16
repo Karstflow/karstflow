@@ -90,6 +90,13 @@ impl QuicConfig {
         Ok(server_config)
     }
 
+    /// Create a config bound to localhost with an ephemeral port.
+    pub fn for_testing() -> Self {
+        // Ensure a crypto provider is installed for rustls
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        Self::new("127.0.0.1:0".parse().unwrap()).expect("test QuicConfig creation failed")
+    }
+
     fn build_self_signed_crypto() -> QuicResult<QuicServerConfig> {
         let cert = rcgen::generate_simple_self_signed(vec!["paradencer.local".to_string()])
             .map_err(|e| IngressError::QuicConfiguration {
@@ -116,5 +123,11 @@ impl QuicConfig {
         QuicServerConfig::try_from(rustls_config).map_err(|e| IngressError::QuicConfiguration {
             detail: format!("failed to build QUIC server config: {}", e),
         })
+    }
+}
+
+impl Default for QuicConfig {
+    fn default() -> Self {
+        Self::for_testing()
     }
 }

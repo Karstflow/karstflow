@@ -10,6 +10,7 @@ authors.workspace = true
 ed25519-dalek = { version = "2.1", features = ["rand_core", "batch"] }
 blake3 = "1.5"
 sha2 = "0.10"
+hmac = "0.12"
 curve25519-dalek = "4.1"
 reed-solomon-erasure = "6.0"
 tiny-keccak = { workspace = true }

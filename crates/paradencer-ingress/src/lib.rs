@@ -20,8 +20,9 @@ pub use quic::{
     QuicConfig, QuicEndpoint, QuicEndpointStats, QuicLimits, QuicPacket, QuicPacketBatch,
 };
 pub use repair::{
-    RepairMessage, RepairRequest, RepairRequester, RepairResponse, RepairServer,
-    RepairServerConfig, RepairService, RepairServiceConfig, ShredIndex, Slot,
+    InMemoryShredStore, RepairMessage, RepairRequest, RepairRequester, RepairResponse, RepairServer,
+    RepairServerConfig, RepairService, RepairServiceConfig, ShredData, ShredIndex, ShredProvider,
+    Slot,
 };
 pub use turbine::{
     BroadcastManager, BroadcastShred, BroadcastStats, Neighborhood, NetworkProximity,

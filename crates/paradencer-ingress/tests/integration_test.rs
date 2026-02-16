@@ -1,6 +1,6 @@
 use paradencer_ingress::{
     ClusterInfo, ContactInfo, GossipConfig, GossipService, InMemoryShredStore, NodeId,
-    RepairServerConfig, RepairService, RepairServiceConfig, ShredData,
+    RepairServerConfig, RepairService, RepairServiceConfig, ShredData, ShredProvider,
 };
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::Arc;

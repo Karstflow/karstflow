@@ -177,8 +177,7 @@ impl HmacSha256 {
 
     /// Compute HMAC-SHA256 of the given data
     pub fn compute(&self, data: &[u8]) -> Sha256Hash {
-        use sha2::digest::{KeyInit, Mac};
-        use sha2::Hmac;
+        use hmac::{Hmac, Mac};
 
         type HmacSha256Type = Hmac<Sha256>;
 

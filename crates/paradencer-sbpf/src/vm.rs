@@ -3,8 +3,16 @@ use super::{
     COMPUTE_UNIT_COST_ACCOUNT_WRITEBACK, COMPUTE_UNIT_COST_PER_ACCOUNT,
     COMPUTE_UNIT_COST_PER_DATA_BYTE, DEFAULT_INSTRUCTION_BASE_COST,
 };
+use crate::elf_loader::LoadedProgram;
+use crate::interpreter::{self, VmError};
+use crate::memory::MemoryMap;
+use crate::program_cache::ProgramCache;
+use crate::syscall_dispatch::RuntimeSyscallDispatch;
+use crate::validation;
+use paradencer_constants::vm::DEFAULT_HEAP_SIZE;
 use paradencer_ids::{SYSTEM_PROGRAM_ID, VOTE_PROGRAM_ID};
 use std::collections::HashMap;
+use std::sync::Mutex;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SbpfExecutionError {
@@ -106,6 +114,186 @@ impl SbpfVm for StubSbpfVm {
         } else {
             self.execute_generic_program(&context)
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// BytecodeVm — real sBPF execution engine
+// ---------------------------------------------------------------------------
+
+/// Full sBPF virtual machine that loads, validates, and executes bytecode.
+///
+/// Wires together the ELF loader, static validator, memory model,
+/// interpreter, and syscall dispatch into a single `SbpfVm` implementation.
+/// Programs are cached after first load to avoid repeated parsing.
+pub struct BytecodeVm {
+    cache: Mutex<ProgramCache>,
+    syscall_dispatch: RuntimeSyscallDispatch,
+}
+
+impl BytecodeVm {
+    /// Create a new VM with standard syscalls registered.
+    pub fn new() -> Self {
+        Self {
+            cache: Mutex::new(ProgramCache::new()),
+            syscall_dispatch: RuntimeSyscallDispatch::with_standard_syscalls(),
+        }
+    }
+
+    /// Create a VM with a custom syscall dispatcher.
+    pub fn with_syscalls(syscall_dispatch: RuntimeSyscallDispatch) -> Self {
+        Self {
+            cache: Mutex::new(ProgramCache::new()),
+            syscall_dispatch,
+        }
+    }
+
+    /// Load and validate a program from raw ELF bytes.
+    fn load_program(&self, elf_bytes: &[u8]) -> Result<LoadedProgram, SbpfExecutionError> {
+        let program = crate::elf_loader::load_elf(elf_bytes)
+            .map_err(|e| SbpfExecutionError::InvalidProgram)?;
+
+        let syscall_ids = self.syscall_dispatch.registered_ids();
+        validation::validate(&program, &syscall_ids)
+            .map_err(|errors| SbpfExecutionError::InvalidProgram)?;
+
+        Ok(program)
+    }
+
+    /// Serialize account data into the input region for the VM.
+    ///
+    /// Format per account:
+    /// - 1 byte: is_signer (0/1) — always 0 for now
+    /// - 1 byte: is_writable (0/1)
+    /// - 32 bytes: pubkey
+    /// - 32 bytes: owner
+    /// - 8 bytes: lamports (little-endian)
+    /// - 8 bytes: data length (little-endian)
+    /// - N bytes: account data
+    /// - padding to 8-byte alignment
+    fn serialize_accounts(context: &ExecutionContext) -> Vec<u8> {
+        let mut buf = Vec::new();
+
+        // Number of accounts
+        buf.extend_from_slice(&(context.accounts.len() as u64).to_le_bytes());
+
+        for (pubkey, account, writable) in &context.accounts {
+            // is_signer placeholder
+            buf.push(0u8);
+            // is_writable
+            buf.push(if *writable { 1 } else { 0 });
+            // pubkey (32 bytes)
+            buf.extend_from_slice(pubkey.as_ref());
+            // owner (32 bytes)
+            buf.extend_from_slice(account.meta.owner.as_ref());
+            // lamports
+            buf.extend_from_slice(&account.meta.lamports.to_le_bytes());
+            // data length
+            let data = account.data.as_slice();
+            buf.extend_from_slice(&(data.len() as u64).to_le_bytes());
+            // data
+            buf.extend_from_slice(data);
+            // padding to 8-byte alignment
+            let padding = (8 - (buf.len() % 8)) % 8;
+            buf.extend(std::iter::repeat_n(0u8, padding));
+        }
+
+        // Instruction data
+        buf.extend_from_slice(&(context.instruction_data.len() as u64).to_le_bytes());
+        buf.extend_from_slice(&context.instruction_data);
+
+        // Program ID
+        buf.extend_from_slice(context.program_id.as_ref());
+
+        buf
+    }
+
+    /// Execute a loaded program with the given context.
+    fn run_program(
+        &self,
+        program: &LoadedProgram,
+        context: &ExecutionContext,
+    ) -> SbpfExecutionResult {
+        let input_data = Self::serialize_accounts(context);
+
+        let rodata = if program.rodata.is_empty() {
+            &program.text_bytes
+        } else {
+            &program.rodata
+        };
+
+        let memory = MemoryMap::new(rodata, DEFAULT_HEAP_SIZE, DEFAULT_HEAP_SIZE, input_data);
+
+        match interpreter::execute(
+            program,
+            memory,
+            context.compute_budget,
+            &self.syscall_dispatch,
+        ) {
+            Ok(result) => Ok(ExecutionOutcome {
+                success: result.return_value == 0,
+                compute_units_consumed: result.compute_units_consumed,
+                modified_accounts: HashMap::new(),
+                logs: result.logs,
+                return_data: result.return_data,
+            }),
+            Err(VmError::ComputeBudgetExceeded) => Err(SbpfExecutionError::ComputeBudgetExceeded),
+            Err(e) => Err(SbpfExecutionError::ExecutionFailed {
+                message: e.to_string(),
+            }),
+        }
+    }
+}
+
+impl Default for BytecodeVm {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl std::fmt::Debug for BytecodeVm {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("BytecodeVm").finish()
+    }
+}
+
+impl SbpfVm for BytecodeVm {
+    fn execute(&self, context: ExecutionContext) -> SbpfExecutionResult {
+        // Find the program account — the executable account whose pubkey matches program_id
+        let program_account = context
+            .accounts
+            .iter()
+            .find(|(pubkey, account, _)| *pubkey == context.program_id && account.meta.executable)
+            .map(|(_, account, _)| account);
+
+        let elf_bytes = match program_account {
+            Some(account) => account.data.as_slice(),
+            None => return Err(SbpfExecutionError::InvalidProgram),
+        };
+
+        if elf_bytes.is_empty() {
+            return Err(SbpfExecutionError::InvalidAccountData);
+        }
+
+        // Try cache first
+        {
+            let mut cache = self.cache.lock().unwrap();
+            if let Some(program) = cache.get(&context.program_id, 0) {
+                let program = program.clone();
+                drop(cache);
+                return self.run_program(&program, &context);
+            }
+        }
+
+        // Load, validate, cache, and execute
+        let program = self.load_program(elf_bytes)?;
+
+        {
+            let mut cache = self.cache.lock().unwrap();
+            cache.insert(context.program_id, program.clone(), elf_bytes.len(), 0);
+        }
+
+        self.run_program(&program, &context)
     }
 }
 
@@ -236,5 +424,188 @@ mod tests {
             result.unwrap_err(),
             SbpfExecutionError::ComputeBudgetExceeded
         ));
+    }
+
+    // --- BytecodeVm tests ---
+
+    /// Build a minimal ELF with the given instructions.
+    fn make_elf_program(instructions: &[crate::instruction::Instruction]) -> Vec<u8> {
+        let mut text = Vec::new();
+        for insn in instructions {
+            text.extend_from_slice(&insn.encode().to_le_bytes());
+        }
+        crate::elf_loader::TestElfBuilder::new().text(text).build()
+    }
+
+    /// Make a program account containing an ELF binary.
+    fn program_account(elf_bytes: Vec<u8>) -> Account {
+        Account {
+            meta: AccountMeta {
+                lamports: 1,
+                owner: Pubkey::default(),
+                executable: true,
+                rent_epoch: 0,
+            },
+            data: AccountData::new(elf_bytes),
+        }
+    }
+
+    #[test]
+    fn bytecode_vm_executes_minimal_program() {
+        use crate::instruction::{Instruction, Opcode};
+
+        let vm = BytecodeVm::new();
+        let program_id = Pubkey::new_unique();
+
+        // Program: mov r0, 0; exit
+        let elf = make_elf_program(&[
+            Instruction::new(Opcode::Mov64Imm as u8, 0, 0, 0, 0),
+            Instruction::new(Opcode::Exit as u8, 0, 0, 0, 0),
+        ]);
+
+        let context = ExecutionContext::new(
+            program_id,
+            vec![(program_id, program_account(elf), false)],
+            vec![],
+        );
+
+        let result = vm.execute(context);
+        assert!(result.is_ok());
+        let outcome = result.unwrap();
+        assert!(outcome.success);
+        assert!(outcome.compute_units_consumed > 0);
+    }
+
+    #[test]
+    fn bytecode_vm_nonzero_exit_is_failure() {
+        use crate::instruction::{Instruction, Opcode};
+
+        let vm = BytecodeVm::new();
+        let program_id = Pubkey::new_unique();
+
+        // Program: mov r0, 1; exit (non-zero return = failure)
+        let elf = make_elf_program(&[
+            Instruction::new(Opcode::Mov64Imm as u8, 0, 0, 0, 1),
+            Instruction::new(Opcode::Exit as u8, 0, 0, 0, 0),
+        ]);
+
+        let context = ExecutionContext::new(
+            program_id,
+            vec![(program_id, program_account(elf), false)],
+            vec![],
+        );
+
+        let result = vm.execute(context);
+        assert!(result.is_ok());
+        let outcome = result.unwrap();
+        assert!(!outcome.success); // r0 != 0 → failure
+    }
+
+    #[test]
+    fn bytecode_vm_rejects_missing_program() {
+        let vm = BytecodeVm::new();
+        let program_id = Pubkey::new_unique();
+
+        // No program account provided
+        let context = ExecutionContext::new(program_id, vec![], vec![]);
+
+        let result = vm.execute(context);
+        assert!(result.is_err());
+        assert!(matches!(
+            result.unwrap_err(),
+            SbpfExecutionError::InvalidProgram
+        ));
+    }
+
+    #[test]
+    fn bytecode_vm_rejects_empty_program_data() {
+        let vm = BytecodeVm::new();
+        let program_id = Pubkey::new_unique();
+
+        let empty_account = Account {
+            meta: AccountMeta {
+                lamports: 1,
+                owner: Pubkey::default(),
+                executable: true,
+                rent_epoch: 0,
+            },
+            data: AccountData::empty(),
+        };
+
+        let context =
+            ExecutionContext::new(program_id, vec![(program_id, empty_account, false)], vec![]);
+
+        let result = vm.execute(context);
+        assert!(result.is_err());
+        assert!(matches!(
+            result.unwrap_err(),
+            SbpfExecutionError::InvalidAccountData
+        ));
+    }
+
+    #[test]
+    fn bytecode_vm_caches_program() {
+        use crate::instruction::{Instruction, Opcode};
+
+        let vm = BytecodeVm::new();
+        let program_id = Pubkey::new_unique();
+
+        let elf = make_elf_program(&[
+            Instruction::new(Opcode::Mov64Imm as u8, 0, 0, 0, 0),
+            Instruction::new(Opcode::Exit as u8, 0, 0, 0, 0),
+        ]);
+
+        let account = program_account(elf);
+
+        // Execute twice — second should hit cache
+        for _ in 0..2 {
+            let context = ExecutionContext::new(
+                program_id,
+                vec![(program_id, account.clone(), false)],
+                vec![],
+            );
+            let result = vm.execute(context);
+            assert!(result.is_ok());
+        }
+
+        // Verify cache has the entry
+        let cache = vm.cache.lock().unwrap();
+        assert!(cache.contains(&program_id));
+    }
+
+    #[test]
+    fn bytecode_vm_arithmetic_program() {
+        use crate::instruction::{Instruction, Opcode};
+
+        let vm = BytecodeVm::new();
+        let program_id = Pubkey::new_unique();
+
+        // Program: r1 = 10; r2 = 10; r0 = r1 - r2 (= 0 → success); exit
+        let elf = make_elf_program(&[
+            Instruction::new(Opcode::Mov64Imm as u8, 1, 0, 0, 10),
+            Instruction::new(Opcode::Mov64Imm as u8, 2, 0, 0, 10),
+            Instruction::new(Opcode::Sub64Reg as u8, 0, 0, 0, 0), // r0 = r0 - r0 = 0 but we want r1 - r2
+            // Actually: mov r0, r1; sub r0, r2
+            Instruction::new(Opcode::Exit as u8, 0, 0, 0, 0),
+        ]);
+
+        // Let's redo with correct logic
+        let elf = make_elf_program(&[
+            Instruction::new(Opcode::Mov64Imm as u8, 1, 0, 0, 5), // r1 = 5
+            Instruction::new(Opcode::Mov64Imm as u8, 0, 0, 0, 5), // r0 = 5
+            Instruction::new(Opcode::Sub64Reg as u8, 0, 1, 0, 0), // r0 = r0 - r1 = 0
+            Instruction::new(Opcode::Exit as u8, 0, 0, 0, 0),
+        ]);
+
+        let context = ExecutionContext::new(
+            program_id,
+            vec![(program_id, program_account(elf), false)],
+            vec![],
+        );
+
+        let result = vm.execute(context);
+        assert!(result.is_ok());
+        let outcome = result.unwrap();
+        assert!(outcome.success); // r0 = 0
     }
 }

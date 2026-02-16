@@ -1,8 +1,8 @@
-/// Constants for the Compute Budget program.
-///
-/// The Compute Budget program processes per-transaction resource limits
-/// including compute unit caps, priority fees, heap size, and loaded
-/// accounts data size.
+//! Constants for the Compute Budget program.
+//!
+//! The Compute Budget program processes per-transaction resource limits
+//! including compute unit caps, priority fees, heap size, and loaded
+//! accounts data size.
 
 // Instruction discriminants (single-byte tags)
 pub const INSTRUCTION_REQUEST_HEAP_FRAME: u8 = 1;

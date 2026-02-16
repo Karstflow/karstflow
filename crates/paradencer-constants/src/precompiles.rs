@@ -1,7 +1,7 @@
-/// Constants for precompile programs (native signature verification).
-///
-/// Precompiles run outside the sBPF VM and provide efficient
-/// cryptographic operations such as signature verification.
+//! Constants for precompile programs (native signature verification).
+//!
+//! Precompiles run outside the sBPF VM and provide efficient
+//! cryptographic operations such as signature verification.
 
 // Ed25519 signature verification costs
 pub const ED25519_VERIFY_COST: u64 = 3500;

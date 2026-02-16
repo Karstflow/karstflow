@@ -1,6 +1,6 @@
 use super::*;
 use crate::gossip::{ContactInfo, NodeId, ValidatorInfo};
-use crate::quic::{QuicConfig, QuicEndpointStats};
+use crate::quic::{QuicConfig, QuicEndpoint, QuicEndpointStats};
 use paradencer_types::shred::{
     DataShredHeader, Shred, ShredCommonHeader, ShredVariant, SIGNATURE_SIZE,
 };
@@ -86,7 +86,7 @@ fn test_turbine_tree_builder_layer1() {
     let root_contact = create_contact_info(root_id, 8000);
 
     let validators: Vec<_> = (1..=20)
-        .map(|i| create_validator(create_node_id(i), 1000 * i as u64, 8000 + i))
+        .map(|i| create_validator(create_node_id(i), 1000 * i as u64, 8000 + i as u16))
         .collect();
 
     let config = TurbineConfig::with_fanout(10);
@@ -103,7 +103,7 @@ fn test_turbine_tree_builder_layer2() {
     let root_contact = create_contact_info(root_id, 8000);
 
     let validators: Vec<_> = (1..=100)
-        .map(|i| create_validator(create_node_id(i as u8), 1000, 8000 + i))
+        .map(|i| create_validator(create_node_id(i as u8), 1000, 8000 + i as u16))
         .collect();
 
     let config = TurbineConfig::with_fanout(5);
@@ -297,7 +297,7 @@ async fn test_broadcaster_integration() {
     let root_id = create_node_id(0);
     let root_contact = create_contact_info(root_id, 8000);
     let validators: Vec<_> = (1..=10)
-        .map(|i| create_validator(create_node_id(i), 1000, 8000 + i))
+        .map(|i| create_validator(create_node_id(i), 1000, 8000 + i as u16))
         .collect();
 
     let tree_config = TurbineConfig::with_fanout(5);
@@ -324,7 +324,7 @@ async fn test_retransmit_service_integration() {
     let root_id = create_node_id(0);
     let root_contact = create_contact_info(root_id, 8000);
     let validators: Vec<_> = (1..=10)
-        .map(|i| create_validator(create_node_id(i), 1000, 8000 + i))
+        .map(|i| create_validator(create_node_id(i), 1000, 8000 + i as u16))
         .collect();
 
     let tree_config = TurbineConfig::with_fanout(5);
@@ -408,7 +408,7 @@ fn test_tree_get_layer() {
     let root_contact = create_contact_info(root_id, 8000);
 
     let validators: Vec<_> = (1..=30)
-        .map(|i| create_validator(create_node_id(i), 1000, 8000 + i))
+        .map(|i| create_validator(create_node_id(i), 1000, 8000 + i as u16))
         .collect();
 
     let config = TurbineConfig::with_fanout(5);

@@ -1,20 +1,42 @@
+// Pre-existing builtin program modules have dead-code variants reserved
+// for future instruction types and unused helper methods.
+#![allow(
+    dead_code,
+    unused_imports,
+    unused_variables,
+    unused_mut,
+    unused_assignments,
+    clippy::inherent_to_string,
+    clippy::wrong_self_convention,
+    clippy::needless_range_loop,
+    clippy::useless_vec,
+    clippy::len_zero
+)]
+
 mod address_lookup_table;
 mod associated_token_program;
 mod bpf_loader;
 mod compute_budget_program;
 mod config_program;
+pub mod elf_loader;
+pub mod instruction;
 #[cfg(test)]
 mod integration_tests;
+pub mod interpreter;
 mod memo_program;
+pub mod memory;
 pub mod precompiles;
+mod program_cache;
 #[cfg(test)]
 mod spl_integration_tests;
 mod stake_program;
+pub mod syscall_dispatch;
 pub mod syscalls;
 mod system_program;
 mod token_2022_program;
 mod token_program;
 mod transaction_processor;
+pub mod validation;
 mod vm;
 mod vote;
 
@@ -33,6 +55,7 @@ pub use paradencer_constants::execution::{
     COMPUTE_UNIT_COST_PER_DATA_BYTE, DEFAULT_INSTRUCTION_BASE_COST, MAX_COMPUTE_UNITS,
 };
 pub use precompiles::{Ed25519PrecompileExecutor, Secp256k1PrecompileExecutor};
+pub use program_cache::{CacheError, CachedProgram, ProgramCache};
 pub use stake_program::StakeProgramExecutor;
 pub use system_program::SystemProgramExecutor;
 pub use token_2022_program::Token2022ProgramExecutor;
@@ -41,7 +64,7 @@ pub use transaction_processor::{
     AccountMeta as InstructionAccountMeta, CompiledInstruction, Transaction,
     TransactionInstruction, TransactionMessage, TransactionProcessor, TransactionResult,
 };
-pub use vm::{SbpfExecutionError, SbpfExecutionResult, SbpfVm, StubSbpfVm};
+pub use vm::{BytecodeVm, SbpfExecutionError, SbpfExecutionResult, SbpfVm, StubSbpfVm};
 pub use vote::VoteProgramExecutor;
 
 use paradencer_types::{Account, Pubkey};

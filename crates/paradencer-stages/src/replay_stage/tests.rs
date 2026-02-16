@@ -16,6 +16,7 @@ use paradencer_storage::{AccountDatabase, Pubkey};
 /// Test utilities for setting up replay stage components
 mod test_utils {
     use super::*;
+    use crate::Entry;
 
     pub fn create_test_bank_forks() -> Arc<RwLock<BankForks>> {
         let accounts = Arc::new(AccountDatabase::new());
@@ -207,7 +208,7 @@ mod block_processor_integration_tests {
         let commitment_tracker = create_test_commitment_tracker();
         let mut processor = BlockProcessor::new(execution_bridge, commitment_tracker);
 
-        let block = create_test_block(1);
+        let block = create_test_block(1, 0);
         let bank = create_test_bank();
 
         // Process block (will fail due to frozen bank in test setup)
@@ -243,7 +244,7 @@ mod block_processor_integration_tests {
         let processor = BlockProcessor::new(execution_bridge, commitment_tracker);
 
         // Valid block
-        let valid_block = create_test_block(1);
+        let valid_block = create_test_block(1, 0);
         assert!(processor.verify_block(&valid_block).is_ok());
 
         // Empty block (invalid)

@@ -427,7 +427,7 @@ fn test_block_producer_channels() {
     // Send some transactions
     for i in 0..10 {
         let tx = format!("transaction_{}", i).into_bytes();
-        tx_sender.send(tx).unwrap();
+        tx_sender.try_send(tx).unwrap();
     }
 
     // Let it run briefly
