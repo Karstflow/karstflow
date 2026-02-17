@@ -29,6 +29,16 @@ pub struct TransactionCache {
     max_entries: usize,
 }
 
+impl std::fmt::Debug for TransactionCache {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TransactionCache")
+            .field("shard_count", &self.shards.len())
+            .field("max_entries", &self.max_entries)
+            .field("entry_count", &self.entry_count())
+            .finish()
+    }
+}
+
 impl TransactionCache {
     /// Create a cache with the default maximum entry count.
     pub fn new() -> Self {

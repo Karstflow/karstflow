@@ -1,6 +1,7 @@
 use super::{EpochSchedule, Inflation, LeaderSchedule, Rent};
 use crate::blockhash_queue::{BlockhashInfo, BlockhashQueue};
 use crate::epoch_processing::EpochProcessor;
+use crate::transaction_cache::TransactionCache;
 use crate::features::{process_feature_activations, FeatureSet};
 use crate::reward_application::RewardApplicator;
 use crate::rewards_distribution::RewardsDistributor;
@@ -89,6 +90,9 @@ pub struct Bank {
     // Recent blockhash queue for transaction validation
     blockhash_queue: RwLock<BlockhashQueue>,
 
+    // Transaction deduplication cache
+    transaction_cache: Arc<TransactionCache>,
+
     // Epoch boundary state (optional, set externally)
     stake_tracker: Option<Arc<RwLock<StakeTracker>>>,
     stake_history: Option<Arc<RwLock<StakeHistory>>>,
@@ -149,6 +153,7 @@ impl Bank {
             signature_count: AtomicU64::new(0),
             last_blockhash: RwLock::new([0u8; 32]),
             blockhash_queue: RwLock::new(BlockhashQueue::default()),
+            transaction_cache: Arc::new(TransactionCache::new()),
             stake_tracker: None,
             stake_history: None,
             feature_set: None,
@@ -186,6 +191,7 @@ impl Bank {
             signature_count: AtomicU64::new(0),
             last_blockhash: RwLock::new(parent_hash),
             blockhash_queue: RwLock::new(parent.blockhash_queue.read().unwrap().clone()),
+            transaction_cache: parent.transaction_cache.clone(),
             stake_tracker: parent.stake_tracker.clone(),
             stake_history: parent.stake_history.clone(),
             feature_set: parent.feature_set.clone(),
@@ -355,6 +361,11 @@ impl Bank {
     /// Get a reference to the blockhash queue lock.
     pub fn blockhash_queue(&self) -> &RwLock<BlockhashQueue> {
         &self.blockhash_queue
+    }
+
+    /// Access the transaction deduplication cache.
+    pub fn transaction_cache(&self) -> &TransactionCache {
+        &self.transaction_cache
     }
 
     /// Get a clone of the current lattice hash accumulator.

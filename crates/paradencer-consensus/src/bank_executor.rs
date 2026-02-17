@@ -127,6 +127,8 @@ pub enum TransactionExecutionError {
     BlockhashNotRecent,
     /// One or more signatures failed Ed25519 verification.
     SignatureVerificationFailed { signer_index: usize },
+    /// Transaction is a duplicate (already processed in a recent slot).
+    DuplicateTransaction,
 }
 
 impl std::fmt::Display for TransactionExecutionError {
@@ -151,6 +153,7 @@ impl std::fmt::Display for TransactionExecutionError {
             Self::SignatureVerificationFailed { signer_index } => {
                 write!(f, "signature verification failed for signer {signer_index}")
             }
+            Self::DuplicateTransaction => write!(f, "duplicate transaction"),
         }
     }
 }
@@ -188,6 +191,30 @@ pub struct BatchExecutionSummary {
     pub results: Vec<TransactionExecutionResult>,
     /// All vote updates extracted from successful vote transactions.
     pub vote_updates: Vec<VoteUpdate>,
+}
+
+// ---------------------------------------------------------------------------
+// Transaction hashing
+// ---------------------------------------------------------------------------
+
+/// Compute a SHA-256 hash of the transaction message for deduplication.
+///
+/// Uses message_bytes if available, otherwise falls back to the first
+/// signature as a unique identifier.
+fn compute_message_hash(tx: &SanitizedTransaction) -> [u8; 32] {
+    use sha2::{Digest, Sha256};
+    if !tx.message_bytes.is_empty() {
+        let mut hasher = Sha256::new();
+        hasher.update(&tx.message_bytes);
+        hasher.finalize().into()
+    } else if let Some(sig) = tx.signatures.first() {
+        // Use first 32 bytes of the 64-byte signature as a unique hash
+        let mut hash = [0u8; 32];
+        hash.copy_from_slice(&sig[..32]);
+        hash
+    } else {
+        [0u8; 32]
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -287,6 +314,25 @@ impl Bank {
                     modified_accounts: HashMap::new(),
                     logs: vec![],
                     error: Some(err),
+                    vote_updates: vec![],
+                };
+            }
+        }
+
+        // Step 1d: Deduplication check (skipped when signatures are empty)
+        if !transaction.signatures.is_empty() {
+            let message_hash = compute_message_hash(transaction);
+            if self
+                .transaction_cache()
+                .contains(&transaction.recent_blockhash, &message_hash, self.slot())
+            {
+                return TransactionExecutionResult {
+                    success: false,
+                    compute_units_consumed: 0,
+                    fee: 0,
+                    modified_accounts: HashMap::new(),
+                    logs: vec![],
+                    error: Some(TransactionExecutionError::DuplicateTransaction),
                     vote_updates: vec![],
                 };
             }
@@ -486,6 +532,17 @@ impl Bank {
 
         // Step 8: Extract vote updates from successful vote transactions
         let vote_updates = self.extract_vote_updates(transaction);
+
+        // Step 9: Record transaction in dedup cache
+        if !transaction.signatures.is_empty() {
+            let message_hash = compute_message_hash(transaction);
+            self.transaction_cache().insert(
+                &transaction.recent_blockhash,
+                &message_hash,
+                self.slot(),
+                self.slot(),
+            );
+        }
 
         TransactionExecutionResult {
             success: true,
@@ -1493,5 +1550,121 @@ mod tests {
 
         let result = bank.process_transaction(&tx, &backend, MAX_COMPUTE_UNITS);
         assert!(result.success, "multi-sig should pass: {:?}", result.error);
+    }
+
+    // --- Deduplication tests ---
+
+    #[test]
+    fn duplicate_transaction_rejected() {
+        use ed25519_dalek::{Signer, SigningKey};
+
+        let bank = create_test_bank();
+        let backend = PassthroughBackend;
+
+        let signing_key = SigningKey::from_bytes(&[1u8; 32]);
+        let payer = Pubkey::from(signing_key.verifying_key().to_bytes());
+        let program = Pubkey::new_unique();
+        let payer_account = Account::new(10_000_000, vec![], Pubkey::default());
+        store_test_account(&bank, &payer, &payer_account);
+
+        let message_bytes = b"dedup test message".to_vec();
+        let signature = signing_key.sign(&message_bytes);
+
+        let tx = SanitizedTransaction {
+            account_keys: vec![payer, program],
+            recent_blockhash: [0u8; 32],
+            instructions: vec![CompiledInstruction {
+                program_id_index: 1,
+                account_indices: vec![0],
+                data: vec![],
+            }],
+            num_signatures: 1,
+            signatures: vec![signature.to_bytes()],
+            message_bytes,
+        };
+
+        // First submission succeeds
+        let result = bank.process_transaction(&tx, &backend, MAX_COMPUTE_UNITS);
+        assert!(result.success, "first should succeed: {:?}", result.error);
+
+        // Second submission of the same transaction is rejected
+        let result2 = bank.process_transaction(&tx, &backend, MAX_COMPUTE_UNITS);
+        assert!(!result2.success);
+        assert!(matches!(
+            result2.error,
+            Some(TransactionExecutionError::DuplicateTransaction)
+        ));
+    }
+
+    #[test]
+    fn different_transactions_both_succeed() {
+        use ed25519_dalek::{Signer, SigningKey};
+
+        let bank = create_test_bank();
+        let backend = PassthroughBackend;
+
+        let signing_key = SigningKey::from_bytes(&[1u8; 32]);
+        let payer = Pubkey::from(signing_key.verifying_key().to_bytes());
+        let program = Pubkey::new_unique();
+        let payer_account = Account::new(10_000_000, vec![], Pubkey::default());
+        store_test_account(&bank, &payer, &payer_account);
+
+        // Two different messages → different message hashes → not duplicates
+        let msg1 = b"message one".to_vec();
+        let sig1 = signing_key.sign(&msg1);
+        let tx1 = SanitizedTransaction {
+            account_keys: vec![payer, program],
+            recent_blockhash: [0u8; 32],
+            instructions: vec![CompiledInstruction {
+                program_id_index: 1,
+                account_indices: vec![0],
+                data: vec![],
+            }],
+            num_signatures: 1,
+            signatures: vec![sig1.to_bytes()],
+            message_bytes: msg1,
+        };
+
+        let msg2 = b"message two".to_vec();
+        let sig2 = signing_key.sign(&msg2);
+        let tx2 = SanitizedTransaction {
+            account_keys: vec![payer, program],
+            recent_blockhash: [0u8; 32],
+            instructions: vec![CompiledInstruction {
+                program_id_index: 1,
+                account_indices: vec![0],
+                data: vec![],
+            }],
+            num_signatures: 1,
+            signatures: vec![sig2.to_bytes()],
+            message_bytes: msg2,
+        };
+
+        let result1 = bank.process_transaction(&tx1, &backend, MAX_COMPUTE_UNITS);
+        assert!(result1.success, "tx1 should succeed: {:?}", result1.error);
+
+        let result2 = bank.process_transaction(&tx2, &backend, MAX_COMPUTE_UNITS);
+        assert!(result2.success, "tx2 should succeed: {:?}", result2.error);
+    }
+
+    #[test]
+    fn empty_signatures_bypass_dedup() {
+        let bank = create_test_bank();
+        let backend = PassthroughBackend;
+
+        let payer = Pubkey::new_unique();
+        let program = Pubkey::new_unique();
+        let payer_account = Account::new(1_000_000, vec![], Pubkey::default());
+        store_test_account(&bank, &payer, &payer_account);
+
+        // Transactions with empty signatures skip dedup (backward compat)
+        let tx = create_simple_transaction(payer, program, vec![payer], vec![]);
+        assert!(tx.signatures.is_empty());
+
+        let r1 = bank.process_transaction(&tx, &backend, MAX_COMPUTE_UNITS);
+        assert!(r1.success);
+
+        let r2 = bank.process_transaction(&tx, &backend, MAX_COMPUTE_UNITS);
+        assert!(r2.success); // not rejected as duplicate
     }
 }
