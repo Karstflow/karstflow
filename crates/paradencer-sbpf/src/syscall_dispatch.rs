@@ -129,6 +129,10 @@ impl RuntimeSyscallDispatch {
             "sol_get_epoch_schedule_sysvar",
             Box::new(SolGetEpochScheduleHandler),
         );
+        dispatch.register_by_name(
+            "sol_get_last_restart_slot",
+            Box::new(SolGetLastRestartSlotHandler),
+        );
 
         // Runtime queries
         dispatch.register_by_name("sol_get_stack_height", Box::new(SolGetStackHeightHandler));
@@ -833,6 +837,9 @@ impl SyscallHandler for SolGetReturnDataHandler {
 }
 
 /// sol_get_clock_sysvar: Write Clock sysvar data to VM memory.
+///
+/// Serialization layout (40 bytes, little-endian):
+///   slot(8) | epoch_start_timestamp(8) | epoch(8) | leader_schedule_epoch(8) | unix_timestamp(8)
 struct SolGetClockSysvarHandler;
 
 impl SyscallHandler for SolGetClockSysvarHandler {
@@ -847,9 +854,13 @@ impl SyscallHandler for SolGetClockSysvarHandler {
     ) -> Result<u64, VmError> {
         deduct_compute(vm, syscalls::GET_SYSVAR_COST)?;
 
-        // Clock sysvar: slot(8) + epoch_start_timestamp(8) + epoch(8) + leader_schedule_epoch(8) + unix_timestamp(8) = 40 bytes
+        let snap = &vm.sysvar_snapshot;
         let mut buf = [0u8; 40];
-        // All zeros = default values (slot 0, epoch 0, timestamp 0)
+        buf[0..8].copy_from_slice(&snap.slot.to_le_bytes());
+        buf[8..16].copy_from_slice(&snap.epoch_start_timestamp.to_le_bytes());
+        buf[16..24].copy_from_slice(&snap.epoch.to_le_bytes());
+        buf[24..32].copy_from_slice(&snap.leader_schedule_epoch.to_le_bytes());
+        buf[32..40].copy_from_slice(&snap.unix_timestamp.to_le_bytes());
 
         vm.memory
             .write_slice(r1, &buf)
@@ -860,6 +871,9 @@ impl SyscallHandler for SolGetClockSysvarHandler {
 }
 
 /// sol_get_rent_sysvar: Write Rent sysvar data to VM memory.
+///
+/// Serialization layout (17 bytes, little-endian):
+///   lamports_per_byte_year(8) | exemption_threshold(f64 8) | burn_percent(1)
 struct SolGetRentSysvarHandler;
 
 impl SyscallHandler for SolGetRentSysvarHandler {
@@ -874,16 +888,11 @@ impl SyscallHandler for SolGetRentSysvarHandler {
     ) -> Result<u64, VmError> {
         deduct_compute(vm, syscalls::GET_SYSVAR_COST)?;
 
-        // Rent sysvar: lamports_per_byte_year(8) + exemption_threshold(8 as f64) + burn_percent(1) = 17 bytes
-        let lamports_per_byte: u64 =
-            paradencer_constants::economics::RENT_EXEMPTION_LAMPORTS_PER_BYTE;
-        let threshold: f64 = 2.0;
-        let burn: u8 = paradencer_constants::economics::DEFAULT_FEE_BURN_PERCENT;
-
-        let mut buf = Vec::with_capacity(17);
-        buf.extend_from_slice(&lamports_per_byte.to_le_bytes());
-        buf.extend_from_slice(&threshold.to_le_bytes());
-        buf.push(burn);
+        let snap = &vm.sysvar_snapshot;
+        let mut buf = [0u8; 17];
+        buf[0..8].copy_from_slice(&snap.lamports_per_byte_year.to_le_bytes());
+        buf[8..16].copy_from_slice(&snap.exemption_threshold.to_le_bytes());
+        buf[16] = snap.burn_percent;
 
         vm.memory
             .write_slice(r1, &buf)
@@ -894,6 +903,9 @@ impl SyscallHandler for SolGetRentSysvarHandler {
 }
 
 /// sol_get_epoch_schedule_sysvar: Write EpochSchedule sysvar data to VM memory.
+///
+/// Serialization layout (33 bytes, little-endian):
+///   slots_per_epoch(8) | leader_schedule_slot_offset(8) | warmup(1) | first_normal_epoch(8) | first_normal_slot(8)
 struct SolGetEpochScheduleHandler;
 
 impl SyscallHandler for SolGetEpochScheduleHandler {
@@ -908,19 +920,41 @@ impl SyscallHandler for SolGetEpochScheduleHandler {
     ) -> Result<u64, VmError> {
         deduct_compute(vm, syscalls::GET_SYSVAR_COST)?;
 
-        // EpochSchedule: slots_per_epoch(8) + leader_schedule_slot_offset(8) + warmup(1) + first_normal_epoch(8) + first_normal_slot(8) = 33 bytes
-        let slots_per_epoch: u64 = paradencer_constants::ledger::SLOTS_PER_EPOCH;
-        let offset: u64 = paradencer_constants::consensus::LEADER_SCHEDULE_SLOT_OFFSET;
-
-        let mut buf = Vec::with_capacity(33);
-        buf.extend_from_slice(&slots_per_epoch.to_le_bytes());
-        buf.extend_from_slice(&offset.to_le_bytes());
-        buf.push(0); // warmup = false
-        buf.extend_from_slice(&0u64.to_le_bytes()); // first_normal_epoch
-        buf.extend_from_slice(&0u64.to_le_bytes()); // first_normal_slot
+        let snap = &vm.sysvar_snapshot;
+        let mut buf = [0u8; 33];
+        buf[0..8].copy_from_slice(&snap.slots_per_epoch.to_le_bytes());
+        buf[8..16].copy_from_slice(&snap.leader_schedule_slot_offset.to_le_bytes());
+        buf[16] = snap.warmup as u8;
+        buf[17..25].copy_from_slice(&snap.first_normal_epoch.to_le_bytes());
+        buf[25..33].copy_from_slice(&snap.first_normal_slot.to_le_bytes());
 
         vm.memory
             .write_slice(r1, &buf)
+            .map_err(|e| VmError::MemoryError(e.to_string()))?;
+
+        Ok(0)
+    }
+}
+
+/// sol_get_last_restart_slot: Write LastRestartSlot sysvar data to VM memory.
+///
+/// Serialization layout (8 bytes, little-endian): slot(8)
+struct SolGetLastRestartSlotHandler;
+
+impl SyscallHandler for SolGetLastRestartSlotHandler {
+    fn call(
+        &self,
+        vm: &mut VmState,
+        r1: u64, // destination pointer
+        _r2: u64,
+        _r3: u64,
+        _r4: u64,
+        _r5: u64,
+    ) -> Result<u64, VmError> {
+        deduct_compute(vm, syscalls::GET_SYSVAR_COST)?;
+
+        vm.memory
+            .write_slice(r1, &vm.sysvar_snapshot.last_restart_slot.to_le_bytes())
             .map_err(|e| VmError::MemoryError(e.to_string()))?;
 
         Ok(0)
@@ -1341,13 +1375,14 @@ mod tests {
         assert!(ids.contains(&murmur3_hash("sol_get_clock_sysvar")));
         assert!(ids.contains(&murmur3_hash("sol_get_rent_sysvar")));
         assert!(ids.contains(&murmur3_hash("sol_get_epoch_schedule_sysvar")));
+        assert!(ids.contains(&murmur3_hash("sol_get_last_restart_slot")));
         assert!(ids.contains(&murmur3_hash("sol_get_stack_height")));
         assert!(ids.contains(&murmur3_hash("sol_secp256k1_recover")));
         assert!(!ids.contains(&0xDEAD));
-        // 4 log + 4 mem + 3 hash + 1 alloc + 2 PDA + 2 return_data + 3 sysvar + 1 stack + 1 crypto = 21
+        // 4 log + 4 mem + 3 hash + 1 alloc + 2 PDA + 2 return_data + 4 sysvar + 1 stack + 1 crypto = 22
         assert!(
-            ids.len() >= 21,
-            "Expected >= 21 syscalls, got {}",
+            ids.len() >= 22,
+            "Expected >= 22 syscalls, got {}",
             ids.len()
         );
     }
@@ -1440,10 +1475,10 @@ mod tests {
         let ids = dispatch.registered_ids();
         assert!(ids.contains(&murmur3_hash("sol_invoke_signed_c")));
         assert!(ids.contains(&murmur3_hash("sol_invoke_signed_rust")));
-        // 21 standard + 2 CPI = 23
+        // 22 standard + 2 CPI = 24
         assert!(
-            ids.len() >= 23,
-            "Expected >= 23 syscalls with CPI, got {}",
+            ids.len() >= 24,
+            "Expected >= 24 syscalls with CPI, got {}",
             ids.len()
         );
     }
@@ -1453,5 +1488,120 @@ mod tests {
         let dispatch = RuntimeSyscallDispatch::with_standard_syscalls();
         let ids = dispatch.registered_ids();
         assert!(!ids.contains(&murmur3_hash("sol_invoke_signed_c")));
+    }
+
+    // -----------------------------------------------------------------------
+    // Sysvar syscall tests
+    // -----------------------------------------------------------------------
+
+    /// Create a VmState with a given SysvarSnapshot and heap for testing syscall handlers directly.
+    fn make_sysvar_test_vm(
+        snapshot: crate::sysvar_snapshot::SysvarSnapshot,
+    ) -> VmState {
+        use crate::interpreter::VmState;
+        VmState {
+            registers: [0u64; 11],
+            pc: 0,
+            instruction_count: 0,
+            memory: MemoryMap::new(&[], TOTAL_STACK_SIZE, DEFAULT_HEAP_SIZE, vec![]),
+            call_stack: Vec::new(),
+            compute_meter: 1_000_000,
+            logs: Vec::new(),
+            return_data: None,
+            heap_position: REGION_HEAP_BASE,
+            sysvar_snapshot: snapshot,
+            cpi_depth: 0,
+        }
+    }
+
+    #[test]
+    fn clock_syscall_reads_snapshot_slot() {
+        let mut snap = crate::sysvar_snapshot::SysvarSnapshot::default();
+        snap.slot = 12345;
+        snap.epoch = 7;
+        snap.unix_timestamp = 1700000000;
+        snap.epoch_start_timestamp = 1699000000;
+        snap.leader_schedule_epoch = 8;
+
+        let mut vm = make_sysvar_test_vm(snap);
+        let handler = SolGetClockSysvarHandler;
+        let ret = handler.call(&mut vm, REGION_HEAP_BASE, 0, 0, 0, 0).unwrap();
+        assert_eq!(ret, 0);
+
+        let buf = vm.memory.read_slice(REGION_HEAP_BASE, 40).unwrap();
+        assert_eq!(u64::from_le_bytes(buf[0..8].try_into().unwrap()), 12345);
+        assert_eq!(i64::from_le_bytes(buf[8..16].try_into().unwrap()), 1699000000);
+        assert_eq!(u64::from_le_bytes(buf[16..24].try_into().unwrap()), 7);
+        assert_eq!(u64::from_le_bytes(buf[24..32].try_into().unwrap()), 8);
+        assert_eq!(i64::from_le_bytes(buf[32..40].try_into().unwrap()), 1700000000);
+    }
+
+    #[test]
+    fn rent_syscall_reads_snapshot() {
+        let mut snap = crate::sysvar_snapshot::SysvarSnapshot::default();
+        snap.lamports_per_byte_year = 3480;
+        snap.exemption_threshold = 2.0;
+        snap.burn_percent = 50;
+
+        let mut vm = make_sysvar_test_vm(snap);
+        let handler = SolGetRentSysvarHandler;
+        let ret = handler.call(&mut vm, REGION_HEAP_BASE, 0, 0, 0, 0).unwrap();
+        assert_eq!(ret, 0);
+
+        let buf = vm.memory.read_slice(REGION_HEAP_BASE, 17).unwrap();
+        assert_eq!(u64::from_le_bytes(buf[0..8].try_into().unwrap()), 3480);
+        assert_eq!(f64::from_le_bytes(buf[8..16].try_into().unwrap()), 2.0);
+        assert_eq!(buf[16], 50);
+    }
+
+    #[test]
+    fn epoch_schedule_syscall_reads_snapshot() {
+        let mut snap = crate::sysvar_snapshot::SysvarSnapshot::default();
+        snap.slots_per_epoch = 432_000;
+        snap.leader_schedule_slot_offset = 432_000;
+        snap.warmup = true;
+        snap.first_normal_epoch = 14;
+        snap.first_normal_slot = 524_256;
+
+        let mut vm = make_sysvar_test_vm(snap);
+        let handler = SolGetEpochScheduleHandler;
+        let ret = handler.call(&mut vm, REGION_HEAP_BASE, 0, 0, 0, 0).unwrap();
+        assert_eq!(ret, 0);
+
+        let buf = vm.memory.read_slice(REGION_HEAP_BASE, 33).unwrap();
+        assert_eq!(u64::from_le_bytes(buf[0..8].try_into().unwrap()), 432_000);
+        assert_eq!(u64::from_le_bytes(buf[8..16].try_into().unwrap()), 432_000);
+        assert_eq!(buf[16], 1);
+        assert_eq!(u64::from_le_bytes(buf[17..25].try_into().unwrap()), 14);
+        assert_eq!(u64::from_le_bytes(buf[25..33].try_into().unwrap()), 524_256);
+    }
+
+    #[test]
+    fn last_restart_slot_syscall_reads_snapshot() {
+        let mut snap = crate::sysvar_snapshot::SysvarSnapshot::default();
+        snap.last_restart_slot = 99_999;
+
+        let mut vm = make_sysvar_test_vm(snap);
+        let handler = SolGetLastRestartSlotHandler;
+        let ret = handler.call(&mut vm, REGION_HEAP_BASE, 0, 0, 0, 0).unwrap();
+        assert_eq!(ret, 0);
+
+        let buf = vm.memory.read_slice(REGION_HEAP_BASE, 8).unwrap();
+        assert_eq!(u64::from_le_bytes(buf[0..8].try_into().unwrap()), 99_999);
+    }
+
+    #[test]
+    fn sysvar_syscalls_with_default_snapshot_return_zeros() {
+        let mut vm = make_sysvar_test_vm(crate::sysvar_snapshot::SysvarSnapshot::default());
+        let ret = SolGetClockSysvarHandler.call(&mut vm, REGION_HEAP_BASE, 0, 0, 0, 0).unwrap();
+        assert_eq!(ret, 0);
+        let buf = vm.memory.read_slice(REGION_HEAP_BASE, 40).unwrap();
+        assert!(buf.iter().all(|&b| b == 0), "default clock should be all zeros");
+
+        let mut vm = make_sysvar_test_vm(crate::sysvar_snapshot::SysvarSnapshot::default());
+        let ret = SolGetLastRestartSlotHandler.call(&mut vm, REGION_HEAP_BASE, 0, 0, 0, 0).unwrap();
+        assert_eq!(ret, 0);
+        let buf = vm.memory.read_slice(REGION_HEAP_BASE, 8).unwrap();
+        assert!(buf.iter().all(|&b| b == 0), "default last_restart should be all zeros");
     }
 }
