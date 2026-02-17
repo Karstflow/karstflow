@@ -124,6 +124,18 @@ impl AccountDatabase {
         self.records.get(&key).map(|entry| entry.account.clone())
     }
 
+    /// Store an account directly into published state.
+    ///
+    /// Used for protocol-level operations (e.g. epoch reward credits)
+    /// that happen outside the normal transaction flow.
+    pub fn store_published_account(&self, pubkey: Pubkey, account: Account) {
+        let version = self.versions.next();
+        let key = RecordKey::published(pubkey);
+        let record = AccountRecord::new(TransactionId::root(), pubkey, account.clone(), version);
+        self.records.insert(key, record);
+        self.account_cache.insert(pubkey, (account, version));
+    }
+
     pub fn count_records(&self) -> usize {
         self.records.len()
     }

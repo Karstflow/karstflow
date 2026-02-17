@@ -17,6 +17,7 @@ mod inflation;
 mod leader_schedule;
 mod nonce;
 mod rent;
+mod reward_application;
 mod rewards;
 pub mod rewards_calculator;
 pub mod rewards_distribution;
@@ -58,6 +59,7 @@ pub use inflation::Inflation;
 pub use leader_schedule::{LeaderSchedule, LeaderScheduleError};
 pub use nonce::{Nonce, NonceAccount, NonceData, NonceError, NonceState};
 pub use rent::{CollectedRent, Rent, RentCollector, RentDue};
+pub use reward_application::{RewardApplicator, RewardApplicationResult};
 pub use rewards::{
     calculate_epoch_rewards, calculate_reward_blocks, calculate_stake_points,
     calculate_stake_reward, EpochRewards, LAMPORTS_PER_SOL, MAX_REWARD_BLOCKS_FACTOR,
