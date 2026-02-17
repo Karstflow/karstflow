@@ -117,16 +117,21 @@ impl ConsensusCoordinator {
     }
 
     /// Refresh fork choice with current stake weights.
+    ///
+    /// Re-records all latest votes with updated stake amounts from the
+    /// tracker. Uses LMD-aware recording to keep weights consistent.
     fn refresh_fork_choice_stakes(&mut self) {
-        let stake_map = self.stake_tracker.stake_by_vote_account();
+        // Collect current votes to avoid borrow conflict
+        let votes: Vec<(Pubkey, u64)> = self
+            .latest_votes
+            .iter()
+            .map(|(validator, vote)| (*validator, vote.slot))
+            .collect();
 
-        for (vote_pubkey, stake) in stake_map {
-            // Find slots that this validator voted on and update weights
-            for vote in self.latest_votes.values() {
-                if vote.validator == vote_pubkey {
-                    self.fork_choice.add_stake(vote.slot, stake);
-                }
-            }
+        for (validator, slot) in votes {
+            let stake = self.stake_tracker.total_stake_for_voter(&validator);
+            self.fork_choice
+                .record_validator_vote(validator, slot, stake);
         }
     }
 
@@ -137,7 +142,9 @@ impl ConsensusCoordinator {
 
     /// Process a vote from a validator.
     ///
-    /// Updates fork choice with the validator's stake weight from StakeTracker.
+    /// Uses LMD-GHOST semantics: the old vote's stake is subtracted from
+    /// its ancestry and the new vote's stake is added. Only the latest
+    /// vote from each validator counts.
     pub fn record_validator_vote(&mut self, vote: ValidatorVote) {
         let slot = vote.slot;
         let validator = vote.validator;
@@ -145,16 +152,13 @@ impl ConsensusCoordinator {
         // Get actual stake weight from stake tracker
         let stake = self.stake_tracker.total_stake_for_voter(&validator);
 
-        // Record this as the latest vote from this validator
-        if let Some(previous_vote) = self.latest_votes.insert(validator, vote.clone()) {
-            // If validator changed their vote, just add to the new slot
-            if previous_vote.slot != slot {
-                self.fork_choice.add_stake(slot, stake);
-            }
-        } else {
-            // First vote from this validator
-            self.fork_choice.add_stake(slot, stake);
-        }
+        // Use ForkChoice's LMD-aware record which subtracts old vote stake
+        // from ancestry and adds new vote stake to ancestry
+        self.fork_choice
+            .record_validator_vote(validator, slot, stake);
+
+        // Track latest vote for pruning
+        self.latest_votes.insert(validator, vote);
     }
 
     /// Check if we can vote on a slot without violating lockouts.

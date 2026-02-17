@@ -291,20 +291,22 @@ impl VoteIntegration {
         Ok(vote_processor.get_slot_stake(slot))
     }
 
-    /// Check if we can switch to a different fork
+    /// Check if we can switch to a different fork.
     ///
-    /// Uses tower's switching threshold (38% advantage required)
+    /// Uses tower's switching threshold: at least 38% of total stake must be
+    /// locked out on forks other than our current fork.
     pub fn can_switch_fork(
         &self,
         candidate_slot: u64,
-        candidate_stake: u64,
+        total_stake: u64,
+        current_fork_stake: u64,
         is_same_fork: impl Fn(u64, u64) -> bool,
     ) -> Result<bool, VoteIntegrationError> {
         let tower = self
             .tower
             .read()
             .map_err(|_| VoteIntegrationError::LockFailed)?;
-        Ok(tower.can_switch_to(candidate_slot, candidate_stake, is_same_fork))
+        Ok(tower.can_switch_to(candidate_slot, total_stake, current_fork_stake, is_same_fork))
     }
 }
 
@@ -488,10 +490,16 @@ mod tests {
 
         let different_fork = |a: u64, b: u64| a == b;
 
-        let can_switch = integration.can_switch_fork(200, 1, different_fork).unwrap();
+        // total_stake=1000, current_fork_stake=700 → other=300/1000=30% < 38% → cannot switch
+        let can_switch = integration
+            .can_switch_fork(200, 1000, 700, different_fork)
+            .unwrap();
         assert!(!can_switch);
 
-        let can_switch = integration.can_switch_fork(200, 2, different_fork).unwrap();
+        // total_stake=1000, current_fork_stake=500 → other=500/1000=50% >= 38% → can switch
+        let can_switch = integration
+            .can_switch_fork(200, 1000, 500, different_fork)
+            .unwrap();
         assert!(can_switch);
     }
 

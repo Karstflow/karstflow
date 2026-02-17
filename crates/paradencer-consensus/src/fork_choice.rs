@@ -434,6 +434,7 @@ impl ForkChoice {
                     self.subtract_stake_from_ancestry(old_slot, old_stake);
                     self.add_stake_to_ancestry(slot, stake);
                     self.validator_latest_votes.insert(validator, (slot, stake));
+                    self.update_confirmation(slot);
                 }
                 return;
             }
@@ -443,6 +444,9 @@ impl ForkChoice {
         // Add new vote's stake to its ancestry
         self.add_stake_to_ancestry(slot, stake);
         self.validator_latest_votes.insert(validator, (slot, stake));
+
+        // Update confirmation status for the voted slot
+        self.update_confirmation(slot);
     }
 
     /// Add stake to a slot and all of its ancestors.
@@ -484,11 +488,12 @@ impl ForkChoice {
         own_weight.saturating_add(children_weight)
     }
 
-    /// Select the heaviest fork using proper GHOST traversal with subtree weights.
+    /// Select the heaviest fork using GHOST traversal with ancestry-propagated weights.
     ///
     /// Starting from the root, at each level picks the child with the
-    /// heaviest subtree (ties broken by lower slot number). Traverses
-    /// until reaching a leaf node.
+    /// highest stake weight (ties broken by lower slot number). With LMD-GHOST
+    /// ancestry propagation, each node's `stake_weight` already includes all
+    /// descendant votes, so direct comparison is correct.
     pub fn select_heaviest_fork(&mut self, root: u64) -> Option<u64> {
         if !self.forks.contains_key(&root) {
             return None;
@@ -510,12 +515,20 @@ impl ForkChoice {
                 return Some(current);
             }
 
-            // Pick child with heaviest subtree, break ties by lower slot
+            // Pick child with highest stake weight, break ties by lower slot
             let mut best_child = children[0];
-            let mut best_weight = self.subtree_weight(children[0]);
+            let mut best_weight = self
+                .forks
+                .get(&children[0])
+                .map(|f| f.stake_weight)
+                .unwrap_or(0);
 
             for &child in &children[1..] {
-                let weight = self.subtree_weight(child);
+                let weight = self
+                    .forks
+                    .get(&child)
+                    .map(|f| f.stake_weight)
+                    .unwrap_or(0);
                 if weight > best_weight || (weight == best_weight && child < best_child) {
                     best_child = child;
                     best_weight = weight;
@@ -842,5 +855,142 @@ mod tests {
         assert_eq!(stats.total_stake, 1000);
         assert_eq!(stats.max_fork_stake, 700);
         assert_eq!(stats.best_slot, Some(2));
+    }
+
+    #[test]
+    fn lmd_ghost_only_latest_vote_counts() {
+        let mut fc = ForkChoice::new(1000);
+        fc.add_fork(0, None);
+        fc.add_fork(1, Some(0));
+        fc.add_fork(2, Some(1));
+
+        let validator = Pubkey::from([1u8; 32]);
+
+        // Validator votes for slot 1
+        fc.record_validator_vote(validator, 1, 500);
+        assert_eq!(fc.get_fork(1).unwrap().stake_weight, 500);
+        assert_eq!(fc.get_fork(0).unwrap().stake_weight, 500); // ancestor gets stake
+
+        // Validator switches to slot 2 — old vote removed from slot 1
+        fc.record_validator_vote(validator, 2, 500);
+        assert_eq!(fc.get_fork(2).unwrap().stake_weight, 500);
+        assert_eq!(fc.get_fork(1).unwrap().stake_weight, 500); // still in ancestry
+        assert_eq!(fc.get_fork(0).unwrap().stake_weight, 500); // still in ancestry
+
+        // Slot 1 should NOT have direct vote stake anymore (only ancestry)
+        // The key test: only one validator's worth of stake in the tree
+        assert_eq!(fc.validator_vote_count(), 1);
+        assert_eq!(fc.validator_vote_slot(&validator), Some(2));
+    }
+
+    #[test]
+    fn lmd_ghost_fork_competition() {
+        let mut fc = ForkChoice::new(1000);
+        // Tree: 0 → 1 → 2 (fork A)
+        //              → 3 (fork B)
+        fc.add_fork(0, None);
+        fc.add_fork(1, Some(0));
+        fc.add_fork(2, Some(1));
+        fc.add_fork(3, Some(1));
+
+        let val_a = Pubkey::from([1u8; 32]);
+        let val_b = Pubkey::from([2u8; 32]);
+
+        // Validator A (300 stake) votes for slot 2
+        fc.record_validator_vote(val_a, 2, 300);
+        // Validator B (400 stake) votes for slot 3
+        fc.record_validator_vote(val_b, 3, 400);
+
+        // Ancestry: slot 0 and 1 should have both validators' stake
+        assert_eq!(fc.get_fork(0).unwrap().stake_weight, 700);
+        assert_eq!(fc.get_fork(1).unwrap().stake_weight, 700);
+
+        // Competing forks at the leaf level
+        assert_eq!(fc.get_fork(2).unwrap().stake_weight, 300);
+        assert_eq!(fc.get_fork(3).unwrap().stake_weight, 400);
+
+        // GHOST should pick slot 3 (heavier fork)
+        let best = fc.compute_best_fork(0);
+        assert_eq!(best, Some(3));
+
+        // select_heaviest_fork should agree
+        let heaviest = fc.select_heaviest_fork(0);
+        assert_eq!(heaviest, Some(3));
+    }
+
+    #[test]
+    fn lmd_ghost_validator_switches_fork() {
+        let mut fc = ForkChoice::new(1000);
+        // Tree: 0 → 1 → 2 (fork A)
+        //              → 3 (fork B)
+        fc.add_fork(0, None);
+        fc.add_fork(1, Some(0));
+        fc.add_fork(2, Some(1));
+        fc.add_fork(3, Some(1));
+
+        let val_a = Pubkey::from([1u8; 32]);
+        let val_b = Pubkey::from([2u8; 32]);
+
+        // Both validators initially vote for slot 2
+        fc.record_validator_vote(val_a, 2, 300);
+        fc.record_validator_vote(val_b, 2, 400);
+        assert_eq!(fc.get_fork(2).unwrap().stake_weight, 700);
+        assert_eq!(fc.compute_best_fork(0), Some(2));
+
+        // Validator B switches to slot 3
+        fc.record_validator_vote(val_b, 3, 400);
+
+        // Slot 2 should lose B's stake, slot 3 gains it
+        assert_eq!(fc.get_fork(2).unwrap().stake_weight, 300);
+        assert_eq!(fc.get_fork(3).unwrap().stake_weight, 400);
+
+        // GHOST now picks slot 3
+        assert_eq!(fc.compute_best_fork(0), Some(3));
+    }
+
+    #[test]
+    fn lmd_ghost_confirmation_triggers_on_ancestry_vote() {
+        // total_stake=1000, VOTE_THRESHOLD_SIZE=0.6667
+        let mut fc = ForkChoice::new(1000);
+        fc.add_fork(0, None);
+        fc.add_fork(1, Some(0));
+
+        let val_a = Pubkey::from([1u8; 32]);
+        let val_b = Pubkey::from([2u8; 32]);
+
+        // 300 stake — not enough for confirmation
+        fc.record_validator_vote(val_a, 1, 300);
+        assert!(!fc.get_fork(1).unwrap().confirmed);
+
+        // 700 more stake — now 1000 total on slot 1, which is 100% >= 66.7%
+        fc.record_validator_vote(val_b, 1, 700);
+        assert!(fc.get_fork(1).unwrap().confirmed);
+    }
+
+    #[test]
+    fn select_heaviest_fork_consistent_with_compute_best_fork() {
+        let mut fc = ForkChoice::new(1000);
+        // Deep tree: 0 → 1 → 2 → 4
+        //                  → 3
+        fc.add_fork(0, None);
+        fc.add_fork(1, Some(0));
+        fc.add_fork(2, Some(1));
+        fc.add_fork(3, Some(1));
+        fc.add_fork(4, Some(2));
+
+        let val_a = Pubkey::from([1u8; 32]);
+        let val_b = Pubkey::from([2u8; 32]);
+        let val_c = Pubkey::from([3u8; 32]);
+
+        // A votes for slot 4 (deep chain), B and C vote for slot 3
+        fc.record_validator_vote(val_a, 4, 200);
+        fc.record_validator_vote(val_b, 3, 300);
+        fc.record_validator_vote(val_c, 3, 400);
+
+        // Both methods should agree: slot 3 is heavier (700 vs 200)
+        let best = fc.compute_best_fork(0);
+        let heaviest = fc.select_heaviest_fork(0);
+        assert_eq!(best, heaviest);
+        assert_eq!(best, Some(3));
     }
 }

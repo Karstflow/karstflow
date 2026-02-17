@@ -263,9 +263,9 @@ impl VoteProcessor {
         vote_info.add_vote(vote_account, stake);
         vote_info.update_supermajority(self.total_stake);
 
-        // Update fork choice with new vote
+        // Update fork choice with LMD-GHOST vote recording
         if let Some(fc) = fork_choice {
-            fc.add_stake(slot, stake);
+            fc.record_validator_vote(vote_account, slot, stake);
         }
 
         Ok(vote_info.total_stake)
@@ -667,5 +667,56 @@ mod tests {
         assert_eq!(voters.len(), 2);
         assert!(voters.contains(&vote1));
         assert!(voters.contains(&vote2));
+    }
+
+    #[test]
+    fn vote_processor_uses_lmd_ghost_fork_choice() {
+        let mut processor = create_test_vote_processor();
+        let (vote_account, _) = setup_vote_account(&mut processor, 500);
+
+        let mut fc = ForkChoice::new(1000);
+        fc.add_fork(0, None);
+        fc.add_fork(1, Some(0));
+        fc.add_fork(2, Some(0));
+
+        // Vote for slot 1 — should use record_validator_vote (LMD)
+        processor
+            .process_vote(vote_account, 1, 1000, None, Some(&mut fc))
+            .unwrap();
+
+        // Stake should propagate to ancestry
+        assert_eq!(fc.get_fork(1).unwrap().stake_weight, 500);
+        assert_eq!(fc.get_fork(0).unwrap().stake_weight, 500);
+
+        // Validator tracked in LMD map
+        assert_eq!(fc.validator_vote_slot(&vote_account), Some(1));
+    }
+
+    #[test]
+    fn vote_processor_lmd_switch_removes_old_stake() {
+        let mut processor = create_test_vote_processor();
+        let (vote_account, _) = setup_vote_account(&mut processor, 500);
+
+        let mut fc = ForkChoice::new(1000);
+        fc.add_fork(0, None);
+        fc.add_fork(1, Some(0));
+        fc.add_fork(2, Some(0));
+
+        // Vote for slot 1
+        processor
+            .process_vote(vote_account, 1, 1000, None, Some(&mut fc))
+            .unwrap();
+        assert_eq!(fc.get_fork(1).unwrap().stake_weight, 500);
+
+        // Switch to slot 2 — old stake removed from slot 1 ancestry
+        processor
+            .process_vote(vote_account, 2, 2000, None, Some(&mut fc))
+            .unwrap();
+
+        assert_eq!(fc.get_fork(1).unwrap().stake_weight, 0);
+        assert_eq!(fc.get_fork(2).unwrap().stake_weight, 500);
+        // Root still has stake from the new vote's ancestry
+        assert_eq!(fc.get_fork(0).unwrap().stake_weight, 500);
+        assert_eq!(fc.validator_vote_slot(&vote_account), Some(2));
     }
 }

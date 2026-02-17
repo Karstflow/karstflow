@@ -206,11 +206,18 @@ impl Tower {
 
     /// Check if voting on a candidate slot would violate switching threshold.
     ///
-    /// Returns true if we can switch to the candidate fork.
+    /// Uses real stake weights to determine if enough of the network is locked
+    /// out on other forks (>= 38% of total stake), making a fork switch safe.
+    ///
+    /// - `candidate`: the slot we want to switch to
+    /// - `total_stake`: total active stake in the network
+    /// - `current_fork_stake`: stake currently on our fork (last vote's fork)
+    /// - `is_same_fork`: closure that checks if two slots are on the same fork
     pub fn can_switch_to(
         &self,
         candidate: u64,
-        candidate_stake: u64,
+        total_stake: u64,
+        current_fork_stake: u64,
         is_same_fork: impl Fn(u64, u64) -> bool,
     ) -> bool {
         // Get our last vote
@@ -224,23 +231,9 @@ impl Tower {
             return true;
         }
 
-        // Find the stake of our current fork from votes in tower
-        let mut current_fork_stake = 0u64;
-
-        for vote in &self.votes {
-            if is_same_fork(vote.slot, last_vote_slot) {
-                // This is a rough estimation - in practice you'd query actual stake
-                current_fork_stake = current_fork_stake.saturating_add(1);
-            }
-        }
-
-        // Check switching threshold (38% advantage)
-        if current_fork_stake == 0 {
-            return true;
-        }
-
-        let ratio = candidate_stake as f64 / current_fork_stake as f64;
-        ratio >= 1.38
+        // Stake on other forks = total minus our fork's stake
+        let stake_on_other_forks = total_stake.saturating_sub(current_fork_stake);
+        self.check_switch_threshold(total_stake, stake_on_other_forks)
     }
 
     /// Get the lockout expiration for the most recent vote.
@@ -700,14 +693,22 @@ mod tests {
         // Closure: slots are on the same fork if equal
         let same_fork = |a: u64, b: u64| a == b;
 
-        // With one internal vote the current_fork_stake is 1, candidate needs > 38% of 1
-        // Any non-zero candidate stake satisfies this, so switching is allowed.
-        assert!(tower.can_switch_to(200, 100, same_fork));
-        assert!(tower.can_switch_to(200, 1000, same_fork));
+        // total_stake=1000, current_fork_stake=500 → other_forks=500/1000=50% >= 38% → can switch
+        assert!(tower.can_switch_to(200, 1000, 500, same_fork));
+
+        // total_stake=1000, current_fork_stake=700 → other_forks=300/1000=30% < 38% → cannot switch
+        assert!(!tower.can_switch_to(200, 1000, 700, same_fork));
+
+        // total_stake=1000, current_fork_stake=620 → other_forks=380/1000=38% >= 38% → can switch
+        assert!(tower.can_switch_to(200, 1000, 620, same_fork));
 
         // No previous vote → can switch anywhere
         let empty_tower = Tower::new();
-        assert!(empty_tower.can_switch_to(200, 0, same_fork));
+        assert!(empty_tower.can_switch_to(200, 0, 0, same_fork));
+
+        // Same fork → always allowed regardless of stake
+        let always_same = |_a: u64, _b: u64| true;
+        assert!(tower.can_switch_to(200, 1000, 1000, always_same));
     }
 
     #[test]
