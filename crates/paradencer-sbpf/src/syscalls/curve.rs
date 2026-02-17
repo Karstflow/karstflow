@@ -1,8 +1,9 @@
-//! Elliptic curve operations for alt_bn128.
+//! Elliptic curve operations for alt_bn128 and curve25519.
 //!
 //! These syscalls provide BN254 (alt_bn128) point addition, scalar
-//! multiplication, and pairing checks used for zero-knowledge proof
-//! verification on-chain.
+//! multiplication, and pairing checks, plus ed25519/ristretto255
+//! point validation, group operations, and multi-scalar multiplication
+//! used for zero-knowledge proof verification on-chain.
 
 pub mod alt_bn128 {
     use crate::syscalls::{SyscallContext, SyscallError};
@@ -157,5 +158,230 @@ pub mod alt_bn128 {
         })?;
 
         Ok(output)
+    }
+}
+
+pub mod curve25519 {
+    use crate::syscalls::{SyscallContext, SyscallError};
+    use curve25519_dalek::{
+        constants::{ED25519_BASEPOINT_COMPRESSED, RISTRETTO_BASEPOINT_COMPRESSED},
+        edwards::{CompressedEdwardsY, EdwardsPoint},
+        ristretto::{CompressedRistretto, RistrettoPoint},
+        scalar::Scalar,
+        traits::{Identity, VartimeMultiscalarMul},
+    };
+    use paradencer_constants::syscalls::*;
+
+    /// Validate a compressed point on ed25519 or ristretto255.
+    ///
+    /// Returns true if the point is valid (can be decompressed).
+    pub fn validate_point(
+        ctx: &mut SyscallContext,
+        curve_id: u64,
+        point_bytes: &[u8; 32],
+    ) -> Result<bool, SyscallError> {
+        match curve_id {
+            CURVE_ID_ED25519 => {
+                ctx.consume_compute(CURVE25519_EDWARDS_VALIDATE_POINT_COST)?;
+                Ok(CompressedEdwardsY(*point_bytes).decompress().is_some())
+            }
+            CURVE_ID_RISTRETTO255 => {
+                ctx.consume_compute(CURVE25519_RISTRETTO_VALIDATE_POINT_COST)?;
+                Ok(CompressedRistretto(*point_bytes).decompress().is_some())
+            }
+            _ => Err(SyscallError::InvalidArgument(format!(
+                "unknown curve id: {}",
+                curve_id
+            ))),
+        }
+    }
+
+    /// Perform a group operation (add, sub, mul) on ed25519 or ristretto255.
+    ///
+    /// For ADD/SUB, both `left` and `right` are compressed points (32 bytes each).
+    /// For MUL, `left` is a scalar (32 bytes LE) and `right` is a compressed point.
+    /// Returns the compressed result, or None if any input is invalid.
+    pub fn group_op(
+        ctx: &mut SyscallContext,
+        curve_id: u64,
+        op: u64,
+        left: &[u8; 32],
+        right: &[u8; 32],
+    ) -> Result<Option<[u8; 32]>, SyscallError> {
+        match curve_id {
+            CURVE_ID_ED25519 => edwards_group_op(ctx, op, left, right),
+            CURVE_ID_RISTRETTO255 => ristretto_group_op(ctx, op, left, right),
+            _ => Err(SyscallError::InvalidArgument(format!(
+                "unknown curve id: {}",
+                curve_id
+            ))),
+        }
+    }
+
+    /// Multi-scalar multiplication on ed25519 or ristretto255.
+    ///
+    /// Computes sum(scalars[i] * points[i]) and returns the compressed result.
+    /// Returns None if any point is invalid.
+    pub fn multiscalar_mul(
+        ctx: &mut SyscallContext,
+        curve_id: u64,
+        scalars: &[[u8; 32]],
+        points: &[[u8; 32]],
+    ) -> Result<Option<[u8; 32]>, SyscallError> {
+        if scalars.len() != points.len() || scalars.is_empty() {
+            return Err(SyscallError::InvalidArgument(
+                "scalars and points must have equal non-zero length".to_string(),
+            ));
+        }
+
+        match curve_id {
+            CURVE_ID_ED25519 => {
+                let cost = CURVE25519_EDWARDS_MSM_BASE_COST
+                    + CURVE25519_EDWARDS_MSM_INCREMENTAL_COST * (scalars.len().saturating_sub(1)) as u64;
+                ctx.consume_compute(cost)?;
+
+                let parsed_scalars: Vec<Scalar> = scalars
+                    .iter()
+                    .map(|s| Scalar::from_bytes_mod_order(*s))
+                    .collect();
+
+                let parsed_points: Option<Vec<EdwardsPoint>> = points
+                    .iter()
+                    .map(|p| CompressedEdwardsY(*p).decompress())
+                    .collect();
+
+                match parsed_points {
+                    Some(pts) => {
+                        let result = EdwardsPoint::vartime_multiscalar_mul(&parsed_scalars, &pts);
+                        Ok(Some(result.compress().to_bytes()))
+                    }
+                    None => Ok(None),
+                }
+            }
+            CURVE_ID_RISTRETTO255 => {
+                let cost = CURVE25519_RISTRETTO_MSM_BASE_COST
+                    + CURVE25519_RISTRETTO_MSM_INCREMENTAL_COST * (scalars.len().saturating_sub(1)) as u64;
+                ctx.consume_compute(cost)?;
+
+                let parsed_scalars: Vec<Scalar> = scalars
+                    .iter()
+                    .map(|s| Scalar::from_bytes_mod_order(*s))
+                    .collect();
+
+                let parsed_points: Option<Vec<RistrettoPoint>> = points
+                    .iter()
+                    .map(|p| CompressedRistretto(*p).decompress())
+                    .collect();
+
+                match parsed_points {
+                    Some(pts) => {
+                        let result =
+                            RistrettoPoint::vartime_multiscalar_mul(&parsed_scalars, &pts);
+                        Ok(Some(result.compress().to_bytes()))
+                    }
+                    None => Ok(None),
+                }
+            }
+            _ => Err(SyscallError::InvalidArgument(format!(
+                "unknown curve id: {}",
+                curve_id
+            ))),
+        }
+    }
+
+    // --- Internal helpers ---
+
+    fn edwards_group_op(
+        ctx: &mut SyscallContext,
+        op: u64,
+        left: &[u8; 32],
+        right: &[u8; 32],
+    ) -> Result<Option<[u8; 32]>, SyscallError> {
+        match op {
+            CURVE_OP_ADD => {
+                ctx.consume_compute(CURVE25519_EDWARDS_ADD_COST)?;
+                let a = match CompressedEdwardsY(*left).decompress() {
+                    Some(p) => p,
+                    None => return Ok(None),
+                };
+                let b = match CompressedEdwardsY(*right).decompress() {
+                    Some(p) => p,
+                    None => return Ok(None),
+                };
+                Ok(Some((a + b).compress().to_bytes()))
+            }
+            CURVE_OP_SUB => {
+                ctx.consume_compute(CURVE25519_EDWARDS_SUB_COST)?;
+                let a = match CompressedEdwardsY(*left).decompress() {
+                    Some(p) => p,
+                    None => return Ok(None),
+                };
+                let b = match CompressedEdwardsY(*right).decompress() {
+                    Some(p) => p,
+                    None => return Ok(None),
+                };
+                Ok(Some((a - b).compress().to_bytes()))
+            }
+            CURVE_OP_MUL => {
+                ctx.consume_compute(CURVE25519_EDWARDS_MUL_COST)?;
+                let scalar = Scalar::from_bytes_mod_order(*left);
+                let point = match CompressedEdwardsY(*right).decompress() {
+                    Some(p) => p,
+                    None => return Ok(None),
+                };
+                Ok(Some((scalar * point).compress().to_bytes()))
+            }
+            _ => Err(SyscallError::InvalidArgument(format!(
+                "unknown group op: {}",
+                op
+            ))),
+        }
+    }
+
+    fn ristretto_group_op(
+        ctx: &mut SyscallContext,
+        op: u64,
+        left: &[u8; 32],
+        right: &[u8; 32],
+    ) -> Result<Option<[u8; 32]>, SyscallError> {
+        match op {
+            CURVE_OP_ADD => {
+                ctx.consume_compute(CURVE25519_RISTRETTO_ADD_COST)?;
+                let a = match CompressedRistretto(*left).decompress() {
+                    Some(p) => p,
+                    None => return Ok(None),
+                };
+                let b = match CompressedRistretto(*right).decompress() {
+                    Some(p) => p,
+                    None => return Ok(None),
+                };
+                Ok(Some((a + b).compress().to_bytes()))
+            }
+            CURVE_OP_SUB => {
+                ctx.consume_compute(CURVE25519_RISTRETTO_SUB_COST)?;
+                let a = match CompressedRistretto(*left).decompress() {
+                    Some(p) => p,
+                    None => return Ok(None),
+                };
+                let b = match CompressedRistretto(*right).decompress() {
+                    Some(p) => p,
+                    None => return Ok(None),
+                };
+                Ok(Some((a - b).compress().to_bytes()))
+            }
+            CURVE_OP_MUL => {
+                ctx.consume_compute(CURVE25519_RISTRETTO_MUL_COST)?;
+                let scalar = Scalar::from_bytes_mod_order(*left);
+                let point = match CompressedRistretto(*right).decompress() {
+                    Some(p) => p,
+                    None => return Ok(None),
+                };
+                Ok(Some((scalar * point).compress().to_bytes()))
+            }
+            _ => Err(SyscallError::InvalidArgument(format!(
+                "unknown group op: {}",
+                op
+            ))),
+        }
     }
 }

@@ -143,6 +143,18 @@ impl RuntimeSyscallDispatch {
             Box::new(SolSecp256k1RecoverHandler),
         );
 
+        // Curve25519 operations
+        dispatch.register_by_name(
+            "sol_curve_validate_point",
+            Box::new(SolCurveValidatePointHandler),
+        );
+        dispatch
+            .register_by_name("sol_curve_group_op", Box::new(SolCurveGroupOpHandler));
+        dispatch.register_by_name(
+            "sol_curve_multiscalar_mul",
+            Box::new(SolCurveMultiscalarMulHandler),
+        );
+
         dispatch
     }
 
@@ -1041,6 +1053,306 @@ impl SyscallHandler for SolSecp256k1RecoverHandler {
     }
 }
 
+/// sol_curve_validate_point: Validate a compressed curve point.
+///
+/// r1 = curve_id (0=ed25519, 1=ristretto255)
+/// r2 = pointer to compressed point (32 bytes)
+/// Returns 0 if valid, 1 if invalid.
+struct SolCurveValidatePointHandler;
+
+impl SyscallHandler for SolCurveValidatePointHandler {
+    fn call(
+        &self,
+        vm: &mut VmState,
+        r1: u64, // curve_id
+        r2: u64, // point pointer (32 bytes)
+        _r3: u64,
+        _r4: u64,
+        _r5: u64,
+    ) -> Result<u64, VmError> {
+        let point_bytes = vm
+            .memory
+            .read_slice(r2, 32)
+            .map_err(|e| VmError::MemoryError(e.to_string()))?;
+        let point: [u8; 32] = point_bytes.try_into().unwrap();
+
+        let cost = match r1 {
+            syscalls::CURVE_ID_ED25519 => syscalls::CURVE25519_EDWARDS_VALIDATE_POINT_COST,
+            syscalls::CURVE_ID_RISTRETTO255 => syscalls::CURVE25519_RISTRETTO_VALIDATE_POINT_COST,
+            _ => return Ok(1),
+        };
+        deduct_compute(vm, cost)?;
+
+        let valid = match r1 {
+            syscalls::CURVE_ID_ED25519 => {
+                use curve25519_dalek::edwards::CompressedEdwardsY;
+                CompressedEdwardsY(point).decompress().is_some()
+            }
+            syscalls::CURVE_ID_RISTRETTO255 => {
+                use curve25519_dalek::ristretto::CompressedRistretto;
+                CompressedRistretto(point).decompress().is_some()
+            }
+            _ => unreachable!(),
+        };
+
+        Ok(if valid { 0 } else { 1 })
+    }
+}
+
+/// sol_curve_group_op: Perform a group operation on a curve.
+///
+/// r1 = curve_id, r2 = op_id (0=add, 1=sub, 2=mul)
+/// r3 = left operand pointer (32 bytes), r4 = right operand pointer (32 bytes)
+/// r5 = result pointer (32 bytes)
+/// Returns 0 on success, 1 if an input point is invalid.
+struct SolCurveGroupOpHandler;
+
+impl SyscallHandler for SolCurveGroupOpHandler {
+    fn call(
+        &self,
+        vm: &mut VmState,
+        r1: u64, // curve_id
+        r2: u64, // op_id
+        r3: u64, // left pointer
+        r4: u64, // right pointer
+        r5: u64, // result pointer
+    ) -> Result<u64, VmError> {
+        let left_bytes = vm
+            .memory
+            .read_slice(r3, 32)
+            .map_err(|e| VmError::MemoryError(e.to_string()))?;
+        let right_bytes = vm
+            .memory
+            .read_slice(r4, 32)
+            .map_err(|e| VmError::MemoryError(e.to_string()))?;
+
+        let left: [u8; 32] = left_bytes.try_into().unwrap();
+        let right: [u8; 32] = right_bytes.try_into().unwrap();
+
+        let result = curve25519_group_op(vm, r1, r2, &left, &right)?;
+
+        match result {
+            Some(bytes) => {
+                vm.memory
+                    .write_slice(r5, &bytes)
+                    .map_err(|e| VmError::MemoryError(e.to_string()))?;
+                Ok(0)
+            }
+            None => Ok(1),
+        }
+    }
+}
+
+/// sol_curve_multiscalar_mul: Multi-scalar multiplication on a curve.
+///
+/// r1 = curve_id
+/// r2 = scalars pointer (N * 32 bytes, little-endian)
+/// r3 = points pointer (N * 32 bytes, compressed)
+/// r4 = count (N)
+/// r5 = result pointer (32 bytes)
+/// Returns 0 on success, 1 if a point is invalid.
+struct SolCurveMultiscalarMulHandler;
+
+impl SyscallHandler for SolCurveMultiscalarMulHandler {
+    fn call(
+        &self,
+        vm: &mut VmState,
+        r1: u64, // curve_id
+        r2: u64, // scalars pointer
+        r3: u64, // points pointer
+        r4: u64, // count
+        r5: u64, // result pointer
+    ) -> Result<u64, VmError> {
+        let count = r4 as usize;
+        if count == 0 {
+            return Ok(1);
+        }
+
+        // Deduct compute
+        let cost = match r1 {
+            syscalls::CURVE_ID_ED25519 => {
+                syscalls::CURVE25519_EDWARDS_MSM_BASE_COST
+                    + syscalls::CURVE25519_EDWARDS_MSM_INCREMENTAL_COST
+                        * count.saturating_sub(1) as u64
+            }
+            syscalls::CURVE_ID_RISTRETTO255 => {
+                syscalls::CURVE25519_RISTRETTO_MSM_BASE_COST
+                    + syscalls::CURVE25519_RISTRETTO_MSM_INCREMENTAL_COST
+                        * count.saturating_sub(1) as u64
+            }
+            _ => return Ok(1),
+        };
+        deduct_compute(vm, cost)?;
+
+        // Read scalars and points
+        let scalars_data = vm
+            .memory
+            .read_slice(r2, count * 32)
+            .map_err(|e| VmError::MemoryError(e.to_string()))?;
+        let points_data = vm
+            .memory
+            .read_slice(r3, count * 32)
+            .map_err(|e| VmError::MemoryError(e.to_string()))?;
+
+        let result = match r1 {
+            syscalls::CURVE_ID_ED25519 => {
+                use curve25519_dalek::{
+                    edwards::{CompressedEdwardsY, EdwardsPoint},
+                    scalar::Scalar,
+                    traits::VartimeMultiscalarMul,
+                };
+                let scalars: Vec<Scalar> = (0..count)
+                    .map(|i| {
+                        let mut s = [0u8; 32];
+                        s.copy_from_slice(&scalars_data[i * 32..(i + 1) * 32]);
+                        Scalar::from_bytes_mod_order(s)
+                    })
+                    .collect();
+                let points: Option<Vec<EdwardsPoint>> = (0..count)
+                    .map(|i| {
+                        let mut p = [0u8; 32];
+                        p.copy_from_slice(&points_data[i * 32..(i + 1) * 32]);
+                        CompressedEdwardsY(p).decompress()
+                    })
+                    .collect();
+                match points {
+                    Some(pts) => {
+                        Some(EdwardsPoint::vartime_multiscalar_mul(&scalars, &pts).compress().to_bytes())
+                    }
+                    None => None,
+                }
+            }
+            syscalls::CURVE_ID_RISTRETTO255 => {
+                use curve25519_dalek::{
+                    ristretto::{CompressedRistretto, RistrettoPoint},
+                    scalar::Scalar,
+                    traits::VartimeMultiscalarMul,
+                };
+                let scalars: Vec<Scalar> = (0..count)
+                    .map(|i| {
+                        let mut s = [0u8; 32];
+                        s.copy_from_slice(&scalars_data[i * 32..(i + 1) * 32]);
+                        Scalar::from_bytes_mod_order(s)
+                    })
+                    .collect();
+                let points: Option<Vec<RistrettoPoint>> = (0..count)
+                    .map(|i| {
+                        let mut p = [0u8; 32];
+                        p.copy_from_slice(&points_data[i * 32..(i + 1) * 32]);
+                        CompressedRistretto(p).decompress()
+                    })
+                    .collect();
+                match points {
+                    Some(pts) => {
+                        Some(RistrettoPoint::vartime_multiscalar_mul(&scalars, &pts).compress().to_bytes())
+                    }
+                    None => None,
+                }
+            }
+            _ => None,
+        };
+
+        match result {
+            Some(bytes) => {
+                vm.memory
+                    .write_slice(r5, &bytes)
+                    .map_err(|e| VmError::MemoryError(e.to_string()))?;
+                Ok(0)
+            }
+            None => Ok(1),
+        }
+    }
+}
+
+/// Helper for curve25519 group operations at the dispatch level.
+fn curve25519_group_op(
+    vm: &mut VmState,
+    curve_id: u64,
+    op: u64,
+    left: &[u8; 32],
+    right: &[u8; 32],
+) -> Result<Option<[u8; 32]>, VmError> {
+    match curve_id {
+        syscalls::CURVE_ID_ED25519 => {
+            use curve25519_dalek::edwards::CompressedEdwardsY;
+            use curve25519_dalek::scalar::Scalar;
+            let cost = match op {
+                syscalls::CURVE_OP_ADD => syscalls::CURVE25519_EDWARDS_ADD_COST,
+                syscalls::CURVE_OP_SUB => syscalls::CURVE25519_EDWARDS_SUB_COST,
+                syscalls::CURVE_OP_MUL => syscalls::CURVE25519_EDWARDS_MUL_COST,
+                _ => return Err(VmError::MemoryError(format!("unknown group op: {}", op))),
+            };
+            deduct_compute(vm, cost)?;
+
+            match op {
+                syscalls::CURVE_OP_ADD => {
+                    let a = CompressedEdwardsY(*left).decompress();
+                    let b = CompressedEdwardsY(*right).decompress();
+                    match (a, b) {
+                        (Some(a), Some(b)) => Ok(Some((a + b).compress().to_bytes())),
+                        _ => Ok(None),
+                    }
+                }
+                syscalls::CURVE_OP_SUB => {
+                    let a = CompressedEdwardsY(*left).decompress();
+                    let b = CompressedEdwardsY(*right).decompress();
+                    match (a, b) {
+                        (Some(a), Some(b)) => Ok(Some((a - b).compress().to_bytes())),
+                        _ => Ok(None),
+                    }
+                }
+                syscalls::CURVE_OP_MUL => {
+                    let scalar = Scalar::from_bytes_mod_order(*left);
+                    match CompressedEdwardsY(*right).decompress() {
+                        Some(p) => Ok(Some((scalar * p).compress().to_bytes())),
+                        None => Ok(None),
+                    }
+                }
+                _ => unreachable!(),
+            }
+        }
+        syscalls::CURVE_ID_RISTRETTO255 => {
+            use curve25519_dalek::ristretto::CompressedRistretto;
+            use curve25519_dalek::scalar::Scalar;
+            let cost = match op {
+                syscalls::CURVE_OP_ADD => syscalls::CURVE25519_RISTRETTO_ADD_COST,
+                syscalls::CURVE_OP_SUB => syscalls::CURVE25519_RISTRETTO_SUB_COST,
+                syscalls::CURVE_OP_MUL => syscalls::CURVE25519_RISTRETTO_MUL_COST,
+                _ => return Err(VmError::MemoryError(format!("unknown group op: {}", op))),
+            };
+            deduct_compute(vm, cost)?;
+
+            match op {
+                syscalls::CURVE_OP_ADD => {
+                    let a = CompressedRistretto(*left).decompress();
+                    let b = CompressedRistretto(*right).decompress();
+                    match (a, b) {
+                        (Some(a), Some(b)) => Ok(Some((a + b).compress().to_bytes())),
+                        _ => Ok(None),
+                    }
+                }
+                syscalls::CURVE_OP_SUB => {
+                    let a = CompressedRistretto(*left).decompress();
+                    let b = CompressedRistretto(*right).decompress();
+                    match (a, b) {
+                        (Some(a), Some(b)) => Ok(Some((a - b).compress().to_bytes())),
+                        _ => Ok(None),
+                    }
+                }
+                syscalls::CURVE_OP_MUL => {
+                    let scalar = Scalar::from_bytes_mod_order(*left);
+                    match CompressedRistretto(*right).decompress() {
+                        Some(p) => Ok(Some((scalar * p).compress().to_bytes())),
+                        None => Ok(None),
+                    }
+                }
+                _ => unreachable!(),
+            }
+        }
+        _ => Ok(None),
+    }
+}
+
 /// sol_alloc_free_: Bump allocator for heap memory.
 struct SolAllocHandler;
 
@@ -1561,10 +1873,13 @@ mod tests {
         assert!(ids.contains(&murmur3_hash("sol_get_stack_height")));
         assert!(ids.contains(&murmur3_hash("sol_secp256k1_recover")));
         assert!(!ids.contains(&0xDEAD));
-        // 4 log + 4 mem + 3 hash + 1 alloc + 2 PDA + 2 return_data + 4 sysvar + 1 stack + 1 crypto = 22
+        assert!(ids.contains(&murmur3_hash("sol_curve_validate_point")));
+        assert!(ids.contains(&murmur3_hash("sol_curve_group_op")));
+        assert!(ids.contains(&murmur3_hash("sol_curve_multiscalar_mul")));
+        // 4 log + 4 mem + 3 hash + 1 alloc + 2 PDA + 2 return_data + 4 sysvar + 1 stack + 1 crypto + 3 curve = 25
         assert!(
-            ids.len() >= 22,
-            "Expected >= 22 syscalls, got {}",
+            ids.len() >= 25,
+            "Expected >= 25 syscalls, got {}",
             ids.len()
         );
     }
@@ -1657,10 +1972,10 @@ mod tests {
         let ids = dispatch.registered_ids();
         assert!(ids.contains(&murmur3_hash("sol_invoke_signed_c")));
         assert!(ids.contains(&murmur3_hash("sol_invoke_signed_rust")));
-        // 22 standard + 2 CPI = 24
+        // 25 standard + 2 CPI = 27
         assert!(
-            ids.len() >= 24,
-            "Expected >= 24 syscalls with CPI, got {}",
+            ids.len() >= 27,
+            "Expected >= 27 syscalls with CPI, got {}",
             ids.len()
         );
     }

@@ -21,6 +21,7 @@ mod tests;
 pub use cpi::{invoke, invoke_signed, CpiAccountInfo, CpiAccountMeta, CpiContext, CpiInstruction};
 pub use crypto::{keccak256, secp256k1_recover, sha256};
 pub use curve::alt_bn128;
+pub use curve::curve25519;
 pub use hash_ops::blake3_hash;
 pub use logging::{sol_log, sol_log_compute_units, sol_log_data};
 pub use memory::{sol_memcmp, sol_memcpy, sol_memmove, sol_memset};
