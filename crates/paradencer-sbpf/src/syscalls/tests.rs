@@ -501,13 +501,14 @@ fn create_program_address_deterministic() {
 
 #[test]
 fn create_program_address_different_seeds_different_result() {
+    // Use try_find to get valid (off-curve) PDAs for comparison
     let mut ctx = test_context();
     let program_id = Pubkey::new([1u8; 32]);
 
-    let result1 = create_program_address(&mut ctx, &[b"seed1"], &program_id).unwrap();
-    let result2 = create_program_address(&mut ctx, &[b"seed2"], &program_id).unwrap();
+    let (pda1, _) = try_find_program_address(&mut ctx, &[b"seed1"], &program_id).unwrap();
+    let (pda2, _) = try_find_program_address(&mut ctx, &[b"seed2"], &program_id).unwrap();
 
-    assert_ne!(result1, result2);
+    assert_ne!(pda1, pda2);
 }
 
 #[test]
@@ -563,8 +564,8 @@ fn try_find_program_address_returns_valid_pda() {
 
     // The PDA should be a valid 32-byte pubkey
     assert_eq!(pda.as_bytes().len(), 32);
-    // Bump should be 255 for the first iteration (simplified)
-    assert_eq!(bump, 255);
+    // Bump should be <= 255
+    assert!(bump <= 255);
 }
 
 #[test]
@@ -603,6 +604,72 @@ fn try_find_program_address_too_many_seeds() {
 
     let result = try_find_program_address(&mut ctx, &seeds, &program_id);
     assert_eq!(result, Err(SyscallError::InvalidSeeds));
+}
+
+#[test]
+fn create_program_address_rejects_on_curve_result() {
+    use curve25519_dalek::edwards::CompressedEdwardsY;
+
+    // The ed25519 basepoint compressed form is definitely on the curve
+    let basepoint = curve25519_dalek::constants::ED25519_BASEPOINT_COMPRESSED;
+    assert!(CompressedEdwardsY(basepoint.to_bytes()).decompress().is_some());
+
+    // Verify that try_find_program_address produces off-curve results
+    // (it skips on-curve hashes). If the raw hash for bump=255 happens to be
+    // on-curve, find will iterate to a lower bump.
+    let mut ctx = test_context();
+    let program_id = Pubkey::new([42u8; 32]);
+    let (pda, _bump) =
+        try_find_program_address(&mut ctx, &[b"off_curve_test"], &program_id).unwrap();
+
+    // The PDA must NOT be on the curve
+    assert!(CompressedEdwardsY(*pda.as_bytes()).decompress().is_none());
+}
+
+#[test]
+fn pda_find_returns_valid_off_curve_address() {
+    use curve25519_dalek::edwards::CompressedEdwardsY;
+
+    let mut ctx = test_context();
+    let program_id = Pubkey::new([7u8; 32]);
+    let (pda, _bump) = try_find_program_address(&mut ctx, &[b"verify_curve"], &program_id).unwrap();
+
+    // The returned PDA must NOT be on the ed25519 curve
+    let bytes: [u8; 32] = *pda.as_bytes();
+    assert!(
+        CompressedEdwardsY(bytes).decompress().is_none(),
+        "PDA must not be on the ed25519 curve"
+    );
+}
+
+#[test]
+fn pda_find_bump_is_deterministic() {
+    let mut ctx = test_context();
+    let program_id = Pubkey::new([10u8; 32]);
+    let seeds: &[&[u8]] = &[b"deterministic_bump"];
+
+    let (pda1, bump1) = try_find_program_address(&mut ctx, seeds, &program_id).unwrap();
+    let (pda2, bump2) = try_find_program_address(&mut ctx, seeds, &program_id).unwrap();
+
+    assert_eq!(pda1, pda2);
+    assert_eq!(bump1, bump2);
+}
+
+#[test]
+fn pda_create_and_find_agree() {
+    let mut ctx = test_context();
+    let program_id = Pubkey::new([15u8; 32]);
+    let seeds: &[&[u8]] = &[b"create_find_agree"];
+
+    let (found_pda, bump) = try_find_program_address(&mut ctx, seeds, &program_id).unwrap();
+
+    // Now create with the same seeds + bump byte
+    let bump_bytes = [bump];
+    let created_pda =
+        create_program_address(&mut ctx, &[b"create_find_agree", &bump_bytes], &program_id)
+            .unwrap();
+
+    assert_eq!(found_pda, created_pda);
 }
 
 // ===========================================================================

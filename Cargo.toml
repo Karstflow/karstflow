@@ -50,6 +50,7 @@ tiny-keccak = { version = "2", features = ["keccak"] }
 k256 = { version = "0.13", features = ["ecdsa"] }
 p256 = { version = "0.13", features = ["ecdsa"] }
 substrate-bn = "0.6"
+curve25519-dalek = { version = "4.1", default-features = false }
 
 # Encoding
 bs58 = "0.5"

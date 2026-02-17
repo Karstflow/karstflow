@@ -15,3 +15,4 @@ ed25519-dalek = { workspace = true }
 tiny-keccak = { workspace = true }
 k256 = { workspace = true }
 substrate-bn = { workspace = true }
+curve25519-dalek = { workspace = true }

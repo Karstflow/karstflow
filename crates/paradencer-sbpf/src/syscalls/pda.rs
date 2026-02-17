@@ -7,9 +7,16 @@
 //! domain separator.
 
 use super::{SyscallContext, SyscallError};
+use curve25519_dalek::edwards::CompressedEdwardsY;
 use paradencer_constants::syscalls::*;
 use paradencer_types::Pubkey;
 use sha2::{Digest, Sha256};
+
+/// Check if 32 bytes represent a valid ed25519 curve point.
+/// PDAs must NOT be on the curve — if this returns true, the address is invalid as a PDA.
+fn is_on_ed25519_curve(bytes: &[u8; 32]) -> bool {
+    CompressedEdwardsY(*bytes).decompress().is_some()
+}
 
 /// Create a program address from seeds and a program ID.
 ///
@@ -46,9 +53,10 @@ pub fn create_program_address(
 
     let bytes: [u8; 32] = hash.into();
 
-    // In production, we would check that the resulting point is NOT
-    // on the ed25519 curve. If it is, the address is invalid.
-    // For now, accept all results (simplified).
+    if is_on_ed25519_curve(&bytes) {
+        return Err(SyscallError::InvalidProgramAddress);
+    }
+
     Ok(Pubkey::new(bytes))
 }
 
@@ -90,10 +98,9 @@ pub fn try_find_program_address(
         let hash = hasher.finalize();
         let bytes: [u8; 32] = hash.into();
 
-        // In production, we would check that the result is NOT on the
-        // ed25519 curve. If it is not on the curve, it is a valid PDA.
-        // Simplified: accept on the first iteration (bump=255).
-        return Ok((Pubkey::new(bytes), bump));
+        if !is_on_ed25519_curve(&bytes) {
+            return Ok((Pubkey::new(bytes), bump));
+        }
     }
 
     Err(SyscallError::InvalidProgramAddress)

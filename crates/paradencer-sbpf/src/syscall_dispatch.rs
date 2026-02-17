@@ -664,6 +664,11 @@ impl SyscallHandler for SolCreateProgramAddressHandler {
         hasher.update(b"ProgramDerivedAddress");
         let hash: [u8; 32] = hasher.finalize().into();
 
+        // PDA must NOT be on the ed25519 curve
+        if is_on_ed25519_curve(&hash) {
+            return Ok(1);
+        }
+
         // Write result
         vm.memory
             .write_slice(r4, &hash)
@@ -671,6 +676,13 @@ impl SyscallHandler for SolCreateProgramAddressHandler {
 
         Ok(0)
     }
+}
+
+/// Check if 32 bytes represent a valid ed25519 curve point.
+/// PDAs must NOT be on the curve — if this returns true, the PDA is invalid.
+fn is_on_ed25519_curve(bytes: &[u8; 32]) -> bool {
+    use curve25519_dalek::edwards::CompressedEdwardsY;
+    CompressedEdwardsY(*bytes).decompress().is_some()
 }
 
 /// sol_try_find_program_address: Find PDA by iterating bump seeds 255→0.
@@ -739,15 +751,16 @@ impl SyscallHandler for SolTryFindProgramAddressHandler {
             hasher.update(b"ProgramDerivedAddress");
             let hash: [u8; 32] = hasher.finalize().into();
 
-            // Simplified: accept on first iteration (real impl checks off-curve)
-            vm.memory
-                .write_slice(r4, &hash)
-                .map_err(|e| VmError::MemoryError(e.to_string()))?;
-            vm.memory
-                .write_slice(r5, &[bump])
-                .map_err(|e| VmError::MemoryError(e.to_string()))?;
+            if !is_on_ed25519_curve(&hash) {
+                vm.memory
+                    .write_slice(r4, &hash)
+                    .map_err(|e| VmError::MemoryError(e.to_string()))?;
+                vm.memory
+                    .write_slice(r5, &[bump])
+                    .map_err(|e| VmError::MemoryError(e.to_string()))?;
 
-            return Ok(0);
+                return Ok(0);
+            }
         }
 
         Ok(1) // No valid PDA found
