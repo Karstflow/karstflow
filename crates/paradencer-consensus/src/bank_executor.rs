@@ -525,9 +525,19 @@ impl Bank {
     }
 
     /// Write modified accounts back to the account database.
+    ///
+    /// Also updates the bank's lattice hash accumulator for each modified
+    /// account by subtracting the old hash and adding the new hash.
     fn write_accounts(&self, accounts: &HashMap<Pubkey, Account>) {
         let db = self.accounts();
-        // Use a non-root XID derived from the bank's slot
+
+        // Update lattice hash for each modified account
+        for (pubkey, new_account) in accounts {
+            let old_account = db.get_published_account(pubkey);
+            self.update_account_hash(pubkey, old_account.as_ref(), new_account);
+        }
+
+        // Write to database
         let mut xid_bytes = [0u8; 16];
         xid_bytes[0..8].copy_from_slice(&self.slot().to_le_bytes());
         xid_bytes[15] = 1; // Ensure non-root
