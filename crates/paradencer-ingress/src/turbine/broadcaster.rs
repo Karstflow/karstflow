@@ -1,12 +1,11 @@
-use crate::gossip::NodeId;
-use crate::quic::{QuicEndpoint, QuicPacket, QuicPacketBatch};
+use crate::quic::{QuicEndpoint, QuicPacket};
 use crate::turbine::{BroadcastStats, TurbineTree};
 use crate::IngressError;
 use bytes::Bytes;
 use crossbeam_channel::{Receiver, Sender};
 use paradencer_types::shred::Shred;
 use parking_lot::RwLock;
-use std::collections::{HashMap, VecDeque};
+use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -217,7 +216,7 @@ impl ShredBroadcaster {
         tree: &Arc<RwLock<Option<TurbineTree>>>,
         stats: &BroadcastStats,
         pending_acks: &Arc<RwLock<HashMap<(u64, u32), Instant>>>,
-        shreds: &mut Vec<BroadcastShred>,
+        shreds: &mut [BroadcastShred],
     ) {
         if shreds.is_empty() {
             return;
@@ -315,13 +314,13 @@ impl ShredBroadcaster {
 
     /// Send data to a single peer via QUIC
     async fn send_to_peer(
-        endpoint: &Arc<QuicEndpoint>,
+        _endpoint: &Arc<QuicEndpoint>,
         addr: SocketAddr,
         data: Bytes,
     ) -> Result<(), IngressError> {
         // In a real implementation, this would use QUIC streams
         // For now, we use the packet interface
-        let packet = QuicPacket::new(data, addr, 0);
+        let _packet = QuicPacket::new(data, addr, 0);
         // The actual sending would happen through the QUIC endpoint
         // This is a simplified version
         Ok(())

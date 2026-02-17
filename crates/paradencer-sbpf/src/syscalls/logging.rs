@@ -50,11 +50,26 @@ pub fn sol_log_compute_units(ctx: &mut SyscallContext) -> Result<(), SyscallErro
     Ok(())
 }
 
+/// Log a public key as a base58-encoded string.
+///
+/// Reads 32 bytes from the given address and logs the base58 representation.
+pub fn sol_log_pubkey(
+    ctx: &mut SyscallContext,
+    pubkey_bytes: &[u8; 32],
+) -> Result<(), SyscallError> {
+    ctx.consume_compute(LOG_PUBKEY_COST)?;
+
+    let encoded = bs58::encode(pubkey_bytes).into_string();
+    ctx.logs.push(format!("Program log: {}", encoded));
+
+    Ok(())
+}
+
 /// Minimal base64 encoding without external dependencies.
 fn encode_base64(data: &[u8]) -> String {
     const CHARS: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 
-    let mut result = String::with_capacity((data.len() + 2) / 3 * 4);
+    let mut result = String::with_capacity(data.len().div_ceil(3) * 4);
     let chunks = data.chunks(3);
 
     for chunk in chunks {

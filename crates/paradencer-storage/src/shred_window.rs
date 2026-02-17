@@ -5,11 +5,10 @@
 
 use dashmap::DashMap;
 use paradencer_crypto::{FecReconstructor, FecResult};
-use paradencer_types::shred::{FecSetId, Shred, ShredMetadata};
+use paradencer_types::shred::{FecSetId, Shred};
 use parking_lot::RwLock;
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
 use thiserror::Error;
 
 /// Errors that can occur in the shred window store
@@ -227,11 +226,11 @@ impl FecSet {
 
         let expected_data = self
             .expected_data_count
-            .ok_or_else(|| paradencer_crypto::FecError::InvalidParameters { data: 0, coding: 0 })?;
+            .ok_or(paradencer_crypto::FecError::InvalidParameters { data: 0, coding: 0 })?;
 
         let expected_coding = self
             .expected_coding_count
-            .ok_or_else(|| paradencer_crypto::FecError::InvalidParameters { data: 0, coding: 0 })?;
+            .ok_or(paradencer_crypto::FecError::InvalidParameters { data: 0, coding: 0 })?;
 
         // Build data and coding shred arrays
         let mut data_array: Vec<Option<Vec<u8>>> = vec![None; expected_data as usize];
@@ -483,7 +482,7 @@ impl ShredWindowStore {
             return 0;
         }
 
-        let old_root = *root;
+        let _old_root = *root;
         *root = new_root;
 
         // Prune slots below new root

@@ -1,8 +1,8 @@
-/// Binary serialization and deserialization for stake state.
-///
-/// Stake accounts store their state as bincode-encoded data. The format
-/// starts with a u32 discriminant identifying the variant, followed by
-/// variant-specific fields.
+//! Binary serialization and deserialization for stake state.
+//!
+//! Stake accounts store their state as bincode-encoded data. The format
+//! starts with a u32 discriminant identifying the variant, followed by
+//! variant-specific fields.
 
 #[allow(deprecated)]
 use crate::stake::{

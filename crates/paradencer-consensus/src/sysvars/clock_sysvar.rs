@@ -10,7 +10,7 @@ use crate::Clock;
 /// Provides binary serialization to and from the on-chain sysvar account
 /// format (5 fields: slot, epoch_start_timestamp, epoch, leader_schedule_epoch,
 /// unix_timestamp).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct ClockSysvar {
     pub clock: Clock,
 }
@@ -53,14 +53,6 @@ impl ClockSysvar {
                 unix_timestamp,
             },
         })
-    }
-}
-
-impl Default for ClockSysvar {
-    fn default() -> Self {
-        Self {
-            clock: Clock::default(),
-        }
     }
 }
 

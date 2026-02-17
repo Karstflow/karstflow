@@ -3,8 +3,8 @@ pub mod block;
 pub mod signature;
 
 pub use account::AccountCache;
-pub use block::{BlockCache, BlockInfo, Reward, RewardType};
-pub use signature::{ConfirmationStatus, SignatureCache, SignatureInfo};
+pub use block::{BlockCache, BlockInfo};
+pub use signature::SignatureCache;
 
 use std::time::{Duration, Instant};
 
@@ -101,9 +101,11 @@ mod tests {
 
     #[test]
     fn test_cache_stats_miss_rate() {
-        let mut stats = CacheStats::default();
-        stats.hits = 75;
-        stats.misses = 25;
+        let stats = CacheStats {
+            hits: 75,
+            misses: 25,
+            ..CacheStats::default()
+        };
 
         assert_eq!(stats.miss_rate(), 0.25);
     }

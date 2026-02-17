@@ -132,11 +132,6 @@ impl CommitmentTracker {
         }
     }
 
-    /// Create with default configuration.
-    pub fn default() -> Self {
-        Self::new(CommitmentConfig::default())
-    }
-
     /// Mark a slot as processed.
     pub fn mark_processed(&mut self, slot: u64, stake: u64, total_stake: u64) {
         self.processed_slots.insert(slot);
@@ -422,6 +417,12 @@ pub struct CommitmentStats {
     pub highest_processed: Option<u64>,
     pub highest_confirmed: Option<u64>,
     pub avg_confirmation_depth: f64,
+}
+
+impl Default for CommitmentTracker {
+    fn default() -> Self {
+        Self::new(CommitmentConfig::default())
+    }
 }
 
 #[cfg(test)]

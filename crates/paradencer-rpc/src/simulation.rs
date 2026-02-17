@@ -1,9 +1,7 @@
-use paradencer_types::Account;
-use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
-
 use crate::state::{RpcCommitment, RpcRuntimeSnapshot};
 use crate::{Result, RpcError};
+use paradencer_types::Account;
+use serde::{Deserialize, Serialize};
 
 /// Transaction simulator for preflight checks
 #[derive(Clone)]
@@ -353,7 +351,7 @@ fn simulate_account_states(
             let lamports = seed.wrapping_add(snapshot.transaction_count);
             Some(Account::new(
                 lamports,
-                vec![((seed % 256) as u8); 32],
+                vec![(seed % 256) as u8; 32],
                 paradencer_types::Pubkey::zeroed(),
             ))
         })

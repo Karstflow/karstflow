@@ -104,8 +104,8 @@ impl FecReconstructor {
     /// Reconstructed data shreds with None for shreds that were already present
     pub fn reconstruct(
         &self,
-        mut data_shreds: Vec<Option<Vec<u8>>>,
-        mut coding_shreds: Vec<Option<Vec<u8>>>,
+        data_shreds: Vec<Option<Vec<u8>>>,
+        coding_shreds: Vec<Option<Vec<u8>>>,
     ) -> FecResult<ReconstructedSet> {
         // Validate input sizes
         if data_shreds.len() != self.num_data {
@@ -144,7 +144,7 @@ impl FecReconstructor {
         }
 
         // Prepare shreds for Reed-Solomon
-        let shred_size = Self::get_uniform_size(&data_shreds, &coding_shreds)?;
+        let _shred_size = Self::get_uniform_size(&data_shreds, &coding_shreds)?;
         let mut all_shreds: Vec<Option<Vec<u8>>> =
             Vec::with_capacity(self.num_data + self.num_coding);
         all_shreds.extend(data_shreds.clone());
@@ -217,8 +217,8 @@ impl FecReconstructor {
 
         // Extract all data shreds
         let mut result = Vec::with_capacity(self.num_data);
-        for i in 0..self.num_data {
-            if let Some(shred) = &all_shreds[i] {
+        for shred in all_shreds.iter().take(self.num_data) {
+            if let Some(shred) = shred {
                 result.push(shred.clone());
             } else {
                 return Err(FecError::ReconstructionFailed(
@@ -241,17 +241,15 @@ impl FecReconstructor {
             .filter_map(|s| s.as_ref())
             .map(|s| s.len())
             .next()
-            .ok_or_else(|| FecError::InsufficientShreds { have: 0, need: 1 })?;
+            .ok_or(FecError::InsufficientShreds { have: 0, need: 1 })?;
 
         // Verify all shreds have the same size
-        for shred in data_shreds.iter().chain(coding_shreds.iter()) {
-            if let Some(s) = shred {
-                if s.len() != size {
-                    return Err(FecError::SizeMismatch {
-                        expected: size,
-                        actual: s.len(),
-                    });
-                }
+        for s in data_shreds.iter().chain(coding_shreds.iter()).flatten() {
+            if s.len() != size {
+                return Err(FecError::SizeMismatch {
+                    expected: size,
+                    actual: s.len(),
+                });
             }
         }
 
@@ -333,7 +331,7 @@ mod tests {
 
         // Create coding shreds using reed-solomon
         let codec = ReedSolomon::new(4, 4).unwrap();
-        let mut all_shreds: Vec<_> = original_data.iter().map(|s| s.clone()).collect();
+        let mut all_shreds: Vec<_> = original_data.to_vec();
         all_shreds.extend(vec![vec![0u8; 128]; 4]);
 
         let mut shreds_refs: Vec<_> = all_shreds.iter_mut().map(|s| s.as_mut_slice()).collect();
@@ -376,7 +374,7 @@ mod tests {
 
         // Create full FEC set
         let codec = ReedSolomon::new(4, 4).unwrap();
-        let mut all_shreds: Vec<_> = original_data.iter().map(|s| s.clone()).collect();
+        let mut all_shreds: Vec<_> = original_data.to_vec();
         all_shreds.extend(vec![vec![0u8; 128]; 4]);
 
         let mut shreds_refs: Vec<_> = all_shreds.iter_mut().map(|s| s.as_mut_slice()).collect();

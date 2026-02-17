@@ -4,12 +4,11 @@
 /// and implements the full transaction processing flow on Bank:
 /// account loading, fee validation, instruction execution, account writeback,
 /// and fee collection.
-use crate::cost_tracker::{CostTrackerError, TransactionCost};
+use crate::cost_tracker::TransactionCost;
 use crate::{Bank, BankStatus, FeeCalculator};
 use paradencer_ids::VOTE_PROGRAM_ID;
-use paradencer_storage::{Account, AccountDatabase, Pubkey, TransactionId};
+use paradencer_storage::{Account, Pubkey, TransactionId};
 use std::collections::HashMap;
-use std::sync::Arc;
 
 // ---------------------------------------------------------------------------
 // Execution backend trait
@@ -407,10 +406,11 @@ impl Bank {
         // Step 1d: Deduplication check (skipped when signatures are empty)
         if !transaction.signatures.is_empty() {
             let message_hash = compute_message_hash(transaction);
-            if self
-                .transaction_cache()
-                .contains(&transaction.recent_blockhash, &message_hash, self.slot())
-            {
+            if self.transaction_cache().contains(
+                &transaction.recent_blockhash,
+                &message_hash,
+                self.slot(),
+            ) {
                 return TransactionExecutionResult {
                     success: false,
                     compute_units_consumed: 0,
@@ -443,9 +443,10 @@ impl Bank {
                 fee: 0,
                 modified_accounts: HashMap::new(),
                 logs: vec![],
-                error: Some(TransactionExecutionError::BlockCostLimitExceeded(
-                    format!("{:?}", e),
-                )),
+                error: Some(TransactionExecutionError::BlockCostLimitExceeded(format!(
+                    "{:?}",
+                    e
+                ))),
                 vote_updates: vec![],
             };
         }
@@ -864,7 +865,7 @@ mod tests {
     use super::*;
     use crate::{EpochSchedule, LeaderSchedule};
     use paradencer_constants::execution::MAX_COMPUTE_UNITS;
-    use paradencer_storage::Pubkey;
+    use paradencer_storage::{AccountDatabase, Pubkey};
     use std::sync::Arc;
 
     /// Trivial backend that always succeeds and passes accounts through.
@@ -996,7 +997,6 @@ mod tests {
         data: Vec<u8>,
     ) -> SanitizedTransaction {
         let mut account_keys = vec![payer, program];
-        let start_idx = account_keys.len() as u8;
         for acc in &accounts {
             if !account_keys.contains(acc) {
                 account_keys.push(*acc);
@@ -1446,7 +1446,11 @@ mod tests {
         };
 
         let result = bank.process_transaction(&tx, &backend, MAX_COMPUTE_UNITS);
-        assert!(result.success, "should accept registered blockhash: {:?}", result.error);
+        assert!(
+            result.success,
+            "should accept registered blockhash: {:?}",
+            result.error
+        );
     }
 
     #[test]
@@ -1474,7 +1478,11 @@ mod tests {
         let custom_hash = [0xABu8; 32];
         use crate::blockhash_queue::BlockhashInfo;
         let info = BlockhashInfo::new(Pubkey::from(custom_hash), 5000, 0);
-        parent.blockhash_queue().write().unwrap().register_hash(info);
+        parent
+            .blockhash_queue()
+            .write()
+            .unwrap()
+            .register_hash(info);
 
         // Complete parent
         use paradencer_constants::ledger::TICKS_PER_SLOT;
@@ -1484,9 +1492,8 @@ mod tests {
         parent.freeze().unwrap();
 
         // Create child
-        let child_schedule = Arc::new(
-            LeaderSchedule::new(0, &[(Pubkey::new_unique(), 1000)]).unwrap(),
-        );
+        let child_schedule =
+            Arc::new(LeaderSchedule::new(0, &[(Pubkey::new_unique(), 1000)]).unwrap());
         let child = Bank::new_from_parent(&parent, 1, child_schedule);
 
         // Custom hash from parent should be valid in child
@@ -1501,7 +1508,10 @@ mod tests {
         // Register MAX_RECENT_BLOCKHASHES + 1 blockhashes (queue already has [0;32])
         let first_hash = [1u8; 32];
         let first_info = BlockhashInfo::new(Pubkey::from(first_hash), 5000, 1);
-        bank.blockhash_queue().write().unwrap().register_hash(first_info);
+        bank.blockhash_queue()
+            .write()
+            .unwrap()
+            .register_hash(first_info);
 
         for i in 2..=(MAX_RECENT_BLOCKHASHES as u64) {
             let mut hash_bytes = [0u8; 32];
@@ -1534,7 +1544,11 @@ mod tests {
         assert!(tx.signatures.is_empty());
 
         let result = bank.process_transaction(&tx, &backend, MAX_COMPUTE_UNITS);
-        assert!(result.success, "empty signatures should skip verification: {:?}", result.error);
+        assert!(
+            result.success,
+            "empty signatures should skip verification: {:?}",
+            result.error
+        );
     }
 
     #[test]
@@ -1570,7 +1584,11 @@ mod tests {
         };
 
         let result = bank.process_transaction(&tx, &backend, MAX_COMPUTE_UNITS);
-        assert!(result.success, "valid signature should pass: {:?}", result.error);
+        assert!(
+            result.success,
+            "valid signature should pass: {:?}",
+            result.error
+        );
     }
 
     #[test]
@@ -1810,7 +1828,6 @@ mod tests {
     #[test]
     fn rent_state_transition_validation() {
         // Test the rent state transition rules directly
-        let rent = crate::Rent::default();
 
         // Uninitialized → always allowed
         let pre = RentState::Uninitialized;
@@ -1819,7 +1836,10 @@ mod tests {
 
         // Any → RentExempt: always allowed
         let post_exempt = RentState::RentExempt;
-        assert!(is_rent_transition_allowed(&RentState::Uninitialized, &post_exempt));
+        assert!(is_rent_transition_allowed(
+            &RentState::Uninitialized,
+            &post_exempt
+        ));
         assert!(is_rent_transition_allowed(
             &RentState::RentPaying {
                 lamports: 100,
@@ -1833,10 +1853,16 @@ mod tests {
             lamports: 100,
             data_len: 10,
         };
-        assert!(!is_rent_transition_allowed(&RentState::Uninitialized, &post_paying));
+        assert!(!is_rent_transition_allowed(
+            &RentState::Uninitialized,
+            &post_paying
+        ));
 
         // RentExempt → RentPaying: NOT allowed
-        assert!(!is_rent_transition_allowed(&RentState::RentExempt, &post_paying));
+        assert!(!is_rent_transition_allowed(
+            &RentState::RentExempt,
+            &post_paying
+        ));
 
         // RentPaying → RentPaying (same size, less lamports): allowed
         let pre_paying = RentState::RentPaying {

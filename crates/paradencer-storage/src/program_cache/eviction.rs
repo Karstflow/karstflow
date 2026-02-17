@@ -15,7 +15,7 @@ impl EvictionPolicy {
     ///
     /// Returns pubkeys of entries to remove. Entries with ref_count > 0
     /// (e.g., builtin programs) are never evicted.
-    pub fn select_evictions(
+    pub(crate) fn select_evictions(
         entries: &HashMap<Pubkey, CacheSlot>,
         target_count: usize,
     ) -> Vec<Pubkey> {

@@ -8,11 +8,10 @@ use paradencer_constants::transaction as constants;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use thiserror::Error;
-use tracing::{debug, warn};
 
 /// Re-export crypto types
 pub use paradencer_crypto::{
-    ed25519_batch::{BatchVerifier, SignatureSet, VerificationResult},
+    ed25519_batch::{BatchVerifier, VerificationResult},
     CryptoError, PUBKEY_SIZE, SIGNATURE_SIZE,
 };
 

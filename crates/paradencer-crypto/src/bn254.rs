@@ -10,9 +10,6 @@ use substrate_bn::{pairing_batch, AffineG1, AffineG2, Fq, Fq2, Fr, Group, Gt, G1
 /// Size of a single G1 point in the serialized input (x: 32 bytes, y: 32 bytes).
 const G1_INPUT_SIZE: usize = 64;
 
-/// Size of a single G2 point in the serialized input (x: 2x32 bytes, y: 2x32 bytes).
-const G2_INPUT_SIZE: usize = 128;
-
 /// Add two G1 points on the BN254 curve.
 ///
 /// Takes 128 bytes of input (two 64-byte big-endian G1 points) and
@@ -52,7 +49,7 @@ pub fn g1_mul(input: &[u8]) -> CryptoResult<[u8; 64]> {
 /// the product of pairings e(P_i, Q_i) equals the identity in Gt.
 /// Returns `true` if the pairing check passes.
 pub fn pairing_check(input: &[u8]) -> CryptoResult<bool> {
-    if input.len() % 192 != 0 {
+    if !input.len().is_multiple_of(192) {
         return Err(CryptoError::InvalidMessageLength(input.len()));
     }
 

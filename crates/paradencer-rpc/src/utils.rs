@@ -1,6 +1,5 @@
 /// Utility functions for RPC operations
-use crate::state::{RpcCommitment, RpcRuntimeSnapshot};
-use paradencer_types::{Account, Pubkey};
+use crate::state::RpcCommitment;
 use serde_json::Value;
 
 /// Generate a deterministic blockhash from slot
@@ -190,8 +189,6 @@ pub fn get_version_info() -> Value {
 
 /// Slot timing utilities
 pub mod slot_timing {
-    use super::*;
-
     const SLOT_DURATION_MS: u64 = 400;
 
     /// Convert slot to estimated timestamp

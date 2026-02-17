@@ -85,8 +85,7 @@ impl ComputeBudgetProgramExecutor {
                 .map_err(|_| "Failed to parse heap size")?,
         );
 
-        if heap_size < execution::MIN_HEAP_FRAME_BYTES
-            || heap_size > execution::MAX_HEAP_FRAME_BYTES
+        if !(execution::MIN_HEAP_FRAME_BYTES..=execution::MAX_HEAP_FRAME_BYTES).contains(&heap_size)
             || heap_size % execution::HEAP_FRAME_BYTES_GRANULARITY != 0
         {
             return Err(ComputeBudgetError::InvalidHeapFrameSize

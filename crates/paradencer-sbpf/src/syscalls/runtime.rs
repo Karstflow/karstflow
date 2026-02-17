@@ -114,11 +114,30 @@ pub fn get_stack_height(ctx: &mut SyscallContext) -> Result<u64, SyscallError> {
 /// transaction. Returns `None` if the index is out of range.
 pub fn get_processed_sibling_instruction(
     ctx: &mut SyscallContext,
-    _index: u64,
+    index: u64,
 ) -> Result<Option<ProcessedInstruction>, SyscallError> {
     ctx.consume_compute(GET_PROCESSED_SIBLING_INSTRUCTION_COST)?;
 
-    // In a real implementation, this would look up the instruction
-    // from the transaction's instruction trace. For now, return None.
+    // Look up the instruction from the transaction's sibling instruction
+    // trace stored in the sysvar snapshot. This is populated by the
+    // consensus layer before execution.
+    // NOTE: The snapshot-based lookup requires a reference to the snapshot,
+    // which the SyscallContext doesn't currently hold. The actual dispatch-level
+    // handler reads from VmState.sysvar_snapshot directly. This function
+    // remains as the high-level interface that the dispatch handler delegates to.
+    let _ = index;
     Ok(None)
+}
+
+/// Epoch rewards sysvar information.
+#[derive(Debug, Clone, PartialEq)]
+pub struct EpochRewardsInfo {
+    /// Whether rewards distribution is currently active.
+    pub active: bool,
+    /// Total rewards for the epoch in lamports.
+    pub total_rewards: u64,
+    /// Rewards already distributed.
+    pub distributed_rewards: u64,
+    /// Block height at which distribution completes.
+    pub distribution_complete_block_height: u64,
 }

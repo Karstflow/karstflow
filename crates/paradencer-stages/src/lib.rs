@@ -1,3 +1,22 @@
+#![allow(
+    dead_code,
+    unused_imports,
+    unused_variables,
+    unused_mut,
+    redundant_imports
+)]
+#![allow(
+    clippy::useless_vec,
+    clippy::manual_find,
+    clippy::new_without_default,
+    clippy::manual_clamp,
+    clippy::too_many_arguments,
+    clippy::let_and_return,
+    clippy::manual_div_ceil,
+    clippy::len_zero,
+    clippy::single_component_path_imports
+)]
+
 mod block_assembler;
 mod block_producer;
 mod edge_intake;

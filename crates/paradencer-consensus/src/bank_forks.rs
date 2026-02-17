@@ -273,7 +273,7 @@ mod tests {
 
         let parent_bank = forks.working_bank();
         let leader_schedule = create_test_leader_schedule(0);
-        let mut child = Bank::new_from_parent(&parent_bank, 1, leader_schedule);
+        let child = Bank::new_from_parent(&parent_bank, 1, leader_schedule);
 
         for _ in 0..paradencer_constants::ledger::TICKS_PER_SLOT {
             child.register_tick().unwrap();
@@ -294,7 +294,7 @@ mod tests {
         let parent_bank = forks.working_bank();
         let leader_schedule = create_test_leader_schedule(0);
 
-        let mut bank1 = Bank::new_from_parent(&parent_bank, 1, leader_schedule.clone());
+        let bank1 = Bank::new_from_parent(&parent_bank, 1, leader_schedule.clone());
         for _ in 0..paradencer_constants::ledger::TICKS_PER_SLOT {
             bank1.register_tick().unwrap();
         }

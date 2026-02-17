@@ -132,12 +132,13 @@ fn test_turbine_tree_stake_weighted() {
     let root_contact = create_contact_info(root_id, 8000);
 
     // Create validators with varying stakes
-    let mut validators = Vec::new();
-    validators.push(create_validator(create_node_id(1), 100000, 8001)); // Very high stake
-    validators.push(create_validator(create_node_id(2), 50000, 8002));
-    validators.push(create_validator(create_node_id(3), 1000, 8003)); // Low stake
-    validators.push(create_validator(create_node_id(4), 75000, 8004));
-    validators.push(create_validator(create_node_id(5), 25000, 8005));
+    let validators = vec![
+        create_validator(create_node_id(1), 100000, 8001), // Very high stake
+        create_validator(create_node_id(2), 50000, 8002),
+        create_validator(create_node_id(3), 1000, 8003), // Low stake
+        create_validator(create_node_id(4), 75000, 8004),
+        create_validator(create_node_id(5), 25000, 8005),
+    ];
 
     let config = TurbineConfig::with_fanout(3).with_stake_weighting(true);
     let builder = TurbineTreeBuilder::new(config);
@@ -270,8 +271,6 @@ fn test_broadcast_shred_creation() {
 
 #[test]
 fn test_retransmit_request() {
-    use std::time::Duration;
-
     let peers = vec![create_node_id(1), create_node_id(2)];
     let mut request = RetransmitRequest::new(100, 5, peers.clone());
 

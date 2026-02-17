@@ -20,11 +20,11 @@ pub mod bpf_serialization;
 mod compute_budget_program;
 mod config_program;
 pub mod elf_loader;
-mod loader_v4;
 pub mod instruction;
 #[cfg(test)]
 mod integration_tests;
 pub mod interpreter;
+mod loader_v4;
 mod memo_program;
 pub mod memory;
 pub mod precompiles;
@@ -34,8 +34,8 @@ mod spl_integration_tests;
 mod stake;
 pub mod syscall_dispatch;
 pub mod syscalls;
-pub mod sysvar_snapshot;
 mod system_program;
+pub mod sysvar_snapshot;
 mod token_2022_program;
 mod token_program;
 mod transaction_processor;
@@ -63,6 +63,7 @@ pub use program_cache::{CacheError, CachedProgram, ProgramCache};
 pub use stake::StakeProgramExecutor;
 pub use syscall_dispatch::InstructionExecutor;
 pub use system_program::SystemProgramExecutor;
+pub use sysvar_snapshot::SysvarSnapshot;
 pub use token_2022_program::Token2022ProgramExecutor;
 pub use token_program::TokenProgramExecutor;
 pub use transaction_processor::{
@@ -71,7 +72,6 @@ pub use transaction_processor::{
 };
 pub use vm::{BytecodeVm, SbpfExecutionError, SbpfExecutionResult, SbpfVm, StubSbpfVm};
 pub use vote::VoteProgramExecutor;
-pub use sysvar_snapshot::SysvarSnapshot;
 
 use paradencer_types::{Account, Pubkey};
 use std::collections::HashMap;

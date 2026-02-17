@@ -4,7 +4,6 @@ use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tokio::sync::broadcast;
 
-use crate::cache::signature::ConfirmationStatus;
 use crate::state::{RpcCommitment, RpcRuntimeSnapshot};
 use paradencer_types::Account;
 
@@ -184,10 +183,7 @@ impl SubscriptionManager {
         };
 
         self.subscriptions.insert(id, sub);
-        self.account_subs
-            .entry(pubkey)
-            .or_insert_with(Vec::new)
-            .push(id);
+        self.account_subs.entry(pubkey).or_default().push(id);
 
         id
     }
@@ -207,10 +203,7 @@ impl SubscriptionManager {
         };
 
         self.subscriptions.insert(id, sub);
-        self.signature_subs
-            .entry(signature)
-            .or_insert_with(Vec::new)
-            .push(id);
+        self.signature_subs.entry(signature).or_default().push(id);
 
         id
     }
@@ -246,10 +239,7 @@ impl SubscriptionManager {
         };
 
         self.subscriptions.insert(id, sub);
-        self.program_subs
-            .entry(program_id)
-            .or_insert_with(Vec::new)
-            .push(id);
+        self.program_subs.entry(program_id).or_default().push(id);
 
         id
     }
@@ -588,8 +578,8 @@ mod tests {
     fn test_multiple_account_subscriptions() {
         let manager = SubscriptionManager::new();
 
-        let id1 = manager.subscribe_account("test_pubkey".to_string(), RpcCommitment::Confirmed);
-        let id2 = manager.subscribe_account("test_pubkey".to_string(), RpcCommitment::Finalized);
+        let _id1 = manager.subscribe_account("test_pubkey".to_string(), RpcCommitment::Confirmed);
+        let _id2 = manager.subscribe_account("test_pubkey".to_string(), RpcCommitment::Finalized);
 
         assert_eq!(manager.subscription_count(), 2);
 

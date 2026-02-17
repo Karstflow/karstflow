@@ -33,7 +33,7 @@
 //! let hash = hasher.finalize();
 //! ```
 
-use crate::{CryptoError, CryptoResult, BLAKE3_HASH_SIZE};
+use crate::BLAKE3_HASH_SIZE;
 
 /// Blake3 hash output
 pub type Blake3Hash = [u8; BLAKE3_HASH_SIZE];

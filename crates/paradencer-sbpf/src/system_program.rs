@@ -108,8 +108,7 @@ impl NonceVersionedState {
                 let authority = Pubkey::new(data[8..40].try_into().unwrap());
                 let mut durable_nonce = [0u8; 32];
                 durable_nonce.copy_from_slice(&data[40..72]);
-                let lamports_per_signature =
-                    u64::from_le_bytes(data[72..80].try_into().unwrap());
+                let lamports_per_signature = u64::from_le_bytes(data[72..80].try_into().unwrap());
                 Ok(Self::Initialized {
                     version,
                     authority,
@@ -167,7 +166,11 @@ fn derive_durable_nonce(blockhash: &[u8; 32]) -> [u8; 32] {
 }
 
 /// Compute minimum rent-exempt balance for a given account data length.
-fn rent_exempt_minimum(lamports_per_byte_year: u64, exemption_threshold: f64, data_len: usize) -> u64 {
+fn rent_exempt_minimum(
+    lamports_per_byte_year: u64,
+    exemption_threshold: f64,
+    data_len: usize,
+) -> u64 {
     let account_storage = 128u64.saturating_add(data_len as u64);
     let annual_cost = lamports_per_byte_year.saturating_mul(account_storage);
     ((annual_cost as f64) * exemption_threshold) as u64
@@ -749,7 +752,10 @@ impl SystemProgramExecutor {
             return Err("Withdraw nonce account: required signer missing".to_string());
         }
 
-        from_account.meta.lamports = from_account.meta.lamports.saturating_sub(requested_lamports);
+        from_account.meta.lamports = from_account
+            .meta
+            .lamports
+            .saturating_sub(requested_lamports);
         to_account.meta.lamports = to_account.meta.lamports.saturating_add(requested_lamports);
 
         modified_accounts.insert(from_pubkey, from_account);
@@ -801,8 +807,7 @@ impl SystemProgramExecutor {
                 lamports_per_signature,
             } => {
                 // Verify current authority is a signer
-                let authority_is_signer =
-                    context.accounts.iter().any(|(pk, _, _)| pk == authority);
+                let authority_is_signer = context.accounts.iter().any(|(pk, _, _)| pk == authority);
                 if !authority_is_signer {
                     return Err("Authorize nonce account: authority must sign".to_string());
                 }
@@ -1662,9 +1667,7 @@ mod tests {
         let modified = &outcome.modified_accounts[&account_pubkey];
         let state = NonceVersionedState::deserialize(modified.data.as_ref()).unwrap();
         match state {
-            NonceVersionedState::Initialized {
-                durable_nonce, ..
-            } => {
+            NonceVersionedState::Initialized { durable_nonce, .. } => {
                 assert_ne!(durable_nonce, old_nonce);
                 assert_eq!(durable_nonce, derive_durable_nonce(&[0xAA; 32]));
             }
@@ -1700,8 +1703,7 @@ mod tests {
         // Create nonce that already matches the durable nonce derived from current blockhash
         let current_durable = derive_durable_nonce(&[0xAA; 32]);
         let account_pubkey = Pubkey::new_unique();
-        let account =
-            make_initialized_nonce_account(1_000_000, &authority, &current_durable, 5000);
+        let account = make_initialized_nonce_account(1_000_000, &authority, &current_durable, 5000);
 
         let instruction_data = vec![4, 0, 0, 0];
 

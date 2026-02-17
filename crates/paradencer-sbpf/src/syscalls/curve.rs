@@ -70,7 +70,7 @@ pub mod alt_bn128 {
     /// Takes a sequence of (G1, G2) point pairs and verifies the pairing
     /// equation. Returns true if the pairing check passes.
     pub fn pairing(ctx: &mut SyscallContext, input: &[u8]) -> Result<bool, SyscallError> {
-        if input.len() % PAIRING_PAIR_SIZE != 0 {
+        if !input.len().is_multiple_of(PAIRING_PAIR_SIZE) {
             return Err(SyscallError::InvalidArgument(format!(
                 "alt_bn128 pairing input must be a multiple of {} bytes, got {}",
                 PAIRING_PAIR_SIZE,
@@ -237,7 +237,8 @@ pub mod curve25519 {
         match curve_id {
             CURVE_ID_ED25519 => {
                 let cost = CURVE25519_EDWARDS_MSM_BASE_COST
-                    + CURVE25519_EDWARDS_MSM_INCREMENTAL_COST * (scalars.len().saturating_sub(1)) as u64;
+                    + CURVE25519_EDWARDS_MSM_INCREMENTAL_COST
+                        * (scalars.len().saturating_sub(1)) as u64;
                 ctx.consume_compute(cost)?;
 
                 let parsed_scalars: Vec<Scalar> = scalars
@@ -260,7 +261,8 @@ pub mod curve25519 {
             }
             CURVE_ID_RISTRETTO255 => {
                 let cost = CURVE25519_RISTRETTO_MSM_BASE_COST
-                    + CURVE25519_RISTRETTO_MSM_INCREMENTAL_COST * (scalars.len().saturating_sub(1)) as u64;
+                    + CURVE25519_RISTRETTO_MSM_INCREMENTAL_COST
+                        * (scalars.len().saturating_sub(1)) as u64;
                 ctx.consume_compute(cost)?;
 
                 let parsed_scalars: Vec<Scalar> = scalars
@@ -275,8 +277,7 @@ pub mod curve25519 {
 
                 match parsed_points {
                     Some(pts) => {
-                        let result =
-                            RistrettoPoint::vartime_multiscalar_mul(&parsed_scalars, &pts);
+                        let result = RistrettoPoint::vartime_multiscalar_mul(&parsed_scalars, &pts);
                         Ok(Some(result.compress().to_bytes()))
                     }
                     None => Ok(None),

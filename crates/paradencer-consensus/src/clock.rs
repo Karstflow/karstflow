@@ -1,11 +1,11 @@
-/// Clock sysvar for network time tracking.
-///
-/// The Clock sysvar provides an approximate measure of network time based on:
-/// - Current slot number
-/// - Current epoch and epoch boundaries
-/// - Stake-weighted timestamp estimates from validators
-///
-/// This is a critical sysvar accessed by many programs to determine time-based logic.
+//! Clock sysvar for network time tracking.
+//!
+//! The Clock sysvar provides an approximate measure of network time based on:
+//! - Current slot number
+//! - Current epoch and epoch boundaries
+//! - Stake-weighted timestamp estimates from validators
+//!
+//! This is a critical sysvar accessed by many programs to determine time-based logic.
 
 /// Default ticks per second (Solana mainnet setting).
 pub const DEFAULT_TICKS_PER_SECOND: u64 = 160;

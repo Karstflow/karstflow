@@ -5,8 +5,8 @@
 #[cfg(test)]
 mod tests {
     use crate::sysvars::SysvarCache;
-    use crate::{Bank, BankStatus, Clock, EpochSchedule, Inflation, LeaderSchedule, Rent};
-    use paradencer_constants::ledger::{SLOTS_PER_EPOCH, TICKS_PER_SLOT};
+    use crate::{Bank, Clock, EpochSchedule, Inflation, LeaderSchedule, Rent};
+    use paradencer_constants::ledger::TICKS_PER_SLOT;
     use paradencer_ids::{CLOCK_SYSVAR_ID, SLOT_HASHES_SYSVAR_ID, SLOT_HISTORY_SYSVAR_ID};
     use paradencer_storage::{AccountDatabase, Pubkey};
     use std::sync::Arc;

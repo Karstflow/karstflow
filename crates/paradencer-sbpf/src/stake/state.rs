@@ -152,7 +152,7 @@ impl Default for Lockup {
 // ---------------------------------------------------------------------------
 
 /// Metadata common to all initialized stake states.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Meta {
     pub rent_exempt_reserve: u64,
     pub authorized: Authorized,
@@ -172,16 +172,6 @@ impl Meta {
         Self {
             rent_exempt_reserve,
             authorized,
-            lockup: Lockup::default(),
-        }
-    }
-}
-
-impl Default for Meta {
-    fn default() -> Self {
-        Self {
-            rent_exempt_reserve: 0,
-            authorized: Authorized::default(),
             lockup: Lockup::default(),
         }
     }

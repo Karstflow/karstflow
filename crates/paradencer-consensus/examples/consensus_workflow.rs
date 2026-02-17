@@ -4,8 +4,8 @@
 //! together to implement a complete consensus mechanism.
 
 use paradencer_consensus::{
-    CommitmentConfig, CommitmentLevel, CommitmentTracker, Delegation, ForkChoice, StakeTracker,
-    Tower, VoteProcessor, VoteProcessorConfig, VoteState,
+    CommitmentConfig, CommitmentTracker, Delegation, ForkChoice, StakeTracker, Tower,
+    VoteProcessor, VoteProcessorConfig, VoteState,
 };
 use paradencer_storage::Pubkey;
 use std::collections::HashMap;
@@ -73,8 +73,7 @@ fn main() {
     println!("\nVote distribution:");
 
     // First 3 validators (60% stake) vote for slot 2
-    for i in 0..3 {
-        let (vote_account, stake) = validator_list[i];
+    for &(vote_account, stake) in &validator_list[0..3] {
         vote_processor
             .process_vote(*vote_account, 2, 1001, None, Some(&mut fork_choice))
             .unwrap();
@@ -82,8 +81,7 @@ fn main() {
     }
 
     // Last 2 validators (40% stake) vote for slot 3
-    for i in 3..5 {
-        let (vote_account, stake) = validator_list[i];
+    for &(vote_account, stake) in &validator_list[3..5] {
         vote_processor
             .process_vote(*vote_account, 3, 1001, None, Some(&mut fork_choice))
             .unwrap();
@@ -116,10 +114,10 @@ fn main() {
     println!("\n=== Phase 3: Tower Voting ===\n");
 
     // Record vote in tower
-    let is_same_fork = |a: u64, b: u64| a == b || a < b; // Simple ancestry check
+    let is_same_fork = |a: u64, b: u64| a <= b; // Simple ancestry check
 
     println!("Recording vote in tower:");
-    match tower.record_vote(1, &is_same_fork) {
+    match tower.record_vote(1, is_same_fork) {
         Ok(new_root) => {
             println!("  Voted on slot 1");
             if let Some(root) = new_root {
@@ -135,7 +133,7 @@ fn main() {
     println!("  Root: {:?}", tower.root());
 
     // Try to vote on best fork
-    match tower.record_vote(best, &is_same_fork) {
+    match tower.record_vote(best, is_same_fork) {
         Ok(_) => println!("\n  Successfully voted on slot {}", best),
         Err(e) => println!("\n  Could not vote on slot {}: {:?}", best, e),
     }
@@ -148,7 +146,7 @@ fn main() {
         fork_choice.add_fork(i, Some(i - 1));
 
         // All validators vote on this chain
-        for (vote_account, _) in &validators {
+        for vote_account in validators.keys() {
             vote_processor
                 .process_vote(
                     *vote_account,

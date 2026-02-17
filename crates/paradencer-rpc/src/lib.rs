@@ -6,6 +6,7 @@ mod http;
 mod simulation;
 mod state;
 mod tests;
+#[allow(dead_code)]
 mod utils;
 mod websocket;
 

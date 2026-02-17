@@ -16,6 +16,5 @@ pub use protocol::{
 pub use service::{GossipConfig, GossipService, GossipServiceStats};
 
 use crate::IngressError;
-use std::sync::Arc;
 
 pub type GossipResult<T> = Result<T, IngressError>;

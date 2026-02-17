@@ -7,7 +7,6 @@
 
 use crate::{CryptoError, CryptoResult};
 use k256::ecdsa::{RecoveryId, Signature, VerifyingKey};
-use k256::elliptic_curve::sec1::ToEncodedPoint;
 
 /// Recover the uncompressed public key from a message hash and signature.
 ///
@@ -99,7 +98,6 @@ mod tests {
 
         let message_hash = [0x42u8; 32];
 
-        use k256::ecdsa::signature::hazmat::PrehashSigner;
         let (signature, recid): (Signature, RecoveryId) =
             signing_key.sign_prehash_recoverable(&message_hash).unwrap();
 
@@ -119,7 +117,6 @@ mod tests {
 
         let message_hash = [0xAB; 32];
 
-        use k256::ecdsa::signature::hazmat::PrehashSigner;
         let (signature, _): (Signature, RecoveryId) =
             signing_key.sign_prehash_recoverable(&message_hash).unwrap();
 
@@ -140,7 +137,6 @@ mod tests {
 
         let message_hash = [0xAB; 32];
 
-        use k256::ecdsa::signature::hazmat::PrehashSigner;
         let (signature, _): (Signature, RecoveryId) =
             signing_key.sign_prehash_recoverable(&message_hash).unwrap();
 

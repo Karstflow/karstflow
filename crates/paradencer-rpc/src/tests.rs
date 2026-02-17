@@ -22,8 +22,8 @@ mod integration_tests {
     #[test]
     fn test_cache_integration() {
         let account_cache = AccountCache::new(100, 60);
-        let block_cache = BlockCache::new(100, 60);
-        let sig_cache = SignatureCache::new(100, 60);
+        let _block_cache = BlockCache::new(100, 60);
+        let _sig_cache = SignatureCache::new(100, 60);
 
         // Insert test data
         let account = Account::new(1000000, vec![1, 2, 3], Pubkey::zeroed());
@@ -78,7 +78,7 @@ mod integration_tests {
     fn test_transaction_simulation_integration() {
         let simulator = TransactionSimulator::new();
         let sig_cache = SignatureCache::new(100, 60);
-        let transactions_advanced = TransactionsAdvanced::new(simulator.clone(), sig_cache);
+        let _transactions_advanced = TransactionsAdvanced::new(simulator.clone(), sig_cache);
         let snapshot = test_snapshot();
 
         let config = SimulationConfig {

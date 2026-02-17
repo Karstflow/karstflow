@@ -26,13 +26,13 @@ pub use crypto::{keccak256, secp256k1_recover, sha256};
 pub use curve::alt_bn128;
 pub use curve::curve25519;
 pub use hash_ops::blake3_hash;
-pub use logging::{sol_log, sol_log_compute_units, sol_log_data};
+pub use logging::{sol_log, sol_log_compute_units, sol_log_data, sol_log_pubkey};
 pub use memory::{sol_memcmp, sol_memcpy, sol_memmove, sol_memset};
 pub use pda::{create_program_address, try_find_program_address};
 pub use return_data::{get_return_data, set_return_data};
 pub use runtime::{
     get_clock, get_epoch_schedule, get_processed_sibling_instruction, get_rent, get_stack_height,
-    ClockInfo, EpochScheduleInfo, ProcessedInstruction, RentInfo,
+    ClockInfo, EpochRewardsInfo, EpochScheduleInfo, ProcessedInstruction, RentInfo,
 };
 
 use paradencer_types::{Account, Pubkey};

@@ -4,7 +4,6 @@ use super::domain::{
 };
 use super::policy::IngressPolicy;
 use crate::IngressError;
-use paradencer_crypto::BatchVerifier;
 use paradencer_types::shred::{Shred, ShredParseError, ShredParser};
 use std::hash::{Hash, Hasher};
 

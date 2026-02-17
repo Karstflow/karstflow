@@ -1,11 +1,11 @@
 use crate::gossip::{ContactInfo, NodeId, ValidatorInfo};
-use crate::turbine::{Neighborhood, NetworkProximity, ProximityEstimator, TurbineConfig};
+use crate::turbine::{Neighborhood, ProximityEstimator, TurbineConfig};
 use parking_lot::RwLock;
 use rand::seq::SliceRandom;
 use rand::Rng;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 /// A node in the turbine tree
 #[derive(Debug, Clone)]
@@ -453,7 +453,7 @@ impl TurbineTreeBuilder {
 
             // Add layer2 nodes to tree
             for (node_id, contact_info, stake) in children {
-                let mut node = TurbineNode::new(node_id, contact_info, stake, 2);
+                let node = TurbineNode::new(node_id, contact_info, stake, 2);
                 tree.add_layer2_node(node, *parent_id);
 
                 // Remove from remaining validators
@@ -533,12 +533,13 @@ mod tests {
         let root_contact = create_contact_info(root_id, 8000);
 
         // Create validators with varying stakes
-        let mut validators = Vec::new();
-        validators.push(create_validator(create_node_id(1), 10000)); // High stake
-        validators.push(create_validator(create_node_id(2), 5000));
-        validators.push(create_validator(create_node_id(3), 1000)); // Low stake
-        validators.push(create_validator(create_node_id(4), 8000));
-        validators.push(create_validator(create_node_id(5), 3000));
+        let validators = vec![
+            create_validator(create_node_id(1), 10000), // High stake
+            create_validator(create_node_id(2), 5000),
+            create_validator(create_node_id(3), 1000), // Low stake
+            create_validator(create_node_id(4), 8000),
+            create_validator(create_node_id(5), 3000),
+        ];
 
         let config = TurbineConfig::with_fanout(3).with_stake_weighting(true);
         let builder = TurbineTreeBuilder::new(config);
@@ -547,7 +548,7 @@ mod tests {
         assert_eq!(tree.layer1_nodes().len(), 3);
 
         // Higher stake nodes should be in layer1 (though randomness makes this probabilistic)
-        let layer1_has_high_stake = tree
+        let _layer1_has_high_stake = tree
             .layer1_nodes()
             .iter()
             .any(|id| *id == create_node_id(1));

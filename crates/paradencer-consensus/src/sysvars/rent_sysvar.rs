@@ -9,7 +9,7 @@ use crate::Rent;
 ///
 /// Layout: lamports_per_byte_year(u64) + exemption_threshold(f64) + burn_percent(u8)
 ///         = 17 bytes.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub struct RentSysvar {
     pub rent: Rent,
 }
@@ -43,14 +43,6 @@ impl RentSysvar {
                 burn_percent,
             },
         })
-    }
-}
-
-impl Default for RentSysvar {
-    fn default() -> Self {
-        Self {
-            rent: Rent::default(),
-        }
     }
 }
 

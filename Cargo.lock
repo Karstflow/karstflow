@@ -1444,6 +1444,7 @@ name = "paradencer-sbpf"
 version = "0.1.0"
 dependencies = [
  "blake3",
+ "bs58",
  "curve25519-dalek",
  "ed25519-dalek",
  "k256",

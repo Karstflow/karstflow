@@ -284,7 +284,10 @@ impl ReplayStage {
                 bf.is_ancestor(a, b)
             };
 
-            match self.vote_integration.run_consensus_decision(block.slot, is_ancestor) {
+            match self
+                .vote_integration
+                .run_consensus_decision(block.slot, is_ancestor)
+            {
                 Ok(decision) => {
                     if decision.vote_slot.is_some() {
                         self.stats.lock().unwrap().record_vote_processed();
@@ -318,7 +321,10 @@ impl ReplayStage {
                     }
                 }
                 Err(e) => {
-                    eprintln!("Consensus decision warning for slot {}: {:?}", block.slot, e);
+                    eprintln!(
+                        "Consensus decision warning for slot {}: {:?}",
+                        block.slot, e
+                    );
                 }
             }
         }

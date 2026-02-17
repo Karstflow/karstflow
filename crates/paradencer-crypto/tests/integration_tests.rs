@@ -5,7 +5,7 @@ use paradencer_crypto::{
     blake3::{Blake3Hasher, Blake3StreamingHasher},
     ed25519_batch::{BatchVerifier, SignatureSet, VerificationResult},
     sha256::{Sha256Hasher, Sha256StreamingHasher},
-    verify_signature, CryptoError, PUBKEY_SIZE, SIGNATURE_SIZE,
+    CryptoError, PUBKEY_SIZE, SIGNATURE_SIZE,
 };
 use rand::rngs::OsRng;
 

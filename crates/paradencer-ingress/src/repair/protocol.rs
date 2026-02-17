@@ -4,6 +4,7 @@ use bytes::{Buf, BufMut, Bytes, BytesMut};
 use serde::{Deserialize, Serialize};
 
 pub const REPAIR_PROTOCOL_VERSION: u16 = 1;
+#[allow(dead_code)]
 pub const MAX_REPAIR_RESPONSE_SIZE: usize = 10 * 1024 * 1024; // 10 MB
 
 /// Repair protocol version

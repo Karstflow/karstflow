@@ -92,7 +92,7 @@ pub fn try_find_program_address(
         for seed in seeds {
             hasher.update(seed);
         }
-        hasher.update(&bump_bytes);
+        hasher.update(bump_bytes);
         hasher.update(program_id.as_bytes());
         hasher.update(b"ProgramDerivedAddress");
         let hash = hasher.finalize();

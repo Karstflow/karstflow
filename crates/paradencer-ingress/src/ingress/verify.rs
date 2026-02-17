@@ -76,6 +76,9 @@ impl VerificationStats {
     }
 }
 
+/// Parsed transaction data: (signatures, message, signature_count)
+type ParsedTransactionData = (Vec<[u8; constants::SIGNATURE_SIZE]>, Vec<u8>, usize);
+
 /// Signature verifier for Solana transactions
 ///
 /// Verifies Ed25519 signatures on transactions.
@@ -129,12 +132,9 @@ impl SignatureVerifier {
     ///
     /// Solana transaction format:
     /// - Compact-u16: signature count
-    /// - [signature_count * 64 bytes]: signatures
+    /// - `signature_count * 64 bytes`: signatures
     /// - remaining bytes: message (what gets signed)
-    fn parse_transaction(
-        &self,
-        data: &[u8],
-    ) -> Result<(Vec<[u8; constants::SIGNATURE_SIZE]>, Vec<u8>, usize), VerificationError> {
+    fn parse_transaction(&self, data: &[u8]) -> Result<ParsedTransactionData, VerificationError> {
         let mut offset = 0;
 
         // Read signature count (compact-u16 encoded)

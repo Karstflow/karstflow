@@ -1,5 +1,6 @@
 use super::*;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use std::sync::Arc;
 use std::time::Duration;
 use tokio::time::sleep;
 
@@ -13,8 +14,10 @@ async fn test_gossip_service_push() {
     let node1_id = NodeId::random();
     let node1_info = create_test_contact_info(node1_id, 0);
 
-    let mut config1 = GossipConfig::default();
-    config1.bind_addr = "127.0.0.1:0".parse().unwrap();
+    let config1 = GossipConfig {
+        bind_addr: "127.0.0.1:0".parse().unwrap(),
+        ..GossipConfig::default()
+    };
 
     let mut service1 = GossipService::new(node1_id, node1_info.clone(), config1)
         .await
@@ -25,8 +28,10 @@ async fn test_gossip_service_push() {
     let node2_id = NodeId::random();
     let node2_info = create_test_contact_info(node2_id, 0);
 
-    let mut config2 = GossipConfig::default();
-    config2.bind_addr = "127.0.0.1:0".parse().unwrap();
+    let config2 = GossipConfig {
+        bind_addr: "127.0.0.1:0".parse().unwrap(),
+        ..GossipConfig::default()
+    };
 
     let mut service2 = GossipService::new(node2_id, node2_info.clone(), config2)
         .await

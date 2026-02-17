@@ -9,7 +9,6 @@ mod tests {
         Tower, VoteProcessor, VoteProcessorConfig, VoteState,
     };
     use paradencer_storage::Pubkey;
-    use std::collections::HashMap;
 
     /// Test scenario: Three validators with different stake weights vote on forks.
     #[test]
@@ -158,13 +157,13 @@ mod tests {
         // Check lockout - slot 100 locks out slot 101 on different fork
         let different_fork = |a: u64, b: u64| a == b; // Only same slot is same fork
 
-        assert!(tower.is_locked_out(101, &different_fork));
+        assert!(tower.is_locked_out(101, different_fork));
 
         // Can vote on slot 102 after lockout expires
-        assert!(!tower.is_locked_out(102, &different_fork));
+        assert!(!tower.is_locked_out(102, different_fork));
 
         // Try to record vote on locked out slot
-        let result = tower.record_vote(101, &different_fork);
+        let result = tower.record_vote(101, different_fork);
         assert!(result.is_err());
     }
 
@@ -287,7 +286,7 @@ mod tests {
     fn consensus_vote_aggregation() {
         let mut stake_tracker = StakeTracker::new(0);
         let validators: Vec<Pubkey> = (0..5).map(|_| Pubkey::new_unique()).collect();
-        let stakes = vec![300, 250, 200, 150, 100]; // Total 1000
+        let stakes = [300, 250, 200, 150, 100]; // Total 1000
 
         for (i, validator) in validators.iter().enumerate() {
             stake_tracker.add_delegation(
@@ -310,7 +309,7 @@ mod tests {
         }
 
         // First 3 validators vote (total 750 stake - supermajority)
-        for (i, validator) in validators.iter().take(3).enumerate() {
+        for validator in validators.iter().take(3) {
             vote_processor
                 .process_vote(*validator, 100, 1000, None, None)
                 .unwrap();
@@ -571,7 +570,7 @@ mod tests {
 
     #[test]
     fn consensus_decision_after_replay() {
-        use crate::{ConsensusCoordinator, ConsensusDecision, DecisionReason};
+        use crate::{ConsensusCoordinator, DecisionReason};
 
         let validator = Pubkey::new_unique();
         let mut coord = ConsensusCoordinator::new(validator, 10);
@@ -637,7 +636,7 @@ mod tests {
     #[test]
     fn epoch_boundary_end_to_end() {
         use crate::{Bank, EpochSchedule, Inflation, LeaderSchedule, Rent, StakeHistory};
-        use paradencer_constants::ledger::{SLOTS_PER_EPOCH, TICKS_PER_SLOT};
+        use paradencer_constants::ledger::TICKS_PER_SLOT;
         use paradencer_storage::AccountDatabase;
         use std::sync::{Arc, RwLock};
 

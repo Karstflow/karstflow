@@ -74,7 +74,7 @@ fn all_active_creates_fully_activated_set() {
 
     // All known features should be active at slot 0
     let known = known_features::all_known_features();
-    assert!(known.len() > 0);
+    assert!(!known.is_empty());
 
     for feature in &known {
         assert!(

@@ -6,7 +6,6 @@
 
 use crate::{CryptoError, CryptoResult};
 use p256::ecdsa::{Signature, VerifyingKey};
-use p256::elliptic_curve::sec1::ToEncodedPoint;
 
 /// Verify a P-256 ECDSA signature against a compressed or SEC1-encoded
 /// public key and a pre-hashed message digest.

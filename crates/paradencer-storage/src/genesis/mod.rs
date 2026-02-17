@@ -15,18 +15,13 @@ use paradencer_types::{Account, Pubkey};
 use serde::{Deserialize, Serialize};
 
 /// Cluster type identifying the network.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ClusterType {
     Mainnet,
     Devnet,
     Testnet,
+    #[default]
     Development,
-}
-
-impl Default for ClusterType {
-    fn default() -> Self {
-        Self::Development
-    }
 }
 
 /// Fee rate governor configuration.

@@ -4,8 +4,7 @@ use crate::StorageError;
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::io::Write;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 
@@ -87,6 +86,12 @@ pub struct SnapshotProgress {
     total_bytes: AtomicU64,
     processed_bytes: AtomicU64,
     chunks_written: AtomicUsize,
+}
+
+impl Default for SnapshotProgress {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl SnapshotProgress {

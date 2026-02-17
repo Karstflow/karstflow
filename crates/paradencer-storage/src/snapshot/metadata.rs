@@ -1,9 +1,10 @@
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum CompressionType {
     None,
+    #[default]
     Zstd,
 }
 
@@ -13,12 +14,6 @@ impl CompressionType {
             CompressionType::None => "none",
             CompressionType::Zstd => "zstd",
         }
-    }
-}
-
-impl Default for CompressionType {
-    fn default() -> Self {
-        CompressionType::Zstd
     }
 }
 
@@ -184,12 +179,6 @@ impl Default for SnapshotConfig {
     fn default() -> Self {
         Self::new()
     }
-}
-
-fn num_cpus() -> usize {
-    std::thread::available_parallelism()
-        .map(|p| p.get())
-        .unwrap_or(4)
 }
 
 #[cfg(test)]

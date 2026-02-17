@@ -188,7 +188,7 @@ mod tests {
 
     #[test]
     fn subtract_wraps_at_u16_min() {
-        let mut a = LatticeHashValue::zero();
+        let a = LatticeHashValue::zero();
         // a.elements[0] = 0
 
         let mut b = LatticeHashValue::zero();

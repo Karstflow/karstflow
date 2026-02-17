@@ -181,6 +181,7 @@ impl ShredProvider for InMemoryShredStore {
 /// Repair server for serving repair requests
 pub struct RepairServer {
     node_id: NodeId,
+    #[allow(dead_code)]
     config: RepairServerConfig,
     stats: RepairServerStats,
     socket: Arc<UdpSocket>,

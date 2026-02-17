@@ -36,7 +36,7 @@ pub fn to_hex(bytes: &[u8]) -> String {
 
 /// Convert hex string to bytes
 pub fn from_hex(hex: &str) -> CryptoResult<Vec<u8>> {
-    if hex.len() % 2 != 0 {
+    if !hex.len().is_multiple_of(2) {
         return Err(CryptoError::InternalError("Odd hex length".to_string()));
     }
 

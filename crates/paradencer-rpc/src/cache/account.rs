@@ -59,7 +59,7 @@ impl AccountCache {
     }
 
     /// Insert account into cache
-    pub fn insert(&self, pubkey: String, account: Account, slot: u64, commitment: RpcCommitment) {
+    pub fn insert(&self, pubkey: String, account: Account, _slot: u64, commitment: RpcCommitment) {
         let key = CacheKey { pubkey, commitment };
 
         // Evict if at capacity

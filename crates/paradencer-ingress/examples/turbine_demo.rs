@@ -4,7 +4,7 @@
 /// block propagation in a distributed network using stake-weighted tree construction.
 use paradencer_ingress::{
     BroadcastStats, ContactInfo, NodeId, QuicConfig, QuicEndpoint, QuicEndpointStats,
-    RetransmitService, RetransmitStats, ShredBroadcaster, TurbineConfig, TurbineStats, TurbineTree,
+    RetransmitService, RetransmitStats, ShredBroadcaster, TurbineConfig, TurbineStats,
     TurbineTreeBuilder, ValidatorInfo,
 };
 use paradencer_types::shred::{

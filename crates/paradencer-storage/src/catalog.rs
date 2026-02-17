@@ -1,7 +1,5 @@
 use crate::accounts::AccountDatabase;
-use crate::snapshot::{
-    SnapshotConfig, SnapshotCreator, SnapshotLoader, SnapshotManifest, SnapshotMetadata,
-};
+use crate::snapshot::{SnapshotConfig, SnapshotCreator, SnapshotLoader, SnapshotManifest};
 use crate::{CommittedFragmentRecord, HotStateStore, SnapshotImage, StorageError};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -427,15 +425,15 @@ impl SnapshotCatalog {
         let base_snapshot_path =
             self.full_snapshots
                 .get(&base_slot)
-                .ok_or_else(|| StorageError::SnapshotNotFound {
+                .ok_or(StorageError::SnapshotNotFound {
                     fragment_id: base_slot,
                 })?;
 
         let base_manifest_path = snapshot_dir.join(format!("full-{}.snapshot.manifest", base_slot));
 
-        let loader = SnapshotLoader::new();
+        let snapshot_loader = SnapshotLoader::new();
         let (base_accounts, _) =
-            loader.load_snapshot_to_map(base_snapshot_path, &base_manifest_path)?;
+            snapshot_loader.load_snapshot_to_map(base_snapshot_path, &base_manifest_path)?;
 
         let config = self.config.clone().unwrap_or_default();
         let creator = SnapshotCreator::new(config);
@@ -465,7 +463,7 @@ impl SnapshotCatalog {
         let snapshot_path = self
             .full_snapshots
             .get(&slot)
-            .ok_or_else(|| StorageError::SnapshotNotFound { fragment_id: slot })?;
+            .ok_or(StorageError::SnapshotNotFound { fragment_id: slot })?;
 
         let manifest_path = snapshot_dir.join(format!("full-{}.snapshot.manifest", slot));
 
@@ -519,7 +517,7 @@ impl SnapshotCatalog {
         let snapshot_path = snapshot_dir.join(&snapshot_filename);
         let manifest_path = snapshot_dir.join(format!("{}.manifest", snapshot_filename));
 
-        let loader = SnapshotLoader::new();
+        let _loader = SnapshotLoader::new();
         let manifest_json = std::fs::read_to_string(&manifest_path).map_err(|e| {
             StorageError::AccountDatabaseError {
                 details: format!("Failed to read manifest: {}", e),
@@ -545,7 +543,7 @@ impl SnapshotCatalog {
             if config.full_snapshot_interval == 0 {
                 return false;
             }
-            slot % config.full_snapshot_interval == 0
+            slot.is_multiple_of(config.full_snapshot_interval)
         } else {
             false
         }
@@ -556,7 +554,7 @@ impl SnapshotCatalog {
             if config.incremental_snapshot_interval == 0 {
                 return false;
             }
-            slot % config.incremental_snapshot_interval == 0
+            slot.is_multiple_of(config.incremental_snapshot_interval)
                 && !self.should_create_full_snapshot(slot)
         } else {
             false

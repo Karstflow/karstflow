@@ -184,11 +184,7 @@ impl BlockProcessor {
         execution_bridge: Arc<ExecutionBridge>,
         commitment_tracker: Arc<Mutex<CommitmentTracker>>,
     ) -> Self {
-        Self::with_backend(
-            execution_bridge,
-            commitment_tracker,
-            Arc::new(NoopBackend),
-        )
+        Self::with_backend(execution_bridge, commitment_tracker, Arc::new(NoopBackend))
     }
 
     pub fn with_backend(
@@ -969,7 +965,7 @@ mod tests {
         message_bytes.push(1); // num_required_signatures
         message_bytes.push(0); // num_readonly_signed
         message_bytes.push(0); // num_readonly_unsigned
-        // Account keys
+                               // Account keys
         encode_compact_u16(&mut message_bytes, account_keys.len());
         for key in &account_keys {
             message_bytes.extend_from_slice(key.as_bytes());

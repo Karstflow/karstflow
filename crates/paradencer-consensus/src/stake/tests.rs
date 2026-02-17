@@ -303,6 +303,7 @@ fn delegation_bootstrap_is_immediately_effective() {
 }
 
 #[test]
+#[allow(deprecated)]
 fn delegation_activated_and_deactivated_same_epoch_has_zero_effective() {
     let d = Delegation {
         voter_pubkey: Pubkey::new_unique(),
@@ -761,15 +762,7 @@ fn rewards_fractional_split_skips_tiny_reward() {
 
     let credits = make_epoch_credits(1, 0, 1);
     // total_points = 1 * 1 = 1, total_rewards = 1 => reward = 1
-    let result = rewards::calculate_stake_rewards(
-        &stake,
-        &credits,
-        50,
-        1,
-        1,
-        1,
-        identity_stake(1),
-    );
+    let result = rewards::calculate_stake_rewards(&stake, &credits, 50, 1, 1, 1, identity_stake(1));
     // With is_split=true and voter_portion=0 or staker_portion=0 => None
     assert!(result.is_none());
 }
@@ -795,9 +788,8 @@ fn total_points_aggregates_multiple_stakes() {
     }];
 
     let stakes = vec![(s1, c1), (s2, c2)];
-    let total = rewards::calculate_total_points(&stakes, |stake, _epoch| {
-        stake.delegation.stake_amount
-    });
+    let total =
+        rewards::calculate_total_points(&stakes, |stake, _epoch| stake.delegation.stake_amount);
 
     // s1: 1000 * 100 = 100_000, s2: 2000 * 50 = 100_000
     assert_eq!(total, 200_000);

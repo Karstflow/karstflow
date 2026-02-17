@@ -789,7 +789,7 @@ mod tests {
         }
 
         // Decide and execute multiple votes
-        for slot in 1..=5 {
+        for _slot in 1..=5 {
             let decision = coord.decide_vote_and_reset(1, linear_ancestor);
             let _root = coord.execute_decision(&decision);
             assert!(decision.vote_slot.is_some());

@@ -55,6 +55,7 @@ struct PendingRequest {
 /// Repair requester for sending repair requests to peers
 pub struct RepairRequester {
     node_id: NodeId,
+    #[allow(dead_code)]
     cluster_info: Arc<ClusterInfo>,
     socket: Arc<UdpSocket>,
     stats: RepairRequesterStats,
@@ -281,27 +282,24 @@ impl RepairRequester {
             let nonce = request.nonce();
 
             let message = RepairMessage::Request(request);
-            match message.encode() {
-                Ok(encoded) => {
-                    if let Ok(_) = socket.send_to(&encoded, target).await {
-                        stats.requests_sent.fetch_add(1, Ordering::Relaxed);
-                        stats
-                            .bytes_sent
-                            .fetch_add(encoded.len() as u64, Ordering::Relaxed);
+            if let Ok(encoded) = message.encode() {
+                if (socket.send_to(&encoded, target).await).is_ok() {
+                    stats.requests_sent.fetch_add(1, Ordering::Relaxed);
+                    stats
+                        .bytes_sent
+                        .fetch_add(encoded.len() as u64, Ordering::Relaxed);
 
-                        let mut pending_map = pending.write();
-                        if pending_map.len() < MAX_PENDING_REQUESTS {
-                            pending_map.insert(
-                                nonce,
-                                PendingRequest {
-                                    created_at: Instant::now(),
-                                    response_tx,
-                                },
-                            );
-                        }
+                    let mut pending_map = pending.write();
+                    if pending_map.len() < MAX_PENDING_REQUESTS {
+                        pending_map.insert(
+                            nonce,
+                            PendingRequest {
+                                created_at: Instant::now(),
+                                response_tx,
+                            },
+                        );
                     }
                 }
-                Err(_) => {}
             }
         }
     }

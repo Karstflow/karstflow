@@ -1,9 +1,9 @@
-/// Special handling for nonce-based transactions.
-///
-/// Nonce transactions use a durable nonce instead of a recent blockhash,
-/// requiring different deduplication logic. The first instruction of a
-/// nonce transaction must be an AdvanceNonceAccount system program
-/// instruction (discriminant value 4).
+//! Special handling for nonce-based transactions.
+//!
+//! Nonce transactions use a durable nonce instead of a recent blockhash,
+//! requiring different deduplication logic. The first instruction of a
+//! nonce transaction must be an AdvanceNonceAccount system program
+//! instruction (discriminant value 4).
 
 /// System program AdvanceNonceAccount instruction discriminant.
 const ADVANCE_NONCE_DISCRIMINANT: u32 = 4;

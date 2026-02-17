@@ -1,5 +1,5 @@
 use super::*;
-use crate::gossip::cluster_info::{ClusterInfo, ContactInfo, NodeId, CRDT_UPDATE_INTERVAL_MS};
+use crate::gossip::cluster_info::{ClusterInfo, ContactInfo, NodeId};
 use crate::gossip::protocol::{
     BloomFilter, GossipMessage, GossipPullRequest, GossipPullResponse, GossipPushMessage,
 };
@@ -9,7 +9,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::net::UdpSocket;
-use tokio::sync::{broadcast, mpsc};
+use tokio::sync::broadcast;
 use tokio::time::{interval, sleep};
 
 const GOSSIP_PUSH_FANOUT: usize = 6;
@@ -483,8 +483,10 @@ mod tests {
         let node_id = NodeId::random();
         let contact_info = create_test_contact_info(node_id, 8001);
 
-        let mut config = GossipConfig::default();
-        config.bind_addr = "127.0.0.1:0".parse().unwrap();
+        let config = GossipConfig {
+            bind_addr: "127.0.0.1:0".parse().unwrap(),
+            ..GossipConfig::default()
+        };
 
         let service = GossipService::new(node_id, contact_info, config).await;
         assert!(service.is_ok());

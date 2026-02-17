@@ -252,10 +252,9 @@ pub fn calculate_total_points(
     let mut total_points: u128 = 0;
 
     for (stake, epoch_credits) in stakes {
-        let calc =
-            calculate_points_and_credits(stake, epoch_credits, |epoch| {
-                effective_stake_fn(stake, epoch)
-            });
+        let calc = calculate_points_and_credits(stake, epoch_credits, |epoch| {
+            effective_stake_fn(stake, epoch)
+        });
         total_points = total_points.saturating_add(calc.points);
     }
 

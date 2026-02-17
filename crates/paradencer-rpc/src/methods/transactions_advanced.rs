@@ -1,12 +1,10 @@
-use serde_json::{json, Value};
-use std::collections::HashMap;
-
 use crate::cache::signature::SignatureCache;
 use crate::simulation::{
     SimulateAccountsConfig, SimulationConfig, SimulationResult, TransactionSimulator,
 };
 use crate::state::{RpcCommitment, RpcRuntimeSnapshot};
 use crate::{Result, RpcError};
+use serde_json::{json, Value};
 
 /// Advanced transaction method handler
 pub struct TransactionsAdvanced {
@@ -312,7 +310,7 @@ fn build_transaction_meta_response(
     signature: &str,
     slot: u64,
     commitment: RpcCommitment,
-    config: &GetTransactionConfig,
+    _config: &GetTransactionConfig,
 ) -> Value {
     let commitment_str = match commitment {
         RpcCommitment::Processed => "processed",
@@ -397,7 +395,7 @@ mod tests {
     fn test_slot_prioritization_fee_with_accounts() {
         let accounts = Some(vec!["acc1".to_string(), "acc2".to_string()]);
         let fee = calculate_slot_prioritization_fee(100, 1000, &accounts);
-        assert_eq!(fee, 1000 + 0 + 100); // base + slot_variance(0) + account_bonus(100)
+        assert_eq!(fee, 1100); // base(1000) + slot_variance(0) + account_bonus(100)
     }
 
     #[test]

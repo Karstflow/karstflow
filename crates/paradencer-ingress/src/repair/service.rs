@@ -97,9 +97,13 @@ mod tests {
             1000,
         ));
 
-        let mut config = RepairServiceConfig::default();
-        config.requester_bind_addr = "127.0.0.1:0".parse().unwrap();
-        config.server_config.bind_addr = "127.0.0.1:0".parse().unwrap();
+        let config = RepairServiceConfig {
+            requester_bind_addr: "127.0.0.1:0".parse().unwrap(),
+            server_config: RepairServerConfig {
+                bind_addr: "127.0.0.1:0".parse().unwrap(),
+                ..RepairServerConfig::default()
+            },
+        };
 
         let shred_provider = Arc::new(InMemoryShredStore::new());
 

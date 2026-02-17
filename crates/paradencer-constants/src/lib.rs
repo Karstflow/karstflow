@@ -1,7 +1,7 @@
 pub mod address_lookup_table;
-pub mod bpf_loader_program;
 pub mod block_limits;
 pub mod blockstore;
+pub mod bpf_loader_program;
 pub mod compute_budget_program;
 pub mod config_program;
 pub mod crypto;

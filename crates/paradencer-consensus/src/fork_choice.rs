@@ -524,11 +524,7 @@ impl ForkChoice {
                 .unwrap_or(0);
 
             for &child in &children[1..] {
-                let weight = self
-                    .forks
-                    .get(&child)
-                    .map(|f| f.stake_weight)
-                    .unwrap_or(0);
+                let weight = self.forks.get(&child).map(|f| f.stake_weight).unwrap_or(0);
                 if weight > best_weight || (weight == best_weight && child < best_child) {
                     best_child = child;
                     best_weight = weight;

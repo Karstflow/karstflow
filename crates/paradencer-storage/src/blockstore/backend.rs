@@ -9,6 +9,12 @@ use paradencer_constants::blockstore::*;
 use std::collections::HashMap;
 use std::sync::RwLock;
 
+/// A single column family store: key -> value.
+type ColumnStore = RwLock<HashMap<Vec<u8>, Vec<u8>>>;
+
+/// A key-value pair from the backend store.
+type KeyValuePair = (Vec<u8>, Vec<u8>);
+
 /// Key-value storage backend for the blockstore.
 ///
 /// Organizes data into column families (CFs), each backed by a separate
@@ -16,7 +22,7 @@ use std::sync::RwLock;
 /// contention between different data types.
 pub struct BlockstoreBackend {
     /// Column family stores: cf_name -> (key -> value).
-    stores: HashMap<String, RwLock<HashMap<Vec<u8>, Vec<u8>>>>,
+    stores: HashMap<String, ColumnStore>,
 }
 
 impl BlockstoreBackend {
@@ -80,7 +86,7 @@ impl BlockstoreBackend {
         &self,
         cf: &str,
         prefix: &[u8],
-    ) -> Result<Vec<(Vec<u8>, Vec<u8>)>, BlockstoreError> {
+    ) -> Result<Vec<KeyValuePair>, BlockstoreError> {
         let store = self.stores.get(cf).ok_or_else(|| {
             BlockstoreError::BackendError(format!("unknown column family: {}", cf))
         })?;

@@ -6,9 +6,9 @@ use super::{
 use crate::elf_loader::LoadedProgram;
 use crate::interpreter::{self, VmError};
 use crate::memory::MemoryMap;
-use crate::sysvar_snapshot::SysvarSnapshot;
 use crate::program_cache::ProgramCache;
 use crate::syscall_dispatch::{InstructionExecutor, RuntimeSyscallDispatch};
+use crate::sysvar_snapshot::SysvarSnapshot;
 use crate::validation;
 use paradencer_constants::vm::{ACCOUNT_SERIALIZED_META_SIZE, DEFAULT_HEAP_SIZE};
 use paradencer_ids::{SYSTEM_PROGRAM_ID, VOTE_PROGRAM_ID};

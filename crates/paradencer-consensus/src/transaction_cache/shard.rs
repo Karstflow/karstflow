@@ -54,7 +54,7 @@ impl CacheShard {
         self.entries
             .get(blockhash)
             .and_then(|m| m.get(message_hash))
-            .map_or(false, |entry| entry.seen_on_fork(fork))
+            .is_some_and(|entry| entry.seen_on_fork(fork))
     }
 
     /// Remove all entries for a specific slot.

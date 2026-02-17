@@ -66,9 +66,9 @@ fn bench_ed25519_batch_verification(c: &mut Criterion) {
         group.bench_with_input(
             BenchmarkId::from_parameter(batch_size),
             batch_size,
-            |b, _| {
+            |b, &size| {
                 b.iter(|| {
-                    let mut verifier = BatchVerifier::new();
+                    let mut verifier = BatchVerifier::with_max_batch_size(size + 1);
                     for sig_set in &sig_sets {
                         verifier
                             .add_signature_set(sig_set.clone())

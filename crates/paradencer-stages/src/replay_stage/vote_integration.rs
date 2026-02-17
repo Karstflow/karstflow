@@ -309,7 +309,12 @@ impl VoteIntegration {
             .tower
             .read()
             .map_err(|_| VoteIntegrationError::LockFailed)?;
-        Ok(tower.can_switch_to(candidate_slot, total_stake, current_fork_stake, is_same_fork))
+        Ok(tower.can_switch_to(
+            candidate_slot,
+            total_stake,
+            current_fork_stake,
+            is_same_fork,
+        ))
     }
 
     /// Run a consensus decision after replaying a slot.
@@ -638,8 +643,7 @@ mod tests {
         // Register the slot in fork choice so add_stake has somewhere to land
         fork_choice.lock().unwrap().add_fork(100, None);
 
-        let mut integration =
-            VoteIntegration::new(vote_processor, tower, fork_choice.clone());
+        let mut integration = VoteIntegration::new(vote_processor, tower, fork_choice.clone());
 
         // Create a VoteUpdate like bank_executor would produce
         let updates = vec![VoteUpdate {
@@ -690,16 +694,21 @@ mod tests {
         stake_tracker.add_delegation(stake_b, Delegation::new(validator_b, 700, u64::MAX));
 
         let mut vp = VoteProcessor::new(config, stake_tracker);
-        vp.register_vote_account(validator_a, VoteState::new(validator_a, validator_a, validator_a, 0));
-        vp.register_vote_account(validator_b, VoteState::new(validator_b, validator_b, validator_b, 0));
+        vp.register_vote_account(
+            validator_a,
+            VoteState::new(validator_a, validator_a, validator_a, 0),
+        );
+        vp.register_vote_account(
+            validator_b,
+            VoteState::new(validator_b, validator_b, validator_b, 0),
+        );
         let vote_processor = Arc::new(Mutex::new(vp));
 
         let tower = create_test_tower();
         let fork_choice = create_test_fork_choice();
         fork_choice.lock().unwrap().add_fork(50, None);
 
-        let mut integration =
-            VoteIntegration::new(vote_processor, tower, fork_choice.clone());
+        let mut integration = VoteIntegration::new(vote_processor, tower, fork_choice.clone());
 
         let updates = vec![
             VoteUpdate {

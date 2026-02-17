@@ -1,12 +1,12 @@
-/// LastRestartSlot sysvar.
-///
-/// Records the slot at which the cluster was last restarted. Programs
-/// can use this to detect when the cluster has undergone a restart and
-/// adjust their behavior accordingly (e.g., resetting caches or
-/// re-evaluating state).
+//! LastRestartSlot sysvar.
+//!
+//! Records the slot at which the cluster was last restarted. Programs
+//! can use this to detect when the cluster has undergone a restart and
+//! adjust their behavior accordingly (e.g., resetting caches or
+//! re-evaluating state).
 
 /// Sysvar recording the most recent cluster restart slot.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct LastRestartSlotSysvar {
     /// The slot number of the last cluster restart, or 0 if never restarted.
     pub slot: u64,
@@ -29,11 +29,5 @@ impl LastRestartSlotSysvar {
         }
         let slot = u64::from_le_bytes(data[0..8].try_into().ok()?);
         Some(Self { slot })
-    }
-}
-
-impl Default for LastRestartSlotSysvar {
-    fn default() -> Self {
-        Self { slot: 0 }
     }
 }

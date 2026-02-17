@@ -93,6 +93,7 @@ impl RuntimeSyscallDispatch {
             Box::new(SolLogComputeUnitsHandler),
         );
         dispatch.register_by_name("sol_log_data", Box::new(SolLogDataHandler));
+        dispatch.register_by_name("sol_log_pubkey", Box::new(SolLogPubkeyHandler));
 
         // Memory operations
         dispatch.register_by_name("sol_memcpy_", Box::new(SolMemcpyHandler));
@@ -136,6 +137,16 @@ impl RuntimeSyscallDispatch {
 
         // Runtime queries
         dispatch.register_by_name("sol_get_stack_height", Box::new(SolGetStackHeightHandler));
+        dispatch.register_by_name(
+            "sol_get_processed_sibling_instruction",
+            Box::new(SolGetProcessedSiblingInstructionHandler),
+        );
+        dispatch.register_by_name(
+            "sol_get_epoch_rewards_sysvar",
+            Box::new(SolGetEpochRewardsSysvarHandler),
+        );
+        dispatch.register_by_name("sol_get_sysvar", Box::new(SolGetSysvarHandler));
+        dispatch.register_by_name("sol_get_epoch_stake", Box::new(SolGetEpochStakeHandler));
 
         // Crypto
         dispatch.register_by_name(
@@ -148,8 +159,7 @@ impl RuntimeSyscallDispatch {
             "sol_curve_validate_point",
             Box::new(SolCurveValidatePointHandler),
         );
-        dispatch
-            .register_by_name("sol_curve_group_op", Box::new(SolCurveGroupOpHandler));
+        dispatch.register_by_name("sol_curve_group_op", Box::new(SolCurveGroupOpHandler));
         dispatch.register_by_name(
             "sol_curve_multiscalar_mul",
             Box::new(SolCurveMultiscalarMulHandler),
@@ -1215,12 +1225,11 @@ impl SyscallHandler for SolCurveMultiscalarMulHandler {
                         CompressedEdwardsY(p).decompress()
                     })
                     .collect();
-                match points {
-                    Some(pts) => {
-                        Some(EdwardsPoint::vartime_multiscalar_mul(&scalars, &pts).compress().to_bytes())
-                    }
-                    None => None,
-                }
+                points.map(|pts| {
+                    EdwardsPoint::vartime_multiscalar_mul(&scalars, &pts)
+                        .compress()
+                        .to_bytes()
+                })
             }
             syscalls::CURVE_ID_RISTRETTO255 => {
                 use curve25519_dalek::{
@@ -1242,12 +1251,11 @@ impl SyscallHandler for SolCurveMultiscalarMulHandler {
                         CompressedRistretto(p).decompress()
                     })
                     .collect();
-                match points {
-                    Some(pts) => {
-                        Some(RistrettoPoint::vartime_multiscalar_mul(&scalars, &pts).compress().to_bytes())
-                    }
-                    None => None,
-                }
+                points.map(|pts| {
+                    RistrettoPoint::vartime_multiscalar_mul(&scalars, &pts)
+                        .compress()
+                        .to_bytes()
+                })
             }
             _ => None,
         };
@@ -1353,6 +1361,229 @@ fn curve25519_group_op(
     }
 }
 
+/// sol_log_pubkey: Log a public key as base58.
+///
+/// r1 = pointer to 32-byte pubkey in VM memory.
+struct SolLogPubkeyHandler;
+
+impl SyscallHandler for SolLogPubkeyHandler {
+    fn call(
+        &self,
+        vm: &mut VmState,
+        r1: u64, // pubkey pointer (32 bytes)
+        _r2: u64,
+        _r3: u64,
+        _r4: u64,
+        _r5: u64,
+    ) -> Result<u64, VmError> {
+        deduct_compute(vm, syscalls::LOG_PUBKEY_COST)?;
+
+        let pk_bytes = vm
+            .memory
+            .read_slice(r1, 32)
+            .map_err(|e| VmError::MemoryError(e.to_string()))?;
+
+        let encoded = bs58::encode(&pk_bytes).into_string();
+        vm.logs.push(format!("Program log: {}", encoded));
+
+        Ok(0)
+    }
+}
+
+/// sol_get_epoch_rewards_sysvar: Write EpochRewards sysvar data to VM memory.
+///
+/// Serialization layout (25 bytes, little-endian):
+///   active(1) | total_rewards(8) | distributed_rewards(8) | distribution_complete_block_height(8)
+struct SolGetEpochRewardsSysvarHandler;
+
+impl SyscallHandler for SolGetEpochRewardsSysvarHandler {
+    fn call(
+        &self,
+        vm: &mut VmState,
+        r1: u64, // destination pointer
+        _r2: u64,
+        _r3: u64,
+        _r4: u64,
+        _r5: u64,
+    ) -> Result<u64, VmError> {
+        deduct_compute(vm, syscalls::GET_EPOCH_REWARDS_SYSVAR_COST)?;
+
+        let snap = &vm.sysvar_snapshot;
+        let mut buf = [0u8; 25];
+        buf[0] = snap.epoch_rewards_active as u8;
+        buf[1..9].copy_from_slice(&snap.epoch_rewards_total_rewards.to_le_bytes());
+        buf[9..17].copy_from_slice(&snap.epoch_rewards_distributed_rewards.to_le_bytes());
+        buf[17..25].copy_from_slice(
+            &snap
+                .epoch_rewards_distribution_complete_block_height
+                .to_le_bytes(),
+        );
+
+        vm.memory
+            .write_slice(r1, &buf)
+            .map_err(|e| VmError::MemoryError(e.to_string()))?;
+
+        Ok(0)
+    }
+}
+
+/// sol_get_sysvar: Generic sysvar slice access (SIMD-0127).
+///
+/// r1 = sysvar address pointer (32 bytes)
+/// r2 = destination buffer pointer
+/// r3 = offset into sysvar data
+/// r4 = length to read
+/// Returns 0 on success, 1 if sysvar not found, 2 if out of bounds.
+struct SolGetSysvarHandler;
+
+impl SyscallHandler for SolGetSysvarHandler {
+    fn call(
+        &self,
+        vm: &mut VmState,
+        r1: u64, // sysvar address pointer (32 bytes)
+        r2: u64, // destination buffer pointer
+        r3: u64, // offset
+        r4: u64, // length
+        _r5: u64,
+    ) -> Result<u64, VmError> {
+        let len = r4 as usize;
+        let cost = syscalls::GET_GENERIC_SYSVAR_BASE_COST
+            + syscalls::GET_GENERIC_SYSVAR_PER_BYTE_COST * len as u64;
+        deduct_compute(vm, cost)?;
+
+        if len > syscalls::MAX_GENERIC_SYSVAR_READ_LEN {
+            return Ok(2); // Length exceeds limit
+        }
+
+        // Read sysvar address from VM memory
+        let addr_bytes = vm
+            .memory
+            .read_slice(r1, 32)
+            .map_err(|e| VmError::MemoryError(e.to_string()))?;
+        let mut sysvar_id = [0u8; 32];
+        sysvar_id.copy_from_slice(&addr_bytes);
+
+        // Look up sysvar data from snapshot
+        let data = match vm.sysvar_snapshot.sysvar_data.get(&sysvar_id) {
+            Some(d) => d,
+            None => return Ok(1), // Sysvar not found
+        };
+
+        let offset = r3 as usize;
+        if offset + len > data.len() {
+            return Ok(2); // Out of bounds
+        }
+
+        // Write slice to destination
+        vm.memory
+            .write_slice(r2, &data[offset..offset + len])
+            .map_err(|e| VmError::MemoryError(e.to_string()))?;
+
+        Ok(0)
+    }
+}
+
+/// sol_get_processed_sibling_instruction: Get a previously processed instruction.
+///
+/// r1 = index (0 = most recent sibling before current)
+/// r2 = metadata result pointer (program_id(32) + data_len(8) + accounts_len(8) = 48 bytes)
+/// r3 = data result pointer
+/// r4 = accounts result pointer
+/// Returns 0 on success (found), 1 if index out of range.
+struct SolGetProcessedSiblingInstructionHandler;
+
+impl SyscallHandler for SolGetProcessedSiblingInstructionHandler {
+    fn call(
+        &self,
+        vm: &mut VmState,
+        r1: u64, // index
+        r2: u64, // metadata destination pointer
+        r3: u64, // data destination pointer
+        r4: u64, // accounts destination pointer
+        _r5: u64,
+    ) -> Result<u64, VmError> {
+        deduct_compute(vm, syscalls::GET_PROCESSED_SIBLING_INSTRUCTION_COST)?;
+
+        let index = r1 as usize;
+        let siblings = &vm.sysvar_snapshot.sibling_instructions;
+
+        // Index 0 = most recent (last in the vec), so reverse lookup
+        let reverse_idx = siblings.len().checked_sub(index + 1);
+        let sibling = match reverse_idx {
+            Some(i) => &siblings[i],
+            None => return Ok(1), // Out of range
+        };
+
+        // Write metadata: program_id(32) + data_len(8) + accounts_len(8)
+        let mut meta_buf = [0u8; 48];
+        meta_buf[0..32].copy_from_slice(&sibling.program_id);
+        meta_buf[32..40].copy_from_slice(&(sibling.data.len() as u64).to_le_bytes());
+        meta_buf[40..48].copy_from_slice(&(sibling.accounts.len() as u64).to_le_bytes());
+
+        vm.memory
+            .write_slice(r2, &meta_buf)
+            .map_err(|e| VmError::MemoryError(e.to_string()))?;
+
+        // Write instruction data
+        if !sibling.data.is_empty() {
+            vm.memory
+                .write_slice(r3, &sibling.data)
+                .map_err(|e| VmError::MemoryError(e.to_string()))?;
+        }
+
+        // Write account keys (each 32 bytes)
+        if !sibling.accounts.is_empty() {
+            let accounts_flat: Vec<u8> = sibling
+                .accounts
+                .iter()
+                .flat_map(|a| a.iter())
+                .copied()
+                .collect();
+            vm.memory
+                .write_slice(r4, &accounts_flat)
+                .map_err(|e| VmError::MemoryError(e.to_string()))?;
+        }
+
+        Ok(0)
+    }
+}
+
+/// sol_get_epoch_stake: Query total stake for a vote account at epoch boundary.
+///
+/// r1 = vote account address pointer (32 bytes)
+/// Returns the stake in lamports (via r0).
+struct SolGetEpochStakeHandler;
+
+impl SyscallHandler for SolGetEpochStakeHandler {
+    fn call(
+        &self,
+        vm: &mut VmState,
+        r1: u64, // vote account address pointer (32 bytes)
+        _r2: u64,
+        _r3: u64,
+        _r4: u64,
+        _r5: u64,
+    ) -> Result<u64, VmError> {
+        deduct_compute(vm, syscalls::GET_EPOCH_STAKE_COST)?;
+
+        let addr_bytes = vm
+            .memory
+            .read_slice(r1, 32)
+            .map_err(|e| VmError::MemoryError(e.to_string()))?;
+        let mut vote_account = [0u8; 32];
+        vote_account.copy_from_slice(&addr_bytes);
+
+        let stake = vm
+            .sysvar_snapshot
+            .epoch_stake
+            .get(&vote_account)
+            .copied()
+            .unwrap_or(0);
+
+        Ok(stake)
+    }
+}
+
 /// sol_alloc_free_: Bump allocator for heap memory.
 struct SolAllocHandler;
 
@@ -1439,8 +1670,7 @@ fn scan_input_region(input: &[u8]) -> Vec<InputRegionEntry> {
         offset += 40;
 
         // Read data_len(8)
-        let data_len =
-            u64::from_le_bytes(input[offset..offset + 8].try_into().unwrap()) as usize;
+        let data_len = u64::from_le_bytes(input[offset..offset + 8].try_into().unwrap()) as usize;
         offset += 8;
 
         // Skip data + padding
@@ -1522,8 +1752,7 @@ fn writeback_account_to_input(
     let pos = pos + 8;
 
     // Read original data_len to check bounds
-    let original_data_len =
-        u64::from_le_bytes(input[pos..pos + 8].try_into().unwrap()) as usize;
+    let original_data_len = u64::from_le_bytes(input[pos..pos + 8].try_into().unwrap()) as usize;
     let pos = pos + 8;
 
     let new_data = account.data.as_slice();
@@ -1674,9 +1903,7 @@ impl SyscallHandler for SolInvokeHandler {
                     };
 
                     for (pubkey, modified_account) in &outcome.modified_accounts {
-                        if let Some(entry) =
-                            input_entries.iter().find(|e| e.pubkey == *pubkey)
-                        {
+                        if let Some(entry) = input_entries.iter().find(|e| e.pubkey == *pubkey) {
                             // Only write back if the CPI meta marked it writable
                             let is_writable = cpi_account_metas
                                 .iter()
@@ -1794,7 +2021,14 @@ mod tests {
         ]);
         let program = load_raw(&bytes).unwrap();
         let memory = MemoryMap::new(&[], TOTAL_STACK_SIZE, DEFAULT_HEAP_SIZE, vec![]);
-        let result = crate::interpreter::execute(&program, memory, 10_000, &dispatch, crate::sysvar_snapshot::SysvarSnapshot::default()).unwrap();
+        let result = crate::interpreter::execute(
+            &program,
+            memory,
+            10_000,
+            &dispatch,
+            crate::sysvar_snapshot::SysvarSnapshot::default(),
+        )
+        .unwrap();
         assert_eq!(result.return_value, 42);
     }
 
@@ -1817,7 +2051,14 @@ mod tests {
         ]);
         let program = load_raw(&bytes).unwrap();
         let memory = MemoryMap::new(&[], TOTAL_STACK_SIZE, DEFAULT_HEAP_SIZE, vec![]);
-        let result = crate::interpreter::execute(&program, memory, 100_000, &dispatch, crate::sysvar_snapshot::SysvarSnapshot::default()).unwrap();
+        let result = crate::interpreter::execute(
+            &program,
+            memory,
+            100_000,
+            &dispatch,
+            crate::sysvar_snapshot::SysvarSnapshot::default(),
+        )
+        .unwrap();
         assert!(result.logs.iter().any(|l| l.contains("Hi")));
     }
 
@@ -1834,7 +2075,14 @@ mod tests {
         ]);
         let program = load_raw(&bytes).unwrap();
         let memory = MemoryMap::new(&[], TOTAL_STACK_SIZE, DEFAULT_HEAP_SIZE, vec![]);
-        let result = crate::interpreter::execute(&program, memory, 100_000, &dispatch, crate::sysvar_snapshot::SysvarSnapshot::default()).unwrap();
+        let result = crate::interpreter::execute(
+            &program,
+            memory,
+            100_000,
+            &dispatch,
+            crate::sysvar_snapshot::SysvarSnapshot::default(),
+        )
+        .unwrap();
         // Should return the heap base address
         assert_eq!(result.return_value, REGION_HEAP_BASE);
     }
@@ -1848,7 +2096,13 @@ mod tests {
         ]);
         let program = load_raw(&bytes).unwrap();
         let memory = MemoryMap::new(&[], TOTAL_STACK_SIZE, DEFAULT_HEAP_SIZE, vec![]);
-        let result = crate::interpreter::execute(&program, memory, 10_000, &dispatch, crate::sysvar_snapshot::SysvarSnapshot::default());
+        let result = crate::interpreter::execute(
+            &program,
+            memory,
+            10_000,
+            &dispatch,
+            crate::sysvar_snapshot::SysvarSnapshot::default(),
+        );
         assert!(matches!(result, Err(VmError::UnknownSyscall { id: 0xBAD })));
     }
 
@@ -1876,10 +2130,16 @@ mod tests {
         assert!(ids.contains(&murmur3_hash("sol_curve_validate_point")));
         assert!(ids.contains(&murmur3_hash("sol_curve_group_op")));
         assert!(ids.contains(&murmur3_hash("sol_curve_multiscalar_mul")));
-        // 4 log + 4 mem + 3 hash + 1 alloc + 2 PDA + 2 return_data + 4 sysvar + 1 stack + 1 crypto + 3 curve = 25
+        // New syscalls
+        assert!(ids.contains(&murmur3_hash("sol_log_pubkey")));
+        assert!(ids.contains(&murmur3_hash("sol_get_epoch_rewards_sysvar")));
+        assert!(ids.contains(&murmur3_hash("sol_get_sysvar")));
+        assert!(ids.contains(&murmur3_hash("sol_get_processed_sibling_instruction")));
+        assert!(ids.contains(&murmur3_hash("sol_get_epoch_stake")));
+        // 5 log + 4 mem + 3 hash + 1 alloc + 2 PDA + 2 return_data + 4 sysvar + 1 stack + 1 crypto + 3 curve + 4 new runtime = 30
         assert!(
-            ids.len() >= 25,
-            "Expected >= 25 syscalls, got {}",
+            ids.len() >= 30,
+            "Expected >= 30 syscalls, got {}",
             ids.len()
         );
     }
@@ -1924,7 +2184,14 @@ mod tests {
         ]);
         let program = load_raw(&bytes).unwrap();
         let memory = MemoryMap::new(&[], TOTAL_STACK_SIZE, DEFAULT_HEAP_SIZE, vec![]);
-        let result = crate::interpreter::execute(&program, memory, 1_000_000, &dispatch, crate::sysvar_snapshot::SysvarSnapshot::default()).unwrap();
+        let result = crate::interpreter::execute(
+            &program,
+            memory,
+            1_000_000,
+            &dispatch,
+            crate::sysvar_snapshot::SysvarSnapshot::default(),
+        )
+        .unwrap();
 
         // Compute expected SHA-256 of "hello"
         let mut hasher = Sha256::new();
@@ -1972,10 +2239,10 @@ mod tests {
         let ids = dispatch.registered_ids();
         assert!(ids.contains(&murmur3_hash("sol_invoke_signed_c")));
         assert!(ids.contains(&murmur3_hash("sol_invoke_signed_rust")));
-        // 25 standard + 2 CPI = 27
+        // 30 standard + 2 CPI = 32
         assert!(
-            ids.len() >= 27,
-            "Expected >= 27 syscalls with CPI, got {}",
+            ids.len() >= 32,
+            "Expected >= 32 syscalls with CPI, got {}",
             ids.len()
         );
     }
@@ -1992,9 +2259,7 @@ mod tests {
     // -----------------------------------------------------------------------
 
     /// Create a VmState with a given SysvarSnapshot and heap for testing syscall handlers directly.
-    fn make_sysvar_test_vm(
-        snapshot: crate::sysvar_snapshot::SysvarSnapshot,
-    ) -> VmState {
+    fn make_sysvar_test_vm(snapshot: crate::sysvar_snapshot::SysvarSnapshot) -> VmState {
         use crate::interpreter::VmState;
         VmState {
             registers: [0u64; 11],
@@ -2013,12 +2278,14 @@ mod tests {
 
     #[test]
     fn clock_syscall_reads_snapshot_slot() {
-        let mut snap = crate::sysvar_snapshot::SysvarSnapshot::default();
-        snap.slot = 12345;
-        snap.epoch = 7;
-        snap.unix_timestamp = 1700000000;
-        snap.epoch_start_timestamp = 1699000000;
-        snap.leader_schedule_epoch = 8;
+        let snap = crate::sysvar_snapshot::SysvarSnapshot {
+            slot: 12345,
+            epoch: 7,
+            unix_timestamp: 1700000000,
+            epoch_start_timestamp: 1699000000,
+            leader_schedule_epoch: 8,
+            ..Default::default()
+        };
 
         let mut vm = make_sysvar_test_vm(snap);
         let handler = SolGetClockSysvarHandler;
@@ -2027,18 +2294,26 @@ mod tests {
 
         let buf = vm.memory.read_slice(REGION_HEAP_BASE, 40).unwrap();
         assert_eq!(u64::from_le_bytes(buf[0..8].try_into().unwrap()), 12345);
-        assert_eq!(i64::from_le_bytes(buf[8..16].try_into().unwrap()), 1699000000);
+        assert_eq!(
+            i64::from_le_bytes(buf[8..16].try_into().unwrap()),
+            1699000000
+        );
         assert_eq!(u64::from_le_bytes(buf[16..24].try_into().unwrap()), 7);
         assert_eq!(u64::from_le_bytes(buf[24..32].try_into().unwrap()), 8);
-        assert_eq!(i64::from_le_bytes(buf[32..40].try_into().unwrap()), 1700000000);
+        assert_eq!(
+            i64::from_le_bytes(buf[32..40].try_into().unwrap()),
+            1700000000
+        );
     }
 
     #[test]
     fn rent_syscall_reads_snapshot() {
-        let mut snap = crate::sysvar_snapshot::SysvarSnapshot::default();
-        snap.lamports_per_byte_year = 3480;
-        snap.exemption_threshold = 2.0;
-        snap.burn_percent = 50;
+        let snap = crate::sysvar_snapshot::SysvarSnapshot {
+            lamports_per_byte_year: 3480,
+            exemption_threshold: 2.0,
+            burn_percent: 50,
+            ..Default::default()
+        };
 
         let mut vm = make_sysvar_test_vm(snap);
         let handler = SolGetRentSysvarHandler;
@@ -2053,12 +2328,14 @@ mod tests {
 
     #[test]
     fn epoch_schedule_syscall_reads_snapshot() {
-        let mut snap = crate::sysvar_snapshot::SysvarSnapshot::default();
-        snap.slots_per_epoch = 432_000;
-        snap.leader_schedule_slot_offset = 432_000;
-        snap.warmup = true;
-        snap.first_normal_epoch = 14;
-        snap.first_normal_slot = 524_256;
+        let snap = crate::sysvar_snapshot::SysvarSnapshot {
+            slots_per_epoch: 432_000,
+            leader_schedule_slot_offset: 432_000,
+            warmup: true,
+            first_normal_epoch: 14,
+            first_normal_slot: 524_256,
+            ..Default::default()
+        };
 
         let mut vm = make_sysvar_test_vm(snap);
         let handler = SolGetEpochScheduleHandler;
@@ -2075,8 +2352,10 @@ mod tests {
 
     #[test]
     fn last_restart_slot_syscall_reads_snapshot() {
-        let mut snap = crate::sysvar_snapshot::SysvarSnapshot::default();
-        snap.last_restart_slot = 99_999;
+        let snap = crate::sysvar_snapshot::SysvarSnapshot {
+            last_restart_slot: 99_999,
+            ..Default::default()
+        };
 
         let mut vm = make_sysvar_test_vm(snap);
         let handler = SolGetLastRestartSlotHandler;
@@ -2088,18 +2367,272 @@ mod tests {
     }
 
     #[test]
+    fn log_pubkey_handler() {
+        let mut vm = make_sysvar_test_vm(crate::sysvar_snapshot::SysvarSnapshot::default());
+        let handler = SolLogPubkeyHandler;
+
+        // Write a known pubkey (all 1s) to heap
+        let pk_bytes = [1u8; 32];
+        vm.memory.write_slice(REGION_HEAP_BASE, &pk_bytes).unwrap();
+
+        let ret = handler.call(&mut vm, REGION_HEAP_BASE, 0, 0, 0, 0).unwrap();
+        assert_eq!(ret, 0);
+
+        let expected = bs58::encode(&pk_bytes).into_string();
+        assert!(
+            vm.logs.iter().any(|l| l.contains(&expected)),
+            "Expected log to contain '{}', got {:?}",
+            expected,
+            vm.logs
+        );
+    }
+
+    #[test]
+    fn epoch_rewards_syscall_reads_snapshot() {
+        let snap = crate::sysvar_snapshot::SysvarSnapshot {
+            epoch_rewards_active: true,
+            epoch_rewards_total_rewards: 1_000_000,
+            epoch_rewards_distributed_rewards: 500_000,
+            epoch_rewards_distribution_complete_block_height: 200,
+            ..Default::default()
+        };
+
+        let mut vm = make_sysvar_test_vm(snap);
+        let handler = SolGetEpochRewardsSysvarHandler;
+        let ret = handler.call(&mut vm, REGION_HEAP_BASE, 0, 0, 0, 0).unwrap();
+        assert_eq!(ret, 0);
+
+        let buf = vm.memory.read_slice(REGION_HEAP_BASE, 25).unwrap();
+        assert_eq!(buf[0], 1); // active = true
+        assert_eq!(u64::from_le_bytes(buf[1..9].try_into().unwrap()), 1_000_000);
+        assert_eq!(u64::from_le_bytes(buf[9..17].try_into().unwrap()), 500_000);
+        assert_eq!(u64::from_le_bytes(buf[17..25].try_into().unwrap()), 200);
+    }
+
+    #[test]
+    fn epoch_rewards_syscall_default_zeros() {
+        let mut vm = make_sysvar_test_vm(crate::sysvar_snapshot::SysvarSnapshot::default());
+        let handler = SolGetEpochRewardsSysvarHandler;
+        let ret = handler.call(&mut vm, REGION_HEAP_BASE, 0, 0, 0, 0).unwrap();
+        assert_eq!(ret, 0);
+
+        let buf = vm.memory.read_slice(REGION_HEAP_BASE, 25).unwrap();
+        assert!(buf.iter().all(|&b| b == 0));
+    }
+
+    #[test]
+    fn generic_sysvar_reads_stored_data() {
+        let mut snap = crate::sysvar_snapshot::SysvarSnapshot::default();
+        let sysvar_id = [0xAA; 32];
+        let sysvar_data = vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
+        snap.sysvar_data.insert(sysvar_id, sysvar_data.clone());
+
+        let mut vm = make_sysvar_test_vm(snap);
+        let handler = SolGetSysvarHandler;
+
+        // Write sysvar ID to heap
+        vm.memory.write_slice(REGION_HEAP_BASE, &sysvar_id).unwrap();
+
+        // Read bytes 2..6 from the sysvar (offset=2, len=4)
+        let dest = REGION_HEAP_BASE + 64;
+        let ret = handler
+            .call(&mut vm, REGION_HEAP_BASE, dest, 2, 4, 0)
+            .unwrap();
+        assert_eq!(ret, 0);
+
+        let result = vm.memory.read_slice(dest, 4).unwrap();
+        assert_eq!(result, &[3, 4, 5, 6]);
+    }
+
+    #[test]
+    fn generic_sysvar_not_found_returns_1() {
+        let mut vm = make_sysvar_test_vm(crate::sysvar_snapshot::SysvarSnapshot::default());
+        let handler = SolGetSysvarHandler;
+
+        let unknown_id = [0xFF; 32];
+        vm.memory
+            .write_slice(REGION_HEAP_BASE, &unknown_id)
+            .unwrap();
+
+        let ret = handler
+            .call(&mut vm, REGION_HEAP_BASE, REGION_HEAP_BASE + 64, 0, 8, 0)
+            .unwrap();
+        assert_eq!(ret, 1); // Not found
+    }
+
+    #[test]
+    fn generic_sysvar_out_of_bounds_returns_2() {
+        let mut snap = crate::sysvar_snapshot::SysvarSnapshot::default();
+        let sysvar_id = [0xBB; 32];
+        snap.sysvar_data.insert(sysvar_id, vec![1, 2, 3]); // 3 bytes
+
+        let mut vm = make_sysvar_test_vm(snap);
+        let handler = SolGetSysvarHandler;
+
+        vm.memory.write_slice(REGION_HEAP_BASE, &sysvar_id).unwrap();
+
+        // Try to read offset=1, len=4 from 3-byte data → out of bounds
+        let ret = handler
+            .call(&mut vm, REGION_HEAP_BASE, REGION_HEAP_BASE + 64, 1, 4, 0)
+            .unwrap();
+        assert_eq!(ret, 2);
+    }
+
+    #[test]
+    fn sibling_instruction_returns_most_recent_first() {
+        use crate::sysvar_snapshot::SiblingInstruction;
+
+        let mut snap = crate::sysvar_snapshot::SysvarSnapshot::default();
+        snap.sibling_instructions.push(SiblingInstruction {
+            program_id: [1u8; 32],
+            data: vec![0xAA, 0xBB],
+            accounts: vec![[2u8; 32]],
+        });
+        snap.sibling_instructions.push(SiblingInstruction {
+            program_id: [3u8; 32],
+            data: vec![0xCC],
+            accounts: vec![[4u8; 32], [5u8; 32]],
+        });
+
+        let mut vm = make_sysvar_test_vm(snap);
+        let handler = SolGetProcessedSiblingInstructionHandler;
+
+        // Index 0 = most recent = second sibling (program_id=[3u8;32])
+        let meta_ptr = REGION_HEAP_BASE;
+        let data_ptr = REGION_HEAP_BASE + 64;
+        let acct_ptr = REGION_HEAP_BASE + 128;
+
+        let ret = handler
+            .call(&mut vm, 0, meta_ptr, data_ptr, acct_ptr, 0)
+            .unwrap();
+        assert_eq!(ret, 0);
+
+        let meta = vm.memory.read_slice(meta_ptr, 48).unwrap();
+        let mut program_id = [0u8; 32];
+        program_id.copy_from_slice(&meta[0..32]);
+        assert_eq!(program_id, [3u8; 32]);
+
+        let data_len = u64::from_le_bytes(meta[32..40].try_into().unwrap());
+        assert_eq!(data_len, 1);
+
+        let accounts_len = u64::from_le_bytes(meta[40..48].try_into().unwrap());
+        assert_eq!(accounts_len, 2);
+
+        let data = vm.memory.read_slice(data_ptr, 1).unwrap();
+        assert_eq!(data, &[0xCC]);
+
+        let acct_data = vm.memory.read_slice(acct_ptr, 64).unwrap();
+        assert_eq!(&acct_data[0..32], &[4u8; 32]);
+        assert_eq!(&acct_data[32..64], &[5u8; 32]);
+    }
+
+    #[test]
+    fn sibling_instruction_index_1_returns_older() {
+        use crate::sysvar_snapshot::SiblingInstruction;
+
+        let mut snap = crate::sysvar_snapshot::SysvarSnapshot::default();
+        snap.sibling_instructions.push(SiblingInstruction {
+            program_id: [1u8; 32],
+            data: vec![0xAA],
+            accounts: vec![],
+        });
+        snap.sibling_instructions.push(SiblingInstruction {
+            program_id: [2u8; 32],
+            data: vec![0xBB],
+            accounts: vec![],
+        });
+
+        let mut vm = make_sysvar_test_vm(snap);
+        let handler = SolGetProcessedSiblingInstructionHandler;
+
+        // Index 1 = older sibling (program_id=[1u8;32])
+        let meta_ptr = REGION_HEAP_BASE;
+        let ret = handler
+            .call(
+                &mut vm,
+                1,
+                meta_ptr,
+                REGION_HEAP_BASE + 64,
+                REGION_HEAP_BASE + 128,
+                0,
+            )
+            .unwrap();
+        assert_eq!(ret, 0);
+
+        let meta = vm.memory.read_slice(meta_ptr, 32).unwrap();
+        assert_eq!(&meta[..], &[1u8; 32]);
+    }
+
+    #[test]
+    fn sibling_instruction_out_of_range_returns_1() {
+        let mut vm = make_sysvar_test_vm(crate::sysvar_snapshot::SysvarSnapshot::default());
+        let handler = SolGetProcessedSiblingInstructionHandler;
+
+        let ret = handler
+            .call(
+                &mut vm,
+                0,
+                REGION_HEAP_BASE,
+                REGION_HEAP_BASE + 64,
+                REGION_HEAP_BASE + 128,
+                0,
+            )
+            .unwrap();
+        assert_eq!(ret, 1); // No siblings
+    }
+
+    #[test]
+    fn epoch_stake_returns_known_stake() {
+        let mut snap = crate::sysvar_snapshot::SysvarSnapshot::default();
+        let vote_account = [0xDD; 32];
+        snap.epoch_stake.insert(vote_account, 42_000_000);
+
+        let mut vm = make_sysvar_test_vm(snap);
+        let handler = SolGetEpochStakeHandler;
+
+        vm.memory
+            .write_slice(REGION_HEAP_BASE, &vote_account)
+            .unwrap();
+
+        let ret = handler.call(&mut vm, REGION_HEAP_BASE, 0, 0, 0, 0).unwrap();
+        assert_eq!(ret, 42_000_000);
+    }
+
+    #[test]
+    fn epoch_stake_returns_zero_for_unknown() {
+        let mut vm = make_sysvar_test_vm(crate::sysvar_snapshot::SysvarSnapshot::default());
+        let handler = SolGetEpochStakeHandler;
+
+        let unknown = [0xFF; 32];
+        vm.memory.write_slice(REGION_HEAP_BASE, &unknown).unwrap();
+
+        let ret = handler.call(&mut vm, REGION_HEAP_BASE, 0, 0, 0, 0).unwrap();
+        assert_eq!(ret, 0);
+    }
+
+    #[test]
     fn sysvar_syscalls_with_default_snapshot_return_zeros() {
         let mut vm = make_sysvar_test_vm(crate::sysvar_snapshot::SysvarSnapshot::default());
-        let ret = SolGetClockSysvarHandler.call(&mut vm, REGION_HEAP_BASE, 0, 0, 0, 0).unwrap();
+        let ret = SolGetClockSysvarHandler
+            .call(&mut vm, REGION_HEAP_BASE, 0, 0, 0, 0)
+            .unwrap();
         assert_eq!(ret, 0);
         let buf = vm.memory.read_slice(REGION_HEAP_BASE, 40).unwrap();
-        assert!(buf.iter().all(|&b| b == 0), "default clock should be all zeros");
+        assert!(
+            buf.iter().all(|&b| b == 0),
+            "default clock should be all zeros"
+        );
 
         let mut vm = make_sysvar_test_vm(crate::sysvar_snapshot::SysvarSnapshot::default());
-        let ret = SolGetLastRestartSlotHandler.call(&mut vm, REGION_HEAP_BASE, 0, 0, 0, 0).unwrap();
+        let ret = SolGetLastRestartSlotHandler
+            .call(&mut vm, REGION_HEAP_BASE, 0, 0, 0, 0)
+            .unwrap();
         assert_eq!(ret, 0);
         let buf = vm.memory.read_slice(REGION_HEAP_BASE, 8).unwrap();
-        assert!(buf.iter().all(|&b| b == 0), "default last_restart should be all zeros");
+        assert!(
+            buf.iter().all(|&b| b == 0),
+            "default last_restart should be all zeros"
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -2262,7 +2795,8 @@ mod tests {
         buf.extend_from_slice(&2u64.to_le_bytes()); // 2 accounts
 
         // Account 1
-        buf.push(0); buf.push(1); // is_signer=0, is_writable=1
+        buf.push(0);
+        buf.push(1); // is_signer=0, is_writable=1
         buf.extend_from_slice(pk1.as_ref());
         buf.extend_from_slice(owner.as_ref());
         buf.extend_from_slice(&100u64.to_le_bytes());
@@ -2273,7 +2807,8 @@ mod tests {
         buf.extend(std::iter::repeat_n(0u8, padding));
 
         // Account 2
-        buf.push(0); buf.push(0); // is_signer=0, is_writable=0
+        buf.push(0);
+        buf.push(0); // is_signer=0, is_writable=0
         buf.extend_from_slice(pk2.as_ref());
         buf.extend_from_slice(owner.as_ref());
         buf.extend_from_slice(&200u64.to_le_bytes());

@@ -6,13 +6,16 @@ use bytes::Bytes;
 use crossbeam_channel::{Receiver, Sender};
 use paradencer_types::shred::Shred;
 use parking_lot::RwLock;
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::runtime::Handle;
 use tracing::{debug, error, info, warn};
+
+/// Cache of shreds indexed by (slot, index)
+type ShredCache = Arc<RwLock<HashMap<(u64, u32), Arc<Shred>>>>;
 
 /// Retransmit request for a missing shred
 #[derive(Debug, Clone)]
@@ -121,7 +124,7 @@ pub struct RetransmitService {
     pending_requests: Arc<RwLock<HashMap<(u64, u32), RetransmitRequest>>>,
 
     /// Shred cache for fulfilling retransmit requests
-    pub shred_cache: Arc<RwLock<HashMap<(u64, u32), Arc<Shred>>>>,
+    pub shred_cache: ShredCache,
 }
 
 impl RetransmitService {
@@ -254,7 +257,7 @@ impl RetransmitService {
         let receiver = self.request_receiver.clone();
         let endpoint = Arc::clone(&self.endpoint);
         let tree = Arc::clone(&self.tree);
-        let config = self.config.clone();
+        let _config = self.config.clone();
         let running = Arc::clone(&self.running);
         let pending_requests = Arc::clone(&self.pending_requests);
 
@@ -306,7 +309,7 @@ impl RetransmitService {
                     for (key, request) in requests.iter() {
                         if request.is_timed_out(timeout) {
                             if request.retry_count < config.max_retransmit_attempts {
-                                timed_out.push((key.clone(), request.clone()));
+                                timed_out.push((*key, request.clone()));
                             } else {
                                 stats.record_timeout();
                             }
@@ -337,8 +340,8 @@ impl RetransmitService {
         node_id: NodeId,
         stats: &RetransmitStats,
         recent_retransmits: &Arc<RwLock<HashMap<(u64, u32), Instant>>>,
-        shred_cache: &Arc<RwLock<HashMap<(u64, u32), Arc<Shred>>>>,
-        batch: &mut Vec<RetransmitShred>,
+        shred_cache: &ShredCache,
+        batch: &mut [RetransmitShred],
     ) {
         if batch.is_empty() {
             return;
@@ -424,8 +427,8 @@ impl RetransmitService {
 
     /// Send a retransmit request to peers
     async fn send_retransmit_request(
-        endpoint: &Arc<QuicEndpoint>,
-        tree: &Arc<RwLock<Option<TurbineTree>>>,
+        _endpoint: &Arc<QuicEndpoint>,
+        _tree: &Arc<RwLock<Option<TurbineTree>>>,
         request: &RetransmitRequest,
     ) {
         // In a real implementation, this would send a repair request
@@ -440,9 +443,9 @@ impl RetransmitService {
 
     /// Send data to a peer
     async fn send_to_peer(
-        endpoint: &Arc<QuicEndpoint>,
-        addr: SocketAddr,
-        data: Bytes,
+        _endpoint: &Arc<QuicEndpoint>,
+        _addr: SocketAddr,
+        _data: Bytes,
     ) -> Result<(), IngressError> {
         // Simplified send implementation
         // In production, this would use QUIC streams

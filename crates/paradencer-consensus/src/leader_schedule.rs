@@ -37,8 +37,11 @@ impl LeaderSchedule {
             return Err(LeaderScheduleError::NoValidators);
         }
 
-        let slot_leaders =
-            Self::generate_schedule(epoch, validators, paradencer_constants::ledger::SLOTS_PER_EPOCH);
+        let slot_leaders = Self::generate_schedule(
+            epoch,
+            validators,
+            paradencer_constants::ledger::SLOTS_PER_EPOCH,
+        );
 
         Ok(Self {
             slot_leaders,

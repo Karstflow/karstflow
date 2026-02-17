@@ -1,6 +1,6 @@
 /// Performance benchmarks and utilities for RPC components
 #[cfg(test)]
-mod benchmarks {
+mod tests {
     use crate::cache::{AccountCache, BlockCache, SignatureCache};
     use crate::filters::{apply_filters, RpcFilterType};
     use crate::simulation::TransactionSimulator;
@@ -204,7 +204,7 @@ mod benchmarks {
         let snapshot = test_snapshot();
 
         // Create subscriptions
-        for i in 0..100 {
+        for _ in 0..100 {
             manager.subscribe_slot(RpcCommitment::Confirmed);
         }
 
@@ -298,7 +298,7 @@ mod benchmarks {
         println!("\n=== Memory Usage Test ===");
         println!("Cache entries: {}", cache.len());
         println!("Account data size: 1KB");
-        println!("Estimated memory: ~{}KB", cache.len() * 1);
+        println!("Estimated memory: ~{}KB", cache.len());
 
         // Verify cache size
         assert_eq!(cache.len(), 1000);

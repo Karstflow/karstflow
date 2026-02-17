@@ -8,8 +8,7 @@
 /// - Stake weight (amount delegated to validator)
 use crate::Inflation;
 use paradencer_constants::economics::{
-    LAMPORTS_PER_SOL, MAX_REWARD_BLOCKS_FACTOR, REWARD_CALCULATION_NUM_BLOCKS,
-    STAKE_ACCOUNTS_PER_BLOCK,
+    MAX_REWARD_BLOCKS_FACTOR, REWARD_CALCULATION_NUM_BLOCKS, STAKE_ACCOUNTS_PER_BLOCK,
 };
 
 /// Calculates total validator rewards for an epoch.
@@ -65,8 +64,7 @@ pub fn calculate_reward_blocks(num_stake_accounts: usize, slots_in_epoch: u64) -
     }
 
     // Calculate partitions needed (round up division)
-    let num_partitions =
-        (num_stake_accounts + STAKE_ACCOUNTS_PER_BLOCK - 1) / STAKE_ACCOUNTS_PER_BLOCK;
+    let num_partitions = num_stake_accounts.div_ceil(STAKE_ACCOUNTS_PER_BLOCK);
 
     // Add calculation block + distribution blocks
     let total_blocks = REWARD_CALCULATION_NUM_BLOCKS + num_partitions as u64;
@@ -150,6 +148,7 @@ pub fn calculate_stake_reward(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use paradencer_constants::economics::LAMPORTS_PER_SOL;
 
     #[test]
     fn rewards_calculates_epoch_total() {

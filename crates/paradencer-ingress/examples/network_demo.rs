@@ -1,8 +1,7 @@
 use paradencer_ingress::{
-    ClusterInfo, ContactInfo, GossipConfig, GossipService, InMemoryShredStore, NodeId,
-    RepairServerConfig, RepairService, RepairServiceConfig, ShredData,
+    ContactInfo, GossipConfig, GossipService, InMemoryShredStore, NodeId, RepairServerConfig,
+    RepairService, RepairServiceConfig, ShredData,
 };
-use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::time::sleep;
@@ -50,9 +49,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("Starting Gossip Services...");
 
     // Start gossip service for Node 1
-    let mut gossip_config1 = GossipConfig::default();
-    gossip_config1.bind_addr = node1_gossip_addr;
-    gossip_config1.push_interval = Duration::from_millis(500);
+    let gossip_config1 = GossipConfig {
+        bind_addr: node1_gossip_addr,
+        push_interval: Duration::from_millis(500),
+        ..GossipConfig::default()
+    };
 
     let mut gossip1 = GossipService::new(node1_id, node1_contact_info.clone(), gossip_config1)
         .await
@@ -60,9 +61,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     gossip1.start().await.unwrap();
 
     // Start gossip service for Node 2
-    let mut gossip_config2 = GossipConfig::default();
-    gossip_config2.bind_addr = node2_gossip_addr;
-    gossip_config2.push_interval = Duration::from_millis(500);
+    let gossip_config2 = GossipConfig {
+        bind_addr: node2_gossip_addr,
+        push_interval: Duration::from_millis(500),
+        ..GossipConfig::default()
+    };
 
     let mut gossip2 = GossipService::new(node2_id, node2_contact_info.clone(), gossip_config2)
         .await
@@ -116,9 +119,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
-    let mut repair_config1 = RepairServiceConfig::default();
-    repair_config1.requester_bind_addr = "127.0.0.1:0".parse().unwrap();
-    repair_config1.server_config.bind_addr = node1_repair_addr;
+    let repair_config1 = RepairServiceConfig {
+        requester_bind_addr: "127.0.0.1:0".parse().unwrap(),
+        server_config: RepairServerConfig {
+            bind_addr: node1_repair_addr,
+            ..RepairServerConfig::default()
+        },
+    };
 
     let mut repair1 = RepairService::new(
         node1_id,
@@ -133,9 +140,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Setup repair service for Node 2
     let node2_shred_store = Arc::new(InMemoryShredStore::new());
 
-    let mut repair_config2 = RepairServiceConfig::default();
-    repair_config2.requester_bind_addr = "127.0.0.1:0".parse().unwrap();
-    repair_config2.server_config.bind_addr = node2_repair_addr;
+    let repair_config2 = RepairServiceConfig {
+        requester_bind_addr: "127.0.0.1:0".parse().unwrap(),
+        server_config: RepairServerConfig {
+            bind_addr: node2_repair_addr,
+            ..RepairServerConfig::default()
+        },
+    };
 
     let mut repair2 = RepairService::new(
         node2_id,

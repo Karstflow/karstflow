@@ -172,7 +172,7 @@ fn test_snapshot_verification() {
     let mut catalog = SnapshotCatalog::new().with_config(SnapshotConfig::new());
 
     let snapshot_path = snapshot_dir.join("full-100.snapshot");
-    let manifest_path = snapshot_dir.join("full-100.snapshot.manifest");
+    let _manifest_path = snapshot_dir.join("full-100.snapshot.manifest");
 
     catalog.register_full_snapshot(100, snapshot_path);
 

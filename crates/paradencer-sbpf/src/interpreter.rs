@@ -1008,7 +1008,13 @@ mod tests {
         let bytes = make_program_bytes(insns);
         let program = load_raw(&bytes).unwrap();
         let memory = MemoryMap::new(&[], TOTAL_STACK_SIZE, DEFAULT_HEAP_SIZE, vec![]);
-        execute(&program, memory, 10_000, &NoSyscalls, SysvarSnapshot::default())
+        execute(
+            &program,
+            memory,
+            10_000,
+            &NoSyscalls,
+            SysvarSnapshot::default(),
+        )
     }
 
     #[test]
@@ -1181,7 +1187,14 @@ mod tests {
         ]);
         let program = load_raw(&bytes).unwrap();
         let memory = MemoryMap::new(&[], TOTAL_STACK_SIZE, DEFAULT_HEAP_SIZE, vec![]);
-        let result = execute(&program, memory, 10_000, &NoSyscalls, SysvarSnapshot::default()).unwrap();
+        let result = execute(
+            &program,
+            memory,
+            10_000,
+            &NoSyscalls,
+            SysvarSnapshot::default(),
+        )
+        .unwrap();
         assert_eq!(result.return_value, 0xBEEF);
     }
 
@@ -1227,7 +1240,13 @@ mod tests {
         let bytes = make_program_bytes(insns);
         let program = load_raw(&bytes).unwrap();
         let memory = MemoryMap::new(&[], TOTAL_STACK_SIZE, DEFAULT_HEAP_SIZE, vec![]);
-        execute(&program, memory, budget, &NoSyscalls, SysvarSnapshot::default())
+        execute(
+            &program,
+            memory,
+            budget,
+            &NoSyscalls,
+            SysvarSnapshot::default(),
+        )
     }
 
     #[test]
@@ -1274,7 +1293,14 @@ mod tests {
         assert!(program.call_targets.contains_key(&1));
 
         let memory = MemoryMap::new(&[], TOTAL_STACK_SIZE, DEFAULT_HEAP_SIZE, vec![]);
-        let result = execute(&program, memory, 10_000, &NoSyscalls, SysvarSnapshot::default()).unwrap();
+        let result = execute(
+            &program,
+            memory,
+            10_000,
+            &NoSyscalls,
+            SysvarSnapshot::default(),
+        )
+        .unwrap();
         assert_eq!(result.return_value, 15); // 10 + 5
     }
 

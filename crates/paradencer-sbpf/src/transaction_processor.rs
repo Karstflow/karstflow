@@ -10,8 +10,8 @@ use crate::{
 use paradencer_ids::{
     ADDRESS_LOOKUP_TABLE_PROGRAM_ID, ASSOCIATED_TOKEN_PROGRAM_ID, BPF_LOADER_PROGRAM_ID,
     COMPUTE_BUDGET_PROGRAM_ID, CONFIG_PROGRAM_ID, ED25519_PROGRAM_ID, LOADER_V4_PROGRAM_ID,
-    MEMO_PROGRAM_ID, MEMO_PROGRAM_V3_ID, SECP256K1_PROGRAM_ID, STAKE_PROGRAM_ID,
-    SYSTEM_PROGRAM_ID, TOKEN_2022_PROGRAM_ID, TOKEN_PROGRAM_ID, VOTE_PROGRAM_ID,
+    MEMO_PROGRAM_ID, MEMO_PROGRAM_V3_ID, SECP256K1_PROGRAM_ID, STAKE_PROGRAM_ID, SYSTEM_PROGRAM_ID,
+    TOKEN_2022_PROGRAM_ID, TOKEN_PROGRAM_ID, VOTE_PROGRAM_ID,
 };
 use paradencer_types::{Account, Pubkey};
 use std::collections::HashMap;
@@ -173,7 +173,7 @@ impl TransactionProcessor {
                     .get(&pubkey)
                     .or_else(|| account_state.get(&pubkey))
                     .cloned()
-                    .unwrap_or_else(|| Account::default());
+                    .unwrap_or_default();
 
                 // Determine if writable (simplified: assume all accounts in instruction are writable)
                 instruction_accounts.push((pubkey, account, true));

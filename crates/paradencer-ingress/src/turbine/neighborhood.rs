@@ -1,5 +1,4 @@
 use crate::gossip::NodeId;
-use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::time::{Duration, Instant};
 
@@ -113,7 +112,7 @@ impl Neighborhood {
     }
 
     /// Add or update a peer in the neighborhood
-    pub fn upsert_peer(&mut self, mut proximity: NetworkProximity) {
+    pub fn upsert_peer(&mut self, proximity: NetworkProximity) {
         // Remove existing entry if present
         self.peers.retain(|p| p.node_id != proximity.node_id);
 

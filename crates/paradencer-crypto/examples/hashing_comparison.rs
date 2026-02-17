@@ -74,8 +74,8 @@ fn main() {
             100
         };
 
-        benchmark_hash_algorithm("Blake3", &data, iterations, |d| Blake3Hasher::hash(d));
-        benchmark_hash_algorithm("SHA256", &data, iterations, |d| Sha256Hasher::hash(d));
+        benchmark_hash_algorithm("Blake3", &data, iterations, Blake3Hasher::hash);
+        benchmark_hash_algorithm("SHA256", &data, iterations, Sha256Hasher::hash);
     }
 
     // Streaming hashing comparison

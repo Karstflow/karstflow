@@ -167,7 +167,8 @@ fn bench_bulk_insert(c: &mut Criterion) {
 
                 b.iter(|| {
                     let db = AccountDatabase::with_capacity(size);
-                    black_box(db.bulk_insert_published_accounts(accounts.clone()).unwrap());
+                    db.bulk_insert_published_accounts(accounts.clone()).unwrap();
+                    black_box(&db);
                 });
             },
         );

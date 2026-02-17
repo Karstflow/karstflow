@@ -335,10 +335,9 @@ impl LoaderV4Executor {
         outcome
             .modified_accounts
             .insert(*program_pubkey, new_program);
-        outcome.logs.push(format!(
-            "LoaderV4: Copied {} bytes from source",
-            length
-        ));
+        outcome
+            .logs
+            .push(format!("LoaderV4: Copied {} bytes from source", length));
         Ok(outcome)
     }
 
@@ -478,11 +477,7 @@ impl LoaderV4Executor {
         let (state, _authority) = self.check_program_account(ctx)?;
 
         // Get current slot from sysvar snapshot
-        let current_slot = ctx
-            .sysvar_snapshot
-            .as_ref()
-            .map(|s| s.slot)
-            .unwrap_or(0);
+        let current_slot = ctx.sysvar_snapshot.as_ref().map(|s| s.slot).unwrap_or(0);
 
         // Cooldown check: skip if never deployed (slot == 0)
         if state.slot != 0
@@ -540,11 +535,7 @@ impl LoaderV4Executor {
     ) -> Result<ExecutionOutcome, String> {
         let (state, _authority) = self.check_program_account(ctx)?;
 
-        let current_slot = ctx
-            .sysvar_snapshot
-            .as_ref()
-            .map(|s| s.slot)
-            .unwrap_or(0);
+        let current_slot = ctx.sysvar_snapshot.as_ref().map(|s| s.slot).unwrap_or(0);
 
         // Cooldown check
         if state
@@ -569,9 +560,7 @@ impl LoaderV4Executor {
         outcome
             .modified_accounts
             .insert(*program_pubkey, new_program);
-        outcome
-            .logs
-            .push("LoaderV4: Retracted program".to_string());
+        outcome.logs.push("LoaderV4: Retracted program".to_string());
         Ok(outcome)
     }
 
@@ -788,7 +777,8 @@ mod tests {
         assert!(outcome.success);
         let modified = &outcome.modified_accounts[&program_pubkey];
         assert_eq!(
-            modified.data.as_ref()[constants::PROGRAM_DATA_OFFSET..constants::PROGRAM_DATA_OFFSET + 3],
+            modified.data.as_ref()
+                [constants::PROGRAM_DATA_OFFSET..constants::PROGRAM_DATA_OFFSET + 3],
             [0xAA, 0xBB, 0xCC]
         );
     }
@@ -883,7 +873,8 @@ mod tests {
         assert!(outcome.success);
         let modified = &outcome.modified_accounts[&program_pubkey];
         assert_eq!(
-            modified.data.as_ref()[constants::PROGRAM_DATA_OFFSET..constants::PROGRAM_DATA_OFFSET + 4],
+            modified.data.as_ref()
+                [constants::PROGRAM_DATA_OFFSET..constants::PROGRAM_DATA_OFFSET + 4],
             [0xDE, 0xAD, 0xBE, 0xEF]
         );
     }
@@ -938,7 +929,9 @@ mod tests {
 
         let program = make_uninitialized_account(50_000_000);
 
-        let mut instruction_data = constants::INSTRUCTION_SET_PROGRAM_LENGTH.to_le_bytes().to_vec();
+        let mut instruction_data = constants::INSTRUCTION_SET_PROGRAM_LENGTH
+            .to_le_bytes()
+            .to_vec();
         instruction_data.extend_from_slice(&1000u32.to_le_bytes());
 
         let ctx = ExecutionContext::new(
@@ -958,10 +951,7 @@ mod tests {
         assert!(modified.meta.executable);
 
         // Should have correct total size
-        assert_eq!(
-            modified.data.len(),
-            constants::PROGRAM_DATA_OFFSET + 1000
-        );
+        assert_eq!(modified.data.len(), constants::PROGRAM_DATA_OFFSET + 1000);
 
         // State should be retracted with correct authority
         let state = LoaderV4State::from_bytes(modified.data.as_ref()).unwrap();
@@ -989,7 +979,9 @@ mod tests {
             data: AccountData::empty(),
         };
 
-        let mut instruction_data = constants::INSTRUCTION_SET_PROGRAM_LENGTH.to_le_bytes().to_vec();
+        let mut instruction_data = constants::INSTRUCTION_SET_PROGRAM_LENGTH
+            .to_le_bytes()
+            .to_vec();
         instruction_data.extend_from_slice(&0u32.to_le_bytes()); // size 0 = close
 
         let ctx = ExecutionContext::new(
@@ -1175,7 +1167,9 @@ mod tests {
 
         let program = make_program_account(&authority, constants::STATUS_RETRACTED, 0, 100);
 
-        let instruction_data = constants::INSTRUCTION_TRANSFER_AUTHORITY.to_le_bytes().to_vec();
+        let instruction_data = constants::INSTRUCTION_TRANSFER_AUTHORITY
+            .to_le_bytes()
+            .to_vec();
 
         let ctx = ExecutionContext::new(
             LOADER_V4_PROGRAM_ID,
@@ -1203,7 +1197,9 @@ mod tests {
 
         let program = make_program_account(&authority, constants::STATUS_RETRACTED, 0, 100);
 
-        let instruction_data = constants::INSTRUCTION_TRANSFER_AUTHORITY.to_le_bytes().to_vec();
+        let instruction_data = constants::INSTRUCTION_TRANSFER_AUTHORITY
+            .to_le_bytes()
+            .to_vec();
 
         let ctx = ExecutionContext::new(
             LOADER_V4_PROGRAM_ID,
@@ -1230,8 +1226,7 @@ mod tests {
         let next_version_pubkey = Pubkey::new_unique();
 
         let program = make_program_account(&authority, constants::STATUS_DEPLOYED, 5, 100);
-        let next_version =
-            make_program_account(&authority, constants::STATUS_RETRACTED, 0, 50);
+        let next_version = make_program_account(&authority, constants::STATUS_RETRACTED, 0, 50);
 
         let instruction_data = constants::INSTRUCTION_FINALIZE.to_le_bytes().to_vec();
 
@@ -1262,8 +1257,7 @@ mod tests {
         let next_version_pubkey = Pubkey::new_unique();
 
         let program = make_program_account(&authority, constants::STATUS_RETRACTED, 0, 100);
-        let next_version =
-            make_program_account(&authority, constants::STATUS_RETRACTED, 0, 50);
+        let next_version = make_program_account(&authority, constants::STATUS_RETRACTED, 0, 50);
 
         let instruction_data = constants::INSTRUCTION_FINALIZE.to_le_bytes().to_vec();
 
@@ -1290,8 +1284,7 @@ mod tests {
         let next_version_pubkey = Pubkey::new_unique();
 
         let program = make_program_account(&authority, constants::STATUS_DEPLOYED, 5, 100);
-        let next_version =
-            make_program_account(&authority, constants::STATUS_FINALIZED, 0, 50);
+        let next_version = make_program_account(&authority, constants::STATUS_FINALIZED, 0, 50);
 
         let instruction_data = constants::INSTRUCTION_FINALIZE.to_le_bytes().to_vec();
 

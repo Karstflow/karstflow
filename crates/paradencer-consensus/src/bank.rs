@@ -1,11 +1,11 @@
 use super::{EpochSchedule, Inflation, LeaderSchedule, Rent};
 use crate::blockhash_queue::{BlockhashInfo, BlockhashQueue};
 use crate::epoch_processing::{AccountDatabaseVoteReader, EpochProcessor};
-use crate::transaction_cache::TransactionCache;
 use crate::features::{process_feature_activations, FeatureSet};
 use crate::reward_application::RewardApplicator;
 use crate::rewards_distribution::RewardsDistributor;
 use crate::sysvars::SysvarCache;
+use crate::transaction_cache::TransactionCache;
 use crate::StakeHistory;
 use crate::StakeTracker;
 use paradencer_constants::economics::{FEE_BURN_PERCENT, LAMPORTS_PER_SIGNATURE};
@@ -218,9 +218,7 @@ impl Bank {
             stake_tracker: parent.stake_tracker.clone(),
             stake_history: parent.stake_history.clone(),
             feature_set: parent.feature_set.clone(),
-            rewards_distributor: RwLock::new(
-                parent.rewards_distributor.read().unwrap().clone(),
-            ),
+            rewards_distributor: RwLock::new(parent.rewards_distributor.read().unwrap().clone()),
         }
     }
 
@@ -450,7 +448,7 @@ impl Bank {
             .read()
             .unwrap()
             .as_ref()
-            .map_or(false, |d| !d.is_complete())
+            .is_some_and(|d| !d.is_complete())
     }
 
     /// Distribute pending stake rewards for the current slot.
@@ -599,11 +597,8 @@ impl Bank {
 
         // Register this slot's blockhash in the recent blockhash queue
         let bank_hash = self.hash();
-        let blockhash_info = BlockhashInfo::new(
-            Pubkey::from(bank_hash),
-            LAMPORTS_PER_SIGNATURE,
-            self.slot,
-        );
+        let blockhash_info =
+            BlockhashInfo::new(Pubkey::from(bank_hash), LAMPORTS_PER_SIGNATURE, self.slot);
         self.blockhash_queue
             .write()
             .unwrap()
@@ -1035,7 +1030,7 @@ mod tests {
         let epoch_schedule = Arc::new(EpochSchedule::default());
         let leader_schedule = create_test_leader_schedule(0);
 
-        let mut bank = Bank::new_genesis(accounts, epoch_schedule, leader_schedule);
+        let bank = Bank::new_genesis(accounts, epoch_schedule, leader_schedule);
 
         for i in 1..=TICKS_PER_SLOT {
             assert!(bank.register_tick().is_ok());
@@ -1056,7 +1051,7 @@ mod tests {
         let epoch_schedule = Arc::new(EpochSchedule::default());
         let leader_schedule = create_test_leader_schedule(0);
 
-        let mut bank = Bank::new_genesis(accounts, epoch_schedule, leader_schedule);
+        let bank = Bank::new_genesis(accounts, epoch_schedule, leader_schedule);
 
         assert!(bank.register_transaction().is_ok());
         assert_eq!(bank.transaction_count(), 1);
@@ -1071,7 +1066,7 @@ mod tests {
         let epoch_schedule = Arc::new(EpochSchedule::default());
         let leader_schedule = create_test_leader_schedule(0);
 
-        let mut bank = Bank::new_genesis(accounts, epoch_schedule, leader_schedule);
+        let bank = Bank::new_genesis(accounts, epoch_schedule, leader_schedule);
 
         assert!(matches!(
             bank.freeze(),
@@ -1093,7 +1088,7 @@ mod tests {
         let epoch_schedule = Arc::new(EpochSchedule::default());
         let leader_schedule = create_test_leader_schedule(0);
 
-        let mut bank = Bank::new_genesis(accounts, epoch_schedule, leader_schedule);
+        let bank = Bank::new_genesis(accounts, epoch_schedule, leader_schedule);
 
         for _ in 0..TICKS_PER_SLOT {
             bank.register_tick().unwrap();
@@ -1113,7 +1108,7 @@ mod tests {
         let epoch_schedule = Arc::new(EpochSchedule::default());
         let leader_schedule = create_test_leader_schedule(0);
 
-        let mut bank = Bank::new_genesis(accounts, epoch_schedule, leader_schedule);
+        let bank = Bank::new_genesis(accounts, epoch_schedule, leader_schedule);
 
         assert_eq!(bank.mark_rooted(), Err(BankRootError::NotFrozen));
 
@@ -1132,7 +1127,7 @@ mod tests {
         let epoch_schedule = Arc::new(EpochSchedule::default());
         let leader_schedule = create_test_leader_schedule(0);
 
-        let mut parent = Bank::new_genesis(
+        let parent = Bank::new_genesis(
             accounts.clone(),
             epoch_schedule.clone(),
             leader_schedule.clone(),
@@ -1195,7 +1190,7 @@ mod tests {
         let epoch_schedule = Arc::new(EpochSchedule::default());
         let leader_schedule = create_test_leader_schedule(0);
 
-        let mut bank = Bank::new_genesis(accounts, epoch_schedule, leader_schedule);
+        let bank = Bank::new_genesis(accounts, epoch_schedule, leader_schedule);
 
         bank.add_execution_fee(1000);
         bank.add_priority_fee(500);
@@ -1216,7 +1211,7 @@ mod tests {
         let epoch_schedule = Arc::new(EpochSchedule::default());
         let leader_schedule = create_test_leader_schedule(0);
 
-        let mut bank = Bank::new_genesis_with_config(
+        let bank = Bank::new_genesis_with_config(
             accounts,
             epoch_schedule,
             leader_schedule,
@@ -1252,7 +1247,7 @@ mod tests {
         let epoch_schedule = Arc::new(EpochSchedule::default());
         let leader_schedule = create_test_leader_schedule(0);
 
-        let mut bank = Bank::new_genesis(accounts, epoch_schedule, leader_schedule);
+        let bank = Bank::new_genesis(accounts, epoch_schedule, leader_schedule);
 
         for _ in 0..TICKS_PER_SLOT {
             bank.register_tick().unwrap();
@@ -1284,7 +1279,7 @@ mod tests {
             foundation_duration_years: 8.0,
         };
 
-        let mut parent = Bank::new_genesis_with_config(
+        let parent = Bank::new_genesis_with_config(
             accounts.clone(),
             epoch_schedule.clone(),
             leader_schedule.clone(),
@@ -2027,7 +2022,11 @@ mod tests {
         use crate::blockhash_queue::BlockhashInfo;
         let test_hash = [0x42u8; 32];
         let info = BlockhashInfo::new(Pubkey::from(test_hash), LAMPORTS_PER_SIGNATURE, 0);
-        parent.blockhash_queue().write().unwrap().register_hash(info);
+        parent
+            .blockhash_queue()
+            .write()
+            .unwrap()
+            .register_hash(info);
 
         for _ in 0..TICKS_PER_SLOT {
             parent.register_tick().unwrap();
@@ -2072,7 +2071,8 @@ mod tests {
         // Manually set up a rewards distributor with a reward for this slot
         let target = Pubkey::new_unique();
         let target_account = paradencer_storage::Account::new(1_000, vec![], Pubkey::default());
-        bank.accounts().store_published_account(target, target_account);
+        bank.accounts()
+            .store_published_account(target, target_account);
 
         let reward = crate::rewards_distribution::PendingReward {
             account: target,
@@ -2125,7 +2125,9 @@ mod tests {
         let regenerated = parent.next_leader_schedule().unwrap();
 
         // Create child in the next epoch — should use regenerated schedule
-        let next_epoch_slot = parent.epoch_schedule().get_first_slot_in_epoch(parent.epoch() + 1);
+        let next_epoch_slot = parent
+            .epoch_schedule()
+            .get_first_slot_in_epoch(parent.epoch() + 1);
         let fallback_schedule = create_test_leader_schedule(parent.epoch() + 1);
         let child = Bank::new_from_parent(&parent, next_epoch_slot, fallback_schedule);
 
@@ -2144,8 +2146,7 @@ mod tests {
 
         // Create child in same epoch — should use provided schedule
         let same_epoch_schedule = create_test_leader_schedule(parent.epoch());
-        let child =
-            Bank::new_from_parent(&parent, parent.slot() + 1, same_epoch_schedule.clone());
+        let child = Bank::new_from_parent(&parent, parent.slot() + 1, same_epoch_schedule.clone());
 
         // Should use the provided schedule, not the regenerated one
         assert_eq!(
@@ -2160,8 +2161,7 @@ mod tests {
         let epoch_schedule = Arc::new(EpochSchedule::default());
 
         let leader = Pubkey::new_unique();
-        let leader_schedule =
-            Arc::new(LeaderSchedule::new(0, &[(leader, 1000)]).unwrap());
+        let leader_schedule = Arc::new(LeaderSchedule::new(0, &[(leader, 1000)]).unwrap());
 
         let bank = Bank::new_genesis_with_config(
             accounts.clone(),
@@ -2203,8 +2203,7 @@ mod tests {
         let accounts = Arc::new(AccountDatabase::new());
         let epoch_schedule = Arc::new(EpochSchedule::default());
         let leader = Pubkey::new_unique();
-        let leader_schedule =
-            Arc::new(LeaderSchedule::new(0, &[(leader, 1000)]).unwrap());
+        let leader_schedule = Arc::new(LeaderSchedule::new(0, &[(leader, 1000)]).unwrap());
 
         let parent = Bank::new_genesis_with_config(
             accounts.clone(),
@@ -2238,8 +2237,7 @@ mod tests {
 
         // Create child at epoch boundary (first slot of epoch 1)
         let epoch_1_start = SLOTS_PER_EPOCH;
-        let child_schedule =
-            Arc::new(LeaderSchedule::new(1, &[(leader, 1000)]).unwrap());
+        let child_schedule = Arc::new(LeaderSchedule::new(1, &[(leader, 1000)]).unwrap());
         let child = Bank::new_from_parent(&parent, epoch_1_start, child_schedule);
 
         assert!(child.is_epoch_boundary());

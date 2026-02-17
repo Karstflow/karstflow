@@ -76,17 +76,17 @@ impl Pubkey {
         // Check that owner doesn't contain ProgramDerivedAddress marker
         // (prevents misuse of create_with_seed for PDA derivation)
         const PDA_MARKER: &[u8] = b"ProgramDerivedAddress";
-        if owner.0.len() >= 11 + PDA_MARKER.len() {
-            if &owner.0[11..11 + PDA_MARKER.len()] == PDA_MARKER {
-                return Err(PubkeyError::IllegalOwner);
-            }
+        if owner.0.len() >= 11 + PDA_MARKER.len()
+            && &owner.0[11..11 + PDA_MARKER.len()] == PDA_MARKER
+        {
+            return Err(PubkeyError::IllegalOwner);
         }
 
         // Compute SHA256(base || seed || owner)
         let mut hasher = Sha256::new();
-        hasher.update(&base.0);
+        hasher.update(base.0);
         hasher.update(seed_bytes);
-        hasher.update(&owner.0);
+        hasher.update(owner.0);
         let hash = hasher.finalize();
 
         Ok(Pubkey(hash.into()))

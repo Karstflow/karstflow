@@ -5,7 +5,7 @@
 use paradencer_ingress::{
     BroadcastManager, BroadcastStats, ContactInfo, Neighborhood, NetworkProximity, NodeId,
     PropagationMetrics, ProximityEstimator, QuicConfig, QuicEndpoint, QuicEndpointStats,
-    RetransmitService, RetransmitStats, ShredBroadcaster, TurbineConfig, TurbineStats, TurbineTree,
+    RetransmitService, RetransmitStats, ShredBroadcaster, TurbineConfig, TurbineStats,
     TurbineTreeBuilder, ValidatorInfo,
 };
 use paradencer_types::shred::{

@@ -44,9 +44,10 @@ impl NonceData {
 /// Nonce account state.
 ///
 /// Can be either uninitialized or initialized with nonce data.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub enum Nonce {
     /// Account is not initialized
+    #[default]
     Uninitialized,
     /// Account is initialized with nonce data
     Initialized(NonceData),
@@ -105,12 +106,6 @@ impl Nonce {
     /// Get the fee calculator if initialized.
     pub fn fee_calculator(&self) -> Option<&FeeCalculator> {
         self.data().map(|d| &d.fee_calculator)
-    }
-}
-
-impl Default for Nonce {
-    fn default() -> Self {
-        Self::Uninitialized
     }
 }
 

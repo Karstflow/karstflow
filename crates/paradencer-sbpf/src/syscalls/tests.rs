@@ -624,7 +624,9 @@ fn create_program_address_rejects_on_curve_result() {
 
     // The ed25519 basepoint compressed form is definitely on the curve
     let basepoint = curve25519_dalek::constants::ED25519_BASEPOINT_COMPRESSED;
-    assert!(CompressedEdwardsY(basepoint.to_bytes()).decompress().is_some());
+    assert!(CompressedEdwardsY(basepoint.to_bytes())
+        .decompress()
+        .is_some());
 
     // Verify that try_find_program_address produces off-curve results
     // (it skips on-curve hashes). If the raw hash for bump=255 happens to be
@@ -1210,8 +1212,8 @@ fn ed25519_validate_invalid_point() {
     let mut bad = [0u8; 32];
     bad[0] = 2; // low-order bytes of y = 2 → likely no valid x
     bad[31] = 0x7F; // high bit clear, but y near max
-    // This specific pattern is almost certainly invalid. If somehow valid,
-    // the test still verifies the function runs without panicking.
+                    // This specific pattern is almost certainly invalid. If somehow valid,
+                    // the test still verifies the function runs without panicking.
     let result = curve25519::validate_point(&mut ctx, CURVE_ID_ED25519, &bad).unwrap();
     // We just verify the function doesn't panic. The result may be true or false.
     let _ = result;
@@ -1277,9 +1279,15 @@ fn ristretto_add_two_points() {
         s[0] = 2;
         s
     };
-    let mul_result = curve25519::group_op(&mut ctx, CURVE_ID_RISTRETTO255, CURVE_OP_MUL, &scalar_2, &bp)
-        .unwrap()
-        .unwrap();
+    let mul_result = curve25519::group_op(
+        &mut ctx,
+        CURVE_ID_RISTRETTO255,
+        CURVE_OP_MUL,
+        &scalar_2,
+        &bp,
+    )
+    .unwrap()
+    .unwrap();
 
     assert_eq!(result, mul_result);
 }
@@ -1318,14 +1326,9 @@ fn ed25519_msm_single_point_matches_mul() {
         .unwrap()
         .unwrap();
 
-    let msm_result = curve25519::multiscalar_mul(
-        &mut ctx,
-        CURVE_ID_ED25519,
-        &[scalar_7],
-        &[bp],
-    )
-    .unwrap()
-    .unwrap();
+    let msm_result = curve25519::multiscalar_mul(&mut ctx, CURVE_ID_ED25519, &[scalar_7], &[bp])
+        .unwrap()
+        .unwrap();
 
     assert_eq!(mul_result, msm_result);
 }
@@ -1565,8 +1568,7 @@ fn cpi_pda_signer_allows_escalation() {
 
     // Derive a PDA from the caller's program ID
     let mut find_ctx = SyscallContext::new(caller_id, 1_000_000);
-    let (pda_key, bump) =
-        try_find_program_address(&mut find_ctx, &[b"auth"], &caller_id).unwrap();
+    let (pda_key, bump) = try_find_program_address(&mut find_ctx, &[b"auth"], &caller_id).unwrap();
 
     let mut ctx = SyscallContext::new(caller_id, 1_000_000);
     // Caller has the PDA account as writable but NOT signer
@@ -1693,8 +1695,7 @@ fn cpi_derive_pda_signers_seed_too_long() {
 fn cpi_derive_pda_signers_deterministic() {
     let program_id = Pubkey::new([5u8; 32]);
     let mut find_ctx = SyscallContext::new(program_id, 1_000_000);
-    let (_, bump) =
-        try_find_program_address(&mut find_ctx, &[b"det"], &program_id).unwrap();
+    let (_, bump) = try_find_program_address(&mut find_ctx, &[b"det"], &program_id).unwrap();
     let bump_bytes = [bump];
     let seeds: &[&[u8]] = &[b"det", &bump_bytes];
 
@@ -1716,10 +1717,8 @@ fn cpi_realloc_within_limit_succeeds() {
 
     let mut ctx = SyscallContext::new(caller_id, 1_000_000);
     // Existing account with 100 bytes
-    ctx.accounts.insert(
-        account_key,
-        Account::new(1000, vec![0u8; 100], caller_id),
-    );
+    ctx.accounts
+        .insert(account_key, Account::new(1000, vec![0u8; 100], caller_id));
 
     let instruction = CpiInstruction {
         program_id: callee_id,
@@ -1764,10 +1763,8 @@ fn cpi_realloc_exceeds_limit_rejected() {
     let account_key = Pubkey::new_unique();
 
     let mut ctx = SyscallContext::new(caller_id, 1_000_000);
-    ctx.accounts.insert(
-        account_key,
-        Account::new(1000, vec![0u8; 100], caller_id),
-    );
+    ctx.accounts
+        .insert(account_key, Account::new(1000, vec![0u8; 100], caller_id));
 
     let instruction = CpiInstruction {
         program_id: callee_id,
@@ -1809,10 +1806,8 @@ fn cpi_data_shrink_allowed() {
     let account_key = Pubkey::new_unique();
 
     let mut ctx = SyscallContext::new(caller_id, 1_000_000);
-    ctx.accounts.insert(
-        account_key,
-        Account::new(1000, vec![42u8; 1000], caller_id),
-    );
+    ctx.accounts
+        .insert(account_key, Account::new(1000, vec![42u8; 1000], caller_id));
 
     let instruction = CpiInstruction {
         program_id: callee_id,
@@ -1859,10 +1854,8 @@ fn cpi_writeback_propagates_lamports() {
     let account_key = Pubkey::new_unique();
 
     let mut ctx = SyscallContext::new(caller_id, 1_000_000);
-    ctx.accounts.insert(
-        account_key,
-        Account::new(1000, vec![], caller_id),
-    );
+    ctx.accounts
+        .insert(account_key, Account::new(1000, vec![], caller_id));
 
     let instruction = CpiInstruction {
         program_id: callee_id,
@@ -1906,10 +1899,8 @@ fn cpi_writeback_propagates_owner() {
     let new_owner = Pubkey::new_unique();
 
     let mut ctx = SyscallContext::new(caller_id, 1_000_000);
-    ctx.accounts.insert(
-        account_key,
-        Account::new(1000, vec![], caller_id),
-    );
+    ctx.accounts
+        .insert(account_key, Account::new(1000, vec![], caller_id));
 
     let instruction = CpiInstruction {
         program_id: callee_id,
@@ -1952,10 +1943,8 @@ fn cpi_readonly_account_not_written_back() {
     let account_key = Pubkey::new_unique();
 
     let mut ctx = SyscallContext::new(caller_id, 1_000_000);
-    ctx.accounts.insert(
-        account_key,
-        Account::new(1000, vec![], caller_id),
-    );
+    ctx.accounts
+        .insert(account_key, Account::new(1000, vec![], caller_id));
 
     let instruction = CpiInstruction {
         program_id: callee_id,
@@ -1997,10 +1986,8 @@ fn cpi_missing_account_info_rejected() {
     let missing_key = Pubkey::new_unique();
 
     let mut ctx = SyscallContext::new(caller_id, 1_000_000);
-    ctx.accounts.insert(
-        missing_key,
-        Account::new(100, vec![], caller_id),
-    );
+    ctx.accounts
+        .insert(missing_key, Account::new(100, vec![], caller_id));
 
     let instruction = CpiInstruction {
         program_id: callee_id,
@@ -2041,7 +2028,7 @@ fn cpi_too_many_signers_rejected() {
     // Create 17 signer seed sets (exceeds MAX_CPI_SIGNERS = 16)
     let seed_data: Vec<Vec<u8>> = (0..17u8).map(|i| vec![i]).collect();
     let seed_refs: Vec<&[u8]> = seed_data.iter().map(|s| s.as_slice()).collect();
-    let all_seeds: Vec<&[&[u8]]> = seed_refs.iter().map(|s| std::slice::from_ref(s)).collect();
+    let all_seeds: Vec<&[&[u8]]> = seed_refs.iter().map(std::slice::from_ref).collect();
 
     let result = invoke_signed(&mut ctx, &instruction, &[], &all_seeds);
     assert!(matches!(result, Err(SyscallError::InvalidArgument(_))));

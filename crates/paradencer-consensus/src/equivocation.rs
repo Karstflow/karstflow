@@ -29,7 +29,8 @@ pub struct EquivocationProof {
 struct VoteRecord {
     /// Block hash the validator voted for
     block_hash: [u8; 32],
-    /// When the vote was recorded
+    /// When the vote was recorded (kept for diagnostic/slashing evidence)
+    #[allow(dead_code)]
     timestamp: u64,
 }
 
@@ -175,7 +176,10 @@ impl EquivocationDetector {
         if slot > self.current_slot {
             self.current_slot = slot;
             // Prune periodically when we advance far enough
-            if self.current_slot % (self.max_history_slots / 4).max(1) == 0 {
+            if self
+                .current_slot
+                .is_multiple_of((self.max_history_slots / 4).max(1))
+            {
                 self.prune_old_history();
             }
         }

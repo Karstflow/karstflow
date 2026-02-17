@@ -602,10 +602,8 @@ impl StakeProgramExecutor {
                     && current_epoch > stake.delegation.deactivation_epoch
                 {
                     0 // Assume fully cooled down after 1+ epoch for simplicity
-                } else if stake.delegation.is_deactivated() {
-                    stake.delegation.stake_amount // Still cooling down
                 } else {
-                    stake.delegation.stake_amount // Active
+                    stake.delegation.stake_amount // Active or still cooling down
                 };
 
                 let locked = meta.rent_exempt_reserve.saturating_add(effective_stake);

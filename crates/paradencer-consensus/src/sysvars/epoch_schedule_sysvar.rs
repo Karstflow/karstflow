@@ -10,7 +10,7 @@ use crate::{EpochSchedule, EpochScheduleConfig};
 /// Layout: slots_per_epoch(u64) + leader_schedule_slot_offset(u64)
 ///         + warmup(bool as u8) + first_normal_epoch(u64) + first_normal_slot(u64)
 ///         = 33 bytes.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct EpochScheduleSysvar {
     pub schedule: EpochSchedule,
 }
@@ -53,14 +53,6 @@ impl EpochScheduleSysvar {
         Some(Self {
             schedule: EpochSchedule::new(config),
         })
-    }
-}
-
-impl Default for EpochScheduleSysvar {
-    fn default() -> Self {
-        Self {
-            schedule: EpochSchedule::default(),
-        }
     }
 }
 

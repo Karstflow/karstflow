@@ -106,7 +106,7 @@ impl FeatureSet {
     pub fn was_active_at_slot(&self, feature_id: &Pubkey, slot: u64) -> bool {
         self.active
             .get(feature_id)
-            .map_or(false, |&activation_slot| activation_slot <= slot)
+            .is_some_and(|&activation_slot| activation_slot <= slot)
     }
 
     /// Get all inactive feature IDs.

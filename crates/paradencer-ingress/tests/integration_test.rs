@@ -16,8 +16,10 @@ async fn test_gossip_service_lifecycle() {
     let node_id = NodeId::random();
     let contact_info = create_test_contact_info(node_id, 0);
 
-    let mut config = GossipConfig::default();
-    config.bind_addr = "127.0.0.1:0".parse().unwrap();
+    let config = GossipConfig {
+        bind_addr: "127.0.0.1:0".parse().unwrap(),
+        ..GossipConfig::default()
+    };
 
     let mut service = GossipService::new(node_id, contact_info, config)
         .await
@@ -47,9 +49,13 @@ async fn test_repair_service_lifecycle() {
 
     let shred_store = Arc::new(InMemoryShredStore::new());
 
-    let mut config = RepairServiceConfig::default();
-    config.requester_bind_addr = "127.0.0.1:0".parse().unwrap();
-    config.server_config.bind_addr = "127.0.0.1:0".parse().unwrap();
+    let config = RepairServiceConfig {
+        requester_bind_addr: "127.0.0.1:0".parse().unwrap(),
+        server_config: RepairServerConfig {
+            bind_addr: "127.0.0.1:0".parse().unwrap(),
+            ..RepairServerConfig::default()
+        },
+    };
 
     let mut service = RepairService::new(node_id, cluster_info, config, shred_store)
         .await
@@ -110,8 +116,10 @@ async fn test_two_node_gossip() {
     let node1_id = NodeId::random();
     let node1_info = create_test_contact_info(node1_id, 0);
 
-    let mut config1 = GossipConfig::default();
-    config1.bind_addr = "127.0.0.1:0".parse().unwrap();
+    let config1 = GossipConfig {
+        bind_addr: "127.0.0.1:0".parse().unwrap(),
+        ..GossipConfig::default()
+    };
 
     let mut service1 = GossipService::new(node1_id, node1_info.clone(), config1)
         .await
@@ -121,8 +129,10 @@ async fn test_two_node_gossip() {
     let node2_id = NodeId::random();
     let node2_info = create_test_contact_info(node2_id, 0);
 
-    let mut config2 = GossipConfig::default();
-    config2.bind_addr = "127.0.0.1:0".parse().unwrap();
+    let config2 = GossipConfig {
+        bind_addr: "127.0.0.1:0".parse().unwrap(),
+        ..GossipConfig::default()
+    };
 
     let mut service2 = GossipService::new(node2_id, node2_info.clone(), config2)
         .await

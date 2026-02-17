@@ -10,7 +10,7 @@
 use crate::{
     rewards_calculator::{RewardsCalculator, ValidatorReward, VoteAccountInfo},
     rewards_distribution::{PendingReward, RewardsDistributor},
-    Bank, Inflation, StakeHistory, StakeHistoryEntry, StakeTracker,
+    Bank, StakeHistory, StakeHistoryEntry, StakeTracker,
 };
 use paradencer_constants::economics::PARTITIONED_REWARDS_DISTRIBUTION_SLOTS;
 use paradencer_storage::{AccountDatabase, Pubkey};
@@ -260,13 +260,13 @@ impl EpochProcessor {
     ) -> Result<(), EpochError> {
         // Sum effective, activating, deactivating stake from all delegations
         let mut effective: u64 = 0;
-        let mut activating: u64 = 0;
-        let mut deactivating: u64 = 0;
+        let activating: u64 = 0;
+        let deactivating: u64 = 0;
 
         let epoch = ctx.previous_epoch;
         let stake_by_voter = stake_tracker.stake_by_vote_account();
 
-        for (_voter, total_stake) in &stake_by_voter {
+        for total_stake in stake_by_voter.values() {
             effective = effective.saturating_add(*total_stake);
         }
 
@@ -274,8 +274,6 @@ impl EpochProcessor {
         // to separate activating/deactivating amounts. For now, track only
         // effective stake and leave transition fields at zero to match the
         // simplified stake model already in the codebase.
-        let _ = activating;
-        let _ = deactivating;
 
         let entry = StakeHistoryEntry::new(effective, activating, deactivating);
         stake_history.add(epoch, entry);
@@ -363,7 +361,7 @@ pub enum RewardType {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{Delegation, EpochSchedule, LeaderSchedule, Rent};
+    use crate::{Delegation, EpochSchedule, Inflation, LeaderSchedule, Rent};
     use paradencer_storage::AccountDatabase;
     use std::sync::Arc;
 

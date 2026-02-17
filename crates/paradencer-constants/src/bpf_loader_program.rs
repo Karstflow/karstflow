@@ -1,7 +1,7 @@
-/// Constants for the BPF Upgradeable Loader program.
-///
-/// Defines instruction discriminants, state discriminants, on-chain sizes,
-/// and compute costs matching the Solana protocol specification.
+//! Constants for the BPF Upgradeable Loader program.
+//!
+//! Defines instruction discriminants, state discriminants, on-chain sizes,
+//! and compute costs matching the Solana protocol specification.
 
 // ── State discriminants (bincode u32 tags) ──────────────────────────────
 

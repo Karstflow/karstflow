@@ -31,7 +31,7 @@
 //! let hash = hasher.finalize();
 //! ```
 
-use crate::{CryptoError, CryptoResult, SHA256_HASH_SIZE};
+use crate::SHA256_HASH_SIZE;
 use sha2::{Digest, Sha256};
 
 /// SHA256 hash output
@@ -198,7 +198,7 @@ impl HmacSha256 {
 pub fn hash_blockhash(parent_hash: &[u8; 32], slot: u64) -> Sha256Hash {
     let mut hasher = Sha256::new();
     hasher.update(parent_hash);
-    hasher.update(&slot.to_le_bytes());
+    hasher.update(slot.to_le_bytes());
     hasher.finalize().into()
 }
 

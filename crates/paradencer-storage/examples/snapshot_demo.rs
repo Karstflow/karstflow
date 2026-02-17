@@ -122,7 +122,7 @@ fn main() {
     let manifest_path = snapshot_dir.join("full-1000.snapshot.manifest");
 
     let start = std::time::Instant::now();
-    let (loaded_accounts, metadata) = loader
+    let (loaded_accounts, _metadata) = loader
         .load_snapshot_to_map(&snapshot_path, &manifest_path)
         .unwrap();
     let duration = start.elapsed();

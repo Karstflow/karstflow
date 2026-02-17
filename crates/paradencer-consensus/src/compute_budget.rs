@@ -88,11 +88,11 @@ impl ComputeBudget {
 
     /// Validate heap size request.
     fn validate_heap_size(heap_size: u32) -> Result<(), ComputeBudgetError> {
-        if heap_size < MIN_HEAP_FRAME_BYTES || heap_size > MAX_HEAP_FRAME_BYTES {
+        if !(MIN_HEAP_FRAME_BYTES..=MAX_HEAP_FRAME_BYTES).contains(&heap_size) {
             return Err(ComputeBudgetError::InvalidHeapSize);
         }
 
-        if heap_size % HEAP_FRAME_BYTES_GRANULARITY != 0 {
+        if !heap_size.is_multiple_of(HEAP_FRAME_BYTES_GRANULARITY) {
             return Err(ComputeBudgetError::InvalidHeapSize);
         }
 

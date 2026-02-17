@@ -7,7 +7,7 @@
 use crate::{EpochStakeEntry, StakeHistory, StakeHistoryEntry};
 
 /// Serializable wrapper for the StakeHistory sysvar.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct StakeHistorySysvar {
     pub history: StakeHistory,
 }
@@ -59,14 +59,6 @@ impl StakeHistorySysvar {
             offset += entry_size;
         }
         Some(Self { history })
-    }
-}
-
-impl Default for StakeHistorySysvar {
-    fn default() -> Self {
-        Self {
-            history: StakeHistory::new(),
-        }
     }
 }
 

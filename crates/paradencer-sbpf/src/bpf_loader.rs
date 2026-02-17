@@ -174,9 +174,8 @@ impl UpgradeableLoaderState {
                 if data.len() < 13 {
                     return Err("ProgramData state data too short".into());
                 }
-                let slot = u64::from_le_bytes(
-                    data[4..12].try_into().map_err(|_| "Bad slot bytes")?,
-                );
+                let slot =
+                    u64::from_le_bytes(data[4..12].try_into().map_err(|_| "Bad slot bytes")?);
                 let upgrade_authority = if data[12] != 0 {
                     if data.len() < constants::SIZE_OF_PROGRAMDATA_METADATA {
                         return Err("ProgramData authority data too short".into());
@@ -581,13 +580,12 @@ impl BpfLoaderExecutor {
         }
 
         // Verify programdata state
-        let pd_state =
-            UpgradeableLoaderState::deserialize(programdata_account.data.as_ref())?;
+        let pd_state = UpgradeableLoaderState::deserialize(programdata_account.data.as_ref())?;
         let (old_slot, upgrade_authority) = match &pd_state {
             UpgradeableLoaderState::ProgramData {
                 slot,
                 upgrade_authority,
-            } => (*slot, upgrade_authority.clone()),
+            } => (*slot, *upgrade_authority),
             _ => return Err("Invalid ProgramData account".into()),
         };
 
@@ -720,7 +718,9 @@ impl BpfLoaderExecutor {
                 slot,
                 upgrade_authority,
             } => {
-                let auth = upgrade_authority.as_ref().ok_or("Program not upgradeable")?;
+                let auth = upgrade_authority
+                    .as_ref()
+                    .ok_or("Program not upgradeable")?;
                 if *auth != present_authority {
                     return Err("Incorrect upgrade authority provided".into());
                 }
@@ -795,9 +795,7 @@ impl BpfLoaderExecutor {
                 if context.accounts.len() < 4 {
                     return Err("Close programdata requires program account".into());
                 }
-                let auth = upgrade_authority
-                    .as_ref()
-                    .ok_or("Account is immutable")?;
+                let auth = upgrade_authority.as_ref().ok_or("Account is immutable")?;
                 let signer = context.accounts[2].0;
                 if *auth != signer {
                     return Err("Incorrect authority provided".into());
@@ -822,9 +820,7 @@ impl BpfLoaderExecutor {
                         programdata_address,
                     } => {
                         if *programdata_address != close_pubkey {
-                            return Err(
-                                "Program account does not match ProgramData account".into()
-                            );
+                            return Err("Program account does not match ProgramData account".into());
                         }
                     }
                     _ => return Err("Invalid Program account".into()),
@@ -845,8 +841,7 @@ impl BpfLoaderExecutor {
 
         // Transfer all lamports to recipient
         let lamports = close_account.meta.lamports;
-        recipient_account.meta.lamports =
-            recipient_account.meta.lamports.saturating_add(lamports);
+        recipient_account.meta.lamports = recipient_account.meta.lamports.saturating_add(lamports);
         close_account.meta.lamports = 0;
 
         // Set close account to Uninitialized
@@ -917,13 +912,12 @@ impl BpfLoaderExecutor {
         }
 
         // Verify programdata state
-        let pd_state =
-            UpgradeableLoaderState::deserialize(programdata_account.data.as_ref())?;
+        let pd_state = UpgradeableLoaderState::deserialize(programdata_account.data.as_ref())?;
         let (slot, upgrade_authority) = match &pd_state {
             UpgradeableLoaderState::ProgramData {
                 slot,
                 upgrade_authority,
-            } => (*slot, upgrade_authority.clone()),
+            } => (*slot, *upgrade_authority),
             _ => return Err("ProgramData state is invalid".into()),
         };
 
@@ -1010,7 +1004,9 @@ impl BpfLoaderExecutor {
                 slot,
                 upgrade_authority,
             } => {
-                let auth = upgrade_authority.as_ref().ok_or("Program not upgradeable")?;
+                let auth = upgrade_authority
+                    .as_ref()
+                    .ok_or("Program not upgradeable")?;
                 if *auth != present_authority {
                     return Err("Incorrect upgrade authority provided".into());
                 }
@@ -1076,11 +1072,7 @@ mod tests {
         }
     }
 
-    fn make_programdata_account(
-        slot: u64,
-        authority: Option<Pubkey>,
-        elf_len: usize,
-    ) -> Account {
+    fn make_programdata_account(slot: u64, authority: Option<Pubkey>, elf_len: usize) -> Account {
         let total = constants::SIZE_OF_PROGRAMDATA_METADATA + elf_len;
         let mut data = vec![0u8; total];
         let state = UpgradeableLoaderState::ProgramData {
@@ -1122,10 +1114,7 @@ mod tests {
         let state = UpgradeableLoaderState::Uninitialized;
         let data = state.serialize();
         assert_eq!(data.len(), constants::SIZE_OF_UNINITIALIZED);
-        assert_eq!(
-            UpgradeableLoaderState::deserialize(&data).unwrap(),
-            state
-        );
+        assert_eq!(UpgradeableLoaderState::deserialize(&data).unwrap(), state);
     }
 
     #[test]
@@ -1136,10 +1125,7 @@ mod tests {
         };
         let data = state.serialize();
         assert_eq!(data.len(), constants::SIZE_OF_BUFFER_METADATA);
-        assert_eq!(
-            UpgradeableLoaderState::deserialize(&data).unwrap(),
-            state
-        );
+        assert_eq!(UpgradeableLoaderState::deserialize(&data).unwrap(), state);
     }
 
     #[test]
@@ -1160,10 +1146,7 @@ mod tests {
         };
         let data = state.serialize();
         assert_eq!(data.len(), constants::SIZE_OF_PROGRAM);
-        assert_eq!(
-            UpgradeableLoaderState::deserialize(&data).unwrap(),
-            state
-        );
+        assert_eq!(UpgradeableLoaderState::deserialize(&data).unwrap(), state);
     }
 
     #[test]
@@ -1175,10 +1158,7 @@ mod tests {
         };
         let data = state.serialize();
         assert_eq!(data.len(), constants::SIZE_OF_PROGRAMDATA_METADATA);
-        assert_eq!(
-            UpgradeableLoaderState::deserialize(&data).unwrap(),
-            state
-        );
+        assert_eq!(UpgradeableLoaderState::deserialize(&data).unwrap(), state);
     }
 
     #[test]
@@ -1237,7 +1217,9 @@ mod tests {
         // Uninitialized account with enough space for buffer metadata
         let buffer_account = make_account(10_000, constants::SIZE_OF_BUFFER_METADATA + 1000);
 
-        let instruction_data = constants::INSTRUCTION_INITIALIZE_BUFFER.to_le_bytes().to_vec();
+        let instruction_data = constants::INSTRUCTION_INITIALIZE_BUFFER
+            .to_le_bytes()
+            .to_vec();
 
         let context = ExecutionContext::new(
             BPF_LOADER_PROGRAM_ID,
@@ -1250,7 +1232,10 @@ mod tests {
 
         let outcome = executor.execute(&context).unwrap();
         assert!(outcome.success);
-        assert_eq!(outcome.compute_units_consumed, constants::COMPUTE_COST_INITIALIZE_BUFFER);
+        assert_eq!(
+            outcome.compute_units_consumed,
+            constants::COMPUTE_COST_INITIALIZE_BUFFER
+        );
 
         let modified = &outcome.modified_accounts[&buffer_pubkey];
         let state = UpgradeableLoaderState::deserialize(modified.data.as_ref()).unwrap();
@@ -1268,7 +1253,9 @@ mod tests {
         let authority = Pubkey::new_unique();
         let buffer_account = make_buffer_account(authority, 100);
 
-        let instruction_data = constants::INSTRUCTION_INITIALIZE_BUFFER.to_le_bytes().to_vec();
+        let instruction_data = constants::INSTRUCTION_INITIALIZE_BUFFER
+            .to_le_bytes()
+            .to_vec();
 
         let context = ExecutionContext::new(
             BPF_LOADER_PROGRAM_ID,
@@ -1385,8 +1372,9 @@ mod tests {
         let program_account = make_account(10_000, constants::SIZE_OF_PROGRAM);
         let programdata_account = make_account(10_000, 0);
 
-        let mut instruction_data =
-            constants::INSTRUCTION_DEPLOY_WITH_MAX_DATA_LEN.to_le_bytes().to_vec();
+        let mut instruction_data = constants::INSTRUCTION_DEPLOY_WITH_MAX_DATA_LEN
+            .to_le_bytes()
+            .to_vec();
         instruction_data.extend_from_slice(&200u64.to_le_bytes()); // max_data_len
 
         let context = ExecutionContext::new(
@@ -1441,8 +1429,9 @@ mod tests {
         let buffer_account = make_buffer_account(authority, 100);
         let program_account = make_program_account(programdata_pubkey);
 
-        let mut instruction_data =
-            constants::INSTRUCTION_DEPLOY_WITH_MAX_DATA_LEN.to_le_bytes().to_vec();
+        let mut instruction_data = constants::INSTRUCTION_DEPLOY_WITH_MAX_DATA_LEN
+            .to_le_bytes()
+            .to_vec();
         instruction_data.extend_from_slice(&200u64.to_le_bytes());
 
         let context = ExecutionContext::new(
@@ -1637,8 +1626,9 @@ mod tests {
         let buffer_pubkey = Pubkey::new_unique();
         let buffer_account = make_buffer_account(old_auth, 100);
 
-        let instruction_data =
-            constants::INSTRUCTION_SET_AUTHORITY_CHECKED.to_le_bytes().to_vec();
+        let instruction_data = constants::INSTRUCTION_SET_AUTHORITY_CHECKED
+            .to_le_bytes()
+            .to_vec();
 
         let context = ExecutionContext::new(
             BPF_LOADER_PROGRAM_ID,
@@ -1771,8 +1761,7 @@ mod tests {
         let pd_account = make_programdata_account(50, Some(authority), 100);
         let program_account = make_program_account(pd_pubkey);
 
-        let mut instruction_data =
-            constants::INSTRUCTION_EXTEND_PROGRAM.to_le_bytes().to_vec();
+        let mut instruction_data = constants::INSTRUCTION_EXTEND_PROGRAM.to_le_bytes().to_vec();
         instruction_data.extend_from_slice(&200u32.to_le_bytes()); // +200 bytes
 
         let context = ExecutionContext::new(
@@ -1801,8 +1790,7 @@ mod tests {
         let pd_account = make_programdata_account(50, Some(authority), 100);
         let program_account = make_program_account(pd_pubkey);
 
-        let mut instruction_data =
-            constants::INSTRUCTION_EXTEND_PROGRAM.to_le_bytes().to_vec();
+        let mut instruction_data = constants::INSTRUCTION_EXTEND_PROGRAM.to_le_bytes().to_vec();
         instruction_data.extend_from_slice(&0u32.to_le_bytes());
 
         let context = ExecutionContext::new(
@@ -1827,8 +1815,7 @@ mod tests {
         let pd_account = make_programdata_account(50, None, 100); // No authority
         let program_account = make_program_account(pd_pubkey);
 
-        let mut instruction_data =
-            constants::INSTRUCTION_EXTEND_PROGRAM.to_le_bytes().to_vec();
+        let mut instruction_data = constants::INSTRUCTION_EXTEND_PROGRAM.to_le_bytes().to_vec();
         instruction_data.extend_from_slice(&100u32.to_le_bytes());
 
         let context = ExecutionContext::new(
@@ -1857,7 +1844,9 @@ mod tests {
 
         // Step 1: Initialize buffer
         let mut buffer_account = make_account(10_000, constants::SIZE_OF_BUFFER_METADATA + 200);
-        let init_data = constants::INSTRUCTION_INITIALIZE_BUFFER.to_le_bytes().to_vec();
+        let init_data = constants::INSTRUCTION_INITIALIZE_BUFFER
+            .to_le_bytes()
+            .to_vec();
 
         let ctx = ExecutionContext::new(
             BPF_LOADER_PROGRAM_ID,
@@ -1899,8 +1888,9 @@ mod tests {
         let program_account = make_account(10_000, constants::SIZE_OF_PROGRAM);
         let programdata_account = make_account(10_000, 0);
 
-        let mut deploy_data =
-            constants::INSTRUCTION_DEPLOY_WITH_MAX_DATA_LEN.to_le_bytes().to_vec();
+        let mut deploy_data = constants::INSTRUCTION_DEPLOY_WITH_MAX_DATA_LEN
+            .to_le_bytes()
+            .to_vec();
         deploy_data.extend_from_slice(&200u64.to_le_bytes());
 
         let ctx = ExecutionContext::new(
@@ -1929,8 +1919,7 @@ mod tests {
 
         // Step 4: Upgrade with new data
         let new_elf = vec![0x7F, 0x45, 0x4C, 0x46, 9, 8, 7, 6];
-        let mut new_buffer_data =
-            vec![0u8; constants::SIZE_OF_BUFFER_METADATA + new_elf.len()];
+        let mut new_buffer_data = vec![0u8; constants::SIZE_OF_BUFFER_METADATA + new_elf.len()];
         UpgradeableLoaderState::Buffer {
             authority: Some(authority),
         }

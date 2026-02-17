@@ -104,7 +104,8 @@ pub fn serialize_aligned(
     // Track seen accounts for deduplication (by key)
     let mut seen: Vec<Option<usize>> = vec![None; accounts.len()];
     // Map from key bytes to first instruction account index
-    let mut key_to_first: std::collections::HashMap<[u8; 32], usize> = std::collections::HashMap::new();
+    let mut key_to_first: std::collections::HashMap<[u8; 32], usize> =
+        std::collections::HashMap::new();
 
     // Write account count
     buffer.extend_from_slice(&(accounts.len() as u64).to_le_bytes());
@@ -226,13 +227,16 @@ pub fn serialize_unaligned(
     let estimated_size = 8
         + accounts.len() * 96
         + accounts.iter().map(|a| a.data.len()).sum::<usize>()
-        + 8 + instruction_data.len() + 32;
+        + 8
+        + instruction_data.len()
+        + 32;
     let mut buffer = Vec::with_capacity(estimated_size);
     let mut account_metas: Vec<AccountRegionMeta> = Vec::with_capacity(accounts.len());
     let mut pre_lens = Vec::with_capacity(accounts.len());
     let mut duplicate_indices = Vec::with_capacity(accounts.len());
 
-    let mut key_to_first: std::collections::HashMap<[u8; 32], usize> = std::collections::HashMap::new();
+    let mut key_to_first: std::collections::HashMap<[u8; 32], usize> =
+        std::collections::HashMap::new();
 
     // Write account count
     buffer.extend_from_slice(&(accounts.len() as u64).to_le_bytes());
@@ -377,10 +381,7 @@ pub fn deserialize_aligned(
             ));
         }
         if post_len > MAX_PERMITTED_DATA_LENGTH {
-            return Err(format!(
-                "Account {} data exceeds maximum: {}",
-                i, post_len
-            ));
+            return Err(format!("Account {} data exceeds maximum: {}", i, post_len));
         }
 
         // Read data

@@ -655,7 +655,7 @@ impl VoteState {
     }
 
     /// Calculate credits for a vote at a given index, using timely vote credits.
-    fn credits_for_vote_at_index(index: usize, vote: &LandedVote) -> u64 {
+    fn credits_for_vote_at_index(_index: usize, vote: &LandedVote) -> u64 {
         let latency = vote.latency as u64;
         // With timely_vote_credits: credits decrease as latency increases
         // max_credits if latency <= grace_slots, then decreasing
@@ -1352,7 +1352,7 @@ mod tests {
         // Fill tower to max height + 1
         for i in 0..=(MAX_LOCKOUT_HISTORY as u64) {
             // Use slots spaced enough apart that none expire
-            let slot = i * 1;
+            let slot = i;
             state.process_next_vote_slot(slot, 0, slot);
         }
 

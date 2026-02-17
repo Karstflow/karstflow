@@ -1,11 +1,9 @@
-use serde_json::{json, Value};
-use std::cmp::Ordering;
-
 use crate::cache::account::AccountCache;
 use crate::filters::{apply_filters, RpcFilterType, SortOrder};
 use crate::state::{RpcCommitment, RpcRuntimeSnapshot};
 use crate::{Result, RpcError};
-use paradencer_types::{Account, AccountMeta, Pubkey};
+use paradencer_types::{Account, Pubkey};
+use serde_json::{json, Value};
 
 /// Advanced account query handler
 pub struct AccountsAdvanced {
@@ -257,8 +255,8 @@ fn generate_program_accounts(
         let lamports = base_seed
             .wrapping_add(i as u64)
             .wrapping_add(snapshot.transaction_count);
-        let data_size = ((i * 13) % 1000) as usize;
-        let data = vec![((i % 256) as u8); data_size];
+        let data_size = (i * 13) % 1000;
+        let data = vec![(i % 256) as u8; data_size];
 
         // Create owner pubkey from program_id string (for testing)
         let mut owner_bytes = [0u8; 32];
@@ -280,7 +278,7 @@ fn generate_synthetic_account(pubkey: &str, snapshot: RpcRuntimeSnapshot) -> Acc
         .fold(0u64, |acc, b| acc.wrapping_add(b as u64));
     let lamports = seed.wrapping_add(snapshot.transaction_count);
     let data_size = (seed % 1000) as usize;
-    let data = vec![((seed % 256) as u8); data_size];
+    let data = vec![(seed % 256) as u8; data_size];
 
     Account::new(lamports, data, Pubkey::zeroed())
 }
@@ -300,7 +298,7 @@ fn generate_large_accounts(snapshot: RpcRuntimeSnapshot, count: usize) -> Vec<(S
     accounts
 }
 
-fn sort_accounts(accounts: &mut Vec<(String, Account)>, order: &SortOrder) {
+fn sort_accounts(accounts: &mut [(String, Account)], order: &SortOrder) {
     match order {
         SortOrder::LamportsAsc => {
             accounts.sort_by(|a, b| a.1.meta.lamports.cmp(&b.1.meta.lamports));
@@ -400,7 +398,7 @@ mod tests {
 
     #[test]
     fn test_sort_accounts_by_lamports() {
-        let snapshot = test_snapshot();
+        let _snapshot = test_snapshot();
         let mut accounts = vec![
             (
                 "acc1".to_string(),

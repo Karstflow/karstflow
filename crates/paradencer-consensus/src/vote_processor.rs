@@ -55,8 +55,10 @@ impl SlotVoteInfo {
 
     /// Add a vote with stake weight.
     pub fn add_vote(&mut self, vote_account: Pubkey, stake: u64) {
-        if !self.votes_by_account.contains_key(&vote_account) {
-            self.votes_by_account.insert(vote_account, stake);
+        if let std::collections::hash_map::Entry::Vacant(e) =
+            self.votes_by_account.entry(vote_account)
+        {
+            e.insert(stake);
             self.total_stake = self.total_stake.saturating_add(stake);
         }
     }
@@ -194,7 +196,7 @@ impl VoteProcessor {
 
         // Enforce tower lockout if enabled and tower provided
         if self.config.enforce_tower_lockouts {
-            if let Some(tower) = tower {
+            if let Some(_tower) = tower {
                 if !vote_state.can_vote_on_slot(slot) {
                     return Err(VoteProcessorError::LockoutViolation { slot });
                 }
@@ -253,7 +255,7 @@ impl VoteProcessor {
 
         vote_state
             .process_vote(slot, timestamp, 0)
-            .map_err(|e| VoteProcessorError::VoteStateError(e))?;
+            .map_err(VoteProcessorError::VoteStateError)?;
 
         // Update slot vote aggregation
         let vote_info = self
@@ -286,7 +288,7 @@ impl VoteProcessor {
                 slot,
                 timestamp,
                 tower,
-                fork_choice.as_mut().map(|fc| &mut **fc),
+                fork_choice.as_deref_mut(),
             );
             results.push(result);
         }

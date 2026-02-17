@@ -1,6 +1,6 @@
 use super::creator::{SerializedAccount, SnapshotData};
 use super::metadata::{SnapshotManifest, SnapshotMetadata};
-use crate::accounts::{Account, AccountDatabase, Pubkey, TransactionId};
+use crate::accounts::{Account, AccountDatabase, Pubkey};
 use crate::StorageError;
 use rayon::prelude::*;
 use std::collections::HashMap;
@@ -19,6 +19,12 @@ pub struct LoadProgress {
     total_bytes: AtomicU64,
     loaded_bytes: AtomicU64,
     validation_errors: AtomicU64,
+}
+
+impl Default for LoadProgress {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl LoadProgress {
@@ -201,7 +207,7 @@ impl SnapshotLoader {
 
     fn load_accounts(
         &self,
-        db: &AccountDatabase,
+        _db: &AccountDatabase,
         snapshot_data: &SnapshotData,
     ) -> Result<HashMap<Pubkey, Account>, StorageError> {
         let total_accounts = snapshot_data.accounts.len() as u64;
@@ -305,7 +311,6 @@ pub struct LoadedSnapshot {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::snapshot::creator::SnapshotData;
 
     #[test]
     fn test_progress_tracking() {

@@ -178,7 +178,7 @@ impl Default for Lockup {
 /// Metadata common to all initialized stake states.
 ///
 /// Contains the rent-exempt reserve, authorization info, and lockup conditions.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Meta {
     /// Minimum lamports that must remain in the account for rent exemption
     pub rent_exempt_reserve: u64,
@@ -202,16 +202,6 @@ impl Meta {
         Self {
             rent_exempt_reserve,
             authorized,
-            lockup: Lockup::default(),
-        }
-    }
-}
-
-impl Default for Meta {
-    fn default() -> Self {
-        Self {
-            rent_exempt_reserve: 0,
-            authorized: Authorized::default(),
             lockup: Lockup::default(),
         }
     }
