@@ -1,4 +1,5 @@
 pub mod address_lookup_table;
+pub mod bpf_loader_program;
 pub mod block_limits;
 pub mod blockstore;
 pub mod compute_budget_program;
