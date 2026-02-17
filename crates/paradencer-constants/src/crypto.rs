@@ -76,6 +76,14 @@ pub const BN254_MUL_INPUT_SIZE: usize = 96;
 /// BN254 pairing input pair size (G1 point + G2 point).
 pub const BN254_PAIRING_PAIR_SIZE: usize = 192;
 
+// --- Lattice hash ---
+
+/// Lattice hash value size in bytes (1024 u16 elements).
+pub const LTHASH_VALUE_BYTES: usize = 2048;
+
+/// Number of u16 elements in a lattice hash value.
+pub const LTHASH_ELEMENT_COUNT: usize = 1024;
+
 // --- Compute unit costs for syscalls ---
 
 /// Base cost for a SHA-256 hash syscall invocation.

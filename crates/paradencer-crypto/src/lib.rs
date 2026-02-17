@@ -37,6 +37,7 @@ pub mod blake3;
 pub mod bn254;
 pub mod ed25519_batch;
 pub mod keccak256;
+pub mod lthash;
 pub mod reed_solomon;
 pub mod secp256k1;
 pub mod secp256r1;
@@ -50,6 +51,7 @@ pub use errors::{CryptoError, CryptoResult};
 // Re-export commonly used types
 pub use ed25519_batch::{verify_signature, verify_signatures_parallel};
 pub use ed25519_batch::{BatchVerifier, SignatureSet, VerificationResult};
+pub use lthash::LatticeHashValue;
 pub use reed_solomon::{FecError, FecReconstructor, FecResult, ReconstructedSet};
 pub use utils::{constant_time_eq, from_hex, secure_zero, to_hex, xor_bytes};
 

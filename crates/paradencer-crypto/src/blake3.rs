@@ -161,6 +161,16 @@ impl Blake3StreamingHasher {
         let actual_hash = self.finalize();
         constant_time_eq(&actual_hash, expected_hash)
     }
+
+    /// Finalize with extended output (XOF mode).
+    ///
+    /// Produces an output of arbitrary length using Blake3's
+    /// eXtendable Output Function. Used for lattice hash computation
+    /// where 2048-byte outputs are needed.
+    pub fn finalize_xof(self, output: &mut [u8]) {
+        let mut reader = self.hasher.finalize_xof();
+        reader.fill(output);
+    }
 }
 
 impl Default for Blake3StreamingHasher {
@@ -218,6 +228,19 @@ fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
         diff |= x ^ y;
     }
     diff == 0
+}
+
+/// Hash data with extended output (XOF mode).
+///
+/// Produces output of arbitrary length by feeding all chunks into
+/// Blake3 and using its eXtendable Output Function.
+pub fn hash_xof(chunks: &[&[u8]], output: &mut [u8]) {
+    let mut hasher = ::blake3::Hasher::new();
+    for chunk in chunks {
+        hasher.update(chunk);
+    }
+    let mut reader = hasher.finalize_xof();
+    reader.fill(output);
 }
 
 /// Hash a Solana transaction for deduplication
