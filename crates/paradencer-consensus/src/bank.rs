@@ -93,6 +93,9 @@ pub struct Bank {
     // Transaction deduplication cache
     transaction_cache: Arc<TransactionCache>,
 
+    // Per-block cost tracking for compute/data limits
+    cost_tracker: Arc<crate::cost_tracker::CostTracker>,
+
     // Leader schedule computed at epoch boundary for the next epoch
     next_leader_schedule: RwLock<Option<Arc<LeaderSchedule>>>,
 
@@ -157,6 +160,7 @@ impl Bank {
             last_blockhash: RwLock::new([0u8; 32]),
             blockhash_queue: RwLock::new(BlockhashQueue::default()),
             transaction_cache: Arc::new(TransactionCache::new()),
+            cost_tracker: Arc::new(crate::cost_tracker::CostTracker::new()),
             next_leader_schedule: RwLock::new(None),
             stake_tracker: None,
             stake_history: None,
@@ -209,6 +213,7 @@ impl Bank {
             last_blockhash: RwLock::new(parent_hash),
             blockhash_queue: RwLock::new(parent.blockhash_queue.read().unwrap().clone()),
             transaction_cache: parent.transaction_cache.clone(),
+            cost_tracker: Arc::new(crate::cost_tracker::CostTracker::new()),
             next_leader_schedule: RwLock::new(None),
             stake_tracker: parent.stake_tracker.clone(),
             stake_history: parent.stake_history.clone(),
@@ -386,6 +391,11 @@ impl Bank {
     /// Access the transaction deduplication cache.
     pub fn transaction_cache(&self) -> &TransactionCache {
         &self.transaction_cache
+    }
+
+    /// Get the per-block cost tracker.
+    pub fn cost_tracker(&self) -> &crate::cost_tracker::CostTracker {
+        &self.cost_tracker
     }
 
     /// Get a clone of the current lattice hash accumulator.

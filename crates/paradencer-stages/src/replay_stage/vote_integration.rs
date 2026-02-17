@@ -1,5 +1,8 @@
 use crate::AssembledBlock;
-use paradencer_consensus::{ForkChoice, Tower, VoteProcessor, VoteProcessorError, VoteUpdate};
+use paradencer_consensus::{
+    ConsensusDecision, DecisionReason, ForkChoice, Tower, VoteProcessor, VoteProcessorError,
+    VoteUpdate,
+};
 use std::sync::{Arc, Mutex, RwLock};
 
 /// Errors that can occur during vote integration
@@ -307,6 +310,106 @@ impl VoteIntegration {
             .read()
             .map_err(|_| VoteIntegrationError::LockFailed)?;
         Ok(tower.can_switch_to(candidate_slot, total_stake, current_fork_stake, is_same_fork))
+    }
+
+    /// Run a consensus decision after replaying a slot.
+    ///
+    /// Evaluates fork choice, tower lockouts, and switch thresholds to
+    /// determine whether to vote and which fork to reset to. If a vote
+    /// is made and tower produces a new root, returns the new root slot.
+    pub fn run_consensus_decision(
+        &self,
+        replayed_slot: u64,
+        is_ancestor: impl Fn(u64, u64) -> bool + Copy,
+    ) -> Result<ConsensusDecision, VoteIntegrationError> {
+        let mut fc = self
+            .fork_choice
+            .lock()
+            .map_err(|_| VoteIntegrationError::LockFailed)?;
+        let tower = self
+            .tower
+            .read()
+            .map_err(|_| VoteIntegrationError::LockFailed)?;
+
+        // Compute best fork
+        let root = tower.root().unwrap_or(0);
+        let best_slot = fc.compute_best_fork(root).unwrap_or(replayed_slot);
+
+        // Empty tower → vote for best fork
+        if tower.is_empty() || tower.last_vote_slot().is_none() {
+            drop(tower);
+            drop(fc);
+            // Push vote
+            let mut tower_w = self
+                .tower
+                .write()
+                .map_err(|_| VoteIntegrationError::LockFailed)?;
+            let _ = tower_w.push_vote(best_slot);
+            return Ok(ConsensusDecision {
+                reset_slot: best_slot,
+                vote_slot: Some(best_slot),
+                new_root: None,
+                reason: DecisionReason::EmptyTower,
+            });
+        }
+
+        let last_vote = tower.last_vote_slot().unwrap();
+        let same_fork = is_ancestor(last_vote, best_slot) || is_ancestor(best_slot, last_vote);
+
+        let decision = if same_fork {
+            let is_same_fork = |a: u64, b: u64| is_ancestor(a, b) || is_ancestor(b, a);
+            if tower.is_locked_out(best_slot, is_same_fork) {
+                ConsensusDecision {
+                    reset_slot: best_slot,
+                    vote_slot: None,
+                    new_root: None,
+                    reason: DecisionReason::LockedOut,
+                }
+            } else {
+                ConsensusDecision {
+                    reset_slot: best_slot,
+                    vote_slot: Some(best_slot),
+                    new_root: None,
+                    reason: DecisionReason::SameFork,
+                }
+            }
+        } else {
+            // Different fork — check switch threshold
+            if fc.can_switch_fork(last_vote, best_slot) {
+                ConsensusDecision {
+                    reset_slot: best_slot,
+                    vote_slot: Some(best_slot),
+                    new_root: None,
+                    reason: DecisionReason::SwitchApproved,
+                }
+            } else {
+                ConsensusDecision {
+                    reset_slot: best_slot,
+                    vote_slot: None,
+                    new_root: None,
+                    reason: DecisionReason::SwitchDenied,
+                }
+            }
+        };
+
+        // Release read locks before taking write lock
+        drop(tower);
+        drop(fc);
+
+        // Execute: push vote to tower if decided
+        let mut new_root = None;
+        if let Some(vote_slot) = decision.vote_slot {
+            let mut tower_w = self
+                .tower
+                .write()
+                .map_err(|_| VoteIntegrationError::LockFailed)?;
+            new_root = tower_w.push_vote(vote_slot);
+        }
+
+        Ok(ConsensusDecision {
+            new_root,
+            ..decision
+        })
     }
 }
 
@@ -626,5 +729,55 @@ mod tests {
         fc.add_fork(1, None);
         fc.add_stake(1, 100);
         assert_eq!(fc.get_fork(1).unwrap().stake_weight, 100);
+    }
+
+    #[test]
+    fn consensus_decision_votes_on_empty_tower() {
+        let integration = create_test_integration();
+
+        // Set up fork choice with a simple chain
+        {
+            let mut fc = integration.fork_choice.lock().unwrap();
+            fc.add_fork(0, None);
+            fc.add_fork(1, Some(0));
+            fc.add_stake(1, 500);
+        }
+
+        let is_ancestor = |_a: u64, _b: u64| true;
+        let decision = integration.run_consensus_decision(1, is_ancestor).unwrap();
+
+        assert_eq!(decision.reason, DecisionReason::EmptyTower);
+        assert!(decision.vote_slot.is_some());
+
+        // Tower should now have a vote
+        let tower = integration.tower.read().unwrap();
+        assert!(tower.last_vote_slot().is_some());
+    }
+
+    #[test]
+    fn consensus_decision_votes_on_same_fork() {
+        let integration = create_test_integration();
+
+        // Set up fork choice
+        {
+            let mut fc = integration.fork_choice.lock().unwrap();
+            fc.add_fork(0, None);
+            fc.add_fork(1, Some(0));
+            fc.add_fork(2, Some(1));
+            fc.add_stake(2, 500);
+        }
+
+        // First vote
+        {
+            let mut tower = integration.tower.write().unwrap();
+            tower.push_vote(1);
+        }
+
+        // Same fork (all ancestors)
+        let is_ancestor = |_a: u64, _b: u64| true;
+        let decision = integration.run_consensus_decision(2, is_ancestor).unwrap();
+
+        assert_eq!(decision.reason, DecisionReason::SameFork);
+        assert!(decision.vote_slot.is_some());
     }
 }

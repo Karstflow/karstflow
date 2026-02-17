@@ -1,4 +1,7 @@
-use paradencer_consensus::{Bank, BankForks, BankForksError, BankStatus, ForkChoice};
+use paradencer_consensus::{
+    Bank, BankForks, BankForksError, BankFreezeError, BankStatus, ForkChoice,
+    SlotFinalizationResult,
+};
 use std::sync::{Arc, Mutex, RwLock};
 
 /// Errors that can occur during bank transitions
@@ -28,6 +31,8 @@ pub enum BankTransitionError {
     CannotFreezeRoot(u64),
     /// Leader schedule not available
     LeaderScheduleNotAvailable(u64),
+    /// Slot finalization failed
+    FinalizationFailed { slot: u64, error: String },
 }
 
 impl From<BankForksError> for BankTransitionError {
@@ -120,11 +125,15 @@ impl BankTransition {
         Ok(bank_forks.get(slot).unwrap())
     }
 
-    /// Freeze a bank when its slot is complete
+    /// Freeze a bank when its slot is complete.
     ///
-    /// A bank must be frozen before children can be created from it.
-    /// This is called when all ticks for a slot have been processed.
-    pub fn freeze_bank(&mut self, slot: u64) -> Result<(), BankTransitionError> {
+    /// Calls `Bank::finish_slot()` which performs: fee distribution, sysvar
+    /// updates, blockhash registration, epoch boundary processing, and
+    /// freezes the bank. A bank must be frozen before children can be created.
+    pub fn freeze_bank(
+        &mut self,
+        slot: u64,
+    ) -> Result<SlotFinalizationResult, BankTransitionError> {
         let bank = self.get_working_bank(slot)?;
 
         // Check if already frozen
@@ -140,12 +149,17 @@ impl BankTransition {
             });
         }
 
-        // Freeze the bank
-        // Note: In the actual Bank implementation, freeze() would be a method
-        // For now we work with the existing API
-        // This would call bank.freeze() in a real implementation
+        // Finalize the slot: distributes fees, updates sysvars, registers
+        // blockhash, processes epoch boundary if needed, then freezes.
+        let result = bank.finish_slot().map_err(|e| match e {
+            BankFreezeError::AlreadyFrozen => BankTransitionError::BankAlreadyFrozen(slot),
+            BankFreezeError::IncompleteSlot { .. } => BankTransitionError::BankNotComplete {
+                slot,
+                ticks_remaining: bank.ticks_remaining(),
+            },
+        })?;
 
-        Ok(())
+        Ok(result)
     }
 
     /// Get or create a bank for a slot

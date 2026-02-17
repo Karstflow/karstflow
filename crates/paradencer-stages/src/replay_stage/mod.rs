@@ -259,30 +259,67 @@ impl ReplayStage {
             }
         }
 
-        // Step 5: Freeze bank if slot is complete
+        // Step 5: Finalize slot if complete (distribute fees, update sysvars, freeze)
         if self.config.auto_freeze_banks && bank.is_complete() {
-            self.bank_transition
+            let finalization = self
+                .bank_transition
                 .freeze_bank(block.slot)
                 .map_err(|e| StageError::ReplayError(format!("Bank freeze failed: {:?}", e)))?;
 
             self.stats.lock().unwrap().record_bank_transition();
-        }
 
-        // Step 6: Update tower with successful replay
-        if self.config.process_votes {
-            if let Err(e) = self
-                .vote_integration
-                .update_tower(block.slot, block.entries[0].hash)
-            {
-                eprintln!("Tower update warning for slot {}: {:?}", block.slot, e);
+            if finalization.epoch_boundary {
+                println!(
+                    "Epoch boundary at slot {} (epoch {})",
+                    finalization.slot, finalization.epoch
+                );
             }
         }
 
-        // Step 7: Check for root progression
-        if self.config.enable_root_progression {
-            if let Some(new_root) = self.check_root_progression()? {
-                self.stats.lock().unwrap().record_root_progression();
-                println!("Root progressed to slot {}", new_root);
+        // Step 6: Run consensus decision (vote + root progression)
+        if self.config.process_votes {
+            let bank_forks = self.bank_transition.bank_forks.clone();
+            let is_ancestor = |a: u64, b: u64| {
+                let bf = bank_forks.read().unwrap();
+                bf.is_ancestor(a, b)
+            };
+
+            match self.vote_integration.run_consensus_decision(block.slot, is_ancestor) {
+                Ok(decision) => {
+                    if decision.vote_slot.is_some() {
+                        self.stats.lock().unwrap().record_vote_processed();
+                    }
+
+                    // Handle root progression
+                    if let Some(new_root) = decision.new_root {
+                        if self.config.enable_root_progression {
+                            let mut bank_forks = self.bank_transition.bank_forks.write().unwrap();
+                            if new_root > bank_forks.root_slot() {
+                                if let Err(e) = bank_forks.set_root(new_root) {
+                                    eprintln!("Root progression failed: {:?}", e);
+                                } else {
+                                    drop(bank_forks);
+                                    // Prune old vote data
+                                    let mut vote_processor =
+                                        self.vote_integration.vote_processor.lock().unwrap();
+                                    vote_processor.prune_below_root(new_root);
+
+                                    self.block_processor
+                                        .commitment_tracker
+                                        .lock()
+                                        .unwrap()
+                                        .update_root(new_root);
+
+                                    self.stats.lock().unwrap().record_root_progression();
+                                    println!("Root progressed to slot {}", new_root);
+                                }
+                            }
+                        }
+                    }
+                }
+                Err(e) => {
+                    eprintln!("Consensus decision warning for slot {}: {:?}", block.slot, e);
+                }
             }
         }
 
@@ -319,41 +356,6 @@ impl ReplayStage {
         }
 
         Ok(())
-    }
-
-    /// Check if conditions are met for root progression
-    fn check_root_progression(&mut self) -> Result<Option<u64>, StageError> {
-        // Check if tower has produced a new root
-        let tower = self.vote_integration.tower.read().unwrap();
-        let new_root = tower.root();
-        drop(tower);
-
-        if let Some(root_slot) = new_root {
-            let mut bank_forks = self.bank_transition.bank_forks.write().unwrap();
-            let current_root = bank_forks.root_slot();
-
-            if root_slot > current_root {
-                // Progress root in bank forks
-                bank_forks.set_root(root_slot).map_err(|e| {
-                    StageError::ReplayError(format!("Root progression failed: {:?}", e))
-                })?;
-
-                // Prune old vote data
-                let mut vote_processor = self.vote_integration.vote_processor.lock().unwrap();
-                vote_processor.prune_below_root(root_slot);
-
-                // Update commitment tracker
-                self.block_processor
-                    .commitment_tracker
-                    .lock()
-                    .unwrap()
-                    .update_root(root_slot);
-
-                return Ok(Some(root_slot));
-            }
-        }
-
-        Ok(None)
     }
 
     /// Get current statistics

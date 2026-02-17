@@ -4,6 +4,7 @@
 /// and implements the full transaction processing flow on Bank:
 /// account loading, fee validation, instruction execution, account writeback,
 /// and fee collection.
+use crate::cost_tracker::{CostTrackerError, TransactionCost};
 use crate::{Bank, BankStatus, FeeCalculator};
 use paradencer_ids::VOTE_PROGRAM_ID;
 use paradencer_storage::{Account, AccountDatabase, Pubkey, TransactionId};
@@ -129,6 +130,10 @@ pub enum TransactionExecutionError {
     SignatureVerificationFailed { signer_index: usize },
     /// Transaction is a duplicate (already processed in a recent slot).
     DuplicateTransaction,
+    /// A writable account would transition to rent-paying state.
+    InsufficientFundsForRent { account: Pubkey },
+    /// Block cost limit would be exceeded by this transaction.
+    BlockCostLimitExceeded(String),
 }
 
 impl std::fmt::Display for TransactionExecutionError {
@@ -154,6 +159,12 @@ impl std::fmt::Display for TransactionExecutionError {
                 write!(f, "signature verification failed for signer {signer_index}")
             }
             Self::DuplicateTransaction => write!(f, "duplicate transaction"),
+            Self::InsufficientFundsForRent { account } => {
+                write!(f, "insufficient funds for rent: account {account:?}")
+            }
+            Self::BlockCostLimitExceeded(msg) => {
+                write!(f, "block cost limit exceeded: {msg}")
+            }
         }
     }
 }
@@ -257,6 +268,56 @@ fn verify_transaction_signatures(
     Ok(())
 }
 
+/// Account rent state for transition validation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RentState {
+    /// Account has zero lamports (treated as non-existent).
+    Uninitialized,
+    /// Account balance is below rent-exempt minimum.
+    RentPaying { lamports: u64, data_len: usize },
+    /// Account balance meets or exceeds rent-exempt minimum.
+    RentExempt,
+}
+
+impl RentState {
+    fn from_account(account: &Account, rent: &crate::Rent) -> Self {
+        if account.meta.lamports == 0 {
+            return RentState::Uninitialized;
+        }
+        if rent.is_exempt(account.meta.lamports, account.data.len()) {
+            RentState::RentExempt
+        } else {
+            RentState::RentPaying {
+                lamports: account.meta.lamports,
+                data_len: account.data.len(),
+            }
+        }
+    }
+}
+
+/// Check if a rent state transition is allowed.
+///
+/// Rules:
+/// - Transition to Uninitialized (zero lamports) is always allowed
+/// - Transition to RentExempt is always allowed
+/// - Transition to RentPaying is only allowed if the account was already
+///   RentPaying with the same data size and the new balance is not higher
+fn is_rent_transition_allowed(pre: &RentState, post: &RentState) -> bool {
+    match post {
+        RentState::Uninitialized | RentState::RentExempt => true,
+        RentState::RentPaying {
+            lamports: post_lamports,
+            data_len: post_data_len,
+        } => match pre {
+            RentState::RentPaying {
+                lamports: pre_lamports,
+                data_len: pre_data_len,
+            } => post_data_len == pre_data_len && post_lamports <= pre_lamports,
+            _ => false, // Cannot transition from Uninitialized/RentExempt to RentPaying
+        },
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Bank execution methods
 // ---------------------------------------------------------------------------
@@ -336,6 +397,33 @@ impl Bank {
                     vote_updates: vec![],
                 };
             }
+        }
+
+        // Step 1e: Reserve block capacity via cost tracker
+        let is_vote = transaction
+            .instructions
+            .first()
+            .map(|ix| {
+                transaction
+                    .account_keys
+                    .get(ix.program_id_index as usize)
+                    .map(|id| *id == paradencer_ids::VOTE_PROGRAM_ID)
+                    .unwrap_or(false)
+            })
+            .unwrap_or(false);
+        let estimated_cost = TransactionCost::new(compute_limit, is_vote);
+        if let Err(e) = self.cost_tracker().try_add(&estimated_cost) {
+            return TransactionExecutionResult {
+                success: false,
+                compute_units_consumed: 0,
+                fee: 0,
+                modified_accounts: HashMap::new(),
+                logs: vec![],
+                error: Some(TransactionExecutionError::BlockCostLimitExceeded(
+                    format!("{:?}", e),
+                )),
+                vote_updates: vec![],
+            };
         }
 
         // Step 2: Load accounts
@@ -511,6 +599,32 @@ impl Bank {
                     vote_updates: vec![],
                 };
             }
+        }
+
+        // Step 4b: Validate rent state transitions for writable accounts
+        let rent = crate::Rent::default();
+        let rent_violation = modified.iter().find_map(|(pubkey, post_account)| {
+            let pre_account = account_state.get(pubkey).cloned().unwrap_or_default();
+            let pre_state = RentState::from_account(&pre_account, &rent);
+            let post_state = RentState::from_account(post_account, &rent);
+            if !is_rent_transition_allowed(&pre_state, &post_state) {
+                Some(*pubkey)
+            } else {
+                None
+            }
+        });
+        if let Some(violating_account) = rent_violation {
+            return TransactionExecutionResult {
+                success: false,
+                compute_units_consumed: total_compute,
+                fee,
+                modified_accounts: modified,
+                logs: all_logs,
+                error: Some(TransactionExecutionError::InsufficientFundsForRent {
+                    account: violating_account,
+                }),
+                vote_updates: vec![],
+            };
         }
 
         // Step 5: Write modified accounts back to the database
@@ -1666,5 +1780,109 @@ mod tests {
 
         let r2 = bank.process_transaction(&tx, &backend, MAX_COMPUTE_UNITS);
         assert!(r2.success); // not rejected as duplicate
+    }
+
+    #[test]
+    fn rent_state_transition_validation() {
+        // Test the rent state transition rules directly
+        let rent = crate::Rent::default();
+
+        // Uninitialized → always allowed
+        let pre = RentState::Uninitialized;
+        let post = RentState::Uninitialized;
+        assert!(is_rent_transition_allowed(&pre, &post));
+
+        // Any → RentExempt: always allowed
+        let post_exempt = RentState::RentExempt;
+        assert!(is_rent_transition_allowed(&RentState::Uninitialized, &post_exempt));
+        assert!(is_rent_transition_allowed(
+            &RentState::RentPaying {
+                lamports: 100,
+                data_len: 10
+            },
+            &post_exempt
+        ));
+
+        // Uninitialized → RentPaying: NOT allowed
+        let post_paying = RentState::RentPaying {
+            lamports: 100,
+            data_len: 10,
+        };
+        assert!(!is_rent_transition_allowed(&RentState::Uninitialized, &post_paying));
+
+        // RentExempt → RentPaying: NOT allowed
+        assert!(!is_rent_transition_allowed(&RentState::RentExempt, &post_paying));
+
+        // RentPaying → RentPaying (same size, less lamports): allowed
+        let pre_paying = RentState::RentPaying {
+            lamports: 200,
+            data_len: 10,
+        };
+        assert!(is_rent_transition_allowed(&pre_paying, &post_paying));
+
+        // RentPaying → RentPaying (same size, MORE lamports): NOT allowed
+        let post_more = RentState::RentPaying {
+            lamports: 300,
+            data_len: 10,
+        };
+        assert!(!is_rent_transition_allowed(&pre_paying, &post_more));
+
+        // RentPaying → RentPaying (different size): NOT allowed
+        let post_diff_size = RentState::RentPaying {
+            lamports: 100,
+            data_len: 20,
+        };
+        assert!(!is_rent_transition_allowed(&pre_paying, &post_diff_size));
+    }
+
+    #[test]
+    fn cost_tracker_limits_block_transactions() {
+        let bank = create_test_bank();
+        let backend = PassthroughBackend;
+
+        let payer = Pubkey::new_unique();
+        let program = Pubkey::new_unique();
+        let payer_account = Account::new(100_000_000_000, vec![], Pubkey::default());
+        store_test_account(&bank, &payer, &payer_account);
+
+        // Fill up block cost by processing transactions with large compute limits
+        // MAX_BLOCK_COMPUTE_UNITS is 48M; each tx reserves its full compute_limit
+        use paradencer_constants::block_limits::MAX_BLOCK_COMPUTE_UNITS;
+
+        // Process one tx that consumes nearly all block capacity
+        let tx = create_simple_transaction(payer, program, vec![payer], vec![]);
+        let result = bank.process_transaction(&tx, &backend, MAX_BLOCK_COMPUTE_UNITS - 1000);
+        assert!(result.success);
+
+        // Second tx should be rejected — block cost limit exceeded
+        let tx2 = create_simple_transaction(payer, program, vec![payer], vec![]);
+        let result2 = bank.process_transaction(&tx2, &backend, MAX_BLOCK_COMPUTE_UNITS);
+        assert!(!result2.success);
+        assert!(matches!(
+            result2.error,
+            Some(TransactionExecutionError::BlockCostLimitExceeded(_))
+        ));
+    }
+
+    #[test]
+    fn cost_tracker_reports_remaining_capacity() {
+        let bank = create_test_bank();
+        let backend = PassthroughBackend;
+
+        use paradencer_constants::block_limits::MAX_BLOCK_COMPUTE_UNITS;
+        let initial_capacity = bank.cost_tracker().remaining_capacity();
+        assert_eq!(initial_capacity, MAX_BLOCK_COMPUTE_UNITS);
+
+        let payer = Pubkey::new_unique();
+        let program = Pubkey::new_unique();
+        let payer_account = Account::new(100_000_000, vec![], Pubkey::default());
+        store_test_account(&bank, &payer, &payer_account);
+
+        let tx = create_simple_transaction(payer, program, vec![payer], vec![]);
+        let result = bank.process_transaction(&tx, &backend, 1_000_000);
+        assert!(result.success);
+
+        // Capacity should have decreased
+        assert!(bank.cost_tracker().remaining_capacity() < initial_capacity);
     }
 }

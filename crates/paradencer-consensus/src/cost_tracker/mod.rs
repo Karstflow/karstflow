@@ -164,6 +164,20 @@ impl Default for CostTracker {
     }
 }
 
+impl std::fmt::Debug for CostTracker {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CostTracker")
+            .field("block_cost", &self.block_cost.load(Ordering::Relaxed))
+            .field("vote_cost", &self.vote_cost.load(Ordering::Relaxed))
+            .field("is_dead", &self.is_dead.load(Ordering::Relaxed))
+            .field(
+                "transaction_count",
+                &self.transaction_count.load(Ordering::Relaxed),
+            )
+            .finish()
+    }
+}
+
 /// Errors returned when a transaction would exceed block limits.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CostTrackerError {
