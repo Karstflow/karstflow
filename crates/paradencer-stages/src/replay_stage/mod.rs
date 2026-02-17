@@ -168,7 +168,7 @@ impl ReplayStage {
     ) -> Self {
         let bank_transition = BankTransition::new(bank_forks.clone(), fork_choice.clone());
         let block_processor = BlockProcessor::new(execution_bridge, commitment_tracker);
-        let vote_integration = VoteIntegration::new(vote_processor, tower);
+        let vote_integration = VoteIntegration::new(vote_processor, tower, fork_choice);
 
         Self {
             config,

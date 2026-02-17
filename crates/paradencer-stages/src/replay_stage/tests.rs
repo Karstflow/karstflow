@@ -313,7 +313,8 @@ mod vote_integration_integration_tests {
     fn vote_integration_processes_blocks_without_votes() {
         let vote_processor = create_test_vote_processor();
         let tower = create_test_tower();
-        let mut integration = VoteIntegration::new(vote_processor, tower);
+        let fork_choice = create_test_fork_choice();
+        let mut integration = VoteIntegration::new(vote_processor, tower, fork_choice);
 
         let block = create_test_block(100, 99);
         let result = integration.process_votes_from_block(&block);
@@ -326,7 +327,8 @@ mod vote_integration_integration_tests {
     fn vote_integration_maintains_tower_ordering() {
         let vote_processor = create_test_vote_processor();
         let tower = create_test_tower();
-        let mut integration = VoteIntegration::new(vote_processor, tower);
+        let fork_choice = create_test_fork_choice();
+        let mut integration = VoteIntegration::new(vote_processor, tower, fork_choice);
 
         // Vote on increasing slots
         integration.update_tower(100, [1u8; 32]).unwrap();
@@ -344,7 +346,8 @@ mod vote_integration_integration_tests {
     fn vote_integration_enforces_lockouts() {
         let vote_processor = create_test_vote_processor();
         let tower = create_test_tower();
-        let mut integration = VoteIntegration::new(vote_processor, tower);
+        let fork_choice = create_test_fork_choice();
+        let mut integration = VoteIntegration::new(vote_processor, tower, fork_choice);
 
         integration.update_tower(100, [1u8; 32]).unwrap();
 
@@ -363,7 +366,8 @@ mod vote_integration_integration_tests {
     fn vote_integration_checks_supermajority() {
         let vote_processor = create_test_vote_processor();
         let tower = create_test_tower();
-        let integration = VoteIntegration::new(vote_processor, tower);
+        let fork_choice = create_test_fork_choice();
+        let integration = VoteIntegration::new(vote_processor, tower, fork_choice);
 
         // No votes yet - no supermajority
         let has_super = integration.has_supermajority(100).unwrap();
@@ -377,7 +381,8 @@ mod vote_integration_integration_tests {
     fn vote_integration_evaluates_fork_switching() {
         let vote_processor = create_test_vote_processor();
         let tower = create_test_tower();
-        let mut integration = VoteIntegration::new(vote_processor, tower);
+        let fork_choice = create_test_fork_choice();
+        let mut integration = VoteIntegration::new(vote_processor, tower, fork_choice);
 
         integration.update_tower(100, [1u8; 32]).unwrap();
 

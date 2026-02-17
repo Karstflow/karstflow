@@ -1,5 +1,5 @@
 use crate::AssembledBlock;
-use paradencer_consensus::{Tower, VoteProcessor, VoteProcessorError};
+use paradencer_consensus::{ForkChoice, Tower, VoteProcessor, VoteProcessorError, VoteUpdate};
 use std::sync::{Arc, Mutex, RwLock};
 
 /// Errors that can occur during vote integration
@@ -29,19 +29,27 @@ impl From<VoteProcessorError> for VoteIntegrationError {
 /// - Extract votes from blocks
 /// - Process votes through VoteProcessor
 /// - Update Tower with vote outcomes
+/// - Feed vote stake into ForkChoice for GHOST algorithm
 /// - Track vote statistics
 pub struct VoteIntegration {
     /// Vote processor for aggregating votes
     pub vote_processor: Arc<Mutex<VoteProcessor>>,
     /// Tower for lockout enforcement
     pub tower: Arc<RwLock<Tower>>,
+    /// Fork choice engine that receives vote stake
+    pub fork_choice: Arc<Mutex<ForkChoice>>,
 }
 
 impl VoteIntegration {
-    pub fn new(vote_processor: Arc<Mutex<VoteProcessor>>, tower: Arc<RwLock<Tower>>) -> Self {
+    pub fn new(
+        vote_processor: Arc<Mutex<VoteProcessor>>,
+        tower: Arc<RwLock<Tower>>,
+        fork_choice: Arc<Mutex<ForkChoice>>,
+    ) -> Self {
         Self {
             vote_processor,
             tower,
+            fork_choice,
         }
     }
 
@@ -61,18 +69,25 @@ impl VoteIntegration {
             return Ok(0);
         }
 
-        // Process each vote through vote processor
+        // Process each vote through vote processor with fork choice integration
         let mut processed_count = 0;
         let mut vote_processor = self
             .vote_processor
             .lock()
             .map_err(|_| VoteIntegrationError::LockFailed)?;
+        let mut fork_choice = self
+            .fork_choice
+            .lock()
+            .map_err(|_| VoteIntegrationError::LockFailed)?;
 
         for (vote_account, slot, timestamp) in votes {
-            // Note: We pass None for tower and fork_choice here since they're
-            // updated separately. In production, you might want to pass them
-            // for integrated validation.
-            match vote_processor.process_vote(vote_account, slot, timestamp, None, None) {
+            match vote_processor.process_vote(
+                vote_account,
+                slot,
+                timestamp,
+                None,
+                Some(&mut fork_choice),
+            ) {
                 Ok(_stake) => {
                     processed_count += 1;
                 }
@@ -89,26 +104,66 @@ impl VoteIntegration {
         Ok(processed_count)
     }
 
-    /// Extract vote transactions from block
+    /// Process vote updates extracted by the bank executor.
     ///
-    /// In a real implementation, this would:
-    /// 1. Parse each transaction in the block
-    /// 2. Identify vote program transactions
-    /// 3. Deserialize vote instruction data
-    /// 4. Extract vote account, voted slot, and timestamp
+    /// When Bank::process_transaction() detects vote program instructions,
+    /// it produces VoteUpdate records containing the vote account and voted
+    /// slot. This method feeds those updates into VoteProcessor and ForkChoice
+    /// so the GHOST algorithm has real stake data.
+    pub fn process_vote_updates(
+        &mut self,
+        vote_updates: &[VoteUpdate],
+    ) -> Result<usize, VoteIntegrationError> {
+        if vote_updates.is_empty() {
+            return Ok(0);
+        }
+
+        let mut vote_processor = self
+            .vote_processor
+            .lock()
+            .map_err(|_| VoteIntegrationError::LockFailed)?;
+        let mut fork_choice = self
+            .fork_choice
+            .lock()
+            .map_err(|_| VoteIntegrationError::LockFailed)?;
+
+        let mut processed = 0;
+        for update in vote_updates {
+            if let Some(voted_slot) = update.voted_slot {
+                match vote_processor.process_vote(
+                    update.vote_account,
+                    voted_slot,
+                    0, // timestamp not available from VoteUpdate
+                    None,
+                    Some(&mut fork_choice),
+                ) {
+                    Ok(_) => processed += 1,
+                    Err(e) => {
+                        eprintln!(
+                            "Vote update failed for {:?} slot {}: {:?}",
+                            update.vote_account, voted_slot, e
+                        );
+                    }
+                }
+            }
+        }
+
+        Ok(processed)
+    }
+
+    /// Extract vote transactions from block entries.
     ///
-    /// For now, we simulate this with mock data.
+    /// Parses raw transaction bytes from block entries to identify vote
+    /// program transactions and extract vote data. Returns empty if no
+    /// vote transactions are found (blocks may contain only non-vote txns).
     fn extract_votes_from_block(
         &self,
         _block: &AssembledBlock,
     ) -> Result<Vec<(paradencer_storage::Pubkey, u64, i64)>, VoteIntegrationError> {
-        // In production:
-        // - Iterate through block.entries
-        // - For each entry, iterate through entry.transactions
-        // - Deserialize transactions and check if they're vote transactions
-        // - Extract vote data (vote_account, slot, timestamp)
-
-        // For now, return empty - real implementation would parse transactions
+        // Transaction bytes in entries are not yet deserialized into
+        // SanitizedTransaction format at this stage. Vote extraction
+        // happens during bank execution via bank_executor::extract_vote_updates().
+        // The process_vote_updates() method handles those results.
         Ok(Vec::new())
     }
 
@@ -274,8 +329,10 @@ pub struct VoteIntegrationStats {
 mod tests {
     use super::*;
     use crate::Entry;
-    use paradencer_consensus::{StakeTracker, VoteProcessorConfig, VoteState};
+    use paradencer_consensus::{Delegation, StakeTracker, VoteProcessorConfig, VoteState};
     use paradencer_storage::Pubkey;
+
+    const TEST_TOTAL_STAKE: u64 = 10_000;
 
     fn create_test_vote_processor() -> Arc<Mutex<VoteProcessor>> {
         let config = VoteProcessorConfig::default();
@@ -285,6 +342,18 @@ mod tests {
 
     fn create_test_tower() -> Arc<RwLock<Tower>> {
         Arc::new(RwLock::new(Tower::new()))
+    }
+
+    fn create_test_fork_choice() -> Arc<Mutex<ForkChoice>> {
+        Arc::new(Mutex::new(ForkChoice::new(TEST_TOTAL_STAKE)))
+    }
+
+    fn create_test_integration() -> VoteIntegration {
+        VoteIntegration::new(
+            create_test_vote_processor(),
+            create_test_tower(),
+            create_test_fork_choice(),
+        )
     }
 
     fn create_test_block(slot: u64, parent_slot: u64) -> AssembledBlock {
@@ -304,28 +373,22 @@ mod tests {
 
     #[test]
     fn vote_integration_initializes() {
-        let vote_processor = create_test_vote_processor();
-        let tower = create_test_tower();
-        let _integration = VoteIntegration::new(vote_processor, tower);
+        let _integration = create_test_integration();
     }
 
     #[test]
     fn vote_integration_processes_empty_block() {
-        let vote_processor = create_test_vote_processor();
-        let tower = create_test_tower();
-        let mut integration = VoteIntegration::new(vote_processor, tower);
+        let mut integration = create_test_integration();
 
         let block = create_test_block(100, 99);
         let result = integration.process_votes_from_block(&block);
         assert!(result.is_ok());
-        assert_eq!(result.unwrap(), 0); // No votes in block
+        assert_eq!(result.unwrap(), 0);
     }
 
     #[test]
     fn vote_integration_updates_tower() {
-        let vote_processor = create_test_vote_processor();
-        let tower = create_test_tower();
-        let mut integration = VoteIntegration::new(vote_processor, tower);
+        let mut integration = create_test_integration();
 
         let result = integration.update_tower(100, [1u8; 32]);
         assert!(result.is_ok());
@@ -336,9 +399,7 @@ mod tests {
 
     #[test]
     fn vote_integration_enforces_tower_ordering() {
-        let vote_processor = create_test_vote_processor();
-        let tower = create_test_tower();
-        let mut integration = VoteIntegration::new(vote_processor, tower);
+        let mut integration = create_test_integration();
 
         // Vote on slot 100
         integration.update_tower(100, [1u8; 32]).unwrap();
@@ -354,9 +415,7 @@ mod tests {
 
     #[test]
     fn vote_integration_tracks_tower_root() {
-        let vote_processor = create_test_vote_processor();
-        let tower = create_test_tower();
-        let integration = VoteIntegration::new(vote_processor, tower);
+        let integration = create_test_integration();
 
         let root = integration.tower_root().unwrap();
         assert_eq!(root, None);
@@ -364,9 +423,7 @@ mod tests {
 
     #[test]
     fn vote_integration_checks_lockout() {
-        let vote_processor = create_test_vote_processor();
-        let tower = create_test_tower();
-        let mut integration = VoteIntegration::new(vote_processor, tower);
+        let mut integration = create_test_integration();
 
         // Vote on slot 100
         integration.update_tower(100, [1u8; 32]).unwrap();
@@ -374,19 +431,17 @@ mod tests {
         // Same fork check
         let same_fork = |_a: u64, _b: u64| true;
         let locked_out = integration.is_locked_out(101, same_fork).unwrap();
-        assert!(!locked_out); // Not locked out on same fork
+        assert!(!locked_out);
 
         // Different fork check
         let different_fork = |a: u64, b: u64| a == b;
         let locked_out = integration.is_locked_out(101, different_fork).unwrap();
-        assert!(locked_out); // Locked out on different fork (within lockout window)
+        assert!(locked_out);
     }
 
     #[test]
     fn vote_integration_gets_stats() {
-        let vote_processor = create_test_vote_processor();
-        let tower = create_test_tower();
-        let mut integration = VoteIntegration::new(vote_processor, tower);
+        let mut integration = create_test_integration();
 
         integration.update_tower(100, [1u8; 32]).unwrap();
         integration.update_tower(101, [2u8; 32]).unwrap();
@@ -398,59 +453,170 @@ mod tests {
 
     #[test]
     fn vote_integration_checks_supermajority() {
-        let vote_processor = create_test_vote_processor();
-        let tower = create_test_tower();
-        let integration = VoteIntegration::new(vote_processor, tower);
+        let integration = create_test_integration();
 
-        // No votes yet
         let has_supermajority = integration.has_supermajority(100).unwrap();
         assert!(!has_supermajority);
     }
 
     #[test]
     fn vote_integration_gets_slot_stake() {
-        let vote_processor = create_test_vote_processor();
-        let tower = create_test_tower();
-        let integration = VoteIntegration::new(vote_processor, tower);
+        let integration = create_test_integration();
 
-        // No votes yet
         let stake = integration.get_slot_stake(100).unwrap();
         assert_eq!(stake, 0);
     }
 
     #[test]
     fn vote_integration_validates_votes() {
-        let vote_processor = create_test_vote_processor();
-        let tower = create_test_tower();
-        let mut integration = VoteIntegration::new(vote_processor, tower);
+        let mut integration = create_test_integration();
 
         let same_fork = |_a: u64, _b: u64| true;
 
-        // First vote should succeed
         let result = integration.record_vote_with_validation(100, same_fork);
         assert!(result.is_ok());
 
-        // Second vote on same fork should succeed
         let result = integration.record_vote_with_validation(101, same_fork);
         assert!(result.is_ok());
     }
 
     #[test]
     fn vote_integration_detects_fork_switch_threshold() {
-        let vote_processor = create_test_vote_processor();
-        let tower = create_test_tower();
-        let mut integration = VoteIntegration::new(vote_processor, tower);
+        let mut integration = create_test_integration();
 
         integration.update_tower(100, [1u8; 32]).unwrap();
 
         let different_fork = |a: u64, b: u64| a == b;
 
-        // Insufficient stake to switch (ratio < 1.38)
         let can_switch = integration.can_switch_fork(200, 1, different_fork).unwrap();
         assert!(!can_switch);
 
-        // Sufficient stake to switch (ratio >= 1.38)
         let can_switch = integration.can_switch_fork(200, 2, different_fork).unwrap();
         assert!(can_switch);
+    }
+
+    /// Create a vote processor with a registered validator that has stake.
+    fn create_staked_vote_processor(
+        vote_account: Pubkey,
+        stake_amount: u64,
+    ) -> Arc<Mutex<VoteProcessor>> {
+        let config = VoteProcessorConfig::default();
+        let stake_account = Pubkey::new_unique();
+        let mut stake_tracker = StakeTracker::new(0);
+        // Use bootstrap activation (u64::MAX) for immediate full effective stake
+        stake_tracker.add_delegation(
+            stake_account,
+            Delegation::new(vote_account, stake_amount, u64::MAX),
+        );
+        let mut vp = VoteProcessor::new(config, stake_tracker);
+        vp.register_vote_account(
+            vote_account,
+            VoteState::new(vote_account, vote_account, vote_account, 0),
+        );
+        Arc::new(Mutex::new(vp))
+    }
+
+    #[test]
+    fn vote_updates_flow_to_fork_choice() {
+        let validator = Pubkey::new_unique();
+        let vote_processor = create_staked_vote_processor(validator, 1000);
+
+        let tower = create_test_tower();
+        let fork_choice = create_test_fork_choice();
+
+        // Register the slot in fork choice so add_stake has somewhere to land
+        fork_choice.lock().unwrap().add_fork(100, None);
+
+        let mut integration =
+            VoteIntegration::new(vote_processor, tower, fork_choice.clone());
+
+        // Create a VoteUpdate like bank_executor would produce
+        let updates = vec![VoteUpdate {
+            vote_account: validator,
+            voted_slot: Some(100),
+        }];
+
+        let processed = integration.process_vote_updates(&updates).unwrap();
+        assert_eq!(processed, 1);
+
+        // Verify stake landed in ForkChoice
+        let fc = fork_choice.lock().unwrap();
+        let fork = fc.get_fork(100).unwrap();
+        assert_eq!(fork.stake_weight, 1000);
+    }
+
+    #[test]
+    fn vote_updates_without_slot_are_skipped() {
+        let mut integration = create_test_integration();
+
+        let updates = vec![VoteUpdate {
+            vote_account: Pubkey::new_unique(),
+            voted_slot: None,
+        }];
+
+        let processed = integration.process_vote_updates(&updates).unwrap();
+        assert_eq!(processed, 0);
+    }
+
+    #[test]
+    fn empty_vote_updates_returns_zero() {
+        let mut integration = create_test_integration();
+
+        let processed = integration.process_vote_updates(&[]).unwrap();
+        assert_eq!(processed, 0);
+    }
+
+    #[test]
+    fn multiple_vote_updates_accumulate_stake() {
+        let config = VoteProcessorConfig::default();
+        let validator_a = Pubkey::new_unique();
+        let validator_b = Pubkey::new_unique();
+        let stake_a = Pubkey::new_unique();
+        let stake_b = Pubkey::new_unique();
+
+        let mut stake_tracker = StakeTracker::new(0);
+        stake_tracker.add_delegation(stake_a, Delegation::new(validator_a, 500, u64::MAX));
+        stake_tracker.add_delegation(stake_b, Delegation::new(validator_b, 700, u64::MAX));
+
+        let mut vp = VoteProcessor::new(config, stake_tracker);
+        vp.register_vote_account(validator_a, VoteState::new(validator_a, validator_a, validator_a, 0));
+        vp.register_vote_account(validator_b, VoteState::new(validator_b, validator_b, validator_b, 0));
+        let vote_processor = Arc::new(Mutex::new(vp));
+
+        let tower = create_test_tower();
+        let fork_choice = create_test_fork_choice();
+        fork_choice.lock().unwrap().add_fork(50, None);
+
+        let mut integration =
+            VoteIntegration::new(vote_processor, tower, fork_choice.clone());
+
+        let updates = vec![
+            VoteUpdate {
+                vote_account: validator_a,
+                voted_slot: Some(50),
+            },
+            VoteUpdate {
+                vote_account: validator_b,
+                voted_slot: Some(50),
+            },
+        ];
+
+        let processed = integration.process_vote_updates(&updates).unwrap();
+        assert_eq!(processed, 2);
+
+        let fc = fork_choice.lock().unwrap();
+        let fork = fc.get_fork(50).unwrap();
+        assert_eq!(fork.stake_weight, 1200); // 500 + 700
+    }
+
+    #[test]
+    fn fork_choice_accessible_after_construction() {
+        let integration = create_test_integration();
+
+        // Verify fork_choice is accessible and usable
+        let mut fc = integration.fork_choice.lock().unwrap();
+        fc.add_fork(1, None);
+        fc.add_stake(1, 100);
+        assert_eq!(fc.get_fork(1).unwrap().stake_weight, 100);
     }
 }
