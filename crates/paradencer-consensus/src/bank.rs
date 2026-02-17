@@ -738,25 +738,29 @@ impl Bank {
         (validator_rewards, validator_rate, foundation_rate)
     }
 
+    /// Compute the bank hash for this slot.
+    ///
+    /// The bank hash is a deterministic cryptographic hash of the slot's
+    /// state: `SHA256(SHA256(prev_bank_hash || sig_count || last_blockhash) || lthash)`.
     pub fn hash(&self) -> [u8; 32] {
-        use std::collections::hash_map::DefaultHasher;
-        use std::hash::{Hash, Hasher};
+        use paradencer_crypto::sha256::Sha256StreamingHasher;
 
-        let tick_height = self.tick_height.load(Ordering::Relaxed);
-        let transaction_count = self.transaction_count.load(Ordering::Relaxed);
+        let lthash = self.lthash.read().unwrap();
+        let blockhash = self.last_blockhash.read().unwrap();
+        let sig_count = self.signature_count.load(Ordering::Relaxed);
 
-        let mut hasher = DefaultHasher::new();
-        self.slot.hash(&mut hasher);
-        self.parent_hash.hash(&mut hasher);
-        tick_height.hash(&mut hasher);
-        transaction_count.hash(&mut hasher);
+        // inner = SHA256(prev_bank_hash || sig_count || last_blockhash)
+        let mut inner = Sha256StreamingHasher::new();
+        inner.update(&self.parent_hash);
+        inner.update(&sig_count.to_le_bytes());
+        inner.update(&*blockhash);
+        let inner_hash = inner.finalize();
 
-        let hash_u64 = hasher.finish();
-        let mut result = [0u8; 32];
-        result[0..8].copy_from_slice(&hash_u64.to_le_bytes());
-        result[8..16].copy_from_slice(&self.slot.to_le_bytes());
-        result[16..24].copy_from_slice(&tick_height.to_le_bytes());
-        result
+        // bank_hash = SHA256(inner_hash || lthash_bytes)
+        let mut outer = Sha256StreamingHasher::new();
+        outer.update(&inner_hash);
+        outer.update(lthash.as_bytes());
+        outer.finalize()
     }
 }
 
@@ -982,12 +986,13 @@ mod tests {
         let epoch_schedule = Arc::new(EpochSchedule::default());
         let leader_schedule = create_test_leader_schedule(0);
 
-        let mut bank = Bank::new_genesis(accounts, epoch_schedule, leader_schedule);
+        let bank = Bank::new_genesis(accounts, epoch_schedule, leader_schedule);
 
         let hash_before = bank.hash();
-        bank.register_tick().unwrap();
-        let hash_after = bank.hash();
 
+        // Modifying signatures changes the hash
+        bank.add_signatures(1);
+        let hash_after = bank.hash();
         assert_ne!(hash_before, hash_after);
     }
 
@@ -1662,18 +1667,126 @@ mod tests {
 
         let bank = Bank::new_genesis(accounts, epoch_schedule, leader_schedule);
 
-        let hash = [0xABu8; 32];
-        bank.set_last_blockhash(hash);
-
-        // Verify it's set (accessed through hash() computation change)
+        bank.set_last_blockhash([0xABu8; 32]);
         let hash1 = bank.hash();
+
         bank.set_last_blockhash([0xCDu8; 32]);
         let hash2 = bank.hash();
 
-        // Different blockhashes should produce different bank hashes
-        // (even though the current hash() is still the old placeholder,
-        // this test validates the setter works — the hash comparison
-        // will be meaningful after Phase 4 replaces hash())
-        let _ = (hash1, hash2);
+        // Different blockhashes produce different bank hashes
+        assert_ne!(hash1, hash2);
+    }
+
+    // -- Deterministic bank hash tests --
+
+    #[test]
+    fn bank_hash_is_deterministic() {
+        let make_bank = || {
+            let accounts = Arc::new(AccountDatabase::new());
+            let epoch_schedule = Arc::new(EpochSchedule::default());
+            let leader_schedule = create_test_leader_schedule(0);
+            Bank::new_genesis(accounts, epoch_schedule, leader_schedule)
+        };
+
+        let b1 = make_bank();
+        let b2 = make_bank();
+
+        // Same initial state → same hash
+        assert_eq!(b1.hash(), b2.hash());
+
+        // Same modifications → same hash
+        b1.add_signatures(5);
+        b2.add_signatures(5);
+        assert_eq!(b1.hash(), b2.hash());
+    }
+
+    #[test]
+    fn bank_hash_changes_with_accounts() {
+        let accounts = Arc::new(AccountDatabase::new());
+        let epoch_schedule = Arc::new(EpochSchedule::default());
+        let leader_schedule = create_test_leader_schedule(0);
+
+        let bank = Bank::new_genesis(accounts, epoch_schedule, leader_schedule);
+
+        let hash_before = bank.hash();
+
+        let pubkey = Pubkey::new_unique();
+        let account = Account::new(1000, vec![1, 2, 3], Pubkey::new_unique());
+        bank.update_account_hash(&pubkey, None, &account);
+
+        let hash_after = bank.hash();
+        assert_ne!(hash_before, hash_after);
+    }
+
+    #[test]
+    fn bank_hash_changes_with_signatures() {
+        let accounts = Arc::new(AccountDatabase::new());
+        let epoch_schedule = Arc::new(EpochSchedule::default());
+        let leader_schedule = create_test_leader_schedule(0);
+
+        let bank = Bank::new_genesis(accounts, epoch_schedule, leader_schedule);
+
+        let hash_before = bank.hash();
+        bank.add_signatures(1);
+        let hash_after = bank.hash();
+
+        assert_ne!(hash_before, hash_after);
+    }
+
+    #[test]
+    fn bank_hash_changes_with_blockhash() {
+        let accounts = Arc::new(AccountDatabase::new());
+        let epoch_schedule = Arc::new(EpochSchedule::default());
+        let leader_schedule = create_test_leader_schedule(0);
+
+        let bank = Bank::new_genesis(accounts, epoch_schedule, leader_schedule);
+
+        let hash_before = bank.hash();
+        bank.set_last_blockhash([0xFF; 32]);
+        let hash_after = bank.hash();
+
+        assert_ne!(hash_before, hash_after);
+    }
+
+    #[test]
+    fn child_hash_incorporates_parent() {
+        let accounts = Arc::new(AccountDatabase::new());
+        let epoch_schedule = Arc::new(EpochSchedule::default());
+        let leader_schedule = create_test_leader_schedule(0);
+
+        let parent = Bank::new_genesis(accounts.clone(), epoch_schedule.clone(), leader_schedule.clone());
+        parent.add_signatures(3);
+        parent.set_last_blockhash([0x42; 32]);
+        for _ in 0..TICKS_PER_SLOT {
+            parent.register_tick().unwrap();
+        }
+        parent.freeze().unwrap();
+
+        let parent_hash = parent.hash();
+
+        let child = Bank::new_from_parent(&parent, 1, leader_schedule);
+
+        // Child's parent_hash should be the parent's computed hash
+        assert_eq!(child.parent_hash(), parent_hash);
+
+        // Child's hash should differ from parent's (different sig count, etc.)
+        assert_ne!(child.hash(), parent.hash());
+    }
+
+    #[test]
+    fn genesis_bank_hash_is_sha256() {
+        let accounts = Arc::new(AccountDatabase::new());
+        let epoch_schedule = Arc::new(EpochSchedule::default());
+        let leader_schedule = create_test_leader_schedule(0);
+
+        let bank = Bank::new_genesis(accounts, epoch_schedule, leader_schedule);
+        let hash = bank.hash();
+
+        // SHA256 output should use all 32 bytes meaningfully
+        // (old placeholder only used first 24 bytes)
+        assert_eq!(hash.len(), 32);
+        // Verify it's not all zeros (prev_bank_hash=[0;32], sig_count=0,
+        // blockhash=[0;32], lthash=zero still produces non-zero SHA256)
+        assert!(hash.iter().any(|&b| b != 0));
     }
 }
