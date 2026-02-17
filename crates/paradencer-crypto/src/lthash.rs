@@ -83,6 +83,39 @@ impl std::fmt::Debug for LatticeHashValue {
     }
 }
 
+/// Compute the lattice hash contribution of a single account.
+///
+/// For accounts with non-zero lamports, computes:
+///   `Blake3_XOF_2048(lamports || data || executable || owner || pubkey)`
+///
+/// Zero-lamport accounts produce an all-zero hash and are excluded
+/// from the cumulative bank hash.
+pub fn hash_account(
+    pubkey: &[u8; 32],
+    owner: &[u8; 32],
+    lamports: u64,
+    executable: bool,
+    data: &[u8],
+) -> LatticeHashValue {
+    if lamports == 0 {
+        return LatticeHashValue::zero();
+    }
+
+    let executable_byte = [if executable { 1u8 } else { 0u8 }];
+
+    let mut hasher = ::blake3::Hasher::new();
+    hasher.update(&lamports.to_le_bytes());
+    hasher.update(data);
+    hasher.update(&executable_byte);
+    hasher.update(owner);
+    hasher.update(pubkey);
+
+    let mut value = LatticeHashValue::zero();
+    let mut reader = hasher.finalize_xof();
+    reader.fill(value.as_bytes_mut());
+    value
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -225,5 +258,77 @@ mod tests {
         let debug = format!("{:?}", v);
         assert!(debug.starts_with("LatticeHash("));
         assert!(debug.len() < 40); // compact representation
+    }
+
+    // --- Account hashing tests ---
+
+    fn test_pubkey() -> [u8; 32] {
+        let mut k = [0u8; 32];
+        k[0] = 1;
+        k[31] = 0xFF;
+        k
+    }
+
+    fn test_owner() -> [u8; 32] {
+        let mut k = [0u8; 32];
+        k[0] = 0x11;
+        k[1] = 0x22;
+        k
+    }
+
+    #[test]
+    fn zero_lamport_is_zero_hash() {
+        let h = hash_account(&test_pubkey(), &test_owner(), 0, false, b"data");
+        assert!(h.is_zero());
+    }
+
+    #[test]
+    fn nonzero_account_produces_nonzero_hash() {
+        let h = hash_account(&test_pubkey(), &test_owner(), 1000, false, b"data");
+        assert!(!h.is_zero());
+    }
+
+    #[test]
+    fn different_lamports_different_hash() {
+        let h1 = hash_account(&test_pubkey(), &test_owner(), 1000, false, b"data");
+        let h2 = hash_account(&test_pubkey(), &test_owner(), 2000, false, b"data");
+        assert_ne!(h1, h2);
+    }
+
+    #[test]
+    fn different_data_different_hash() {
+        let h1 = hash_account(&test_pubkey(), &test_owner(), 1000, false, b"hello");
+        let h2 = hash_account(&test_pubkey(), &test_owner(), 1000, false, b"world");
+        assert_ne!(h1, h2);
+    }
+
+    #[test]
+    fn different_owner_different_hash() {
+        let owner2 = [0xAAu8; 32];
+        let h1 = hash_account(&test_pubkey(), &test_owner(), 1000, false, b"data");
+        let h2 = hash_account(&test_pubkey(), &owner2, 1000, false, b"data");
+        assert_ne!(h1, h2);
+    }
+
+    #[test]
+    fn different_pubkey_different_hash() {
+        let pubkey2 = [0xBBu8; 32];
+        let h1 = hash_account(&test_pubkey(), &test_owner(), 1000, false, b"data");
+        let h2 = hash_account(&pubkey2, &test_owner(), 1000, false, b"data");
+        assert_ne!(h1, h2);
+    }
+
+    #[test]
+    fn executable_flag_affects_hash() {
+        let h1 = hash_account(&test_pubkey(), &test_owner(), 1000, false, b"data");
+        let h2 = hash_account(&test_pubkey(), &test_owner(), 1000, true, b"data");
+        assert_ne!(h1, h2);
+    }
+
+    #[test]
+    fn hash_deterministic() {
+        let h1 = hash_account(&test_pubkey(), &test_owner(), 5000, true, b"program");
+        let h2 = hash_account(&test_pubkey(), &test_owner(), 5000, true, b"program");
+        assert_eq!(h1, h2);
     }
 }
