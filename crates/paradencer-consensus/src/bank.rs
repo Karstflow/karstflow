@@ -299,6 +299,30 @@ impl Bank {
         }
     }
 
+    /// Route vote updates from transaction execution to the consensus coordinator.
+    ///
+    /// For each vote update with a valid voted slot, creates a `ValidatorVote`
+    /// with stake weight from the coordinator's tracker and records it.
+    pub fn route_vote_updates(
+        &self,
+        updates: &[crate::bank_executor::VoteUpdate],
+        coordinator: &mut crate::ConsensusCoordinator,
+    ) {
+        for update in updates {
+            if let Some(voted_slot) = update.voted_slot {
+                let stake = coordinator
+                    .stake_tracker()
+                    .total_stake_for_voter(&update.vote_account);
+                coordinator.record_validator_vote(crate::consensus_coordinator::ValidatorVote {
+                    validator: update.vote_account,
+                    slot: voted_slot,
+                    stake,
+                    timestamp: 0,
+                });
+            }
+        }
+    }
+
     pub fn slot_info(&self) -> SlotInfo {
         SlotInfo {
             slot: self.slot,

@@ -504,4 +504,202 @@ mod tests {
         assert_eq!(fc_stats.total_forks, 2);
         assert!(fc_stats.confirmed_forks > 0);
     }
+
+    // -----------------------------------------------------------------------
+    // Wave 10: Vote flow and consensus decision integration
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn vote_updates_flow_to_consensus_coordinator() {
+        use crate::{
+            bank_executor::VoteUpdate, Bank, ConsensusCoordinator, EpochSchedule, Inflation,
+            LeaderSchedule, Rent,
+        };
+        use paradencer_storage::AccountDatabase;
+        use std::sync::Arc;
+
+        let accounts = Arc::new(AccountDatabase::new());
+        let epoch_schedule = Arc::new(EpochSchedule::default());
+        let validator = Pubkey::new_unique();
+        let validators = vec![(validator, 1000)];
+        let leader_schedule = Arc::new(LeaderSchedule::new(0, &validators).unwrap());
+
+        let bank = Bank::new_genesis_with_config(
+            accounts,
+            epoch_schedule,
+            leader_schedule,
+            1_000_000_000_000,
+            Rent::default(),
+            Inflation::default(),
+        );
+
+        let mut coordinator = ConsensusCoordinator::new(validator, 10);
+        coordinator.add_fork(0, None);
+        coordinator.add_fork(5, Some(0));
+        coordinator.add_fork(10, Some(5));
+
+        // Add stake so the validator has weight
+        coordinator.stake_tracker_mut().add_delegation(
+            Pubkey::new_unique(),
+            Delegation::new(validator, 500, 0),
+        );
+        coordinator.set_epoch(10);
+
+        // Simulate vote updates from transaction execution
+        let updates = vec![
+            VoteUpdate {
+                vote_account: validator,
+                voted_slot: Some(5),
+            },
+            VoteUpdate {
+                vote_account: validator,
+                voted_slot: Some(10),
+            },
+            VoteUpdate {
+                vote_account: Pubkey::new_unique(),
+                voted_slot: None, // No vote extracted
+            },
+        ];
+
+        bank.route_vote_updates(&updates, &mut coordinator);
+
+        // The last vote for this validator should be slot 10
+        // (recorded_validator_vote updates the latest_votes map)
+        let fork_info = coordinator.get_fork_info(10);
+        assert!(fork_info.is_some());
+        assert!(fork_info.unwrap().stake_weight > 0);
+    }
+
+    #[test]
+    fn consensus_decision_after_replay() {
+        use crate::{ConsensusCoordinator, ConsensusDecision, DecisionReason};
+
+        let validator = Pubkey::new_unique();
+        let mut coord = ConsensusCoordinator::new(validator, 10);
+
+        // Linear chain: 1 -> 2 -> 3 -> 4 -> 5
+        for slot in 1..=5 {
+            coord.add_fork(slot, if slot == 1 { None } else { Some(slot - 1) });
+        }
+
+        let linear = |a: u64, b: u64| -> bool { a <= b };
+
+        // First replay → empty tower → vote
+        let d1 = coord.decide_vote_and_reset(1, linear);
+        assert_eq!(d1.reason, DecisionReason::EmptyTower);
+        coord.execute_decision(&d1);
+
+        // Second replay → same fork → vote
+        let d2 = coord.decide_vote_and_reset(1, linear);
+        assert_eq!(d2.reason, DecisionReason::SameFork);
+        coord.execute_decision(&d2);
+
+        // Tower should have votes now
+        assert!(!coord.tower().is_empty());
+    }
+
+    #[test]
+    fn root_advancement_prunes_forks() {
+        use crate::ConsensusCoordinator;
+
+        let validator = Pubkey::new_unique();
+        let mut coord = ConsensusCoordinator::new(validator, 10);
+
+        // Add a voter with stake
+        let voter = Pubkey::new_unique();
+        coord.stake_tracker_mut().add_delegation(
+            Pubkey::new_unique(),
+            Delegation::new(voter, 1000, 0),
+        );
+        coord.set_epoch(10);
+
+        // Build chain and add votes
+        for slot in 1..=20 {
+            coord.add_fork(slot, if slot == 1 { None } else { Some(slot - 1) });
+        }
+
+        // Record a vote at slot 5
+        coord.record_validator_vote(crate::ValidatorVote {
+            validator: voter,
+            slot: 5,
+            stake: 1000,
+            timestamp: 0,
+        });
+
+        // Advance root to 10
+        coord.advance_root(10);
+
+        assert_eq!(coord.root(), Some(10));
+
+        // Vote at slot 5 should have been pruned (below root)
+        // The fork info for slot 5 should be gone (pruned by set_root)
+        assert!(coord.get_fork_info(5).is_none());
+    }
+
+    #[test]
+    fn epoch_boundary_end_to_end() {
+        use crate::{Bank, EpochSchedule, Inflation, LeaderSchedule, Rent, StakeHistory};
+        use paradencer_constants::ledger::{SLOTS_PER_EPOCH, TICKS_PER_SLOT};
+        use paradencer_storage::AccountDatabase;
+        use std::sync::{Arc, RwLock};
+
+        let accounts = Arc::new(AccountDatabase::new());
+        let epoch_schedule = Arc::new(EpochSchedule::default());
+        let validator = Pubkey::new_unique();
+        let validators = vec![(validator, 1000)];
+        let leader_schedule = Arc::new(LeaderSchedule::new(0, &validators).unwrap());
+
+        // Create vote account in the DB
+        let vote_account = paradencer_storage::Account::new(1_000_000, vec![], Pubkey::default());
+        accounts.store_published_account(validator, vote_account);
+
+        let mut parent = Bank::new_genesis_with_config(
+            accounts.clone(),
+            epoch_schedule.clone(),
+            leader_schedule,
+            1_000_000_000_000,
+            Rent::default(),
+            Inflation::default(),
+        );
+
+        // Set up epoch state
+        let mut tracker = crate::StakeTracker::new(1);
+        tracker.add_delegation(
+            Pubkey::new_unique(),
+            Delegation::new(validator, 1_000_000_000, 0),
+        );
+        let tracker = Arc::new(RwLock::new(tracker));
+        let history = Arc::new(RwLock::new(StakeHistory::new()));
+        parent.set_stake_tracker(tracker.clone());
+        parent.set_stake_history(history.clone());
+
+        // Create bank at epoch 1 boundary
+        let slot = epoch_schedule.get_first_slot_in_epoch(1);
+        let child_schedule = Arc::new(LeaderSchedule::new(1, &validators).unwrap());
+        let child = Bank::new_from_parent(&parent, slot, child_schedule);
+
+        // Complete the slot
+        for _ in 0..TICKS_PER_SLOT {
+            child.register_tick().unwrap();
+        }
+
+        let result = child.finish_slot().unwrap();
+        assert!(result.epoch_boundary);
+
+        // Verify rewards were applied
+        let acct = accounts.get_published_account(&validator).unwrap();
+        assert!(
+            acct.meta.lamports > 1_000_000,
+            "Vote account should have received rewards: {}",
+            acct.meta.lamports
+        );
+
+        // Verify stake history was updated
+        let h = history.read().unwrap();
+        assert!(h.get(0).is_some(), "Stake history should have epoch 0 entry");
+        assert!(h.get(0).unwrap().effective > 0);
+
+        // Verify capitalization increased
+        assert!(child.capitalization() > 1_000_000_000_000);
+    }
 }
