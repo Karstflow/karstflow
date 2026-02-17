@@ -16,6 +16,7 @@
 mod address_lookup_table;
 mod associated_token_program;
 mod bpf_loader;
+pub mod bpf_serialization;
 mod compute_budget_program;
 mod config_program;
 pub mod elf_loader;

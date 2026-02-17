@@ -294,6 +294,24 @@ pub const SBPF_VERSION_V3: u32 = 3;
 /// Layout: is_signer(1) + is_writable(1) + pubkey(32) + owner(32) + lamports(8) + data_len(8) = 82
 pub const ACCOUNT_SERIALIZED_META_SIZE: usize = 82;
 
+/// Maximum account data growth allowed per instruction (10 KiB realloc buffer).
+pub const MAX_PERMITTED_DATA_INCREASE: usize = 10 * 1024;
+
+/// Maximum total account data length (10 MiB).
+pub const MAX_PERMITTED_DATA_LENGTH: usize = 10 * 1024 * 1024;
+
+/// Alignment for u128 values in the serialized input region.
+pub const ALIGN_OF_U128: usize = 16;
+
+/// Marker byte indicating this account is not a duplicate in the input region.
+pub const NON_DUP_MARKER: u8 = 0xFF;
+
+/// Maximum number of accounts in a single BPF instruction.
+pub const MAX_INSTRUCTION_ACCOUNTS: usize = 256;
+
+/// Maximum number of accounts in a single transaction.
+pub const MAX_TRANSACTION_ACCOUNTS: usize = 256;
+
 // ---------------------------------------------------------------------------
 // Compute metering
 // ---------------------------------------------------------------------------
