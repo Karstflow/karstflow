@@ -539,10 +539,9 @@ mod tests {
         coordinator.add_fork(10, Some(5));
 
         // Add stake so the validator has weight
-        coordinator.stake_tracker_mut().add_delegation(
-            Pubkey::new_unique(),
-            Delegation::new(validator, 500, 0),
-        );
+        coordinator
+            .stake_tracker_mut()
+            .add_delegation(Pubkey::new_unique(), Delegation::new(validator, 500, 0));
         coordinator.set_epoch(10);
 
         // Simulate vote updates from transaction execution
@@ -607,10 +606,9 @@ mod tests {
 
         // Add a voter with stake
         let voter = Pubkey::new_unique();
-        coord.stake_tracker_mut().add_delegation(
-            Pubkey::new_unique(),
-            Delegation::new(voter, 1000, 0),
-        );
+        coord
+            .stake_tracker_mut()
+            .add_delegation(Pubkey::new_unique(), Delegation::new(voter, 1000, 0));
         coord.set_epoch(10);
 
         // Build chain and add votes
@@ -696,7 +694,10 @@ mod tests {
 
         // Verify stake history was updated
         let h = history.read().unwrap();
-        assert!(h.get(0).is_some(), "Stake history should have epoch 0 entry");
+        assert!(
+            h.get(0).is_some(),
+            "Stake history should have epoch 0 entry"
+        );
         assert!(h.get(0).unwrap().effective > 0);
 
         // Verify capitalization increased
@@ -711,7 +712,8 @@ mod tests {
 
         let accounts = Arc::new(AccountDatabase::new());
         let epoch_schedule = Arc::new(EpochSchedule::default());
-        let leader_schedule = Arc::new(LeaderSchedule::new(0, &[(Pubkey::new_unique(), 1_000)]).unwrap());
+        let leader_schedule =
+            Arc::new(LeaderSchedule::new(0, &[(Pubkey::new_unique(), 1_000)]).unwrap());
 
         let bank = Bank::new_genesis(accounts, epoch_schedule, leader_schedule);
 
@@ -734,7 +736,8 @@ mod tests {
         let make_bank = || {
             let accounts = Arc::new(AccountDatabase::new());
             let epoch_schedule = Arc::new(EpochSchedule::default());
-            let leader_schedule = Arc::new(LeaderSchedule::new(0, &[(Pubkey::new_unique(), 1_000)]).unwrap());
+            let leader_schedule =
+                Arc::new(LeaderSchedule::new(0, &[(Pubkey::new_unique(), 1_000)]).unwrap());
             Bank::new_genesis(accounts, epoch_schedule, leader_schedule)
         };
 
@@ -764,7 +767,8 @@ mod tests {
 
         let accounts = Arc::new(AccountDatabase::new());
         let epoch_schedule = Arc::new(EpochSchedule::default());
-        let leader_schedule = Arc::new(LeaderSchedule::new(0, &[(Pubkey::new_unique(), 1_000)]).unwrap());
+        let leader_schedule =
+            Arc::new(LeaderSchedule::new(0, &[(Pubkey::new_unique(), 1_000)]).unwrap());
 
         let bank = Bank::new_genesis(accounts, epoch_schedule, leader_schedule);
 
@@ -805,7 +809,8 @@ mod tests {
 
         let accounts = Arc::new(AccountDatabase::new());
         let epoch_schedule = Arc::new(EpochSchedule::default());
-        let leader_schedule = Arc::new(LeaderSchedule::new(0, &[(Pubkey::new_unique(), 1_000)]).unwrap());
+        let leader_schedule =
+            Arc::new(LeaderSchedule::new(0, &[(Pubkey::new_unique(), 1_000)]).unwrap());
 
         // Set up parent with some state
         let parent = Bank::new_genesis(accounts, epoch_schedule, leader_schedule.clone());

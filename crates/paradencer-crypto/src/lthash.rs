@@ -78,8 +78,11 @@ impl std::fmt::Debug for LatticeHashValue {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         // Show a compact blake3 hash of the full 2048 bytes for readability
         let digest = crate::blake3::Blake3Hasher::hash(self.as_bytes());
-        write!(f, "LatticeHash({:02x}{:02x}..{:02x}{:02x})",
-            digest[0], digest[1], digest[30], digest[31])
+        write!(
+            f,
+            "LatticeHash({:02x}{:02x}..{:02x}{:02x})",
+            digest[0], digest[1], digest[30], digest[31]
+        )
     }
 }
 

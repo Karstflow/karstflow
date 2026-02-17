@@ -3,7 +3,6 @@
 /// Maintains a list of recent blockhashes paired with fee calculator data.
 /// This sysvar is deprecated in favor of direct blockhash age checks,
 /// but it must remain available for backward compatibility with older programs.
-
 use paradencer_constants::sysvars::MAX_RECENT_BLOCKHASHES;
 
 /// Entry pairing a blockhash with its associated fee rate.

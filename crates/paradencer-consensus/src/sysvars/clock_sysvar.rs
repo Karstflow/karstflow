@@ -3,7 +3,6 @@
 /// Wraps the existing `Clock` type to provide account-level serialization
 /// for the Clock sysvar. The clock tracks network time using slot numbers,
 /// epoch boundaries, and stake-weighted timestamp estimates.
-
 use crate::Clock;
 
 /// Serializable wrapper around the consensus `Clock` type.

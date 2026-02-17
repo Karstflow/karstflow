@@ -326,21 +326,12 @@ fn sysvar_cache_epoch_boundary_adds_stake_history() {
 fn sysvar_cache_multiple_epoch_boundaries() {
     let cache = SysvarCache::default();
     for epoch in 0..5 {
-        cache.on_epoch_boundary(
-            epoch,
-            StakeHistoryEntry::new(10_000 + epoch * 100, 0, 0),
-        );
+        cache.on_epoch_boundary(epoch, StakeHistoryEntry::new(10_000 + epoch * 100, 0, 0));
     }
     let history = cache.stake_history();
     assert_eq!(history.len(), 5);
-    assert_eq!(
-        history.get(0),
-        Some(&StakeHistoryEntry::new(10_000, 0, 0))
-    );
-    assert_eq!(
-        history.get(4),
-        Some(&StakeHistoryEntry::new(10_400, 0, 0))
-    );
+    assert_eq!(history.get(0), Some(&StakeHistoryEntry::new(10_000, 0, 0)));
+    assert_eq!(history.get(4), Some(&StakeHistoryEntry::new(10_400, 0, 0)));
 }
 
 // -----------------------------------------------------------------------
@@ -407,9 +398,7 @@ fn sysvar_account_recent_blockhashes_returns_data() {
 #[test]
 fn sysvar_account_epoch_rewards_returns_data() {
     let cache = SysvarCache::default();
-    let account = cache
-        .get_sysvar_account(&EPOCH_REWARDS_SYSVAR_ID)
-        .unwrap();
+    let account = cache.get_sysvar_account(&EPOCH_REWARDS_SYSVAR_ID).unwrap();
     // Inactive: 1 byte (0).
     assert_eq!(account.data.len(), 1);
 }
@@ -604,13 +593,11 @@ fn instructions_sysvar_tracks_current_index() {
 
 #[test]
 fn instructions_sysvar_serialization_roundtrip() {
-    let instructions = vec![
-        SerializedInstruction {
-            program_id_index: 1,
-            account_indices: vec![2, 3, 4],
-            data: vec![0x01, 0x02],
-        },
-    ];
+    let instructions = vec![SerializedInstruction {
+        program_id_index: 1,
+        account_indices: vec![2, 3, 4],
+        data: vec![0x01, 0x02],
+    }];
     let mut sysvar = InstructionsSysvar::load(instructions).unwrap();
     sysvar.set_current_index(0);
 
@@ -689,10 +676,7 @@ fn sysvar_cache_concurrent_epoch_boundary() {
             let cache = cache.clone();
             thread::spawn(move || {
                 for epoch in (t * 10)..(t * 10 + 10) {
-                    cache.on_epoch_boundary(
-                        epoch,
-                        StakeHistoryEntry::new(1000 + epoch * 10, 0, 0),
-                    );
+                    cache.on_epoch_boundary(epoch, StakeHistoryEntry::new(1000 + epoch * 10, 0, 0));
                 }
             })
         })

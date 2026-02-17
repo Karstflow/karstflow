@@ -1285,6 +1285,7 @@ version = "0.1.0"
 dependencies = [
  "bincode",
  "dashmap",
+ "ed25519-dalek",
  "paradencer-constants",
  "paradencer-crypto",
  "paradencer-ids",
@@ -1441,6 +1442,7 @@ name = "paradencer-sbpf"
 version = "0.1.0"
 dependencies = [
  "blake3",
+ "curve25519-dalek",
  "ed25519-dalek",
  "k256",
  "paradencer-constants",
@@ -1473,6 +1475,7 @@ dependencies = [
  "reed-solomon-erasure",
  "serde",
  "serde_json",
+ "sha2",
  "thiserror 2.0.18",
 ]
 

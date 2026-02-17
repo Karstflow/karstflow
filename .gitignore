@@ -3,6 +3,7 @@
 
 # Documentation (temporary)
 /docs/
+/docs/*
 
 # Rust analyzer / IDE
 **/*.rs.bk

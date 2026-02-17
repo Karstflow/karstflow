@@ -4,7 +4,6 @@
 /// serialization. The stake history records the network-wide activation
 /// and deactivation state across recent epochs, used for warmup/cooldown
 /// rate calculations when delegating or withdrawing stake.
-
 use crate::{EpochStakeEntry, StakeHistory, StakeHistoryEntry};
 
 /// Serializable wrapper for the StakeHistory sysvar.
@@ -52,9 +51,11 @@ impl StakeHistorySysvar {
             let epoch = u64::from_le_bytes(data[offset..offset + 8].try_into().ok()?);
             let effective = u64::from_le_bytes(data[offset + 8..offset + 16].try_into().ok()?);
             let activating = u64::from_le_bytes(data[offset + 16..offset + 24].try_into().ok()?);
-            let deactivating =
-                u64::from_le_bytes(data[offset + 24..offset + 32].try_into().ok()?);
-            history.add(epoch, StakeHistoryEntry::new(effective, activating, deactivating));
+            let deactivating = u64::from_le_bytes(data[offset + 24..offset + 32].try_into().ok()?);
+            history.add(
+                epoch,
+                StakeHistoryEntry::new(effective, activating, deactivating),
+            );
             offset += entry_size;
         }
         Some(Self { history })

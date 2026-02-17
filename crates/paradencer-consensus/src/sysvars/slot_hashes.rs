@@ -3,7 +3,6 @@
 /// Maintains an ordered list of the most recent slot numbers paired with
 /// their corresponding bank hashes. Programs can verify that a specific
 /// slot was processed and retrieve its hash for proof-of-history validation.
-
 use paradencer_constants::sysvars::MAX_SLOT_HASHES;
 
 /// Entry pairing a slot number with its bank hash.

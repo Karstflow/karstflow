@@ -297,8 +297,7 @@ impl ConsensusCoordinator {
 
         // Determine if best fork is on the same fork as our last vote.
         // Two slots are on the same fork if one is an ancestor of the other.
-        let same_fork =
-            is_ancestor(last_vote, best_slot) || is_ancestor(best_slot, last_vote);
+        let same_fork = is_ancestor(last_vote, best_slot) || is_ancestor(best_slot, last_vote);
 
         if same_fork {
             // Same fork — check lockout

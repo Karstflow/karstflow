@@ -3,7 +3,6 @@
 /// Maintains a compact bitvector indicating which slots have been processed.
 /// This allows programs and the runtime to verify whether a given slot
 /// was included in the chain without storing full block data.
-
 use paradencer_constants::sysvars::SLOT_HISTORY_BITS;
 
 /// Number of u64 words needed to hold the bitvector.
@@ -158,7 +157,9 @@ impl SlotHistorySysvar {
         let mut bits = Vec::with_capacity(word_count);
         let mut offset = 24;
         for _ in 0..word_count {
-            bits.push(u64::from_le_bytes(data[offset..offset + 8].try_into().ok()?));
+            bits.push(u64::from_le_bytes(
+                data[offset..offset + 8].try_into().ok()?,
+            ));
             offset += 8;
         }
         Some(Self {

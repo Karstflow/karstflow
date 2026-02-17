@@ -3,7 +3,6 @@
 /// Wraps the existing `Rent` type to provide account-level serialization.
 /// Rent parameters control the minimum balance required for accounts
 /// to remain alive on-chain.
-
 use crate::Rent;
 
 /// Serializable wrapper for the Rent sysvar.

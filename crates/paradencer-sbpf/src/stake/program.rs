@@ -210,7 +210,11 @@ impl StakeProgramExecutor {
             }
             constants::INSTRUCTION_GET_MINIMUM_DELEGATION => {
                 compute_used = compute_used.saturating_add(constants::COMPUTE_COST_AUTHORIZE);
-                return_data = Some(constants::MINIMUM_DELEGATION_LAMPORTS.to_le_bytes().to_vec());
+                return_data = Some(
+                    constants::MINIMUM_DELEGATION_LAMPORTS
+                        .to_le_bytes()
+                        .to_vec(),
+                );
                 logs.push("Returned minimum delegation".to_string());
             }
             constants::INSTRUCTION_DEACTIVATE_DELINQUENT => {
@@ -230,7 +234,10 @@ impl StakeProgramExecutor {
                 self.execute_move_lamports(context, &mut modified_accounts, &mut logs)?;
             }
             _ => {
-                return Err(format!("Unknown stake instruction type {}", instruction_type));
+                return Err(format!(
+                    "Unknown stake instruction type {}",
+                    instruction_type
+                ));
             }
         }
 
@@ -273,8 +280,7 @@ impl StakeProgramExecutor {
             account.data = AccountData::new(vec![0u8; constants::STAKE_STATE_V2_SIZE]);
         }
 
-        let state = deserialize_stake_state(account.data.as_ref())
-            .map_err(|e| e.to_string())?;
+        let state = deserialize_stake_state(account.data.as_ref()).map_err(|e| e.to_string())?;
         if !state.is_uninitialized() {
             return Err("Stake account already initialized".to_string());
         }
@@ -319,16 +325,16 @@ impl StakeProgramExecutor {
 
         let new_authority = read_pubkey(&context.instruction_data, 4)?;
         let auth_type_raw = read_u32(&context.instruction_data, 36)?;
-        let auth_type = AuthorityType::from_discriminant(auth_type_raw)
-            .ok_or("Invalid authority type")?;
+        let auth_type =
+            AuthorityType::from_discriminant(auth_type_raw).ok_or("Invalid authority type")?;
 
         let (pubkey, mut account, writable) = context.accounts[0].clone();
         if !writable {
             return Err(StakeError::AccountNotWritable.to_string());
         }
 
-        let mut state = deserialize_stake_state(account.data.as_ref())
-            .map_err(|e| e.to_string())?;
+        let mut state =
+            deserialize_stake_state(account.data.as_ref()).map_err(|e| e.to_string())?;
 
         let meta = state.meta_mut().ok_or("Account not initialized")?;
 
@@ -370,8 +376,8 @@ impl StakeProgramExecutor {
             return Err("Vote account not owned by vote program".to_string());
         }
 
-        let state = deserialize_stake_state(stake_account.data.as_ref())
-            .map_err(|e| e.to_string())?;
+        let state =
+            deserialize_stake_state(stake_account.data.as_ref()).map_err(|e| e.to_string())?;
 
         let meta = match state {
             StakeState::Initialized(ref m) => m.clone(),
@@ -430,8 +436,8 @@ impl StakeProgramExecutor {
             return Err("Both accounts must be writable".to_string());
         }
 
-        let src_state = deserialize_stake_state(src_account.data.as_ref())
-            .map_err(|e| e.to_string())?;
+        let src_state =
+            deserialize_stake_state(src_account.data.as_ref()).map_err(|e| e.to_string())?;
 
         // Verify staker authority
         let signers: Vec<Pubkey> = context.accounts.iter().map(|(pk, _, _)| *pk).collect();
@@ -458,10 +464,8 @@ impl StakeProgramExecutor {
                 }
 
                 src_account.meta.lamports = remaining;
-                dst_account.meta.lamports = dst_account
-                    .meta
-                    .lamports
-                    .saturating_add(split_lamports);
+                dst_account.meta.lamports =
+                    dst_account.meta.lamports.saturating_add(split_lamports);
                 dst_account.meta.owner = STAKE_PROGRAM_ID;
 
                 let dst_state = StakeState::Initialized(meta.clone());
@@ -488,10 +492,8 @@ impl StakeProgramExecutor {
                 dst_delegation.stake_amount = dst_stake_amount;
 
                 src_account.meta.lamports = remaining;
-                dst_account.meta.lamports = dst_account
-                    .meta
-                    .lamports
-                    .saturating_add(split_lamports);
+                dst_account.meta.lamports =
+                    dst_account.meta.lamports.saturating_add(split_lamports);
                 dst_account.meta.owner = STAKE_PROGRAM_ID;
 
                 let src_state = StakeState::Delegated(
@@ -500,7 +502,11 @@ impl StakeProgramExecutor {
                     flags,
                 );
                 let dst_state = StakeState::Delegated(
-                    Meta::new(meta.rent_exempt_reserve, meta.authorized.clone(), meta.lockup.clone()),
+                    Meta::new(
+                        meta.rent_exempt_reserve,
+                        meta.authorized.clone(),
+                        meta.lockup.clone(),
+                    ),
                     StakeAccount::new(dst_delegation, stake.credits_observed),
                     StakeFlags::EMPTY,
                 );
@@ -512,7 +518,10 @@ impl StakeProgramExecutor {
 
         modified.insert(src_pubkey, src_account);
         modified.insert(dst_pubkey, dst_account);
-        logs.push(format!("Split {} lamports to new stake account", split_lamports));
+        logs.push(format!(
+            "Split {} lamports to new stake account",
+            split_lamports
+        ));
         Ok(())
     }
 
@@ -541,8 +550,8 @@ impl StakeProgramExecutor {
             return Err(StakeError::AccountNotWritable.to_string());
         }
 
-        let state = deserialize_stake_state(stake_account.data.as_ref())
-            .map_err(|e| e.to_string())?;
+        let state =
+            deserialize_stake_state(stake_account.data.as_ref()).map_err(|e| e.to_string())?;
 
         // Verify withdrawer authority
         let signers: Vec<Pubkey> = context.accounts.iter().map(|(pk, _, _)| *pk).collect();
@@ -618,10 +627,7 @@ impl StakeProgramExecutor {
         }
 
         stake_account.meta.lamports = stake_account.meta.lamports.saturating_sub(lamports);
-        recipient_account.meta.lamports = recipient_account
-            .meta
-            .lamports
-            .saturating_add(lamports);
+        recipient_account.meta.lamports = recipient_account.meta.lamports.saturating_add(lamports);
 
         // If all lamports withdrawn, set to Uninitialized
         if stake_account.meta.lamports == 0 {
@@ -652,8 +658,8 @@ impl StakeProgramExecutor {
             return Err(StakeError::AccountNotWritable.to_string());
         }
 
-        let mut state = deserialize_stake_state(account.data.as_ref())
-            .map_err(|e| e.to_string())?;
+        let mut state =
+            deserialize_stake_state(account.data.as_ref()).map_err(|e| e.to_string())?;
 
         let (meta, stake, flags) = match &mut state {
             StakeState::Delegated(m, s, f) => (m, s, f),
@@ -702,8 +708,8 @@ impl StakeProgramExecutor {
             return Err(StakeError::AccountNotWritable.to_string());
         }
 
-        let mut state = deserialize_stake_state(account.data.as_ref())
-            .map_err(|e| e.to_string())?;
+        let mut state =
+            deserialize_stake_state(account.data.as_ref()).map_err(|e| e.to_string())?;
 
         let meta = state.meta_mut().ok_or("Account not initialized")?;
 
@@ -777,10 +783,10 @@ impl StakeProgramExecutor {
             return Err("Both accounts must be writable".to_string());
         }
 
-        let dst_state = deserialize_stake_state(dst_account.data.as_ref())
-            .map_err(|e| e.to_string())?;
-        let src_state = deserialize_stake_state(src_account.data.as_ref())
-            .map_err(|e| e.to_string())?;
+        let dst_state =
+            deserialize_stake_state(dst_account.data.as_ref()).map_err(|e| e.to_string())?;
+        let src_state =
+            deserialize_stake_state(src_account.data.as_ref()).map_err(|e| e.to_string())?;
 
         // Verify staker authority on both
         let signers: Vec<Pubkey> = context.accounts.iter().map(|(pk, _, _)| *pk).collect();
@@ -864,8 +870,8 @@ impl StakeProgramExecutor {
             return Err(StakeError::AccountNotWritable.to_string());
         }
 
-        let mut state = deserialize_stake_state(account.data.as_ref())
-            .map_err(|e| e.to_string())?;
+        let mut state =
+            deserialize_stake_state(account.data.as_ref()).map_err(|e| e.to_string())?;
         let meta = state.meta_mut().ok_or("Account not initialized")?;
 
         // The base signer is accounts[1] - we trust the transaction verified the signature
@@ -917,8 +923,7 @@ impl StakeProgramExecutor {
             account.data = AccountData::new(vec![0u8; constants::STAKE_STATE_V2_SIZE]);
         }
 
-        let state = deserialize_stake_state(account.data.as_ref())
-            .map_err(|e| e.to_string())?;
+        let state = deserialize_stake_state(account.data.as_ref()).map_err(|e| e.to_string())?;
         if !state.is_uninitialized() {
             return Err("Stake account already initialized".to_string());
         }
@@ -968,8 +973,8 @@ impl StakeProgramExecutor {
             return Err(StakeError::AccountNotWritable.to_string());
         }
 
-        let mut state = deserialize_stake_state(account.data.as_ref())
-            .map_err(|e| e.to_string())?;
+        let mut state =
+            deserialize_stake_state(account.data.as_ref()).map_err(|e| e.to_string())?;
         let meta = state.meta_mut().ok_or("Account not initialized")?;
 
         let signers: Vec<Pubkey> = context.accounts.iter().map(|(pk, _, _)| *pk).collect();
@@ -1012,8 +1017,8 @@ impl StakeProgramExecutor {
             return Err(StakeError::AccountNotWritable.to_string());
         }
 
-        let mut state = deserialize_stake_state(account.data.as_ref())
-            .map_err(|e| e.to_string())?;
+        let mut state =
+            deserialize_stake_state(account.data.as_ref()).map_err(|e| e.to_string())?;
         let meta = state.meta_mut().ok_or("Account not initialized")?;
 
         let (base_pubkey, _, _) = &context.accounts[2];
@@ -1027,9 +1032,7 @@ impl StakeProgramExecutor {
                 // Accept base key as authority proxy
                 match auth_type {
                     AuthorityType::Staker => meta.authorized.staker = *new_authority_pubkey,
-                    AuthorityType::Withdrawer => {
-                        meta.authorized.withdrawer = *new_authority_pubkey
-                    }
+                    AuthorityType::Withdrawer => meta.authorized.withdrawer = *new_authority_pubkey,
                 }
                 Ok(())
             })
@@ -1059,8 +1062,8 @@ impl StakeProgramExecutor {
             return Err(StakeError::AccountNotWritable.to_string());
         }
 
-        let mut state = deserialize_stake_state(account.data.as_ref())
-            .map_err(|e| e.to_string())?;
+        let mut state =
+            deserialize_stake_state(account.data.as_ref()).map_err(|e| e.to_string())?;
         let meta = state.meta_mut().ok_or("Account not initialized")?;
 
         let signers: Vec<Pubkey> = context.accounts.iter().map(|(pk, _, _)| *pk).collect();
@@ -1122,8 +1125,8 @@ impl StakeProgramExecutor {
             return Err(StakeError::AccountNotWritable.to_string());
         }
 
-        let mut state = deserialize_stake_state(stake_account.data.as_ref())
-            .map_err(|e| e.to_string())?;
+        let mut state =
+            deserialize_stake_state(stake_account.data.as_ref()).map_err(|e| e.to_string())?;
 
         let (_, stake, _) = match &mut state {
             StakeState::Delegated(m, s, f) => (m, s, f),
@@ -1177,8 +1180,8 @@ impl StakeProgramExecutor {
             return Err("Both stake accounts must be writable".to_string());
         }
 
-        let old_state = deserialize_stake_state(old_account.data.as_ref())
-            .map_err(|e| e.to_string())?;
+        let old_state =
+            deserialize_stake_state(old_account.data.as_ref()).map_err(|e| e.to_string())?;
 
         let (meta, stake, _) = match &old_state {
             StakeState::Delegated(m, s, f) => (m, s, f),
@@ -1204,7 +1207,11 @@ impl StakeProgramExecutor {
         let current_epoch = epoch_from_context(context, 2);
 
         // Create new delegation on the uninitialized account
-        let new_delegation = Delegation::new(new_vote_pubkey, stake.delegation.stake_amount, current_epoch);
+        let new_delegation = Delegation::new(
+            new_vote_pubkey,
+            stake.delegation.stake_amount,
+            current_epoch,
+        );
         let new_stake = StakeAccount::new(new_delegation, 0);
         let mut new_flags = StakeFlags::EMPTY;
         new_flags.insert(StakeFlags::MUST_FULLY_ACTIVATE_BEFORE_DEACTIVATION);
@@ -1238,7 +1245,10 @@ impl StakeProgramExecutor {
         };
 
         write_state(&mut old_account, &old_new_state);
-        write_state(&mut new_account, &StakeState::Delegated(new_meta, new_stake, new_flags));
+        write_state(
+            &mut new_account,
+            &StakeState::Delegated(new_meta, new_stake, new_flags),
+        );
 
         modified.insert(old_pubkey, old_account);
         modified.insert(new_pubkey, new_account);
@@ -1271,10 +1281,10 @@ impl StakeProgramExecutor {
             return Err("Both accounts must be writable".to_string());
         }
 
-        let mut src_state = deserialize_stake_state(src_account.data.as_ref())
-            .map_err(|e| e.to_string())?;
-        let mut dst_state = deserialize_stake_state(dst_account.data.as_ref())
-            .map_err(|e| e.to_string())?;
+        let mut src_state =
+            deserialize_stake_state(src_account.data.as_ref()).map_err(|e| e.to_string())?;
+        let mut dst_state =
+            deserialize_stake_state(dst_account.data.as_ref()).map_err(|e| e.to_string())?;
 
         let (src_meta, src_stake) = match &mut src_state {
             StakeState::Delegated(m, s, _) => (m, s),
@@ -1301,14 +1311,10 @@ impl StakeProgramExecutor {
             return Err(StakeError::InsufficientStake.to_string());
         }
 
-        src_stake.delegation.stake_amount = src_stake
-            .delegation
-            .stake_amount
-            .saturating_sub(lamports);
-        dst_stake.delegation.stake_amount = dst_stake
-            .delegation
-            .stake_amount
-            .saturating_add(lamports);
+        src_stake.delegation.stake_amount =
+            src_stake.delegation.stake_amount.saturating_sub(lamports);
+        dst_stake.delegation.stake_amount =
+            dst_stake.delegation.stake_amount.saturating_add(lamports);
 
         // Transfer corresponding lamports
         src_account.meta.lamports = src_account.meta.lamports.saturating_sub(lamports);
@@ -1348,10 +1354,10 @@ impl StakeProgramExecutor {
             return Err("Both accounts must be writable".to_string());
         }
 
-        let src_state = deserialize_stake_state(src_account.data.as_ref())
-            .map_err(|e| e.to_string())?;
-        let dst_state = deserialize_stake_state(dst_account.data.as_ref())
-            .map_err(|e| e.to_string())?;
+        let src_state =
+            deserialize_stake_state(src_account.data.as_ref()).map_err(|e| e.to_string())?;
+        let dst_state =
+            deserialize_stake_state(dst_account.data.as_ref()).map_err(|e| e.to_string())?;
 
         let (src_meta, src_stake) = match &src_state {
             StakeState::Delegated(m, s, _) => (m, s),
@@ -1681,7 +1687,8 @@ mod tests {
         let withdrawer = Pubkey::new_unique();
         let voter = Pubkey::new_unique();
 
-        let account = make_delegated_account(5_000_000_000, staker, withdrawer, voter, 3_000_000_000);
+        let account =
+            make_delegated_account(5_000_000_000, staker, withdrawer, voter, 3_000_000_000);
         let clock = build_clock_account(15, 0);
 
         let data = 5u32.to_le_bytes().to_vec(); // Deactivate
@@ -1713,7 +1720,8 @@ mod tests {
         let withdrawer = Pubkey::new_unique();
         let voter = Pubkey::new_unique();
 
-        let mut account = make_delegated_account(5_000_000_000, staker, withdrawer, voter, 3_000_000_000);
+        let mut account =
+            make_delegated_account(5_000_000_000, staker, withdrawer, voter, 3_000_000_000);
         // Manually deactivate
         let mut state = deserialize_stake_state(account.data.as_ref()).unwrap();
         state.stake_mut().unwrap().delegation.deactivate(5);
@@ -1960,8 +1968,20 @@ mod tests {
         let staker = Pubkey::new_unique();
         let withdrawer = Pubkey::new_unique();
 
-        let dst = make_delegated_account(6_000_000_000, staker, withdrawer, Pubkey::new_unique(), 4_000_000_000);
-        let src = make_delegated_account(4_000_000_000, staker, withdrawer, Pubkey::new_unique(), 2_000_000_000);
+        let dst = make_delegated_account(
+            6_000_000_000,
+            staker,
+            withdrawer,
+            Pubkey::new_unique(),
+            4_000_000_000,
+        );
+        let src = make_delegated_account(
+            4_000_000_000,
+            staker,
+            withdrawer,
+            Pubkey::new_unique(),
+            2_000_000_000,
+        );
 
         let data = 7u32.to_le_bytes().to_vec();
 
@@ -2009,7 +2029,8 @@ mod tests {
         let old_voter = Pubkey::new_unique();
         let new_voter = Pubkey::new_unique();
 
-        let old_stake = make_delegated_account(5_000_000_000, staker, withdrawer, old_voter, 3_000_000_000);
+        let old_stake =
+            make_delegated_account(5_000_000_000, staker, withdrawer, old_voter, 3_000_000_000);
         let new_uninit = make_stake_account(0);
 
         let data = 15u32.to_le_bytes().to_vec(); // Redelegate
@@ -2034,7 +2055,10 @@ mod tests {
         let new_modified = &outcome.modified_accounts[&new_pk];
         let new_state = deserialize_stake_state(new_modified.data.as_ref()).unwrap();
         assert!(new_state.is_delegated());
-        assert_eq!(new_state.stake().unwrap().delegation.voter_pubkey, new_voter);
+        assert_eq!(
+            new_state.stake().unwrap().delegation.voter_pubkey,
+            new_voter
+        );
         assert!(new_state
             .flags()
             .unwrap()
@@ -2048,7 +2072,8 @@ mod tests {
         let withdrawer = Pubkey::new_unique();
         let voter = Pubkey::new_unique();
 
-        let old_stake = make_delegated_account(5_000_000_000, staker, withdrawer, voter, 3_000_000_000);
+        let old_stake =
+            make_delegated_account(5_000_000_000, staker, withdrawer, voter, 3_000_000_000);
         let new_uninit = make_stake_account(0);
 
         let data = 15u32.to_le_bytes().to_vec();
@@ -2102,10 +2127,18 @@ mod tests {
         let outcome = executor.execute(&context).unwrap();
         assert!(outcome.success);
 
-        let src_state = deserialize_stake_state(outcome.modified_accounts[&src_pk].data.as_ref()).unwrap();
-        let dst_state = deserialize_stake_state(outcome.modified_accounts[&dst_pk].data.as_ref()).unwrap();
-        assert_eq!(src_state.stake().unwrap().delegation.stake_amount, 3_000_000_000);
-        assert_eq!(dst_state.stake().unwrap().delegation.stake_amount, 3_000_000_000);
+        let src_state =
+            deserialize_stake_state(outcome.modified_accounts[&src_pk].data.as_ref()).unwrap();
+        let dst_state =
+            deserialize_stake_state(outcome.modified_accounts[&dst_pk].data.as_ref()).unwrap();
+        assert_eq!(
+            src_state.stake().unwrap().delegation.stake_amount,
+            3_000_000_000
+        );
+        assert_eq!(
+            dst_state.stake().unwrap().delegation.stake_amount,
+            3_000_000_000
+        );
     }
 
     // -- MoveLamports test --
@@ -2119,8 +2152,20 @@ mod tests {
         let rent = minimum_stake_balance();
 
         // Source has 2 SOL excess above rent+stake
-        let src = make_delegated_account(rent + 5_000_000_000, staker, withdrawer, voter, 3_000_000_000);
-        let dst = make_delegated_account(rent + 3_000_000_000, staker, withdrawer, voter, 2_000_000_000);
+        let src = make_delegated_account(
+            rent + 5_000_000_000,
+            staker,
+            withdrawer,
+            voter,
+            3_000_000_000,
+        );
+        let dst = make_delegated_account(
+            rent + 3_000_000_000,
+            staker,
+            withdrawer,
+            voter,
+            2_000_000_000,
+        );
 
         let move_amount = 1_000_000_000u64; // Move 1 SOL of excess
         let mut data = 17u32.to_le_bytes().to_vec(); // MoveLamports
@@ -2160,8 +2205,20 @@ mod tests {
         let rent = minimum_stake_balance();
 
         // Source has 2 SOL excess
-        let src = make_delegated_account(rent + 5_000_000_000, staker, withdrawer, voter, 3_000_000_000);
-        let dst = make_delegated_account(rent + 3_000_000_000, staker, withdrawer, voter, 2_000_000_000);
+        let src = make_delegated_account(
+            rent + 5_000_000_000,
+            staker,
+            withdrawer,
+            voter,
+            3_000_000_000,
+        );
+        let dst = make_delegated_account(
+            rent + 3_000_000_000,
+            staker,
+            withdrawer,
+            voter,
+            2_000_000_000,
+        );
 
         let move_amount = 3_000_000_000u64; // Try to move 3 SOL but only 2 SOL excess
         let mut data = 17u32.to_le_bytes().to_vec();

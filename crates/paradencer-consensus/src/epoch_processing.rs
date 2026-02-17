@@ -628,7 +628,10 @@ mod tests {
             EpochProcessor::process_epoch_boundary(&bank2, &tracker2, &mut history2).unwrap();
 
         // Rewards should match since both use the same defaults
-        assert_eq!(ctx_custom.validator_rewards.len(), ctx_default.validator_rewards.len());
+        assert_eq!(
+            ctx_custom.validator_rewards.len(),
+            ctx_default.validator_rewards.len()
+        );
         if !ctx_custom.validator_rewards.is_empty() {
             assert_eq!(
                 ctx_custom.validator_rewards[0].total_reward,

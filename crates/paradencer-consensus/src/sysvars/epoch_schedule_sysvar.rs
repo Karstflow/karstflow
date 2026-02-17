@@ -3,7 +3,6 @@
 /// Wraps the existing `EpochSchedule` type to provide account-level serialization.
 /// The epoch schedule determines how slots map to epochs and controls
 /// warmup behavior for new clusters.
-
 use crate::{EpochSchedule, EpochScheduleConfig};
 
 /// Serializable wrapper for the EpochSchedule sysvar.

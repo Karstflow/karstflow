@@ -267,10 +267,6 @@ impl SysvarCache {
 
 impl Default for SysvarCache {
     fn default() -> Self {
-        Self::new(
-            Clock::default(),
-            EpochSchedule::default(),
-            Rent::default(),
-        )
+        Self::new(Clock::default(), EpochSchedule::default(), Rent::default())
     }
 }

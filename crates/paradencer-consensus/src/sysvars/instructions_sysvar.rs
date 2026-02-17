@@ -4,7 +4,6 @@
 /// is populated per-transaction. It allows a program to inspect the other
 /// instructions within the same transaction, enabling cross-program
 /// verification patterns.
-
 use paradencer_constants::sysvars::MAX_INSTRUCTIONS_PER_TRANSACTION;
 
 /// Single serialized instruction within the transaction.
@@ -112,8 +111,7 @@ impl InstructionsSysvar {
             if offset + 2 > data.len() {
                 return None;
             }
-            let acct_count =
-                u16::from_le_bytes(data[offset..offset + 2].try_into().ok()?) as usize;
+            let acct_count = u16::from_le_bytes(data[offset..offset + 2].try_into().ok()?) as usize;
             offset += 2;
             if offset + acct_count > data.len() {
                 return None;
@@ -123,8 +121,7 @@ impl InstructionsSysvar {
             if offset + 2 > data.len() {
                 return None;
             }
-            let data_len =
-                u16::from_le_bytes(data[offset..offset + 2].try_into().ok()?) as usize;
+            let data_len = u16::from_le_bytes(data[offset..offset + 2].try_into().ok()?) as usize;
             offset += 2;
             if offset + data_len > data.len() {
                 return None;

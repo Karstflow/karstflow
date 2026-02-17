@@ -4,7 +4,6 @@
 /// serialization. This sysvar is active only during partitioned reward
 /// distribution and signals to programs that epoch rewards are still
 /// being distributed (preventing certain stake operations).
-
 use crate::EpochRewards;
 
 /// Serializable wrapper for the EpochRewards sysvar.

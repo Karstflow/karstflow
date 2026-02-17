@@ -283,7 +283,10 @@ fn transaction_processor_routes_bpf_via_bytecode_vm() {
         vec![],
     );
 
-    assert!(outcome.success, "TransactionProcessor should route to BytecodeVm");
+    assert!(
+        outcome.success,
+        "TransactionProcessor should route to BytecodeVm"
+    );
     assert!(outcome.compute_units_consumed > 0);
 }
 
@@ -300,7 +303,10 @@ fn transaction_processor_handles_bpf_failure() {
         vec![],
     );
 
-    assert!(!outcome.success, "Failed BPF should propagate through TransactionProcessor");
+    assert!(
+        !outcome.success,
+        "Failed BPF should propagate through TransactionProcessor"
+    );
 }
 
 #[test]
@@ -337,7 +343,10 @@ fn full_transaction_with_builtin_and_bpf() {
         vec![(from, from_account, true), (to, to_account, true)],
         transfer_data,
     );
-    assert!(builtin_outcome.success, "Builtin system transfer should work");
+    assert!(
+        builtin_outcome.success,
+        "Builtin system transfer should work"
+    );
 
     // Test 2: BPF program in same processor works
     let program_id = Pubkey::new_unique();
@@ -349,14 +358,15 @@ fn full_transaction_with_builtin_and_bpf() {
         vec![(program_id, program_account, false)],
         vec![],
     );
-    assert!(bpf_outcome.success, "BPF program should work alongside builtins");
+    assert!(
+        bpf_outcome.success,
+        "BPF program should work alongside builtins"
+    );
 }
 
 #[test]
 fn full_transaction_process_with_bpf_program() {
-    use crate::transaction_processor::{
-        CompiledInstruction, Transaction, TransactionMessage,
-    };
+    use crate::transaction_processor::{CompiledInstruction, Transaction, TransactionMessage};
 
     let processor = TransactionProcessor::new();
     let program_id = Pubkey::new_unique();
@@ -382,7 +392,11 @@ fn full_transaction_process_with_bpf_program() {
 
     let result = processor.process_transaction(&transaction, &account_state);
 
-    assert!(result.success, "Full transaction with BPF should succeed: {:?}", result.error);
+    assert!(
+        result.success,
+        "Full transaction with BPF should succeed: {:?}",
+        result.error
+    );
     assert!(result.compute_units_consumed > 0);
 }
 
@@ -404,7 +418,12 @@ fn make_vote_owned_account(lamports: u64) -> Account {
 }
 
 /// Build InitializeAccount instruction data.
-fn build_init_vote_data(node: &Pubkey, voter: &Pubkey, withdrawer: &Pubkey, commission: u8) -> Vec<u8> {
+fn build_init_vote_data(
+    node: &Pubkey,
+    voter: &Pubkey,
+    withdrawer: &Pubkey,
+    commission: u8,
+) -> Vec<u8> {
     let mut data = vec![0, 0, 0, 0]; // INSTRUCTION_INITIALIZE_ACCOUNT = 0
     data.extend_from_slice(node.as_bytes());
     data.extend_from_slice(voter.as_bytes());
@@ -468,8 +487,15 @@ fn vote_program_initialize_and_vote_end_to_end() {
     );
     assert!(init_outcome.success, "Init should succeed");
 
-    let initialized = init_outcome.modified_accounts.get(&vote_pubkey).unwrap().clone();
-    assert!(initialized.data.as_slice().len() > 0, "Vote state should be serialized");
+    let initialized = init_outcome
+        .modified_accounts
+        .get(&vote_pubkey)
+        .unwrap()
+        .clone();
+    assert!(
+        initialized.data.as_slice().len() > 0,
+        "Vote state should be serialized"
+    );
 
     // Step 2: Vote on slot 100
     let vote_data = build_vote_data(&[100], [42u8; 32]);
@@ -480,7 +506,11 @@ fn vote_program_initialize_and_vote_end_to_end() {
     );
     assert!(vote_outcome.success, "Vote should succeed");
 
-    let after_vote = vote_outcome.modified_accounts.get(&vote_pubkey).unwrap().clone();
+    let after_vote = vote_outcome
+        .modified_accounts
+        .get(&vote_pubkey)
+        .unwrap()
+        .clone();
 
     // Step 3: Vote on slot 101
     let vote_data_2 = build_vote_data(&[101], [43u8; 32]);
@@ -510,7 +540,11 @@ fn vote_program_tower_sync_end_to_end() {
         init_data,
     );
     assert!(init_outcome.success);
-    let initialized = init_outcome.modified_accounts.get(&vote_pubkey).unwrap().clone();
+    let initialized = init_outcome
+        .modified_accounts
+        .get(&vote_pubkey)
+        .unwrap()
+        .clone();
 
     // Tower sync with root=50, votes=[100/3, 101/2, 102/1]
     let sync_data = build_tower_sync_data(Some(50), &[(100, 3), (101, 2), (102, 1)]);
@@ -838,10 +872,7 @@ fn stake_serialize_deserialize_roundtrip() {
         deserialized.stake().unwrap().delegation.stake_amount,
         3_000_000_000
     );
-    assert_eq!(
-        deserialized.stake().unwrap().delegation.activation_epoch,
-        5
-    );
+    assert_eq!(deserialized.stake().unwrap().delegation.activation_epoch, 5);
     assert_eq!(deserialized.stake().unwrap().credits_observed, 100);
     assert_eq!(deserialized.meta().unwrap().authorized.staker, staker);
     assert_eq!(

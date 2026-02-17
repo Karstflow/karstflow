@@ -632,10 +632,7 @@ fn serialize_stake_account(buf: &mut Vec<u8>, stake: &StakeAccount) {
     write_u64(buf, stake.credits_observed);
 }
 
-fn deserialize_stake_account(
-    data: &[u8],
-    offset: &mut usize,
-) -> Result<StakeAccount, StakeError> {
+fn deserialize_stake_account(data: &[u8], offset: &mut usize) -> Result<StakeAccount, StakeError> {
     let delegation = deserialize_delegation(data, offset)?;
     let credits_observed = read_u64_le(data, offset)?;
     Ok(StakeAccount::new(delegation, credits_observed))
@@ -701,7 +698,10 @@ mod tests {
         let data = serialize_stake_state(&state);
         assert_eq!(data.len(), constants::STAKE_STATE_V2_SIZE);
         let decoded = deserialize_stake_state(&data).unwrap();
-        assert_eq!(decoded.meta().unwrap().rent_exempt_reserve, meta.rent_exempt_reserve);
+        assert_eq!(
+            decoded.meta().unwrap().rent_exempt_reserve,
+            meta.rent_exempt_reserve
+        );
         assert_eq!(decoded.meta().unwrap().authorized, meta.authorized);
         assert_eq!(decoded.meta().unwrap().lockup, meta.lockup);
         assert!(!decoded.is_delegated());
@@ -720,7 +720,10 @@ mod tests {
 
         let decoded = deserialize_stake_state(&data).unwrap();
         assert!(decoded.is_delegated());
-        assert_eq!(decoded.meta().unwrap().rent_exempt_reserve, meta.rent_exempt_reserve);
+        assert_eq!(
+            decoded.meta().unwrap().rent_exempt_reserve,
+            meta.rent_exempt_reserve
+        );
         let s = decoded.stake().unwrap();
         assert_eq!(s.delegation.voter_pubkey, delegation.voter_pubkey);
         assert_eq!(s.delegation.stake_amount, delegation.stake_amount);
