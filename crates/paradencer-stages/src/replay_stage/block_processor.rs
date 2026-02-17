@@ -1,6 +1,7 @@
 use crate::{AssembledBlock, Entry};
 use paradencer_consensus::{Bank, CommitmentLevel, CommitmentTracker};
 use paradencer_execution::ExecutionBridge;
+use sha2::{Digest, Sha256};
 use std::sync::{Arc, Mutex};
 
 /// Result of processing a single transaction
@@ -101,6 +102,12 @@ pub enum BlockProcessorError {
     TickRegistrationFailed { slot: u64, error: String },
     /// Invalid entry data
     InvalidEntry { entry_index: usize, reason: String },
+    /// Entry hash does not match the expected PoH chain value
+    EntryHashMismatch {
+        entry_index: usize,
+        expected: [u8; 32],
+        actual: [u8; 32],
+    },
     /// Commitment tracking error
     CommitmentError(String),
 }
@@ -293,6 +300,40 @@ impl BlockProcessor {
             })
     }
 
+    /// Verify the PoH hash chain of entries in a block.
+    ///
+    /// Each entry's hash is produced by iterating SHA-256 `num_hashes` times
+    /// starting from the previous entry's hash. For entries with transactions,
+    /// the transaction data is mixed in before the final hash iteration.
+    /// This ensures PoH continuity and prevents block tampering.
+    pub fn verify_entry_chain(
+        &self,
+        entries: &[Entry],
+        initial_hash: [u8; 32],
+    ) -> Result<(), BlockProcessorError> {
+        if entries.is_empty() {
+            return Ok(());
+        }
+
+        let mut prev_hash = initial_hash;
+
+        for (i, entry) in entries.iter().enumerate() {
+            let expected = compute_entry_hash(&prev_hash, entry.num_hashes, &entry.transactions);
+
+            if entry.hash != expected {
+                return Err(BlockProcessorError::EntryHashMismatch {
+                    entry_index: i,
+                    expected,
+                    actual: entry.hash,
+                });
+            }
+
+            prev_hash = entry.hash;
+        }
+
+        Ok(())
+    }
+
     /// Verify block structure and metadata
     pub fn verify_block(&self, block: &AssembledBlock) -> Result<(), BlockProcessorError> {
         // Check for empty block
@@ -326,6 +367,51 @@ impl BlockProcessor {
             average_success_rate: 0.0,
         }
     }
+}
+
+/// Compute the expected PoH hash for an entry.
+///
+/// If the entry has no transactions, the hash is produced by iterating
+/// SHA-256 `num_hashes` times starting from `prev_hash`.
+///
+/// If the entry has transactions, the transaction bytes are mixed into
+/// the hash before the final iteration:
+///   1. Hash prev_hash `num_hashes - 1` times
+///   2. Mix in SHA-256(all transaction bytes)
+///   3. Perform the final hash iteration
+fn compute_entry_hash(prev_hash: &[u8; 32], num_hashes: u64, transactions: &[Vec<u8>]) -> [u8; 32] {
+    let mut hash = *prev_hash;
+
+    if transactions.is_empty() {
+        // Tick entry — pure PoH hash chain
+        for _ in 0..num_hashes {
+            let mut hasher = Sha256::new();
+            hasher.update(hash);
+            hash = hasher.finalize().into();
+        }
+    } else {
+        // Transaction entry — mix in transaction data
+        let poh_iterations = num_hashes.saturating_sub(1);
+        for _ in 0..poh_iterations {
+            let mut hasher = Sha256::new();
+            hasher.update(hash);
+            hash = hasher.finalize().into();
+        }
+
+        // Mix transactions: SHA256(hash || SHA256(tx1 || tx2 || ...))
+        let mut tx_hasher = Sha256::new();
+        for tx in transactions {
+            tx_hasher.update(tx);
+        }
+        let tx_hash: [u8; 32] = tx_hasher.finalize().into();
+
+        let mut final_hasher = Sha256::new();
+        final_hasher.update(hash);
+        final_hasher.update(tx_hash);
+        hash = final_hasher.finalize().into();
+    }
+
+    hash
 }
 
 /// Statistics for block processing
@@ -419,5 +505,121 @@ mod tests {
         assert!(!failure.success);
         assert_eq!(failure.compute_units, 0);
         assert!(failure.error.is_some());
+    }
+
+    // --- Entry hash chain verification tests ---
+
+    fn make_entry_chain(initial_hash: [u8; 32], count: usize) -> Vec<Entry> {
+        let mut entries = Vec::with_capacity(count);
+        let mut prev = initial_hash;
+        for _ in 0..count {
+            let hash = compute_entry_hash(&prev, 1, &[]);
+            entries.push(Entry {
+                num_hashes: 1,
+                hash,
+                transactions: vec![],
+            });
+            prev = hash;
+        }
+        entries
+    }
+
+    #[test]
+    fn valid_entry_chain_passes_verification() {
+        let processor = BlockProcessor::new(
+            Arc::new(ExecutionBridge::new()),
+            Arc::new(Mutex::new(CommitmentTracker::default())),
+        );
+
+        let initial_hash = [0xABu8; 32];
+        let entries = make_entry_chain(initial_hash, 5);
+
+        let result = processor.verify_entry_chain(&entries, initial_hash);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn corrupted_entry_hash_rejected() {
+        let processor = BlockProcessor::new(
+            Arc::new(ExecutionBridge::new()),
+            Arc::new(Mutex::new(CommitmentTracker::default())),
+        );
+
+        let initial_hash = [0xABu8; 32];
+        let mut entries = make_entry_chain(initial_hash, 3);
+
+        // Corrupt the second entry's hash
+        entries[1].hash = [0xFFu8; 32];
+
+        let result = processor.verify_entry_chain(&entries, initial_hash);
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            BlockProcessorError::EntryHashMismatch { entry_index, .. } => {
+                assert_eq!(entry_index, 1);
+            }
+            other => panic!("unexpected error: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn empty_block_passes_verification() {
+        let processor = BlockProcessor::new(
+            Arc::new(ExecutionBridge::new()),
+            Arc::new(Mutex::new(CommitmentTracker::default())),
+        );
+
+        let result = processor.verify_entry_chain(&[], [0u8; 32]);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn single_entry_block_verified() {
+        let processor = BlockProcessor::new(
+            Arc::new(ExecutionBridge::new()),
+            Arc::new(Mutex::new(CommitmentTracker::default())),
+        );
+
+        let initial_hash = [0u8; 32];
+        let entries = make_entry_chain(initial_hash, 1);
+
+        let result = processor.verify_entry_chain(&entries, initial_hash);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn entry_with_transactions_hash_verified() {
+        let processor = BlockProcessor::new(
+            Arc::new(ExecutionBridge::new()),
+            Arc::new(Mutex::new(CommitmentTracker::default())),
+        );
+
+        let initial_hash = [0u8; 32];
+        let txns = vec![vec![1, 2, 3], vec![4, 5, 6]];
+        let expected_hash = compute_entry_hash(&initial_hash, 2, &txns);
+
+        let entries = vec![Entry {
+            num_hashes: 2,
+            hash: expected_hash,
+            transactions: txns,
+        }];
+
+        let result = processor.verify_entry_chain(&entries, initial_hash);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn wrong_initial_hash_fails() {
+        let processor = BlockProcessor::new(
+            Arc::new(ExecutionBridge::new()),
+            Arc::new(Mutex::new(CommitmentTracker::default())),
+        );
+
+        let initial_hash = [0xABu8; 32];
+        let entries = make_entry_chain(initial_hash, 3);
+
+        // Verify with a different initial hash
+        let wrong_initial = [0xCDu8; 32];
+        let result = processor.verify_entry_chain(&entries, wrong_initial);
+        assert!(result.is_err());
     }
 }
