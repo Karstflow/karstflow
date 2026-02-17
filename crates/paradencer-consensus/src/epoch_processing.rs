@@ -13,7 +13,7 @@ use crate::{
     Bank, Inflation, StakeHistory, StakeHistoryEntry, StakeTracker,
 };
 use paradencer_constants::economics::PARTITIONED_REWARDS_DISTRIBUTION_SLOTS;
-use paradencer_storage::Pubkey;
+use paradencer_storage::{AccountDatabase, Pubkey};
 
 // ---------------------------------------------------------------------------
 // Vote account reader trait
@@ -39,6 +39,27 @@ pub struct DefaultVoteReader;
 impl VoteAccountReader for DefaultVoteReader {
     fn read_vote_info(&self, _vote_account: &Pubkey, _epoch: u64) -> Option<(u64, u8)> {
         Some((100, 5))
+    }
+}
+
+/// Reads vote credits and commission from vote accounts stored in an account database.
+///
+/// Falls back to `DefaultVoteReader` values when the account is missing or
+/// its data cannot be parsed.
+pub struct AccountDatabaseVoteReader<'a> {
+    db: &'a AccountDatabase,
+}
+
+impl<'a> AccountDatabaseVoteReader<'a> {
+    pub fn new(db: &'a AccountDatabase) -> Self {
+        Self { db }
+    }
+}
+
+impl<'a> VoteAccountReader for AccountDatabaseVoteReader<'a> {
+    fn read_vote_info(&self, vote_account: &Pubkey, epoch: u64) -> Option<(u64, u8)> {
+        let account = self.db.get_published_account(vote_account)?;
+        parse_vote_credits_and_commission(account.data.as_ref(), epoch)
     }
 }
 
@@ -663,5 +684,93 @@ mod tests {
         for vr in &ctx.validator_rewards {
             assert_eq!(vr.total_reward, 0);
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // Phase 4: AccountDatabaseVoteReader integration tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn account_database_vote_reader_reads_real_data() {
+        let db = Arc::new(AccountDatabase::new());
+        let vote_pubkey = Pubkey::new_unique();
+
+        // Store a vote account with commission=10, epoch 0 credits: 500-300=200
+        let vote_data = build_vote_account_data(10, &[(0, 500, 300)]);
+        let vote_account =
+            paradencer_storage::Account::new(1_000_000, vote_data, Pubkey::default());
+        db.store_published_account(vote_pubkey, vote_account);
+
+        let reader = AccountDatabaseVoteReader::new(&db);
+        let result = reader.read_vote_info(&vote_pubkey, 0);
+        assert_eq!(result, Some((200, 10)));
+    }
+
+    #[test]
+    fn account_database_vote_reader_returns_none_for_missing() {
+        let db = Arc::new(AccountDatabase::new());
+        let reader = AccountDatabaseVoteReader::new(&db);
+        let result = reader.read_vote_info(&Pubkey::new_unique(), 0);
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn account_database_vote_reader_returns_none_for_short_data() {
+        let db = Arc::new(AccountDatabase::new());
+        let vote_pubkey = Pubkey::new_unique();
+
+        // Store account with data too short to be a vote account
+        let account = paradencer_storage::Account::new(1_000_000, vec![0; 50], Pubkey::default());
+        db.store_published_account(vote_pubkey, account);
+
+        let reader = AccountDatabaseVoteReader::new(&db);
+        assert_eq!(reader.read_vote_info(&vote_pubkey, 0), None);
+    }
+
+    #[test]
+    fn account_database_vote_reader_with_epoch_processing() {
+        let db = Arc::new(AccountDatabase::new());
+        let epoch_schedule = Arc::new(EpochSchedule::default());
+        let leader_schedule = create_test_leader_schedule(0);
+
+        let parent = Bank::new_genesis_with_config(
+            db.clone(),
+            epoch_schedule.clone(),
+            leader_schedule,
+            1_000_000_000_000,
+            Rent::default(),
+            Inflation::default(),
+        );
+
+        let voter = Pubkey::new_unique();
+        let stake_acct = Pubkey::new_unique();
+
+        // Store vote account with real data: commission=8, epoch 0: credits=1000
+        let vote_data = build_vote_account_data(8, &[(0, 1000, 0)]);
+        let vote_account =
+            paradencer_storage::Account::new(1_000_000, vote_data, Pubkey::default());
+        db.store_published_account(voter, vote_account);
+
+        let mut tracker = StakeTracker::new(1);
+        tracker.add_delegation(stake_acct, Delegation::new(voter, 1_000_000_000, 0));
+
+        let slot = epoch_schedule.get_first_slot_in_epoch(1);
+        let child_schedule = create_test_leader_schedule(1);
+        let child = Bank::new_from_parent(&parent, slot, child_schedule);
+
+        let mut history = StakeHistory::new();
+        let reader = AccountDatabaseVoteReader::new(&db);
+
+        let ctx = EpochProcessor::process_epoch_boundary_with_reader(
+            &child,
+            &tracker,
+            &mut history,
+            Some(&reader),
+        )
+        .unwrap();
+
+        // With real vote data (1000 credits, 8% commission), rewards should be > 0
+        assert!(!ctx.validator_rewards.is_empty());
+        assert!(ctx.validator_rewards[0].total_reward > 0);
     }
 }

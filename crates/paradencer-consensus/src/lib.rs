@@ -51,7 +51,8 @@ pub use consensus_coordinator::{
     ConsensusCoordinator, ConsensusDecision, DecisionReason, ValidatorVote,
 };
 pub use epoch_processing::{
-    DefaultVoteReader, EpochContext, EpochError, EpochProcessor, RewardType, VoteAccountReader,
+    AccountDatabaseVoteReader, DefaultVoteReader, EpochContext, EpochError, EpochProcessor,
+    RewardType, VoteAccountReader,
 };
 pub use epoch_schedule::{EpochSchedule, EpochScheduleConfig};
 pub use equivocation::{EquivocationDetector, EquivocationProof};

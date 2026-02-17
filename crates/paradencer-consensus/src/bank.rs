@@ -1,6 +1,6 @@
 use super::{EpochSchedule, Inflation, LeaderSchedule, Rent};
 use crate::blockhash_queue::{BlockhashInfo, BlockhashQueue};
-use crate::epoch_processing::EpochProcessor;
+use crate::epoch_processing::{AccountDatabaseVoteReader, EpochProcessor};
 use crate::transaction_cache::TransactionCache;
 use crate::features::{process_feature_activations, FeatureSet};
 use crate::reward_application::RewardApplicator;
@@ -93,6 +93,9 @@ pub struct Bank {
     // Transaction deduplication cache
     transaction_cache: Arc<TransactionCache>,
 
+    // Leader schedule computed at epoch boundary for the next epoch
+    next_leader_schedule: RwLock<Option<Arc<LeaderSchedule>>>,
+
     // Epoch boundary state (optional, set externally)
     stake_tracker: Option<Arc<RwLock<StakeTracker>>>,
     stake_history: Option<Arc<RwLock<StakeHistory>>>,
@@ -154,6 +157,7 @@ impl Bank {
             last_blockhash: RwLock::new([0u8; 32]),
             blockhash_queue: RwLock::new(BlockhashQueue::default()),
             transaction_cache: Arc::new(TransactionCache::new()),
+            next_leader_schedule: RwLock::new(None),
             stake_tracker: None,
             stake_history: None,
             feature_set: None,
@@ -168,6 +172,19 @@ impl Bank {
 
         let parent_hash = parent.hash();
 
+        // If crossing an epoch boundary, prefer the schedule computed during
+        // the parent's epoch boundary processing over the caller-supplied one.
+        let effective_schedule = if epoch > parent.epoch {
+            parent
+                .next_leader_schedule
+                .read()
+                .unwrap()
+                .clone()
+                .unwrap_or(leader_schedule)
+        } else {
+            leader_schedule
+        };
+
         Self {
             slot,
             parent_slot: Some(parent.slot),
@@ -178,7 +195,7 @@ impl Bank {
             epoch,
             slot_index,
             epoch_schedule: parent.epoch_schedule.clone(),
-            leader_schedule,
+            leader_schedule: effective_schedule,
             accounts: parent.accounts.clone(),
             transaction_count: AtomicU64::new(0),
             execution_fees: AtomicU64::new(0),
@@ -192,10 +209,13 @@ impl Bank {
             last_blockhash: RwLock::new(parent_hash),
             blockhash_queue: RwLock::new(parent.blockhash_queue.read().unwrap().clone()),
             transaction_cache: parent.transaction_cache.clone(),
+            next_leader_schedule: RwLock::new(None),
             stake_tracker: parent.stake_tracker.clone(),
             stake_history: parent.stake_history.clone(),
             feature_set: parent.feature_set.clone(),
-            rewards_distributor: RwLock::new(None),
+            rewards_distributor: RwLock::new(
+                parent.rewards_distributor.read().unwrap().clone(),
+            ),
         }
     }
 
@@ -506,6 +526,9 @@ impl Bank {
             });
         }
 
+        // Distribute any pending partitioned epoch rewards for this slot
+        self.distribute_slot_rewards();
+
         // Distribute accumulated fees before freezing
         let (leader_share, burn_share) = self
             .distribute_fees()
@@ -597,7 +620,13 @@ impl Bank {
             _ => return,
         };
 
-        let result = EpochProcessor::process_epoch_boundary(self, &tracker, &mut history);
+        let vote_reader = AccountDatabaseVoteReader::new(&self.accounts);
+        let result = EpochProcessor::process_epoch_boundary_with_reader(
+            self,
+            &tracker,
+            &mut history,
+            Some(&vote_reader),
+        );
 
         // Write back updated stake history
         if let Some(ref h) = self.stake_history {
@@ -631,6 +660,9 @@ impl Bank {
     }
 
     /// Regenerate leader schedule for the next epoch based on current stakes.
+    ///
+    /// The computed schedule is stored in `next_leader_schedule` so that
+    /// `new_from_parent` can propagate it to child banks in the next epoch.
     fn regenerate_leader_schedule(&self) {
         if let Some(ref tracker_lock) = self.stake_tracker {
             let tracker = tracker_lock.read().unwrap();
@@ -640,14 +672,15 @@ impl Bank {
             if !validators.is_empty() {
                 let next_epoch = self.epoch + 1;
                 if let Ok(schedule) = LeaderSchedule::new(next_epoch, &validators) {
-                    // Note: leader_schedule field is not interior-mutable,
-                    // so the new schedule takes effect on child banks via
-                    // new_from_parent. The current bank keeps its original
-                    // schedule for consistency.
-                    let _ = schedule;
+                    *self.next_leader_schedule.write().unwrap() = Some(Arc::new(schedule));
                 }
             }
         }
+    }
+
+    /// Get the leader schedule computed for the next epoch, if available.
+    pub fn next_leader_schedule(&self) -> Option<Arc<LeaderSchedule>> {
+        self.next_leader_schedule.read().unwrap().clone()
     }
 
     pub fn freeze(&self) -> Result<(), BankFreezeError> {
@@ -1897,5 +1930,119 @@ mod tests {
 
         // Child should have the same blockhash queue
         assert!(child.is_blockhash_valid(&test_hash));
+    }
+
+    // -- Wave 15: Epoch processing wiring tests --
+
+    #[test]
+    fn child_bank_inherits_rewards_distributor() {
+        let (parent, _tracker, _history) = make_bank_with_epoch_state(1_000_000_000_000);
+
+        // Complete the parent so epoch boundary processing runs
+        for _ in 0..TICKS_PER_SLOT {
+            parent.register_tick().unwrap();
+        }
+        parent.finish_slot().unwrap();
+
+        // Parent should have a rewards distributor from epoch boundary
+        assert!(parent.has_pending_rewards());
+
+        // Child inherits the distributor
+        let child_schedule = create_test_leader_schedule(1);
+        let child = Bank::new_from_parent(&parent, parent.slot() + 1, child_schedule);
+        assert!(child.has_pending_rewards());
+    }
+
+    #[test]
+    fn finish_slot_distributes_pending_rewards() {
+        let accounts = Arc::new(AccountDatabase::new());
+        let epoch_schedule = Arc::new(EpochSchedule::default());
+        let leader_schedule = create_test_leader_schedule(0);
+
+        let bank = Bank::new_genesis(accounts, epoch_schedule, leader_schedule);
+
+        // Manually set up a rewards distributor with a reward for this slot
+        let target = Pubkey::new_unique();
+        let target_account = paradencer_storage::Account::new(1_000, vec![], Pubkey::default());
+        bank.accounts().store_published_account(target, target_account);
+
+        let reward = crate::rewards_distribution::PendingReward {
+            account: target,
+            amount: 5_000,
+            reward_type: crate::epoch_processing::RewardType::Staking,
+        };
+        let distributor =
+            crate::rewards_distribution::RewardsDistributor::new(vec![reward], 1, bank.slot());
+        *bank.rewards_distributor.write().unwrap() = Some(distributor);
+
+        assert!(bank.has_pending_rewards());
+
+        // Complete and finalize the slot
+        for _ in 0..TICKS_PER_SLOT {
+            bank.register_tick().unwrap();
+        }
+        bank.finish_slot().unwrap();
+
+        // Reward should have been applied
+        let acct = bank.accounts().get_published_account(&target).unwrap();
+        assert_eq!(acct.meta.lamports, 1_000 + 5_000);
+    }
+
+    #[test]
+    fn regenerated_leader_schedule_stored_in_bank() {
+        let (parent, _tracker, _history) = make_bank_with_epoch_state(1_000_000_000_000);
+
+        for _ in 0..TICKS_PER_SLOT {
+            parent.register_tick().unwrap();
+        }
+        parent.finish_slot().unwrap();
+
+        // The epoch boundary should have regenerated a leader schedule
+        let next_schedule = parent.next_leader_schedule();
+        assert!(next_schedule.is_some());
+
+        let schedule = next_schedule.unwrap();
+        assert_eq!(schedule.get_epoch(), parent.epoch() + 1);
+    }
+
+    #[test]
+    fn child_bank_uses_regenerated_leader_schedule() {
+        let (parent, _tracker, _history) = make_bank_with_epoch_state(1_000_000_000_000);
+
+        for _ in 0..TICKS_PER_SLOT {
+            parent.register_tick().unwrap();
+        }
+        parent.finish_slot().unwrap();
+
+        let regenerated = parent.next_leader_schedule().unwrap();
+
+        // Create child in the next epoch — should use regenerated schedule
+        let next_epoch_slot = parent.epoch_schedule().get_first_slot_in_epoch(parent.epoch() + 1);
+        let fallback_schedule = create_test_leader_schedule(parent.epoch() + 1);
+        let child = Bank::new_from_parent(&parent, next_epoch_slot, fallback_schedule);
+
+        // The child should be using the regenerated schedule, not the fallback
+        assert_eq!(child.leader_schedule().get_epoch(), regenerated.get_epoch());
+    }
+
+    #[test]
+    fn child_in_same_epoch_uses_provided_schedule() {
+        let (parent, _tracker, _history) = make_bank_with_epoch_state(1_000_000_000_000);
+
+        for _ in 0..TICKS_PER_SLOT {
+            parent.register_tick().unwrap();
+        }
+        parent.finish_slot().unwrap();
+
+        // Create child in same epoch — should use provided schedule
+        let same_epoch_schedule = create_test_leader_schedule(parent.epoch());
+        let child =
+            Bank::new_from_parent(&parent, parent.slot() + 1, same_epoch_schedule.clone());
+
+        // Should use the provided schedule, not the regenerated one
+        assert_eq!(
+            child.leader_schedule().get_epoch(),
+            same_epoch_schedule.get_epoch()
+        );
     }
 }
