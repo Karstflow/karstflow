@@ -47,7 +47,9 @@ pub use commitment::{
 };
 pub use compute_budget::{ComputeBudget, ComputeBudgetError};
 pub use consensus_coordinator::{ConsensusCoordinator, ValidatorVote};
-pub use epoch_processing::{EpochContext, EpochError, EpochProcessor, RewardType};
+pub use epoch_processing::{
+    DefaultVoteReader, EpochContext, EpochError, EpochProcessor, RewardType, VoteAccountReader,
+};
 pub use epoch_schedule::{EpochSchedule, EpochScheduleConfig};
 pub use equivocation::{EquivocationDetector, EquivocationProof};
 pub use fee::{FeeCalculator, FeeCollector, FeeRateGovernor};

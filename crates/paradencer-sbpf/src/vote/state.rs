@@ -413,6 +413,14 @@ impl VoteState {
             data.push(0);
         }
 
+        // Epoch credits: count(4) + entries(24 each: epoch(8) + credits(8) + prev_credits(8))
+        data.extend_from_slice(&(self.epoch_credits.len() as u32).to_le_bytes());
+        for &(epoch, credits, prev_credits) in &self.epoch_credits {
+            data.extend_from_slice(&epoch.to_le_bytes());
+            data.extend_from_slice(&credits.to_le_bytes());
+            data.extend_from_slice(&prev_credits.to_le_bytes());
+        }
+
         data
     }
 
@@ -493,14 +501,55 @@ impl VoteState {
             if data.len() < offset + 8 {
                 return Err(VoteError::InvalidAccountData);
             }
-            Some(u64::from_le_bytes(
+            let slot = u64::from_le_bytes(
                 data[offset..offset + 8]
                     .try_into()
                     .map_err(|_| VoteError::InvalidAccountData)?,
-            ))
+            );
+            offset += 8;
+            Some(slot)
         } else {
+            if data.len() > offset {
+                offset += 1; // skip the 0 byte
+            }
             None
         };
+
+        // Epoch credits: count(4) + entries(24 each: epoch(8) + credits(8) + prev_credits(8))
+        let mut epoch_credits = Vec::new();
+        if offset + 4 <= data.len() {
+            let ec_count = u32::from_le_bytes(
+                data[offset..offset + 4]
+                    .try_into()
+                    .map_err(|_| VoteError::InvalidAccountData)?,
+            ) as usize;
+            offset += 4;
+
+            for _ in 0..ec_count.min(MAX_EPOCH_CREDITS_HISTORY) {
+                if data.len() < offset + 24 {
+                    break;
+                }
+                let epoch = u64::from_le_bytes(
+                    data[offset..offset + 8]
+                        .try_into()
+                        .map_err(|_| VoteError::InvalidAccountData)?,
+                );
+                offset += 8;
+                let credits = u64::from_le_bytes(
+                    data[offset..offset + 8]
+                        .try_into()
+                        .map_err(|_| VoteError::InvalidAccountData)?,
+                );
+                offset += 8;
+                let prev_credits = u64::from_le_bytes(
+                    data[offset..offset + 8]
+                        .try_into()
+                        .map_err(|_| VoteError::InvalidAccountData)?,
+                );
+                offset += 8;
+                epoch_credits.push((epoch, credits, prev_credits));
+            }
+        }
 
         Ok(Self {
             node_pubkey,
@@ -509,7 +558,7 @@ impl VoteState {
             commission,
             votes,
             root_slot,
-            epoch_credits: Vec::new(),
+            epoch_credits,
         })
     }
 }

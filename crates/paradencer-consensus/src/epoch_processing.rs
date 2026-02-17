@@ -10,11 +10,108 @@
 use crate::{
     rewards_calculator::{RewardsCalculator, ValidatorReward, VoteAccountInfo},
     rewards_distribution::{PendingReward, RewardsDistributor},
-    Bank, EpochSchedule, Inflation, StakeHistory, StakeHistoryEntry, StakeTracker,
+    Bank, Inflation, StakeHistory, StakeHistoryEntry, StakeTracker,
 };
 use paradencer_constants::economics::PARTITIONED_REWARDS_DISTRIBUTION_SLOTS;
 use paradencer_storage::Pubkey;
-use std::sync::Arc;
+
+// ---------------------------------------------------------------------------
+// Vote account reader trait
+// ---------------------------------------------------------------------------
+
+/// Reads vote account data for epoch rewards calculation.
+///
+/// Implementations extract vote credits earned in a specific epoch and the
+/// validator's commission rate from stored vote account data.
+pub trait VoteAccountReader {
+    /// Read vote credits earned in the given epoch and commission for a vote account.
+    ///
+    /// Returns `(vote_credits_earned, commission)` or `None` if the account
+    /// cannot be found or is not a valid vote account.
+    fn read_vote_info(&self, vote_account: &Pubkey, epoch: u64) -> Option<(u64, u8)>;
+}
+
+/// Default fallback reader that returns hardcoded values.
+///
+/// Used when no account database is available (e.g., in tests).
+pub struct DefaultVoteReader;
+
+impl VoteAccountReader for DefaultVoteReader {
+    fn read_vote_info(&self, _vote_account: &Pubkey, _epoch: u64) -> Option<(u64, u8)> {
+        Some((100, 5))
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Vote state binary parser (minimal — only extracts what epoch processing needs)
+// ---------------------------------------------------------------------------
+
+/// Parse commission and epoch credits from raw vote account data.
+///
+/// The binary format matches the sbpf vote state serialization:
+/// - `[0..32]`   node_pubkey
+/// - `[32..64]`  authorized_voter
+/// - `[64..96]`  authorized_withdrawer
+/// - `[96]`      commission (1 byte)
+/// - `[97..101]` vote_count (u32 LE)
+/// - votes:      vote_count * 12 bytes (slot:u64 + conf:u32)
+/// - root_slot:  1 byte option tag + optional 8 bytes
+/// - `[..]`      epoch_credits_count (u32 LE) + entries * 24 bytes (epoch:u64 + credits:u64 + prev:u64)
+///
+/// Returns `(credits_earned_in_epoch, commission)` or `None` on parse failure.
+fn parse_vote_credits_and_commission(data: &[u8], target_epoch: u64) -> Option<(u64, u8)> {
+    // Minimum: 3 pubkeys + commission + vote_count = 97 + 4 = 101
+    if data.len() < 101 {
+        return None;
+    }
+
+    let commission = data[96];
+    let mut offset = 97;
+
+    // Skip votes
+    let vote_count = u32::from_le_bytes(data[offset..offset + 4].try_into().ok()?) as usize;
+    offset += 4;
+    offset += vote_count * 12; // each vote = slot(8) + conf(4)
+    if offset >= data.len() {
+        // No root_slot or epoch_credits — return with zero credits
+        return Some((0, commission));
+    }
+
+    // Skip root_slot
+    let root_tag = data[offset];
+    offset += 1;
+    if root_tag == 1 {
+        offset += 8; // skip root slot value
+    }
+
+    if offset + 4 > data.len() {
+        return Some((0, commission));
+    }
+
+    // Parse epoch credits
+    let ec_count = u32::from_le_bytes(data[offset..offset + 4].try_into().ok()?) as usize;
+    offset += 4;
+
+    for _ in 0..ec_count {
+        if offset + 24 > data.len() {
+            break;
+        }
+        let epoch = u64::from_le_bytes(data[offset..offset + 8].try_into().ok()?);
+        offset += 8;
+        let credits = u64::from_le_bytes(data[offset..offset + 8].try_into().ok()?);
+        offset += 8;
+        let prev_credits = u64::from_le_bytes(data[offset..offset + 8].try_into().ok()?);
+        offset += 8;
+
+        if epoch == target_epoch {
+            let earned = credits.saturating_sub(prev_credits);
+            return Some((earned, commission));
+        }
+    }
+
+    // Target epoch not found in credits history
+    Some((0, commission))
+}
 
 /// Errors that can occur during epoch boundary processing.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -81,10 +178,23 @@ impl EpochProcessor {
     ///
     /// The bank's slot must be the first slot of a new epoch (i.e., slot_index == 0
     /// and epoch > 0). Returns the completed `EpochContext` on success.
+    ///
+    /// When a `vote_reader` is provided, real vote credits and commission are read
+    /// from vote accounts. Otherwise, falls back to defaults (100 credits, 5% commission).
     pub fn process_epoch_boundary(
         bank: &Bank,
         stake_tracker: &StakeTracker,
         stake_history: &mut StakeHistory,
+    ) -> Result<EpochContext, EpochError> {
+        Self::process_epoch_boundary_with_reader(bank, stake_tracker, stake_history, None)
+    }
+
+    /// Run epoch boundary processing with an explicit vote account reader.
+    pub fn process_epoch_boundary_with_reader(
+        bank: &Bank,
+        stake_tracker: &StakeTracker,
+        stake_history: &mut StakeHistory,
+        vote_reader: Option<&dyn VoteAccountReader>,
     ) -> Result<EpochContext, EpochError> {
         // Only process at epoch boundaries
         if bank.slot() == 0 {
@@ -113,7 +223,7 @@ impl EpochProcessor {
         Self::update_stake_history(&mut ctx, stake_tracker, stake_history)?;
 
         // Step 2: Calculate and prepare reward distribution
-        Self::distribute_epoch_rewards(&mut ctx, bank, stake_tracker)?;
+        Self::distribute_epoch_rewards(&mut ctx, bank, stake_tracker, vote_reader)?;
 
         Ok(ctx)
     }
@@ -162,6 +272,7 @@ impl EpochProcessor {
         ctx: &mut EpochContext,
         bank: &Bank,
         stake_tracker: &StakeTracker,
+        vote_reader: Option<&dyn VoteAccountReader>,
     ) -> Result<(), EpochError> {
         let inflation = *bank.inflation();
         let epoch_schedule = *bank.epoch_schedule().as_ref();
@@ -174,18 +285,20 @@ impl EpochProcessor {
             return Ok(());
         }
 
-        // Build vote account info from stake tracker
+        // Build vote account info from stake tracker, reading real vote data when available
         let stake_by_voter = stake_tracker.stake_by_vote_account();
         let vote_accounts: Vec<(Pubkey, VoteAccountInfo)> = stake_by_voter
             .iter()
             .map(|(pubkey, &total_stake)| {
+                let (vote_credits, commission) = vote_reader
+                    .and_then(|reader| reader.read_vote_info(pubkey, ctx.previous_epoch))
+                    .unwrap_or((100, 5));
                 (
                     *pubkey,
                     VoteAccountInfo {
                         total_stake,
-                        // In a full implementation these would come from vote state
-                        vote_credits: 100,
-                        commission: 5,
+                        vote_credits,
+                        commission,
                     },
                 )
             })
@@ -230,8 +343,8 @@ pub enum RewardType {
 mod tests {
     use super::*;
     use crate::{Delegation, EpochSchedule, LeaderSchedule, Rent};
-    use paradencer_constants::ledger::TICKS_PER_SLOT;
     use paradencer_storage::AccountDatabase;
+    use std::sync::Arc;
 
     fn create_test_leader_schedule(epoch: u64) -> Arc<LeaderSchedule> {
         let validator = Pubkey::new_unique();
@@ -268,6 +381,35 @@ mod tests {
         let history = StakeHistory::new();
 
         (child, tracker, history)
+    }
+
+    /// Build a minimal serialized vote account with given commission and epoch credits.
+    fn build_vote_account_data(commission: u8, epoch_credits: &[(u64, u64, u64)]) -> Vec<u8> {
+        let mut data = Vec::new();
+
+        // 3 pubkeys (32 bytes each)
+        data.extend_from_slice(&[0u8; 32]); // node_pubkey
+        data.extend_from_slice(&[1u8; 32]); // authorized_voter
+        data.extend_from_slice(&[2u8; 32]); // authorized_withdrawer
+
+        // commission
+        data.push(commission);
+
+        // votes: count=0
+        data.extend_from_slice(&0u32.to_le_bytes());
+
+        // root_slot: None
+        data.push(0);
+
+        // epoch credits
+        data.extend_from_slice(&(epoch_credits.len() as u32).to_le_bytes());
+        for &(epoch, credits, prev_credits) in epoch_credits {
+            data.extend_from_slice(&epoch.to_le_bytes());
+            data.extend_from_slice(&credits.to_le_bytes());
+            data.extend_from_slice(&prev_credits.to_le_bytes());
+        }
+
+        data
     }
 
     #[test]
@@ -348,5 +490,175 @@ mod tests {
         let ctx = EpochProcessor::process_epoch_boundary(&child, &tracker, &mut history).unwrap();
         assert!(ctx.validator_rewards.is_empty());
         assert!(ctx.rewards_distributor.is_none());
+    }
+
+    // -----------------------------------------------------------------------
+    // Phase 1: VoteAccountReader and binary parser tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn parse_vote_data_extracts_commission_and_credits() {
+        // Epoch 5: credits=500, prev=300 → earned=200, commission=10
+        let data = build_vote_account_data(10, &[(5, 500, 300)]);
+        let result = parse_vote_credits_and_commission(&data, 5);
+        assert_eq!(result, Some((200, 10)));
+    }
+
+    #[test]
+    fn parse_vote_data_returns_zero_for_missing_epoch() {
+        let data = build_vote_account_data(7, &[(3, 100, 50)]);
+        // Epoch 5 not in credits → returns (0, commission)
+        let result = parse_vote_credits_and_commission(&data, 5);
+        assert_eq!(result, Some((0, 7)));
+    }
+
+    #[test]
+    fn parse_vote_data_handles_multiple_epochs() {
+        let credits = vec![(1, 100, 0), (2, 250, 100), (3, 400, 250)];
+        let data = build_vote_account_data(8, &credits);
+
+        assert_eq!(parse_vote_credits_and_commission(&data, 1), Some((100, 8)));
+        assert_eq!(parse_vote_credits_and_commission(&data, 2), Some((150, 8)));
+        assert_eq!(parse_vote_credits_and_commission(&data, 3), Some((150, 8)));
+    }
+
+    #[test]
+    fn parse_vote_data_with_votes_present() {
+        let mut data = Vec::new();
+
+        // 3 pubkeys
+        data.extend_from_slice(&[0u8; 96]);
+        // commission = 12
+        data.push(12);
+        // 2 votes
+        data.extend_from_slice(&2u32.to_le_bytes());
+        // vote 1: slot=100, conf=3
+        data.extend_from_slice(&100u64.to_le_bytes());
+        data.extend_from_slice(&3u32.to_le_bytes());
+        // vote 2: slot=101, conf=1
+        data.extend_from_slice(&101u64.to_le_bytes());
+        data.extend_from_slice(&1u32.to_le_bytes());
+        // root_slot: Some(50)
+        data.push(1);
+        data.extend_from_slice(&50u64.to_le_bytes());
+        // epoch credits: 1 entry for epoch 7
+        data.extend_from_slice(&1u32.to_le_bytes());
+        data.extend_from_slice(&7u64.to_le_bytes());
+        data.extend_from_slice(&1000u64.to_le_bytes());
+        data.extend_from_slice(&800u64.to_le_bytes());
+
+        let result = parse_vote_credits_and_commission(&data, 7);
+        assert_eq!(result, Some((200, 12)));
+    }
+
+    #[test]
+    fn parse_vote_data_rejects_too_short() {
+        let data = vec![0u8; 50]; // way too short
+        assert_eq!(parse_vote_credits_and_commission(&data, 0), None);
+    }
+
+    #[test]
+    fn parse_vote_data_empty_credits() {
+        let data = build_vote_account_data(5, &[]);
+        assert_eq!(parse_vote_credits_and_commission(&data, 0), Some((0, 5)));
+    }
+
+    #[test]
+    fn default_vote_reader_returns_hardcoded_values() {
+        let reader = DefaultVoteReader;
+        let pubkey = Pubkey::new_unique();
+        assert_eq!(reader.read_vote_info(&pubkey, 0), Some((100, 5)));
+        assert_eq!(reader.read_vote_info(&pubkey, 999), Some((100, 5)));
+    }
+
+    #[test]
+    fn custom_vote_reader_overrides_defaults() {
+        struct FixedReader {
+            credits: u64,
+            commission: u8,
+        }
+        impl VoteAccountReader for FixedReader {
+            fn read_vote_info(&self, _vote_account: &Pubkey, _epoch: u64) -> Option<(u64, u8)> {
+                Some((self.credits, self.commission))
+            }
+        }
+
+        let (bank, tracker, mut history) = make_bank_at_epoch_boundary(1);
+        let reader = FixedReader {
+            credits: 500,
+            commission: 10,
+        };
+
+        let ctx = EpochProcessor::process_epoch_boundary_with_reader(
+            &bank,
+            &tracker,
+            &mut history,
+            Some(&reader),
+        )
+        .unwrap();
+
+        assert!(!ctx.validator_rewards.is_empty());
+        assert!(ctx.validator_rewards[0].total_reward > 0);
+    }
+
+    #[test]
+    fn vote_reader_returning_none_falls_back_to_defaults() {
+        struct NoneReader;
+        impl VoteAccountReader for NoneReader {
+            fn read_vote_info(&self, _vote_account: &Pubkey, _epoch: u64) -> Option<(u64, u8)> {
+                None
+            }
+        }
+
+        let (bank, tracker, mut history) = make_bank_at_epoch_boundary(1);
+
+        // With NoneReader, falls back to (100, 5) defaults
+        let ctx_custom = EpochProcessor::process_epoch_boundary_with_reader(
+            &bank,
+            &tracker,
+            &mut history,
+            Some(&NoneReader),
+        )
+        .unwrap();
+
+        // Without reader (None), also uses (100, 5) defaults
+        let mut history2 = StakeHistory::new();
+        let (bank2, tracker2, _) = make_bank_at_epoch_boundary(1);
+        let ctx_default =
+            EpochProcessor::process_epoch_boundary(&bank2, &tracker2, &mut history2).unwrap();
+
+        // Rewards should match since both use the same defaults
+        assert_eq!(ctx_custom.validator_rewards.len(), ctx_default.validator_rewards.len());
+        if !ctx_custom.validator_rewards.is_empty() {
+            assert_eq!(
+                ctx_custom.validator_rewards[0].total_reward,
+                ctx_default.validator_rewards[0].total_reward
+            );
+        }
+    }
+
+    #[test]
+    fn zero_credits_reader_gives_zero_rewards() {
+        struct ZeroCreditsReader;
+        impl VoteAccountReader for ZeroCreditsReader {
+            fn read_vote_info(&self, _vote_account: &Pubkey, _epoch: u64) -> Option<(u64, u8)> {
+                Some((0, 5))
+            }
+        }
+
+        let (bank, tracker, mut history) = make_bank_at_epoch_boundary(1);
+
+        let ctx = EpochProcessor::process_epoch_boundary_with_reader(
+            &bank,
+            &tracker,
+            &mut history,
+            Some(&ZeroCreditsReader),
+        )
+        .unwrap();
+
+        // With zero credits, all rewards should be zero
+        for vr in &ctx.validator_rewards {
+            assert_eq!(vr.total_reward, 0);
+        }
     }
 }
