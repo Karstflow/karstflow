@@ -47,7 +47,9 @@ pub use commitment::{
     SlotCommitment,
 };
 pub use compute_budget::{ComputeBudget, ComputeBudgetError};
-pub use consensus_coordinator::{ConsensusCoordinator, ValidatorVote};
+pub use consensus_coordinator::{
+    ConsensusCoordinator, ConsensusDecision, DecisionReason, ValidatorVote,
+};
 pub use epoch_processing::{
     DefaultVoteReader, EpochContext, EpochError, EpochProcessor, RewardType, VoteAccountReader,
 };

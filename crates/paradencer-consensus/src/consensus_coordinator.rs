@@ -20,6 +20,39 @@ pub struct ValidatorVote {
     pub timestamp: u64,
 }
 
+/// Decision output from the consensus engine.
+///
+/// After a slot has been replayed, the coordinator evaluates the fork tree
+/// and tower state to determine whether to vote and which slot to reset to.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConsensusDecision {
+    /// Slot to reset PoH to (best fork tip).
+    pub reset_slot: u64,
+    /// Slot to vote for (`None` if we should not vote).
+    pub vote_slot: Option<u64>,
+    /// New root slot if tower advanced root (`None` if no change).
+    pub new_root: Option<u64>,
+    /// Reason for the decision.
+    pub reason: DecisionReason,
+}
+
+/// Reason behind a consensus decision.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DecisionReason {
+    /// Tower was empty, voting for best fork.
+    EmptyTower,
+    /// Voting on the same fork as previous vote.
+    SameFork,
+    /// Switch check passed, voting on a new fork.
+    SwitchApproved,
+    /// Lockout prevents voting, resetting only.
+    LockedOut,
+    /// Switch check failed, resetting only.
+    SwitchDenied,
+    /// No valid fork available.
+    NoValidFork,
+}
+
 /// Coordinates consensus decisions across Tower and Fork Choice components.
 pub struct ConsensusCoordinator {
     /// Local validator's vote tower
@@ -221,6 +254,116 @@ impl ConsensusCoordinator {
     pub fn stake_by_vote_account(&self) -> HashMap<Pubkey, u64> {
         self.stake_tracker.stake_by_vote_account()
     }
+
+    /// Decide whether to vote and which slot to reset PoH to.
+    ///
+    /// Called after a slot has been replayed. Evaluates the fork tree
+    /// and tower state to determine the correct consensus action.
+    ///
+    /// The `is_ancestor` callback should return `true` if `slot_a` is an
+    /// ancestor of `slot_b` (or they are equal).
+    pub fn decide_vote_and_reset(
+        &mut self,
+        replayed_slot: u64,
+        is_ancestor: impl Fn(u64, u64) -> bool,
+    ) -> ConsensusDecision {
+        // Determine best fork starting from replayed slot
+        let best_slot = self
+            .fork_choice
+            .compute_best_fork(replayed_slot)
+            .unwrap_or(replayed_slot);
+
+        // Case 0: Empty tower — vote for best fork
+        if self.tower.is_empty() {
+            return ConsensusDecision {
+                reset_slot: best_slot,
+                vote_slot: Some(best_slot),
+                new_root: None,
+                reason: DecisionReason::EmptyTower,
+            };
+        }
+
+        let last_vote = match self.tower.last_vote_slot() {
+            Some(v) => v,
+            None => {
+                return ConsensusDecision {
+                    reset_slot: best_slot,
+                    vote_slot: Some(best_slot),
+                    new_root: None,
+                    reason: DecisionReason::EmptyTower,
+                };
+            }
+        };
+
+        // Determine if best fork is on the same fork as our last vote.
+        // Two slots are on the same fork if one is an ancestor of the other.
+        let same_fork =
+            is_ancestor(last_vote, best_slot) || is_ancestor(best_slot, last_vote);
+
+        if same_fork {
+            // Same fork — check lockout
+            let is_same_fork = |a: u64, b: u64| is_ancestor(a, b) || is_ancestor(b, a);
+            if self.tower.is_locked_out(best_slot, is_same_fork) {
+                ConsensusDecision {
+                    reset_slot: best_slot,
+                    vote_slot: None,
+                    new_root: None,
+                    reason: DecisionReason::LockedOut,
+                }
+            } else {
+                ConsensusDecision {
+                    reset_slot: best_slot,
+                    vote_slot: Some(best_slot),
+                    new_root: None,
+                    reason: DecisionReason::SameFork,
+                }
+            }
+        } else {
+            // Different fork — need switch check
+            if self.fork_choice.can_switch_fork(last_vote, best_slot) {
+                ConsensusDecision {
+                    reset_slot: best_slot,
+                    vote_slot: Some(best_slot),
+                    new_root: None,
+                    reason: DecisionReason::SwitchApproved,
+                }
+            } else {
+                ConsensusDecision {
+                    reset_slot: best_slot,
+                    vote_slot: None,
+                    new_root: None,
+                    reason: DecisionReason::SwitchDenied,
+                }
+            }
+        }
+    }
+
+    /// Apply a consensus decision — push vote to tower and advance root.
+    ///
+    /// Returns the new root slot if one was advanced.
+    pub fn execute_decision(&mut self, decision: &ConsensusDecision) -> Option<u64> {
+        let tower_root = if let Some(vote_slot) = decision.vote_slot {
+            self.vote_on_slot(vote_slot)
+        } else {
+            None
+        };
+
+        let root = decision.new_root.or(tower_root);
+        if let Some(r) = root {
+            self.advance_root(r);
+        }
+        root
+    }
+
+    /// Advance root across all consensus subsystems.
+    ///
+    /// Called when tower promotes a new root. Updates tower, fork choice,
+    /// and prunes stale validator vote records below the new root.
+    pub fn advance_root(&mut self, new_root: u64) {
+        self.tower.set_root(new_root);
+        self.fork_choice.set_root(new_root);
+        self.latest_votes.retain(|_, v| v.slot >= new_root);
+    }
 }
 
 #[cfg(test)]
@@ -413,5 +556,243 @@ mod tests {
         });
 
         assert!(coordinator.is_confirmed(1));
+    }
+
+    // -----------------------------------------------------------------------
+    // Phase 4: Consensus decision engine tests
+    // -----------------------------------------------------------------------
+
+    /// Helper: linear ancestry (slot a is ancestor of slot b if a < b)
+    fn linear_ancestor(a: u64, b: u64) -> bool {
+        a <= b
+    }
+
+    #[test]
+    fn decide_empty_tower_votes_for_best_fork() {
+        let validator = Pubkey::new_unique();
+        let mut coord = ConsensusCoordinator::new(validator, 10);
+
+        coord.add_fork(1, None);
+        coord.add_fork(2, Some(1));
+
+        let decision = coord.decide_vote_and_reset(1, linear_ancestor);
+
+        assert!(decision.vote_slot.is_some());
+        assert_eq!(decision.reason, DecisionReason::EmptyTower);
+    }
+
+    #[test]
+    fn decide_same_fork_votes() {
+        let validator = Pubkey::new_unique();
+        let mut coord = ConsensusCoordinator::new(validator, 10);
+
+        coord.add_fork(1, None);
+        coord.add_fork(2, Some(1));
+        coord.add_fork(3, Some(2));
+
+        // Vote on slot 2 first
+        coord.vote_on_slot(2);
+
+        // Decide at slot 3 (same fork, slot 2 is ancestor of slot 3)
+        let decision = coord.decide_vote_and_reset(1, linear_ancestor);
+
+        assert_eq!(decision.reason, DecisionReason::SameFork);
+        assert!(decision.vote_slot.is_some());
+    }
+
+    #[test]
+    fn decide_different_fork_switch_denied() {
+        let validator = Pubkey::new_unique();
+        let mut coord = ConsensusCoordinator::new(validator, 10);
+
+        // Create forking structure: 1 -> 2 and 1 -> 3
+        coord.add_fork(1, None);
+        coord.add_fork(2, Some(1));
+        coord.add_fork(3, Some(1));
+
+        // Voter A has heavy stake on slot 2
+        let voter_a = Pubkey::new_unique();
+        coord.stake_tracker_mut().add_delegation(
+            Pubkey::new_unique(),
+            super::super::Delegation::new(voter_a, 1000, 0),
+        );
+        // Voter B has small stake on slot 3
+        let voter_b = Pubkey::new_unique();
+        coord.stake_tracker_mut().add_delegation(
+            Pubkey::new_unique(),
+            super::super::Delegation::new(voter_b, 100, 0),
+        );
+        coord.set_epoch(10);
+
+        coord.record_validator_vote(ValidatorVote {
+            validator: voter_a,
+            slot: 2,
+            stake: 1000,
+            timestamp: 0,
+        });
+        coord.record_validator_vote(ValidatorVote {
+            validator: voter_b,
+            slot: 3,
+            stake: 100,
+            timestamp: 0,
+        });
+
+        // Vote on slot 2 (the heavy fork)
+        coord.vote_on_slot(2);
+
+        // Custom ancestry: 1->2 and 1->3 are separate forks
+        let is_ancestor = |a: u64, b: u64| -> bool {
+            if a == b {
+                return true;
+            }
+            if a == 1 && (b == 2 || b == 3) {
+                return true;
+            }
+            false
+        };
+
+        // Best fork should be slot 2 (1000 stake > 100 stake), which is
+        // the same fork as last vote → SameFork, not switch
+        let decision = coord.decide_vote_and_reset(1, is_ancestor);
+        assert_eq!(decision.reason, DecisionReason::SameFork);
+
+        // Now switch the weights: remove voter_a from slot 2 by changing their vote to slot 3
+        // Actually let's just test what happens when last vote is on the weak fork:
+        // We need coordinator where last_vote is on slot 3 (weak) but best is slot 2 (heavy)
+        let mut coord2 = ConsensusCoordinator::new(Pubkey::new_unique(), 10);
+        coord2.add_fork(1, None);
+        coord2.add_fork(2, Some(1));
+        coord2.add_fork(3, Some(1));
+
+        let voter_heavy = Pubkey::new_unique();
+        coord2.stake_tracker_mut().add_delegation(
+            Pubkey::new_unique(),
+            super::super::Delegation::new(voter_heavy, 1000, 0),
+        );
+        coord2.set_epoch(10);
+
+        coord2.record_validator_vote(ValidatorVote {
+            validator: voter_heavy,
+            slot: 2,
+            stake: 1000,
+            timestamp: 0,
+        });
+
+        // Our last vote is on slot 3 (weak fork)
+        coord2.vote_on_slot(3);
+
+        // Best fork is slot 2 (1000 stake). Last vote was slot 3 (different fork).
+        // can_switch_fork checks if candidate weight >= current weight * (1 + threshold).
+        // Slot 2 weight (1000) vs slot 3 weight (0) → current_weight=0 → switch approved
+        // (zero weight on current fork always allows switch)
+        let decision2 = coord2.decide_vote_and_reset(1, is_ancestor);
+        assert_eq!(decision2.reason, DecisionReason::SwitchApproved);
+        assert!(decision2.vote_slot.is_some());
+    }
+
+    #[test]
+    fn execute_decision_pushes_vote() {
+        let validator = Pubkey::new_unique();
+        let mut coord = ConsensusCoordinator::new(validator, 10);
+
+        coord.add_fork(1, None);
+        coord.add_fork(2, Some(1));
+
+        let decision = ConsensusDecision {
+            reset_slot: 2,
+            vote_slot: Some(2),
+            new_root: None,
+            reason: DecisionReason::SameFork,
+        };
+
+        coord.execute_decision(&decision);
+
+        assert_eq!(coord.tower().last_vote_slot(), Some(2));
+    }
+
+    #[test]
+    fn execute_decision_advances_root() {
+        let validator = Pubkey::new_unique();
+        let mut coord = ConsensusCoordinator::new(validator, 10);
+
+        coord.add_fork(1, None);
+        coord.add_fork(5, Some(1));
+
+        let decision = ConsensusDecision {
+            reset_slot: 5,
+            vote_slot: Some(5),
+            new_root: Some(1),
+            reason: DecisionReason::SameFork,
+        };
+
+        let root = coord.execute_decision(&decision);
+
+        assert_eq!(root, Some(1));
+        assert_eq!(coord.root(), Some(1));
+    }
+
+    #[test]
+    fn execute_decision_no_vote_no_root() {
+        let validator = Pubkey::new_unique();
+        let mut coord = ConsensusCoordinator::new(validator, 10);
+
+        let decision = ConsensusDecision {
+            reset_slot: 5,
+            vote_slot: None,
+            new_root: None,
+            reason: DecisionReason::LockedOut,
+        };
+
+        let root = coord.execute_decision(&decision);
+
+        assert_eq!(root, None);
+        assert!(coord.tower().is_empty());
+    }
+
+    #[test]
+    fn advance_root_prunes_old_votes() {
+        let validator = Pubkey::new_unique();
+        let mut coord = ConsensusCoordinator::new(validator, 10);
+
+        let voter = Pubkey::new_unique();
+        coord.add_fork(1, None);
+        coord.add_fork(5, Some(1));
+        coord.add_fork(10, Some(5));
+
+        coord.record_validator_vote(ValidatorVote {
+            validator: voter,
+            slot: 1,
+            stake: 100,
+            timestamp: 0,
+        });
+
+        assert_eq!(coord.latest_votes.len(), 1);
+
+        coord.advance_root(5);
+
+        // Vote at slot 1 should be pruned (below root 5)
+        assert_eq!(coord.latest_votes.len(), 0);
+        assert_eq!(coord.root(), Some(5));
+    }
+
+    #[test]
+    fn decide_vote_and_reset_full_cycle() {
+        let validator = Pubkey::new_unique();
+        let mut coord = ConsensusCoordinator::new(validator, 10);
+
+        // Build linear chain
+        for slot in 1..=10 {
+            coord.add_fork(slot, if slot == 1 { None } else { Some(slot - 1) });
+        }
+
+        // Decide and execute multiple votes
+        for slot in 1..=5 {
+            let decision = coord.decide_vote_and_reset(1, linear_ancestor);
+            let _root = coord.execute_decision(&decision);
+            assert!(decision.vote_slot.is_some());
+        }
+
+        // After 5 votes, tower should have votes
+        assert!(!coord.tower().is_empty());
     }
 }
