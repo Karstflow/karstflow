@@ -12,6 +12,7 @@ paradencer-storage = { path = "../paradencer-storage" }
 paradencer-types = { path = "../paradencer-types" }
 paradencer-ids = { path = "../paradencer-ids" }
 bincode = { workspace = true }
+ed25519-dalek = { workspace = true }
 serde = { workspace = true }
 sha2 = { workspace = true }
 dashmap = { workspace = true }

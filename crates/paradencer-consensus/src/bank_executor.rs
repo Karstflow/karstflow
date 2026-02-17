@@ -68,6 +68,10 @@ pub struct SanitizedTransaction {
     pub instructions: Vec<CompiledInstruction>,
     /// Number of required signatures.
     pub num_signatures: u64,
+    /// Ed25519 signatures (one per required signer).
+    pub signatures: Vec<[u8; 64]>,
+    /// Serialized message bytes for signature verification.
+    pub message_bytes: Vec<u8>,
 }
 
 /// Instruction within a sanitized transaction (index-based references).
@@ -121,6 +125,8 @@ pub enum TransactionExecutionError {
     ComputeBudgetExceeded { consumed: u64, limit: u64 },
     /// Blockhash is not recent.
     BlockhashNotRecent,
+    /// One or more signatures failed Ed25519 verification.
+    SignatureVerificationFailed { signer_index: usize },
 }
 
 impl std::fmt::Display for TransactionExecutionError {
@@ -142,6 +148,9 @@ impl std::fmt::Display for TransactionExecutionError {
                 write!(f, "compute budget exceeded: {consumed}/{limit}")
             }
             Self::BlockhashNotRecent => write!(f, "blockhash not recent"),
+            Self::SignatureVerificationFailed { signer_index } => {
+                write!(f, "signature verification failed for signer {signer_index}")
+            }
         }
     }
 }
@@ -179,6 +188,46 @@ pub struct BatchExecutionSummary {
     pub results: Vec<TransactionExecutionResult>,
     /// All vote updates extracted from successful vote transactions.
     pub vote_updates: Vec<VoteUpdate>,
+}
+
+// ---------------------------------------------------------------------------
+// Signature verification
+// ---------------------------------------------------------------------------
+
+/// Verify Ed25519 signatures on a sanitized transaction.
+///
+/// Each signature is verified against the corresponding signer key from
+/// `account_keys[0..num_signatures]` using the serialized message bytes.
+/// Transactions without signatures (empty signatures vec) skip verification
+/// for backward compatibility with test transactions.
+fn verify_transaction_signatures(
+    tx: &SanitizedTransaction,
+) -> Result<(), TransactionExecutionError> {
+    use ed25519_dalek::{Signature, VerifyingKey};
+
+    let num_signers = tx.num_signatures as usize;
+    if tx.signatures.len() < num_signers || tx.account_keys.len() < num_signers {
+        return Err(TransactionExecutionError::SignatureVerificationFailed { signer_index: 0 });
+    }
+
+    for i in 0..num_signers {
+        let sig_bytes = &tx.signatures[i];
+        let pubkey_bytes = tx.account_keys[i].as_bytes();
+
+        let verifying_key = VerifyingKey::from_bytes(pubkey_bytes).map_err(|_| {
+            TransactionExecutionError::SignatureVerificationFailed { signer_index: i }
+        })?;
+
+        let signature = Signature::from_bytes(sig_bytes);
+
+        verifying_key
+            .verify_strict(&tx.message_bytes, &signature)
+            .map_err(|_| TransactionExecutionError::SignatureVerificationFailed {
+                signer_index: i,
+            })?;
+    }
+
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -226,6 +275,21 @@ impl Bank {
                 error: Some(TransactionExecutionError::BlockhashNotRecent),
                 vote_updates: vec![],
             };
+        }
+
+        // Step 1c: Verify Ed25519 signatures (skipped when signatures are empty)
+        if !transaction.signatures.is_empty() {
+            if let Err(err) = verify_transaction_signatures(transaction) {
+                return TransactionExecutionResult {
+                    success: false,
+                    compute_units_consumed: 0,
+                    fee: 0,
+                    modified_accounts: HashMap::new(),
+                    logs: vec![],
+                    error: Some(err),
+                    vote_updates: vec![],
+                };
+            }
         }
 
         // Step 2: Load accounts
@@ -757,6 +821,8 @@ mod tests {
                 data,
             }],
             num_signatures: 1,
+            signatures: vec![],
+            message_bytes: vec![],
         }
     }
 
@@ -964,6 +1030,8 @@ mod tests {
                 },
             ],
             num_signatures: 1,
+            signatures: vec![],
+            message_bytes: vec![],
         };
 
         let result = bank.process_transaction(&tx, &HeavyBackend, 1_000_000);
@@ -1004,6 +1072,8 @@ mod tests {
                 data: vote_data,
             }],
             num_signatures: 1,
+            signatures: vec![],
+            message_bytes: vec![],
         };
 
         let result = bank.process_transaction(&tx, &backend, MAX_COMPUTE_UNITS);
@@ -1060,6 +1130,8 @@ mod tests {
                     data: vote_data,
                 }],
                 num_signatures: 1,
+                signatures: vec![],
+                message_bytes: vec![],
             });
         }
 
@@ -1135,6 +1207,8 @@ mod tests {
                 data: vec![],
             }],
             num_signatures: 1,
+            signatures: vec![],
+            message_bytes: vec![],
         };
 
         let result = bank.process_transaction(&tx, &backend, MAX_COMPUTE_UNITS);
@@ -1171,6 +1245,8 @@ mod tests {
                 data: vec![],
             }],
             num_signatures: 1,
+            signatures: vec![],
+            message_bytes: vec![],
         };
 
         let result = bank.process_transaction(&tx, &backend, MAX_COMPUTE_UNITS);
@@ -1243,5 +1319,179 @@ mod tests {
         // At least one of the early entries should be evicted
         let queue = bank.blockhash_queue().read().unwrap();
         assert_eq!(queue.len(), MAX_RECENT_BLOCKHASHES);
+    }
+
+    // --- Signature verification tests ---
+
+    #[test]
+    fn empty_signatures_skip_verification() {
+        let bank = create_test_bank();
+        let backend = PassthroughBackend;
+
+        let payer = Pubkey::new_unique();
+        let program = Pubkey::new_unique();
+        let payer_account = Account::new(1_000_000, vec![], Pubkey::default());
+        store_test_account(&bank, &payer, &payer_account);
+
+        // Transaction with no signatures — verification is skipped
+        let tx = create_simple_transaction(payer, program, vec![payer], vec![]);
+        assert!(tx.signatures.is_empty());
+
+        let result = bank.process_transaction(&tx, &backend, MAX_COMPUTE_UNITS);
+        assert!(result.success, "empty signatures should skip verification: {:?}", result.error);
+    }
+
+    #[test]
+    fn valid_signature_passes_verification() {
+        use ed25519_dalek::{Signer, SigningKey};
+
+        let bank = create_test_bank();
+        let backend = PassthroughBackend;
+
+        // Generate a real keypair
+        let signing_key = SigningKey::from_bytes(&[1u8; 32]);
+        let verifying_key = signing_key.verifying_key();
+        let payer = Pubkey::from(verifying_key.to_bytes());
+
+        let program = Pubkey::new_unique();
+        let payer_account = Account::new(1_000_000, vec![], Pubkey::default());
+        store_test_account(&bank, &payer, &payer_account);
+
+        let message_bytes = b"test message for signature".to_vec();
+        let signature = signing_key.sign(&message_bytes);
+
+        let tx = SanitizedTransaction {
+            account_keys: vec![payer, program],
+            recent_blockhash: [0u8; 32],
+            instructions: vec![CompiledInstruction {
+                program_id_index: 1,
+                account_indices: vec![0],
+                data: vec![],
+            }],
+            num_signatures: 1,
+            signatures: vec![signature.to_bytes()],
+            message_bytes,
+        };
+
+        let result = bank.process_transaction(&tx, &backend, MAX_COMPUTE_UNITS);
+        assert!(result.success, "valid signature should pass: {:?}", result.error);
+    }
+
+    #[test]
+    fn invalid_signature_rejected() {
+        use ed25519_dalek::{Signer, SigningKey};
+
+        let bank = create_test_bank();
+        let backend = PassthroughBackend;
+
+        let signing_key = SigningKey::from_bytes(&[1u8; 32]);
+        let verifying_key = signing_key.verifying_key();
+        let payer = Pubkey::from(verifying_key.to_bytes());
+
+        let program = Pubkey::new_unique();
+        let payer_account = Account::new(1_000_000, vec![], Pubkey::default());
+        store_test_account(&bank, &payer, &payer_account);
+
+        let message_bytes = b"test message".to_vec();
+        // Sign a different message to produce an invalid signature
+        let signature = signing_key.sign(b"wrong message");
+
+        let tx = SanitizedTransaction {
+            account_keys: vec![payer, program],
+            recent_blockhash: [0u8; 32],
+            instructions: vec![CompiledInstruction {
+                program_id_index: 1,
+                account_indices: vec![0],
+                data: vec![],
+            }],
+            num_signatures: 1,
+            signatures: vec![signature.to_bytes()],
+            message_bytes,
+        };
+
+        let result = bank.process_transaction(&tx, &backend, MAX_COMPUTE_UNITS);
+        assert!(!result.success);
+        assert!(matches!(
+            result.error,
+            Some(TransactionExecutionError::SignatureVerificationFailed { signer_index: 0 })
+        ));
+    }
+
+    #[test]
+    fn wrong_signer_rejected() {
+        use ed25519_dalek::{Signer, SigningKey};
+
+        let bank = create_test_bank();
+        let backend = PassthroughBackend;
+
+        // Signer A signs the message
+        let signer_a = SigningKey::from_bytes(&[1u8; 32]);
+        // But account key is signer B's public key
+        let signer_b = SigningKey::from_bytes(&[2u8; 32]);
+        let payer = Pubkey::from(signer_b.verifying_key().to_bytes());
+
+        let program = Pubkey::new_unique();
+        let payer_account = Account::new(1_000_000, vec![], Pubkey::default());
+        store_test_account(&bank, &payer, &payer_account);
+
+        let message_bytes = b"test message".to_vec();
+        let signature = signer_a.sign(&message_bytes); // signed by A, not B
+
+        let tx = SanitizedTransaction {
+            account_keys: vec![payer, program],
+            recent_blockhash: [0u8; 32],
+            instructions: vec![CompiledInstruction {
+                program_id_index: 1,
+                account_indices: vec![0],
+                data: vec![],
+            }],
+            num_signatures: 1,
+            signatures: vec![signature.to_bytes()],
+            message_bytes,
+        };
+
+        let result = bank.process_transaction(&tx, &backend, MAX_COMPUTE_UNITS);
+        assert!(!result.success);
+        assert!(matches!(
+            result.error,
+            Some(TransactionExecutionError::SignatureVerificationFailed { signer_index: 0 })
+        ));
+    }
+
+    #[test]
+    fn multi_signature_all_verified() {
+        use ed25519_dalek::{Signer, SigningKey};
+
+        let bank = create_test_bank();
+        let backend = PassthroughBackend;
+
+        let signer1 = SigningKey::from_bytes(&[1u8; 32]);
+        let signer2 = SigningKey::from_bytes(&[2u8; 32]);
+        let payer = Pubkey::from(signer1.verifying_key().to_bytes());
+        let cosigner = Pubkey::from(signer2.verifying_key().to_bytes());
+
+        let program = Pubkey::new_unique();
+        let payer_account = Account::new(1_000_000, vec![], Pubkey::default());
+        store_test_account(&bank, &payer, &payer_account);
+
+        let message_bytes = b"multi-sig message".to_vec();
+        let sig1 = signer1.sign(&message_bytes);
+        let sig2 = signer2.sign(&message_bytes);
+
+        let tx = SanitizedTransaction {
+            account_keys: vec![payer, cosigner, program],
+            recent_blockhash: [0u8; 32],
+            instructions: vec![CompiledInstruction {
+                program_id_index: 2,
+                account_indices: vec![0, 1],
+                data: vec![],
+            }],
+            num_signatures: 2,
+            signatures: vec![sig1.to_bytes(), sig2.to_bytes()],
+            message_bytes,
+        };
+
+        let result = bank.process_transaction(&tx, &backend, MAX_COMPUTE_UNITS);
+        assert!(result.success, "multi-sig should pass: {:?}", result.error);
     }
 }
