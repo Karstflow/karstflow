@@ -153,17 +153,23 @@ fn process_feature_activations_no_op_when_no_accounts() {
 }
 
 #[test]
-fn feature_id_is_deterministic() {
-    let id1 = known_features::feature_id("test_feature");
-    let id2 = known_features::feature_id("test_feature");
+fn feature_id_lookup_returns_correct_pubkey() {
+    let id1 = known_features::feature_id("deprecate_rewards_sysvar");
+    let id2 = known_features::feature_id("deprecate_rewards_sysvar");
     assert_eq!(id1, id2);
+    assert!(id1.is_some());
 }
 
 #[test]
 fn different_names_produce_different_ids() {
-    let id1 = known_features::feature_id("feature_a");
-    let id2 = known_features::feature_id("feature_b");
+    let id1 = known_features::feature_id("deprecate_rewards_sysvar");
+    let id2 = known_features::feature_id("pico_inflation");
     assert_ne!(id1, id2);
+}
+
+#[test]
+fn unknown_feature_returns_none() {
+    assert!(known_features::feature_id("nonexistent_feature_xyz").is_none());
 }
 
 #[test]
