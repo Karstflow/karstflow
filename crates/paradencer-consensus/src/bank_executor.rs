@@ -400,8 +400,9 @@ impl Bank {
         }
         self.write_accounts(&modified);
 
-        // Step 6: Record fees
+        // Step 6: Record fees and signatures
         self.add_execution_fee(fee);
+        self.add_signatures(transaction.num_signatures);
 
         // Step 7: Record transaction
         let _ = self.register_transaction();

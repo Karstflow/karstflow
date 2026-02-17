@@ -702,4 +702,153 @@ mod tests {
         // Verify capitalization increased
         assert!(child.capitalization() > 1_000_000_000_000);
     }
+
+    #[test]
+    fn bank_hash_reflects_account_state() {
+        use crate::{Bank, EpochSchedule, LeaderSchedule};
+        use paradencer_storage::{Account, AccountDatabase};
+        use std::sync::Arc;
+
+        let accounts = Arc::new(AccountDatabase::new());
+        let epoch_schedule = Arc::new(EpochSchedule::default());
+        let leader_schedule = Arc::new(LeaderSchedule::new(0, &[(Pubkey::new_unique(), 1_000)]).unwrap());
+
+        let bank = Bank::new_genesis(accounts, epoch_schedule, leader_schedule);
+
+        let initial_hash = bank.hash();
+
+        // Writing an account changes the bank hash
+        let pubkey = Pubkey::new_unique();
+        let account = Account::new(5000, vec![10, 20, 30], Pubkey::new_unique());
+        bank.update_account_hash(&pubkey, None, &account);
+
+        assert_ne!(bank.hash(), initial_hash);
+    }
+
+    #[test]
+    fn bank_hash_deterministic_replay() {
+        use crate::{Bank, EpochSchedule, LeaderSchedule};
+        use paradencer_storage::{Account, AccountDatabase};
+        use std::sync::Arc;
+
+        let make_bank = || {
+            let accounts = Arc::new(AccountDatabase::new());
+            let epoch_schedule = Arc::new(EpochSchedule::default());
+            let leader_schedule = Arc::new(LeaderSchedule::new(0, &[(Pubkey::new_unique(), 1_000)]).unwrap());
+            Bank::new_genesis(accounts, epoch_schedule, leader_schedule)
+        };
+
+        let pk = Pubkey::from([0x42; 32]);
+        let owner = Pubkey::from([0x11; 32]);
+        let account = Account::new(1000, vec![1, 2, 3], owner);
+
+        let b1 = make_bank();
+        b1.update_account_hash(&pk, None, &account);
+        b1.add_signatures(2);
+        b1.set_last_blockhash([0xAA; 32]);
+
+        let b2 = make_bank();
+        b2.update_account_hash(&pk, None, &account);
+        b2.add_signatures(2);
+        b2.set_last_blockhash([0xAA; 32]);
+
+        assert_eq!(b1.hash(), b2.hash());
+    }
+
+    #[test]
+    fn lthash_incremental_matches_recompute() {
+        use crate::{Bank, EpochSchedule, LeaderSchedule};
+        use paradencer_crypto::lthash::{hash_account, LatticeHashValue};
+        use paradencer_storage::{Account, AccountDatabase};
+        use std::sync::Arc;
+
+        let accounts = Arc::new(AccountDatabase::new());
+        let epoch_schedule = Arc::new(EpochSchedule::default());
+        let leader_schedule = Arc::new(LeaderSchedule::new(0, &[(Pubkey::new_unique(), 1_000)]).unwrap());
+
+        let bank = Bank::new_genesis(accounts, epoch_schedule, leader_schedule);
+
+        let owner = Pubkey::from([0x11; 32]);
+        let pk1 = Pubkey::from([1u8; 32]);
+        let pk2 = Pubkey::from([2u8; 32]);
+        let pk3 = Pubkey::from([3u8; 32]);
+
+        let acc1 = Account::new(1000, vec![1], owner);
+        let acc2 = Account::new(2000, vec![2, 3], owner);
+        let acc3 = Account::new(3000, vec![4, 5, 6], owner);
+
+        // Add accounts incrementally via bank
+        bank.update_account_hash(&pk1, None, &acc1);
+        bank.update_account_hash(&pk2, None, &acc2);
+        bank.update_account_hash(&pk3, None, &acc3);
+
+        let incremental = bank.lthash();
+
+        // Recompute from scratch using raw hash_account
+        let mut full = LatticeHashValue::zero();
+        let h1 = hash_account(&pk1.to_bytes(), &owner.to_bytes(), 1000, false, &[1]);
+        let h2 = hash_account(&pk2.to_bytes(), &owner.to_bytes(), 2000, false, &[2, 3]);
+        let h3 = hash_account(&pk3.to_bytes(), &owner.to_bytes(), 3000, false, &[4, 5, 6]);
+        full.add(&h1);
+        full.add(&h2);
+        full.add(&h3);
+
+        assert_eq!(incremental, full);
+    }
+
+    #[test]
+    fn parent_child_hash_chain() {
+        use crate::{Bank, EpochSchedule, LeaderSchedule};
+        use paradencer_constants::ledger::TICKS_PER_SLOT;
+        use paradencer_storage::{Account, AccountDatabase};
+        use std::sync::Arc;
+
+        let accounts = Arc::new(AccountDatabase::new());
+        let epoch_schedule = Arc::new(EpochSchedule::default());
+        let leader_schedule = Arc::new(LeaderSchedule::new(0, &[(Pubkey::new_unique(), 1_000)]).unwrap());
+
+        // Set up parent with some state
+        let parent = Bank::new_genesis(accounts, epoch_schedule, leader_schedule.clone());
+        let pk = Pubkey::new_unique();
+        let acc = Account::new(1000, vec![1], Pubkey::new_unique());
+        parent.update_account_hash(&pk, None, &acc);
+        parent.add_signatures(5);
+
+        // Complete parent
+        for _ in 0..TICKS_PER_SLOT {
+            parent.register_tick().unwrap();
+        }
+        parent.freeze().unwrap();
+        let parent_bank_hash = parent.hash();
+
+        // Create child
+        let child = Bank::new_from_parent(&parent, 1, leader_schedule.clone());
+
+        // Child's parent_hash is parent's bank hash
+        assert_eq!(child.parent_hash(), parent_bank_hash);
+
+        // Child starts with signature_count=0 and inherited lthash
+        assert_eq!(child.signature_count(), 0);
+        assert!(!child.lthash().is_zero());
+
+        // Modify child
+        let pk2 = Pubkey::new_unique();
+        let acc2 = Account::new(2000, vec![2], Pubkey::new_unique());
+        child.update_account_hash(&pk2, None, &acc2);
+        child.add_signatures(3);
+
+        // Child hash differs from parent
+        assert_ne!(child.hash(), parent_bank_hash);
+
+        // Create grandchild
+        for _ in 0..TICKS_PER_SLOT {
+            child.register_tick().unwrap();
+        }
+        child.freeze().unwrap();
+        let child_bank_hash = child.hash();
+
+        let grandchild = Bank::new_from_parent(&child, 2, leader_schedule);
+        assert_eq!(grandchild.parent_hash(), child_bank_hash);
+        assert_ne!(grandchild.parent_hash(), parent_bank_hash);
+    }
 }

@@ -435,7 +435,19 @@ impl Bank {
             return Err(BankTickError::MaxTickHeightReached);
         }
 
-        self.tick_height.fetch_add(1, Ordering::Relaxed);
+        let new_height = self.tick_height.fetch_add(1, Ordering::Relaxed) + 1;
+
+        // Update last_blockhash with a hash derived from the tick.
+        // In production this comes from the PoH chain; here we derive
+        // a deterministic placeholder from the previous blockhash and tick height.
+        use paradencer_crypto::sha256::Sha256Hasher;
+        let prev = *self.last_blockhash.read().unwrap();
+        let mut data = [0u8; 40]; // 32 bytes hash + 8 bytes tick height
+        data[..32].copy_from_slice(&prev);
+        data[32..40].copy_from_slice(&new_height.to_le_bytes());
+        let new_blockhash = Sha256Hasher::hash(&data);
+        *self.last_blockhash.write().unwrap() = new_blockhash;
+
         Ok(())
     }
 
