@@ -355,7 +355,7 @@ fn bench_realistic_deduplication_hashing(c: &mut Criterion) {
     // Simulate hashing signatures for deduplication cache
     // Typical: 1000 transactions/second
     let mut signatures = Vec::new();
-    for i in 0..1000 {
+    for i in 0u64..1000 {
         let mut sig = [0u8; 64];
         sig[0..8].copy_from_slice(&i.to_le_bytes());
         signatures.push(sig);

@@ -174,16 +174,20 @@ Method:
 | Ingress dataplane (UDP/QUIC, decode/dedup/filter) | 18% | 20% | 3.6% |
 | Shred path (sanitize/dedup/flow), repair-adjacent | 7% | 12% | 0.8% |
 | Execution runtime (SVM/sBPF) | 24% | 35% | 8.4% |
-| Replay / bank / fork-choice | 14% | 43% | 6.0% |
-| Storage/accounts state model (funk/groove-equivalent) | 12% | 33% | 4.0% |
+| Replay / bank / fork-choice | 14% | 50% | 7.0% |
+| Storage/accounts state model (funk/groove-equivalent) | 12% | 35% | 4.2% |
 | Consensus / voting / leader pipeline | 9% | 28% | 2.5% |
 | Snapshot lifecycle (download/verify/restore orchestration) | 4% | 18% | 0.7% |
 | Client RPC/WS surface | 3% | 30% | 0.9% |
 | Observability / control-plane / ops guardrails | 1% | 50% | 0.5% |
 
 Summary:
-- Total migrated logic estimate: **~33.4%** (rounded tracking value: **~33%**).
+- Total migrated logic estimate: **~36.8%** (rounded tracking value: **~37%**).
 - This table is intentionally conservative and should be revised after each substantial subsystem move.
+
+Wave 11 changes (2026-02-17):
+- Replay / bank / fork-choice: 43% → 50% (deterministic bank hash via SHA256 + lattice hash accumulator, incremental account hashing on every write, signature counting in tx processing, blockhash derivation in register_tick, parent-child hash chain integrity)
+- Storage/accounts: 33% → 35% (account hash hooks integrated into write path — old account read + lthash subtract/add on every modification)
 
 Wave 10 changes (2026-02-17):
 - Execution runtime: 33% → 35% (vote state epoch_credits serialization fix enables real reward calculation)

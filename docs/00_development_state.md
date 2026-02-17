@@ -7,10 +7,10 @@ Primary residual tracker:
 - `docs/04_module_residual_matrix.md` -> `Firedancer Logic Weight And Migration Table` (weight-based parity tracking table)
 
 ## Rough Migration Progress
-- Paradencer total lines: **118,706** (19 crates)
+- Paradencer total lines: **119,612** (19 crates)
 - Firedancer total lines: **~628,000** (14 subsystems)
 - Paradencer framework completion: **~100%**
-- Firedancer logic parity (estimated): **~33%**
+- Firedancer logic parity (estimated): **~37%**
 - Confidence level:
   - framework completion: medium
   - firedancer parity: medium (measured via subsystem-weighted mapping)
@@ -20,7 +20,8 @@ Primary residual tracker:
   - phase 4 covered (sysvars lifecycle, tx cache, cost tracker, CPI syscalls, all 13 builtin programs real, features, genesis, blockstore, program cache)
   - phase 5 partially covered (real vote program, real stake program with 18 handlers, sysvar per-slot updates)
   - phase 6 partially covered (epoch boundary processing with real rewards, consensus decision engine, vote flow wiring, feature activation, leader schedule regeneration)
-  - phase 7 mostly not migrated yet (gossip, repair, VM interpreter)
+  - phase 7 partially covered (deterministic bank hash via SHA256 + lattice hash, incremental account hashing)
+  - phase 8 mostly not migrated yet (gossip, repair, VM interpreter)
 - Update policy:
   - revise both percentages after each substantial subsystem move
   - keep firedancer parity estimate intentionally conservative
@@ -485,6 +486,18 @@ Primary residual tracker:
   - Added 35 new tests: binary parser, vote reader, reward application, epoch boundary in Bank, consensus decisions, vote flow integration, end-to-end epoch boundary.
   - Total: **118,706 LOC**, **2,234 tests**, 0 failures.
   - Parity estimate: **~28% → ~33%**.
+- **Wave 11: Bank Hash & Lattice Hash — Deterministic State Verification** (2026-02-17):
+  - `paradencer-constants`: added lattice hash constants (`LTHASH_VALUE_BYTES`, `LTHASH_ELEMENT_COUNT`) to crypto module.
+  - `paradencer-crypto`: added Blake3 XOF (eXtendable Output Function) support for 2048-byte output via `finalize_xof()` and standalone `hash_xof()`.
+  - `paradencer-crypto`: created `lthash` module — `LatticeHashValue` type (1024 u16 elements, element-wise wrapping arithmetic) with `add`/`subtract`/`as_bytes`/`from_bytes` operations and compact Debug repr.
+  - `paradencer-crypto`: added `hash_account()` — per-account lattice hash via `Blake3_XOF_2048(lamports || data || executable || owner || pubkey)`, zero-lamport accounts excluded.
+  - `paradencer-consensus`: added bank-level lattice hash accumulator (`lthash`, `signature_count`, `last_blockhash` fields) with inheritance in `new_from_parent`.
+  - `paradencer-consensus`: hooked `update_account_hash()` into `write_accounts()` — subtracts old, adds new account hash on every account modification.
+  - `paradencer-consensus`: replaced placeholder `Bank.hash()` (non-deterministic SipHash) with `SHA256(SHA256(prev_bank_hash || sig_count || last_blockhash) || lthash)` — deterministic, Firedancer-compatible bank hash formula.
+  - `paradencer-consensus`: wired signature counting into transaction processing and blockhash derivation into `register_tick()`.
+  - Added 37 new tests: lthash value operations, account hashing, bank accumulator, deterministic hash, integration (replay determinism, incremental vs recompute, parent-child chain).
+  - Total: **119,612 LOC**, **2,271 tests**, 0 failures.
+  - Parity estimate: **~33% → ~37%**.
 - Topology planner added with declarative stage/link spec and validation.
 - External topology loading from TOML is implemented.
 - Node config is centralized in a dedicated config module with env parsing + validation.

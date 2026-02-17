@@ -507,7 +507,10 @@ mod execution_pipeline_tests {
 
         // Verify the account data was populated (vote state serialized)
         let modified = result.modified_accounts.get(&vote_pubkey).unwrap();
-        assert!(modified.data.as_slice().len() > 0, "Vote state should be serialized");
+        assert!(
+            modified.data.as_slice().len() > 0,
+            "Vote state should be serialized"
+        );
     }
 
     #[test]
