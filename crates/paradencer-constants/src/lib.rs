@@ -397,6 +397,7 @@ pub mod quic {
     pub const PROCESSOR_BATCH_SIZE: usize = 256;
 }
 
+pub mod loader_v4;
 pub mod syscalls;
 pub mod sysvars;
 pub mod vm;

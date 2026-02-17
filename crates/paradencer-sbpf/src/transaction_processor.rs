@@ -3,15 +3,15 @@ use crate::vm::{BytecodeVm, SbpfVm};
 use crate::{
     AddressLookupTableExecutor, AssociatedTokenProgramExecutor, BpfLoaderExecutor,
     ComputeBudgetProgramExecutor, ConfigProgramExecutor, Ed25519PrecompileExecutor,
-    ExecutionContext, ExecutionOutcome, MemoProgramExecutor, Secp256k1PrecompileExecutor,
-    StakeProgramExecutor, SystemProgramExecutor, Token2022ProgramExecutor, TokenProgramExecutor,
-    VoteProgramExecutor, MAX_COMPUTE_UNITS,
+    ExecutionContext, ExecutionOutcome, LoaderV4Executor, MemoProgramExecutor,
+    Secp256k1PrecompileExecutor, StakeProgramExecutor, SystemProgramExecutor,
+    Token2022ProgramExecutor, TokenProgramExecutor, VoteProgramExecutor, MAX_COMPUTE_UNITS,
 };
 use paradencer_ids::{
     ADDRESS_LOOKUP_TABLE_PROGRAM_ID, ASSOCIATED_TOKEN_PROGRAM_ID, BPF_LOADER_PROGRAM_ID,
-    COMPUTE_BUDGET_PROGRAM_ID, CONFIG_PROGRAM_ID, ED25519_PROGRAM_ID, MEMO_PROGRAM_ID,
-    MEMO_PROGRAM_V3_ID, SECP256K1_PROGRAM_ID, STAKE_PROGRAM_ID, SYSTEM_PROGRAM_ID,
-    TOKEN_2022_PROGRAM_ID, TOKEN_PROGRAM_ID, VOTE_PROGRAM_ID,
+    COMPUTE_BUDGET_PROGRAM_ID, CONFIG_PROGRAM_ID, ED25519_PROGRAM_ID, LOADER_V4_PROGRAM_ID,
+    MEMO_PROGRAM_ID, MEMO_PROGRAM_V3_ID, SECP256K1_PROGRAM_ID, STAKE_PROGRAM_ID,
+    SYSTEM_PROGRAM_ID, TOKEN_2022_PROGRAM_ID, TOKEN_PROGRAM_ID, VOTE_PROGRAM_ID,
 };
 use paradencer_types::{Account, Pubkey};
 use std::collections::HashMap;
@@ -78,6 +78,7 @@ pub struct TransactionProcessor {
     compute_budget_program: ComputeBudgetProgramExecutor,
     address_lookup_table: AddressLookupTableExecutor,
     config_program: ConfigProgramExecutor,
+    loader_v4: LoaderV4Executor,
     ed25519_precompile: Ed25519PrecompileExecutor,
     secp256k1_precompile: Secp256k1PrecompileExecutor,
     bytecode_vm: BytecodeVm,
@@ -99,6 +100,7 @@ impl TransactionProcessor {
             compute_budget_program: ComputeBudgetProgramExecutor::new(150),
             address_lookup_table: AddressLookupTableExecutor::new(200),
             config_program: ConfigProgramExecutor::new(150),
+            loader_v4: LoaderV4Executor::new(200),
             ed25519_precompile: Ed25519PrecompileExecutor::new(200),
             secp256k1_precompile: Secp256k1PrecompileExecutor::new(200),
             bytecode_vm: BytecodeVm::new(),
@@ -283,6 +285,10 @@ impl TransactionProcessor {
             self.config_program
                 .execute(context)
                 .unwrap_or_else(|err| ExecutionOutcome::failure(150, err))
+        } else if context.program_id == LOADER_V4_PROGRAM_ID {
+            self.loader_v4
+                .execute(context)
+                .unwrap_or_else(|err| ExecutionOutcome::failure(200, err))
         } else if context.program_id == ED25519_PROGRAM_ID {
             self.ed25519_precompile
                 .execute(context)
@@ -458,6 +464,7 @@ mod tests {
             COMPUTE_BUDGET_PROGRAM_ID,
             ADDRESS_LOOKUP_TABLE_PROGRAM_ID,
             CONFIG_PROGRAM_ID,
+            LOADER_V4_PROGRAM_ID,
             ED25519_PROGRAM_ID,
             SECP256K1_PROGRAM_ID,
         ];

@@ -19,6 +19,7 @@ mod bpf_loader;
 mod compute_budget_program;
 mod config_program;
 pub mod elf_loader;
+mod loader_v4;
 pub mod instruction;
 #[cfg(test)]
 mod integration_tests;
@@ -50,6 +51,7 @@ pub use compute_budget_program::{
     extract_compute_budget, ComputeBudgetProgramExecutor, ExtractedComputeBudget,
 };
 pub use config_program::ConfigProgramExecutor;
+pub use loader_v4::{LoaderV4Executor, LoaderV4State};
 pub use memo_program::MemoProgramExecutor;
 pub use paradencer_constants::execution::{
     COMPUTE_UNIT_COST_ACCOUNT_WRITEBACK, COMPUTE_UNIT_COST_PER_ACCOUNT,
