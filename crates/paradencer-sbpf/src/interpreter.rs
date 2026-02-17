@@ -6,6 +6,7 @@
 use crate::elf_loader::LoadedProgram;
 use crate::instruction::Opcode;
 use crate::memory::{MemoryError, MemoryMap};
+use crate::sysvar_snapshot::SysvarSnapshot;
 use paradencer_constants::vm::{
     CALLEE_SAVED_COUNT, CU_PER_INSTRUCTION, MAX_CALL_DEPTH, MAX_INSTRUCTIONS, REGISTER_COUNT,
     REG_CALLEE_SAVED_START,
@@ -61,6 +62,10 @@ pub struct VmState {
     pub return_data: Option<Vec<u8>>,
     /// Current heap allocation position (bump allocator).
     pub heap_position: u64,
+    /// Frozen sysvar state for syscall reads.
+    pub sysvar_snapshot: SysvarSnapshot,
+    /// CPI invocation depth (separate from function call stack).
+    pub cpi_depth: usize,
 }
 
 /// A saved function call frame.
@@ -177,6 +182,7 @@ pub fn execute(
     memory: MemoryMap,
     compute_budget: u64,
     syscall_dispatch: &dyn SyscallDispatch,
+    sysvar_snapshot: SysvarSnapshot,
 ) -> Result<VmResult, VmError> {
     let instructions = &program.instructions;
 
@@ -194,6 +200,8 @@ pub fn execute(
         logs: Vec::new(),
         return_data: None,
         heap_position: paradencer_constants::vm::REGION_HEAP_BASE,
+        sysvar_snapshot,
+        cpi_depth: 0,
     };
 
     // Set initial frame pointer (r10)
@@ -1000,7 +1008,7 @@ mod tests {
         let bytes = make_program_bytes(insns);
         let program = load_raw(&bytes).unwrap();
         let memory = MemoryMap::new(&[], TOTAL_STACK_SIZE, DEFAULT_HEAP_SIZE, vec![]);
-        execute(&program, memory, 10_000, &NoSyscalls)
+        execute(&program, memory, 10_000, &NoSyscalls, SysvarSnapshot::default())
     }
 
     #[test]
@@ -1173,7 +1181,7 @@ mod tests {
         ]);
         let program = load_raw(&bytes).unwrap();
         let memory = MemoryMap::new(&[], TOTAL_STACK_SIZE, DEFAULT_HEAP_SIZE, vec![]);
-        let result = execute(&program, memory, 10_000, &NoSyscalls).unwrap();
+        let result = execute(&program, memory, 10_000, &NoSyscalls, SysvarSnapshot::default()).unwrap();
         assert_eq!(result.return_value, 0xBEEF);
     }
 
@@ -1219,7 +1227,7 @@ mod tests {
         let bytes = make_program_bytes(insns);
         let program = load_raw(&bytes).unwrap();
         let memory = MemoryMap::new(&[], TOTAL_STACK_SIZE, DEFAULT_HEAP_SIZE, vec![]);
-        execute(&program, memory, budget, &NoSyscalls)
+        execute(&program, memory, budget, &NoSyscalls, SysvarSnapshot::default())
     }
 
     #[test]
@@ -1266,7 +1274,7 @@ mod tests {
         assert!(program.call_targets.contains_key(&1));
 
         let memory = MemoryMap::new(&[], TOTAL_STACK_SIZE, DEFAULT_HEAP_SIZE, vec![]);
-        let result = execute(&program, memory, 10_000, &NoSyscalls).unwrap();
+        let result = execute(&program, memory, 10_000, &NoSyscalls, SysvarSnapshot::default()).unwrap();
         assert_eq!(result.return_value, 15); // 10 + 5
     }
 

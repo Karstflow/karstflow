@@ -1253,7 +1253,7 @@ mod tests {
         ]);
         let program = load_raw(&bytes).unwrap();
         let memory = MemoryMap::new(&[], TOTAL_STACK_SIZE, DEFAULT_HEAP_SIZE, vec![]);
-        let result = crate::interpreter::execute(&program, memory, 10_000, &dispatch).unwrap();
+        let result = crate::interpreter::execute(&program, memory, 10_000, &dispatch, crate::sysvar_snapshot::SysvarSnapshot::default()).unwrap();
         assert_eq!(result.return_value, 42);
     }
 
@@ -1276,7 +1276,7 @@ mod tests {
         ]);
         let program = load_raw(&bytes).unwrap();
         let memory = MemoryMap::new(&[], TOTAL_STACK_SIZE, DEFAULT_HEAP_SIZE, vec![]);
-        let result = crate::interpreter::execute(&program, memory, 100_000, &dispatch).unwrap();
+        let result = crate::interpreter::execute(&program, memory, 100_000, &dispatch, crate::sysvar_snapshot::SysvarSnapshot::default()).unwrap();
         assert!(result.logs.iter().any(|l| l.contains("Hi")));
     }
 
@@ -1293,7 +1293,7 @@ mod tests {
         ]);
         let program = load_raw(&bytes).unwrap();
         let memory = MemoryMap::new(&[], TOTAL_STACK_SIZE, DEFAULT_HEAP_SIZE, vec![]);
-        let result = crate::interpreter::execute(&program, memory, 100_000, &dispatch).unwrap();
+        let result = crate::interpreter::execute(&program, memory, 100_000, &dispatch, crate::sysvar_snapshot::SysvarSnapshot::default()).unwrap();
         // Should return the heap base address
         assert_eq!(result.return_value, REGION_HEAP_BASE);
     }
@@ -1307,7 +1307,7 @@ mod tests {
         ]);
         let program = load_raw(&bytes).unwrap();
         let memory = MemoryMap::new(&[], TOTAL_STACK_SIZE, DEFAULT_HEAP_SIZE, vec![]);
-        let result = crate::interpreter::execute(&program, memory, 10_000, &dispatch);
+        let result = crate::interpreter::execute(&program, memory, 10_000, &dispatch, crate::sysvar_snapshot::SysvarSnapshot::default());
         assert!(matches!(result, Err(VmError::UnknownSyscall { id: 0xBAD })));
     }
 
@@ -1379,7 +1379,7 @@ mod tests {
         ]);
         let program = load_raw(&bytes).unwrap();
         let memory = MemoryMap::new(&[], TOTAL_STACK_SIZE, DEFAULT_HEAP_SIZE, vec![]);
-        let result = crate::interpreter::execute(&program, memory, 1_000_000, &dispatch).unwrap();
+        let result = crate::interpreter::execute(&program, memory, 1_000_000, &dispatch, crate::sysvar_snapshot::SysvarSnapshot::default()).unwrap();
 
         // Compute expected SHA-256 of "hello"
         let mut hasher = Sha256::new();

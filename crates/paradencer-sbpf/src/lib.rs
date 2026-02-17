@@ -32,6 +32,7 @@ mod spl_integration_tests;
 mod stake;
 pub mod syscall_dispatch;
 pub mod syscalls;
+pub mod sysvar_snapshot;
 mod system_program;
 mod token_2022_program;
 mod token_program;
@@ -67,6 +68,7 @@ pub use transaction_processor::{
 };
 pub use vm::{BytecodeVm, SbpfExecutionError, SbpfExecutionResult, SbpfVm, StubSbpfVm};
 pub use vote::VoteProgramExecutor;
+pub use sysvar_snapshot::SysvarSnapshot;
 
 use paradencer_types::{Account, Pubkey};
 use std::collections::HashMap;

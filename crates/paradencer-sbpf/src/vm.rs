@@ -6,6 +6,7 @@ use super::{
 use crate::elf_loader::LoadedProgram;
 use crate::interpreter::{self, VmError};
 use crate::memory::MemoryMap;
+use crate::sysvar_snapshot::SysvarSnapshot;
 use crate::program_cache::ProgramCache;
 use crate::syscall_dispatch::{InstructionExecutor, RuntimeSyscallDispatch};
 use crate::validation;
@@ -130,6 +131,7 @@ impl SbpfVm for StubSbpfVm {
 pub struct BytecodeVm {
     cache: Mutex<ProgramCache>,
     syscall_dispatch: RuntimeSyscallDispatch,
+    sysvar_snapshot: SysvarSnapshot,
 }
 
 impl BytecodeVm {
@@ -138,6 +140,7 @@ impl BytecodeVm {
         Self {
             cache: Mutex::new(ProgramCache::new()),
             syscall_dispatch: RuntimeSyscallDispatch::with_standard_syscalls(),
+            sysvar_snapshot: SysvarSnapshot::default(),
         }
     }
 
@@ -146,6 +149,7 @@ impl BytecodeVm {
         Self {
             cache: Mutex::new(ProgramCache::new()),
             syscall_dispatch: RuntimeSyscallDispatch::with_cpi_support(executor),
+            sysvar_snapshot: SysvarSnapshot::default(),
         }
     }
 
@@ -154,7 +158,13 @@ impl BytecodeVm {
         Self {
             cache: Mutex::new(ProgramCache::new()),
             syscall_dispatch,
+            sysvar_snapshot: SysvarSnapshot::default(),
         }
+    }
+
+    /// Set the sysvar snapshot for this VM.
+    pub fn set_sysvar_snapshot(&mut self, snapshot: SysvarSnapshot) {
+        self.sysvar_snapshot = snapshot;
     }
 
     /// Load and validate a program from raw ELF bytes.
@@ -328,6 +338,7 @@ impl BytecodeVm {
             memory,
             context.compute_budget,
             &self.syscall_dispatch,
+            self.sysvar_snapshot.clone(),
         ) {
             Ok(result) => {
                 let modified_accounts =

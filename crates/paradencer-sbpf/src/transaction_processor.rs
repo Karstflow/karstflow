@@ -1,3 +1,4 @@
+use crate::sysvar_snapshot::SysvarSnapshot;
 use crate::vm::{BytecodeVm, SbpfVm};
 use crate::{
     AddressLookupTableExecutor, AssociatedTokenProgramExecutor, BpfLoaderExecutor,
@@ -109,6 +110,11 @@ impl TransactionProcessor {
     pub fn with_compute_limit(mut self, max_compute_units: u64) -> Self {
         self.max_compute_units = max_compute_units;
         self
+    }
+
+    /// Set the sysvar snapshot for BPF program execution.
+    pub fn set_sysvar_snapshot(&mut self, snapshot: SysvarSnapshot) {
+        self.bytecode_vm.set_sysvar_snapshot(snapshot);
     }
 
     /// Process a transaction with provided account state
@@ -432,8 +438,7 @@ mod tests {
     #[test]
     fn routes_compute_budget_program() {
         let processor = TransactionProcessor::new();
-        let outcome =
-            processor.process_instruction(COMPUTE_BUDGET_PROGRAM_ID, vec![], vec![]);
+        let outcome = processor.process_instruction(COMPUTE_BUDGET_PROGRAM_ID, vec![], vec![]);
         // ComputeBudget with empty data should still be routed (base cost success or parse error)
         assert!(outcome.compute_units_consumed > 0 || !outcome.success);
     }
@@ -467,13 +472,11 @@ mod tests {
     fn precompile_routing_returns_result() {
         let processor = TransactionProcessor::new();
 
-        let ed25519_outcome =
-            processor.process_instruction(ED25519_PROGRAM_ID, vec![], vec![]);
+        let ed25519_outcome = processor.process_instruction(ED25519_PROGRAM_ID, vec![], vec![]);
         // Empty data to a precompile — should route and return a result
         assert!(ed25519_outcome.compute_units_consumed > 0 || !ed25519_outcome.success);
 
-        let secp_outcome =
-            processor.process_instruction(SECP256K1_PROGRAM_ID, vec![], vec![]);
+        let secp_outcome = processor.process_instruction(SECP256K1_PROGRAM_ID, vec![], vec![]);
         assert!(secp_outcome.compute_units_consumed > 0 || !secp_outcome.success);
     }
 
