@@ -1,11 +1,12 @@
 use super::{EpochSchedule, Inflation, LeaderSchedule, Rent};
+use crate::blockhash_queue::{BlockhashInfo, BlockhashQueue};
 use crate::epoch_processing::EpochProcessor;
 use crate::features::{process_feature_activations, FeatureSet};
 use crate::reward_application::RewardApplicator;
 use crate::rewards_distribution::RewardsDistributor;
+use crate::sysvars::SysvarCache;
 use crate::StakeHistory;
 use crate::StakeTracker;
-use crate::sysvars::SysvarCache;
 use paradencer_constants::economics::{FEE_BURN_PERCENT, LAMPORTS_PER_SIGNATURE};
 use paradencer_constants::ledger::{GENESIS_EPOCH, GENESIS_SLOT, TICKS_PER_SLOT};
 use paradencer_crypto::lthash::{self, LatticeHashValue};
@@ -85,6 +86,9 @@ pub struct Bank {
     /// Last PoH blockhash for this slot.
     last_blockhash: RwLock<[u8; 32]>,
 
+    // Recent blockhash queue for transaction validation
+    blockhash_queue: RwLock<BlockhashQueue>,
+
     // Epoch boundary state (optional, set externally)
     stake_tracker: Option<Arc<RwLock<StakeTracker>>>,
     stake_history: Option<Arc<RwLock<StakeHistory>>>,
@@ -144,6 +148,7 @@ impl Bank {
             lthash: RwLock::new(LatticeHashValue::zero()),
             signature_count: AtomicU64::new(0),
             last_blockhash: RwLock::new([0u8; 32]),
+            blockhash_queue: RwLock::new(BlockhashQueue::default()),
             stake_tracker: None,
             stake_history: None,
             feature_set: None,
@@ -180,6 +185,7 @@ impl Bank {
             lthash: RwLock::new(parent.lthash.read().unwrap().clone()),
             signature_count: AtomicU64::new(0),
             last_blockhash: RwLock::new(parent_hash),
+            blockhash_queue: RwLock::new(parent.blockhash_queue.read().unwrap().clone()),
             stake_tracker: parent.stake_tracker.clone(),
             stake_history: parent.stake_history.clone(),
             feature_set: parent.feature_set.clone(),
@@ -340,6 +346,17 @@ impl Bank {
         *self.last_blockhash.write().unwrap() = hash;
     }
 
+    /// Check if a blockhash is in the recent blockhash queue.
+    pub fn is_blockhash_valid(&self, blockhash: &[u8; 32]) -> bool {
+        let hash = Pubkey::from(*blockhash);
+        self.blockhash_queue.read().unwrap().is_hash_valid(&hash)
+    }
+
+    /// Get a reference to the blockhash queue lock.
+    pub fn blockhash_queue(&self) -> &RwLock<BlockhashQueue> {
+        &self.blockhash_queue
+    }
+
     /// Get a clone of the current lattice hash accumulator.
     pub fn lthash(&self) -> LatticeHashValue {
         self.lthash.read().unwrap().clone()
@@ -494,6 +511,18 @@ impl Bank {
             sysvars.update_slot_history(self.slot);
             sysvars.update_recent_blockhashes(self.hash(), LAMPORTS_PER_SIGNATURE);
         }
+
+        // Register this slot's blockhash in the recent blockhash queue
+        let bank_hash = self.hash();
+        let blockhash_info = BlockhashInfo::new(
+            Pubkey::from(bank_hash),
+            LAMPORTS_PER_SIGNATURE,
+            self.slot,
+        );
+        self.blockhash_queue
+            .write()
+            .unwrap()
+            .register_hash(blockhash_info);
 
         // Check and process epoch boundary
         let epoch_boundary = self.is_epoch_boundary();
@@ -1377,15 +1406,11 @@ mod tests {
         let stake_acct = Pubkey::new_unique();
 
         // Store the vote account in the database so rewards can be applied
-        let vote_account =
-            paradencer_storage::Account::new(1_000_000, vec![], Pubkey::default());
+        let vote_account = paradencer_storage::Account::new(1_000_000, vec![], Pubkey::default());
         accounts.store_published_account(voter, vote_account);
 
         let mut tracker = StakeTracker::new(1);
-        tracker.add_delegation(
-            stake_acct,
-            crate::Delegation::new(voter, 1_000_000_000, 0),
-        );
+        tracker.add_delegation(stake_acct, crate::Delegation::new(voter, 1_000_000_000, 0));
 
         let tracker = Arc::new(RwLock::new(tracker));
         let history = Arc::new(RwLock::new(StakeHistory::new()));
@@ -1766,7 +1791,11 @@ mod tests {
         let epoch_schedule = Arc::new(EpochSchedule::default());
         let leader_schedule = create_test_leader_schedule(0);
 
-        let parent = Bank::new_genesis(accounts.clone(), epoch_schedule.clone(), leader_schedule.clone());
+        let parent = Bank::new_genesis(
+            accounts.clone(),
+            epoch_schedule.clone(),
+            leader_schedule.clone(),
+        );
         parent.add_signatures(3);
         parent.set_last_blockhash([0x42; 32]);
         for _ in 0..TICKS_PER_SLOT {
@@ -1800,5 +1829,62 @@ mod tests {
         // Verify it's not all zeros (prev_bank_hash=[0;32], sig_count=0,
         // blockhash=[0;32], lthash=zero still produces non-zero SHA256)
         assert!(hash.iter().any(|&b| b != 0));
+    }
+
+    // -- Blockhash queue tests --
+
+    #[test]
+    fn bank_blockhash_queue_starts_empty() {
+        let accounts = Arc::new(AccountDatabase::new());
+        let epoch_schedule = Arc::new(EpochSchedule::default());
+        let leader_schedule = create_test_leader_schedule(0);
+
+        let bank = Bank::new_genesis(accounts, epoch_schedule, leader_schedule);
+        assert!(bank.blockhash_queue().read().unwrap().is_empty());
+        assert!(!bank.is_blockhash_valid(&[0u8; 32]));
+    }
+
+    #[test]
+    fn bank_finish_slot_registers_blockhash() {
+        let accounts = Arc::new(AccountDatabase::new());
+        let epoch_schedule = Arc::new(EpochSchedule::default());
+        let leader_schedule = create_test_leader_schedule(0);
+
+        let bank = Bank::new_genesis(accounts, epoch_schedule, leader_schedule);
+
+        for _ in 0..TICKS_PER_SLOT {
+            bank.register_tick().unwrap();
+        }
+
+        let expected_hash = bank.hash();
+        bank.finish_slot().unwrap();
+
+        assert!(bank.is_blockhash_valid(&expected_hash));
+        assert_eq!(bank.blockhash_queue().read().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn child_bank_inherits_parent_blockhash_queue() {
+        let accounts = Arc::new(AccountDatabase::new());
+        let epoch_schedule = Arc::new(EpochSchedule::default());
+        let leader_schedule = create_test_leader_schedule(0);
+
+        let parent = Bank::new_genesis(accounts, epoch_schedule, leader_schedule.clone());
+
+        // Register a blockhash in parent
+        use crate::blockhash_queue::BlockhashInfo;
+        let test_hash = [0x42u8; 32];
+        let info = BlockhashInfo::new(Pubkey::from(test_hash), LAMPORTS_PER_SIGNATURE, 0);
+        parent.blockhash_queue().write().unwrap().register_hash(info);
+
+        for _ in 0..TICKS_PER_SLOT {
+            parent.register_tick().unwrap();
+        }
+        parent.freeze().unwrap();
+
+        let child = Bank::new_from_parent(&parent, 1, leader_schedule);
+
+        // Child should have the same blockhash queue
+        assert!(child.is_blockhash_valid(&test_hash));
     }
 }

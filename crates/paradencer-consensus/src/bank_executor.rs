@@ -215,6 +215,19 @@ impl Bank {
             };
         }
 
+        // Step 1b: Validate blockhash is recent
+        if !self.is_blockhash_valid(&transaction.recent_blockhash) {
+            return TransactionExecutionResult {
+                success: false,
+                compute_units_consumed: 0,
+                fee: 0,
+                modified_accounts: HashMap::new(),
+                logs: vec![],
+                error: Some(TransactionExecutionError::BlockhashNotRecent),
+                vote_updates: vec![],
+            };
+        }
+
         // Step 2: Load accounts
         let mut account_state = match self.load_transaction_accounts(transaction) {
             Ok(state) => state,
@@ -480,10 +493,7 @@ impl Bank {
     ///
     /// Scans instructions for vote program invocations and extracts the
     /// vote account pubkey and the voted slot from the instruction data.
-    fn extract_vote_updates(
-        &self,
-        transaction: &SanitizedTransaction,
-    ) -> Vec<VoteUpdate> {
+    fn extract_vote_updates(&self, transaction: &SanitizedTransaction) -> Vec<VoteUpdate> {
         let mut updates = Vec::new();
 
         for instruction in &transaction.instructions {
@@ -574,7 +584,11 @@ fn extract_voted_slot(data: &[u8]) -> Option<u64> {
         if data.len() < last_slot_offset + 8 {
             return None;
         }
-        let slot = u64::from_le_bytes(data[last_slot_offset..last_slot_offset + 8].try_into().ok()?);
+        let slot = u64::from_le_bytes(
+            data[last_slot_offset..last_slot_offset + 8]
+                .try_into()
+                .ok()?,
+        );
         return Some(slot);
     }
 
@@ -699,7 +713,12 @@ mod tests {
         let epoch_schedule = Arc::new(EpochSchedule::default());
         let validator = Pubkey::new_unique();
         let leader_schedule = Arc::new(LeaderSchedule::new(0, &[(validator, 1000)]).unwrap());
-        Bank::new_genesis(accounts, epoch_schedule, leader_schedule)
+        let bank = Bank::new_genesis(accounts, epoch_schedule, leader_schedule);
+        // Register the zero-hash blockhash so tests using [0u8; 32] pass validation
+        use crate::blockhash_queue::BlockhashInfo;
+        let info = BlockhashInfo::new(Pubkey::from([0u8; 32]), 5000, 0);
+        bank.blockhash_queue().write().unwrap().register_hash(info);
+        bank
     }
 
     /// Store an account in the database as a published record for testing.
@@ -980,7 +999,7 @@ mod tests {
             account_keys: vec![payer, VOTE_PROGRAM_ID, vote_account],
             recent_blockhash: [0u8; 32],
             instructions: vec![CompiledInstruction {
-                program_id_index: 1, // VOTE_PROGRAM_ID
+                program_id_index: 1,      // VOTE_PROGRAM_ID
                 account_indices: vec![2], // vote_account
                 data: vote_data,
             }],
@@ -1046,7 +1065,12 @@ mod tests {
 
         // Non-vote transaction
         let other_program = Pubkey::new_unique();
-        transactions.push(create_simple_transaction(payer, other_program, vec![payer], vec![]));
+        transactions.push(create_simple_transaction(
+            payer,
+            other_program,
+            vec![payer],
+            vec![],
+        ));
 
         let summary = bank.process_transactions(&transactions, &backend, MAX_COMPUTE_UNITS);
 
@@ -1087,5 +1111,137 @@ mod tests {
 
         // Too short
         assert_eq!(super::extract_voted_slot(&[1, 2, 3]), None);
+    }
+
+    // -- Blockhash validation tests --
+
+    #[test]
+    fn blockhash_validation_rejects_unknown_hash() {
+        let bank = create_test_bank();
+        let backend = PassthroughBackend;
+
+        let payer = Pubkey::new_unique();
+        let program = Pubkey::new_unique();
+
+        let payer_account = Account::new(1_000_000, vec![], Pubkey::default());
+        store_test_account(&bank, &payer, &payer_account);
+
+        let tx = SanitizedTransaction {
+            account_keys: vec![payer, program],
+            recent_blockhash: [0xFFu8; 32], // unknown hash
+            instructions: vec![CompiledInstruction {
+                program_id_index: 1,
+                account_indices: vec![0],
+                data: vec![],
+            }],
+            num_signatures: 1,
+        };
+
+        let result = bank.process_transaction(&tx, &backend, MAX_COMPUTE_UNITS);
+        assert!(!result.success);
+        assert!(matches!(
+            result.error,
+            Some(TransactionExecutionError::BlockhashNotRecent)
+        ));
+    }
+
+    #[test]
+    fn blockhash_validation_accepts_registered_hash() {
+        let bank = create_test_bank();
+        let backend = PassthroughBackend;
+
+        let payer = Pubkey::new_unique();
+        let program = Pubkey::new_unique();
+
+        let payer_account = Account::new(1_000_000, vec![], Pubkey::default());
+        store_test_account(&bank, &payer, &payer_account);
+
+        // Register a custom blockhash
+        let custom_hash = [0x42u8; 32];
+        use crate::blockhash_queue::BlockhashInfo;
+        let info = BlockhashInfo::new(Pubkey::from(custom_hash), 5000, 1);
+        bank.blockhash_queue().write().unwrap().register_hash(info);
+
+        let tx = SanitizedTransaction {
+            account_keys: vec![payer, program],
+            recent_blockhash: custom_hash,
+            instructions: vec![CompiledInstruction {
+                program_id_index: 1,
+                account_indices: vec![0],
+                data: vec![],
+            }],
+            num_signatures: 1,
+        };
+
+        let result = bank.process_transaction(&tx, &backend, MAX_COMPUTE_UNITS);
+        assert!(result.success, "should accept registered blockhash: {:?}", result.error);
+    }
+
+    #[test]
+    fn blockhash_queue_populated_after_finish_slot() {
+        let bank = create_test_bank();
+
+        // Complete slot ticks
+        use paradencer_constants::ledger::TICKS_PER_SLOT;
+        for _ in 0..TICKS_PER_SLOT {
+            bank.register_tick().unwrap();
+        }
+
+        let bank_hash = bank.hash();
+        bank.finish_slot().unwrap();
+
+        // The bank hash should now be in the blockhash queue
+        assert!(bank.is_blockhash_valid(&bank_hash));
+    }
+
+    #[test]
+    fn child_bank_inherits_blockhash_queue() {
+        let parent = create_test_bank();
+
+        // Register a custom hash in parent
+        let custom_hash = [0xABu8; 32];
+        use crate::blockhash_queue::BlockhashInfo;
+        let info = BlockhashInfo::new(Pubkey::from(custom_hash), 5000, 0);
+        parent.blockhash_queue().write().unwrap().register_hash(info);
+
+        // Complete parent
+        use paradencer_constants::ledger::TICKS_PER_SLOT;
+        for _ in 0..TICKS_PER_SLOT {
+            parent.register_tick().unwrap();
+        }
+        parent.freeze().unwrap();
+
+        // Create child
+        let child_schedule = Arc::new(
+            LeaderSchedule::new(0, &[(Pubkey::new_unique(), 1000)]).unwrap(),
+        );
+        let child = Bank::new_from_parent(&parent, 1, child_schedule);
+
+        // Custom hash from parent should be valid in child
+        assert!(child.is_blockhash_valid(&custom_hash));
+    }
+
+    #[test]
+    fn blockhash_ages_out_after_max_entries() {
+        let bank = create_test_bank();
+        use crate::blockhash_queue::{BlockhashInfo, MAX_RECENT_BLOCKHASHES};
+
+        // Register MAX_RECENT_BLOCKHASHES + 1 blockhashes (queue already has [0;32])
+        let first_hash = [1u8; 32];
+        let first_info = BlockhashInfo::new(Pubkey::from(first_hash), 5000, 1);
+        bank.blockhash_queue().write().unwrap().register_hash(first_info);
+
+        for i in 2..=(MAX_RECENT_BLOCKHASHES as u64) {
+            let mut hash_bytes = [0u8; 32];
+            hash_bytes[0..8].copy_from_slice(&i.to_le_bytes());
+            let info = BlockhashInfo::new(Pubkey::from(hash_bytes), 5000, i);
+            bank.blockhash_queue().write().unwrap().register_hash(info);
+        }
+
+        // The first hash should have been evicted (queue has 300 capacity,
+        // we inserted 301 entries: [0;32] + first_hash + 299 more)
+        // At least one of the early entries should be evicted
+        let queue = bank.blockhash_queue().read().unwrap();
+        assert_eq!(queue.len(), MAX_RECENT_BLOCKHASHES);
     }
 }
