@@ -4,8 +4,8 @@
 /// by delegating instruction execution to `TransactionProcessor` (defined in sbpf).
 /// This keeps `paradencer-consensus` independent of `paradencer-sbpf` while
 /// enabling real program execution in the validator pipeline.
-use paradencer_consensus::{ExecutionBackend, InstructionInfo, InstructionResult};
-use paradencer_sbpf::TransactionProcessor;
+use paradencer_consensus::{ExecutionBackend, InstructionInfo, InstructionResult, SlotContext};
+use paradencer_sbpf::{SysvarSnapshot, TransactionProcessor};
 use std::sync::Arc;
 
 /// Adapter that routes consensus instruction execution to the sBPF runtime.
@@ -27,17 +27,44 @@ impl SbpfExecutionAdapter {
     }
 }
 
+/// Convert consensus slot context to sBPF sysvar snapshot.
+fn to_sysvar_snapshot(ctx: &SlotContext) -> SysvarSnapshot {
+    SysvarSnapshot {
+        slot: ctx.slot,
+        epoch: ctx.epoch,
+        unix_timestamp: ctx.unix_timestamp,
+        epoch_start_timestamp: ctx.epoch_start_timestamp,
+        leader_schedule_epoch: ctx.leader_schedule_epoch,
+        slots_per_epoch: ctx.slots_per_epoch,
+        leader_schedule_slot_offset: ctx.leader_schedule_slot_offset,
+        warmup: ctx.warmup,
+        first_normal_epoch: ctx.first_normal_epoch,
+        first_normal_slot: ctx.first_normal_slot,
+        lamports_per_byte_year: ctx.lamports_per_byte_year,
+        exemption_threshold: ctx.exemption_threshold,
+        burn_percent: ctx.burn_percent,
+        last_restart_slot: ctx.last_restart_slot,
+    }
+}
+
 impl ExecutionBackend for SbpfExecutionAdapter {
     fn execute_instruction(
         &self,
         instruction: &InstructionInfo,
         remaining_compute_units: u64,
     ) -> InstructionResult {
-        let outcome = self.processor.process_instruction(
+        use paradencer_sbpf::ExecutionContext;
+
+        let snapshot = to_sysvar_snapshot(&instruction.slot_context);
+        let context = ExecutionContext::new(
             instruction.program_id,
             instruction.accounts.clone(),
             instruction.data.clone(),
-        );
+        )
+        .with_compute_budget(remaining_compute_units)
+        .with_sysvar_snapshot(snapshot);
+
+        let outcome = self.processor.execute_instruction(&context);
 
         let error = if outcome.success {
             None
@@ -103,6 +130,7 @@ mod tests {
             program_id: SYSTEM_PROGRAM_ID,
             accounts: vec![(from, from_account, true), (to, to_account, true)],
             data,
+            slot_context: SlotContext::default(),
         };
 
         let result = adapter.execute_instruction(&info, MAX_COMPUTE_UNITS);
@@ -122,6 +150,7 @@ mod tests {
             program_id: unknown_program,
             accounts: vec![],
             data: vec![],
+            slot_context: SlotContext::default(),
         };
 
         let result = adapter.execute_instruction(&info, MAX_COMPUTE_UNITS);
@@ -163,6 +192,7 @@ mod tests {
             program_id,
             accounts: vec![(program_id, program_account, false)],
             data: vec![],
+            slot_context: SlotContext::default(),
         };
 
         let result = adapter.execute_instruction(&info, MAX_COMPUTE_UNITS);

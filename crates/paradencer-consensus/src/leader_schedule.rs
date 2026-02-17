@@ -1,5 +1,7 @@
-use paradencer_constants::consensus::MAX_VALIDATORS_IN_SCHEDULE;
+use paradencer_constants::consensus::{LEADER_SCHEDULE_ROTATION, MAX_VALIDATORS_IN_SCHEDULE};
 use paradencer_storage::Pubkey;
+use rand::distributions::{Distribution, WeightedIndex};
+use rand_chacha::{rand_core::SeedableRng, ChaChaRng};
 use std::collections::HashMap;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -15,6 +17,12 @@ pub struct LeaderSchedule {
 }
 
 impl LeaderSchedule {
+    /// Generate a deterministic stake-weighted leader schedule for an epoch.
+    ///
+    /// Validators are sorted by (stake desc, pubkey desc) for determinism.
+    /// A ChaCha20 PRNG seeded by epoch number produces a weighted random
+    /// sample every `LEADER_SCHEDULE_ROTATION` slots (4 by default),
+    /// giving each sampled leader a consecutive run of slots.
     pub fn new(epoch: u64, validators: &[(Pubkey, u64)]) -> Result<Self, LeaderScheduleError> {
         if validators.is_empty() {
             return Err(LeaderScheduleError::NoValidators);
@@ -29,18 +37,40 @@ impl LeaderSchedule {
             return Err(LeaderScheduleError::NoValidators);
         }
 
-        let mut slot_leaders = Vec::new();
-        let slots_per_epoch = paradencer_constants::ledger::SLOTS_PER_EPOCH;
-
-        for slot_index in 0..slots_per_epoch {
-            let leader = Self::select_leader_for_slot(slot_index, validators, total_stake, epoch);
-            slot_leaders.push(leader);
-        }
+        let slot_leaders =
+            Self::generate_schedule(epoch, validators, paradencer_constants::ledger::SLOTS_PER_EPOCH);
 
         Ok(Self {
             slot_leaders,
             epoch,
         })
+    }
+
+    /// Generate the schedule using ChaCha20 weighted sampling with rotation.
+    fn generate_schedule(epoch: u64, validators: &[(Pubkey, u64)], slots: u64) -> Vec<Pubkey> {
+        // Sort by (stake desc, pubkey desc) for determinism, then dedup
+        let mut sorted: Vec<(&Pubkey, u64)> = validators.iter().map(|(pk, s)| (pk, *s)).collect();
+        sort_stakes(&mut sorted);
+
+        let (keys, stakes): (Vec<&Pubkey>, Vec<u64>) = sorted.into_iter().unzip();
+        let weighted_index = WeightedIndex::new(stakes).unwrap();
+
+        // Seed ChaCha20 with epoch in first 8 bytes, rest zero
+        let mut seed = [0u8; 32];
+        seed[..8].copy_from_slice(&epoch.to_le_bytes());
+        let rng = &mut ChaChaRng::from_seed(seed);
+
+        let rotation = LEADER_SCHEDULE_ROTATION;
+        let mut current_leader = Pubkey::default();
+
+        (0..slots)
+            .map(|i| {
+                if i % rotation == 0 {
+                    current_leader = *keys[weighted_index.sample(rng)];
+                }
+                current_leader
+            })
+            .collect()
     }
 
     pub fn get_leader(&self, slot_index: u64) -> Option<Pubkey> {
@@ -66,36 +96,19 @@ impl LeaderSchedule {
         }
         counts
     }
+}
 
-    fn select_leader_for_slot(
-        slot_index: u64,
-        validators: &[(Pubkey, u64)],
-        total_stake: u64,
-        epoch: u64,
-    ) -> Pubkey {
-        let seed = Self::compute_seed(slot_index, epoch);
-        let stake_target = (seed % total_stake) + 1;
-
-        let mut cumulative_stake = 0_u64;
-        for (pubkey, stake) in validators {
-            cumulative_stake = cumulative_stake.saturating_add(*stake);
-            if cumulative_stake >= stake_target {
-                return *pubkey;
-            }
+/// Sort validators by stake descending, then by pubkey descending for
+/// determinism when stakes are equal. Dedup identical entries.
+fn sort_stakes(stakes: &mut Vec<(&Pubkey, u64)>) {
+    stakes.sort_unstable_by(|(l_pubkey, l_stake), (r_pubkey, r_stake)| {
+        if r_stake == l_stake {
+            r_pubkey.cmp(l_pubkey)
+        } else {
+            r_stake.cmp(l_stake)
         }
-
-        validators[0].0
-    }
-
-    fn compute_seed(slot_index: u64, epoch: u64) -> u64 {
-        use std::collections::hash_map::DefaultHasher;
-        use std::hash::{Hash, Hasher};
-
-        let mut hasher = DefaultHasher::new();
-        slot_index.hash(&mut hasher);
-        epoch.hash(&mut hasher);
-        hasher.finish()
-    }
+    });
+    stakes.dedup();
 }
 
 #[cfg(test)]
@@ -147,8 +160,16 @@ mod tests {
         let ratio_a = count_a as f64 / schedule.len() as f64;
         let ratio_b = count_b as f64 / schedule.len() as f64;
 
-        assert!((ratio_a - 0.7).abs() < 0.01);
-        assert!((ratio_b - 0.3).abs() < 0.01);
+        assert!(
+            (ratio_a - 0.7).abs() < 0.05,
+            "Expected ~70% for validator_a, got {:.1}%",
+            ratio_a * 100.0
+        );
+        assert!(
+            (ratio_b - 0.3).abs() < 0.05,
+            "Expected ~30% for validator_b, got {:.1}%",
+            ratio_b * 100.0
+        );
     }
 
     #[test]
@@ -179,5 +200,63 @@ mod tests {
         let max_slot = paradencer_constants::ledger::SLOTS_PER_EPOCH;
         assert!(schedule.get_leader(max_slot).is_none());
         assert!(schedule.get_leader(max_slot + 100).is_none());
+    }
+
+    #[test]
+    fn leader_schedule_is_deterministic() {
+        let validator_a = Pubkey::new_unique();
+        let validator_b = Pubkey::new_unique();
+        let validators = vec![(validator_a, 5000), (validator_b, 5000)];
+
+        let schedule_1 = LeaderSchedule::new(42, &validators).unwrap();
+        let schedule_2 = LeaderSchedule::new(42, &validators).unwrap();
+
+        for slot_index in 0..schedule_1.len() as u64 {
+            assert_eq!(
+                schedule_1.get_leader(slot_index),
+                schedule_2.get_leader(slot_index),
+                "Schedules must be identical for same epoch and validators"
+            );
+        }
+    }
+
+    #[test]
+    fn leader_schedule_uses_4_slot_rotation() {
+        let validator_a = Pubkey::new_unique();
+        let validator_b = Pubkey::new_unique();
+        let validators = vec![(validator_a, 5000), (validator_b, 5000)];
+
+        let schedule = LeaderSchedule::new(0, &validators).unwrap();
+
+        // Each leader rotation is 4 consecutive slots
+        let rotation = LEADER_SCHEDULE_ROTATION as usize;
+        for chunk_start in (0..100).step_by(rotation) {
+            let leader = schedule.get_leader(chunk_start as u64).unwrap();
+            for offset in 1..rotation {
+                let slot = chunk_start + offset;
+                assert_eq!(
+                    schedule.get_leader(slot as u64),
+                    Some(leader),
+                    "Slots {}-{} should have the same leader",
+                    chunk_start,
+                    chunk_start + rotation - 1
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn sort_stakes_orders_by_stake_desc_then_pubkey_desc() {
+        let pk_a = Pubkey::from([1u8; 32]);
+        let pk_b = Pubkey::from([2u8; 32]);
+        let pk_c = Pubkey::from([3u8; 32]);
+
+        let mut stakes = vec![(&pk_a, 100), (&pk_b, 200), (&pk_c, 100)];
+        sort_stakes(&mut stakes);
+
+        // pk_b (200) first, then pk_c (100) before pk_a (100) because 3 > 1
+        assert_eq!(stakes[0], (&pk_b, 200));
+        assert_eq!(stakes[1], (&pk_c, 100));
+        assert_eq!(stakes[2], (&pk_a, 100));
     }
 }

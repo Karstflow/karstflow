@@ -73,12 +73,14 @@ pub use sysvar_snapshot::SysvarSnapshot;
 use paradencer_types::{Account, Pubkey};
 use std::collections::HashMap;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub struct ExecutionContext {
     pub program_id: Pubkey,
     pub accounts: Vec<(Pubkey, Account, bool)>,
     pub instruction_data: Vec<u8>,
     pub compute_budget: u64,
+    /// Sysvar state for this execution (slot, epoch, rent, etc.).
+    pub sysvar_snapshot: Option<SysvarSnapshot>,
 }
 
 impl ExecutionContext {
@@ -92,11 +94,17 @@ impl ExecutionContext {
             accounts,
             instruction_data,
             compute_budget: MAX_COMPUTE_UNITS,
+            sysvar_snapshot: None,
         }
     }
 
     pub fn with_compute_budget(mut self, budget: u64) -> Self {
         self.compute_budget = budget.min(MAX_COMPUTE_UNITS);
+        self
+    }
+
+    pub fn with_sysvar_snapshot(mut self, snapshot: SysvarSnapshot) -> Self {
+        self.sysvar_snapshot = Some(snapshot);
         self
     }
 

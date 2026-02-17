@@ -370,7 +370,7 @@ mod tests {
 #[cfg(test)]
 mod execution_pipeline_tests {
     use crate::SbpfExecutionAdapter;
-    use paradencer_consensus::{ExecutionBackend, InstructionInfo};
+    use paradencer_consensus::{ExecutionBackend, InstructionInfo, SlotContext};
     use paradencer_constants::execution::MAX_COMPUTE_UNITS;
     use paradencer_ids::{BPF_LOADER_PROGRAM_ID, SYSTEM_PROGRAM_ID};
     use paradencer_sbpf::elf_loader::TestElfBuilder;
@@ -424,6 +424,7 @@ mod execution_pipeline_tests {
             program_id: SYSTEM_PROGRAM_ID,
             accounts: vec![(from, from_account, true), (to, to_account, true)],
             data,
+            slot_context: SlotContext::default(),
         };
 
         let result = adapter.execute_instruction(&info, MAX_COMPUTE_UNITS);
@@ -458,6 +459,7 @@ mod execution_pipeline_tests {
             program_id,
             accounts: vec![(program_id, program_account, false)],
             data: vec![],
+            slot_context: SlotContext::default(),
         };
 
         let result = adapter.execute_instruction(&info, MAX_COMPUTE_UNITS);
@@ -497,6 +499,7 @@ mod execution_pipeline_tests {
             program_id: VOTE_PROGRAM_ID,
             accounts: vec![(vote_pubkey, vote_account, true)],
             data: init_data,
+            slot_context: SlotContext::default(),
         };
 
         let result = adapter.execute_instruction(&info, MAX_COMPUTE_UNITS);
@@ -544,6 +547,7 @@ mod execution_pipeline_tests {
                 program_id: *program_id,
                 accounts: vec![],
                 data: vec![],
+                slot_context: SlotContext::default(),
             };
 
             // Should not panic — adapter routes to all builtins
@@ -578,6 +582,7 @@ mod execution_pipeline_tests {
             program_id: SYSTEM_PROGRAM_ID,
             accounts: vec![(from, from_account, true), (to, to_account, true)],
             data,
+            slot_context: SlotContext::default(),
         };
 
         let result = adapter.execute_instruction(&info, MAX_COMPUTE_UNITS);

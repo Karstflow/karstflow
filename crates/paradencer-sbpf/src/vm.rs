@@ -333,12 +333,18 @@ impl BytecodeVm {
 
         let memory = MemoryMap::new(rodata, DEFAULT_HEAP_SIZE, DEFAULT_HEAP_SIZE, input_data);
 
+        // Use the context's snapshot if provided, falling back to the VM default.
+        let snapshot = context
+            .sysvar_snapshot
+            .clone()
+            .unwrap_or_else(|| self.sysvar_snapshot.clone());
+
         match interpreter::execute(
             program,
             memory,
             context.compute_budget,
             &self.syscall_dispatch,
-            self.sysvar_snapshot.clone(),
+            snapshot,
         ) {
             Ok(result) => {
                 let modified_accounts =

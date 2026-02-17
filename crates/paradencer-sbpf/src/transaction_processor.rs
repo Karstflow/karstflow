@@ -235,8 +235,8 @@ impl TransactionProcessor {
         }
     }
 
-    /// Execute a single instruction
-    fn execute_instruction(&self, context: &ExecutionContext) -> ExecutionOutcome {
+    /// Execute a single instruction with full context (including sysvar snapshot).
+    pub fn execute_instruction(&self, context: &ExecutionContext) -> ExecutionOutcome {
         // Route to appropriate program
         if context.program_id == SYSTEM_PROGRAM_ID {
             self.system_program

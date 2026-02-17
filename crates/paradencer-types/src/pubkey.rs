@@ -15,7 +15,7 @@ pub enum PubkeyError {
     IllegalOwner,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[repr(transparent)]
 pub struct Pubkey([u8; PUBKEY_BYTES]);
 

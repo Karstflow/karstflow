@@ -57,6 +57,10 @@ bs58 = "0.5"
 bytes = "1.9"
 bincode = "1.3"
 
+# Random
+rand = "0.8"
+rand_chacha = "0.3"
+
 # Utilities
 tracing = "0.1"
 parking_lot = "0.12"

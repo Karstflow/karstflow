@@ -15,6 +15,26 @@ use std::sync::Arc;
 // Execution backend trait
 // ---------------------------------------------------------------------------
 
+/// Sysvar context passed to instruction execution so programs can read
+/// chain state (current slot, epoch, rent parameters, etc.).
+#[derive(Debug, Clone, Default)]
+pub struct SlotContext {
+    pub slot: u64,
+    pub epoch: u64,
+    pub unix_timestamp: i64,
+    pub epoch_start_timestamp: i64,
+    pub leader_schedule_epoch: u64,
+    pub slots_per_epoch: u64,
+    pub leader_schedule_slot_offset: u64,
+    pub warmup: bool,
+    pub first_normal_epoch: u64,
+    pub first_normal_slot: u64,
+    pub lamports_per_byte_year: u64,
+    pub exemption_threshold: f64,
+    pub burn_percent: u8,
+    pub last_restart_slot: u64,
+}
+
 /// Compiled instruction passed to the execution backend.
 #[derive(Debug, Clone)]
 pub struct InstructionInfo {
@@ -24,6 +44,8 @@ pub struct InstructionInfo {
     pub accounts: Vec<(Pubkey, Account, bool)>,
     /// Opaque instruction data.
     pub data: Vec<u8>,
+    /// Sysvar context (slot, epoch, rent, etc.) for the current execution.
+    pub slot_context: SlotContext,
 }
 
 /// Result produced by executing a single instruction.
@@ -549,6 +571,7 @@ impl Bank {
                 program_id,
                 accounts: instr_accounts,
                 data: instruction.data.clone(),
+                slot_context: self.slot_context(),
             };
 
             let remaining = compute_limit.saturating_sub(total_compute);

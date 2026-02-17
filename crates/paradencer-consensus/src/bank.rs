@@ -326,6 +326,45 @@ impl Bank {
         self.feature_set.as_ref()
     }
 
+    /// Build a slot context for instruction execution from current bank state.
+    ///
+    /// Populates slot, epoch, timestamps and schedule info from the sysvar
+    /// cache if present, falling back to constants for epoch schedule and rent.
+    pub fn slot_context(&self) -> crate::bank_executor::SlotContext {
+        use paradencer_constants::{consensus, economics, ledger};
+
+        let (slot, epoch, timestamp, epoch_start_ts, leader_sched_epoch) =
+            if let Some(sysvars) = &self.sysvars {
+                let clock = sysvars.clock();
+                (
+                    clock.slot,
+                    clock.epoch,
+                    clock.unix_timestamp,
+                    clock.epoch_start_timestamp,
+                    clock.leader_schedule_epoch,
+                )
+            } else {
+                (self.slot, self.epoch, 0, 0, self.epoch.saturating_add(1))
+            };
+
+        crate::bank_executor::SlotContext {
+            slot,
+            epoch,
+            unix_timestamp: timestamp,
+            epoch_start_timestamp: epoch_start_ts,
+            leader_schedule_epoch: leader_sched_epoch,
+            slots_per_epoch: ledger::SLOTS_PER_EPOCH,
+            leader_schedule_slot_offset: consensus::LEADER_SCHEDULE_SLOT_OFFSET,
+            warmup: false,
+            first_normal_epoch: 0,
+            first_normal_slot: 0,
+            lamports_per_byte_year: economics::RENT_EXEMPTION_LAMPORTS_PER_BYTE,
+            exemption_threshold: 2.0,
+            burn_percent: economics::DEFAULT_FEE_BURN_PERCENT,
+            last_restart_slot: 0,
+        }
+    }
+
     /// Update the lattice hash accumulator when an account is modified.
     ///
     /// Subtracts the old account's hash (if any) and adds the new account's hash.
@@ -595,14 +634,56 @@ impl Bank {
     /// vote reward distribution, leader schedule regeneration, and
     /// queues partitioned stake reward distribution.
     fn process_epoch_boundary(&self) {
-        // Step 1: Feature activation — scan feature accounts, activate pending
+        // Step 1: Collect rent from non-exempt accounts
+        self.collect_rent_for_epoch();
+
+        // Step 2: Feature activation — scan feature accounts, activate pending
         self.activate_pending_features();
 
-        // Step 2: Epoch rewards — calculate and prepare distribution
+        // Step 3: Epoch rewards — calculate and prepare distribution
         self.calculate_and_prepare_rewards();
 
-        // Step 3: Regenerate leader schedule for the next epoch
+        // Step 4: Regenerate leader schedule for the next epoch
         self.regenerate_leader_schedule();
+    }
+
+    /// Collect rent from all non-exempt accounts at epoch boundary.
+    ///
+    /// Iterates all published accounts, calculates rent due based on
+    /// data size and current balance, debits rent-paying accounts,
+    /// and burns the collected rent (reducing capitalization).
+    fn collect_rent_for_epoch(&self) {
+        let collector = crate::rent::RentCollector::default_for_epoch(self.epoch);
+
+        let all_accounts = self.accounts.get_all_published_accounts();
+        let mut total_rent_collected: u64 = 0;
+
+        for (pubkey, account) in &all_accounts {
+            let data_len = account.data.len();
+            let collected = collector.collect_from_account(account.meta.lamports, data_len);
+
+            if collected.rent_collected > 0 {
+                let mut updated = account.clone();
+                updated.meta.lamports = updated
+                    .meta
+                    .lamports
+                    .saturating_sub(collected.rent_collected);
+
+                // If account drops to zero lamports with empty data, it becomes
+                // a tombstone (effectively deleted). Otherwise persist the update.
+                self.update_account_hash(pubkey, Some(account), &updated);
+                self.accounts.store_published_account(*pubkey, updated);
+
+                total_rent_collected =
+                    total_rent_collected.saturating_add(collected.rent_collected);
+            }
+        }
+
+        // Burn collected rent by reducing capitalization
+        if total_rent_collected > 0 {
+            self.capitalization
+                .fetch_sub(total_rent_collected, Ordering::Relaxed);
+        }
     }
 
     /// Scan feature accounts and activate any newly created ones.
@@ -761,8 +842,6 @@ impl Bank {
         // Reduce capitalization by burned amount
         self.capitalization.fetch_sub(burn, Ordering::Relaxed);
 
-        // TODO: Actually credit the leader account when we have account modification
-        // For now, just return the amounts
         let total_collected = execution_fees.saturating_add(priority_fees);
 
         Ok((total_collected, burn, fees_to_distribute))
@@ -770,8 +849,9 @@ impl Bank {
 
     /// Distribute accumulated fees: burn a portion and credit the leader.
     ///
-    /// This is a higher-level convenience that combines fee collection and
-    /// capitalization adjustment. Returns (leader_share, burn_share).
+    /// Computes the burn/leader split, reduces capitalization by the burned
+    /// amount, and credits the leader's account in the account database.
+    /// Returns (leader_share, burn_share).
     pub fn distribute_fees(&self) -> Result<(u64, u64), BankFeeError> {
         if self.is_frozen() {
             return Err(BankFeeError::BankFrozen);
@@ -794,7 +874,23 @@ impl Bank {
         // Reduce capitalization by burned amount
         self.capitalization.fetch_sub(burn_share, Ordering::Relaxed);
 
+        // Credit the leader's account with their share of fees
+        if leader_share > 0 {
+            if let Some(leader) = self.get_leader() {
+                self.credit_leader_fees(&leader, leader_share);
+            }
+        }
+
         Ok((leader_share, burn_share))
+    }
+
+    /// Credit fee income to the leader's account.
+    fn credit_leader_fees(&self, leader: &Pubkey, amount: u64) {
+        let old_account = self.accounts.get_published_account(leader);
+        let mut account = old_account.clone().unwrap_or_default();
+        account.meta.lamports = account.meta.lamports.saturating_add(amount);
+        self.update_account_hash(leader, old_account.as_ref(), &account);
+        self.accounts.store_published_account(*leader, account);
     }
 
     // Economic configuration accessors
@@ -2054,5 +2150,132 @@ mod tests {
             child.leader_schedule().get_epoch(),
             same_epoch_schedule.get_epoch()
         );
+    }
+
+    #[test]
+    fn distribute_fees_credits_leader_account() {
+        let accounts = Arc::new(AccountDatabase::new());
+        let epoch_schedule = Arc::new(EpochSchedule::default());
+
+        let leader = Pubkey::new_unique();
+        let leader_schedule =
+            Arc::new(LeaderSchedule::new(0, &[(leader, 1000)]).unwrap());
+
+        let bank = Bank::new_genesis_with_config(
+            accounts.clone(),
+            epoch_schedule,
+            leader_schedule,
+            1_000_000,
+            Rent::default(),
+            Inflation::default(),
+        );
+
+        // Store a leader account with initial balance
+        accounts.store_published_account(
+            leader,
+            Account {
+                meta: paradencer_types::AccountMeta {
+                    lamports: 500,
+                    owner: Pubkey::default(),
+                    executable: false,
+                    rent_epoch: 0,
+                },
+                data: paradencer_types::AccountData::empty(),
+            },
+        );
+
+        bank.add_execution_fee(2000);
+        bank.add_priority_fee(0);
+
+        let (leader_share, burn_share) = bank.distribute_fees().unwrap();
+        assert_eq!(burn_share, 1000); // 50% of 2000
+        assert_eq!(leader_share, 1000);
+
+        // Leader account should now have initial 500 + 1000 = 1500
+        let leader_account = accounts.get_published_account(&leader).unwrap();
+        assert_eq!(leader_account.meta.lamports, 1500);
+    }
+
+    #[test]
+    fn rent_collected_at_epoch_boundary() {
+        let accounts = Arc::new(AccountDatabase::new());
+        let epoch_schedule = Arc::new(EpochSchedule::default());
+        let leader = Pubkey::new_unique();
+        let leader_schedule =
+            Arc::new(LeaderSchedule::new(0, &[(leader, 1000)]).unwrap());
+
+        let parent = Bank::new_genesis_with_config(
+            accounts.clone(),
+            epoch_schedule.clone(),
+            leader_schedule.clone(),
+            10_000_000,
+            Rent::default(),
+            Inflation::default(),
+        );
+
+        // Store a non-exempt account (small balance, some data)
+        let renter = Pubkey::new_unique();
+        accounts.store_published_account(
+            renter,
+            Account {
+                meta: paradencer_types::AccountMeta {
+                    lamports: 100, // Way below rent exemption
+                    owner: Pubkey::default(),
+                    executable: false,
+                    rent_epoch: 0,
+                },
+                data: paradencer_types::AccountData::new(vec![0u8; 200]),
+            },
+        );
+
+        // Complete genesis slot
+        for _ in 0..TICKS_PER_SLOT {
+            parent.register_tick().unwrap();
+        }
+        parent.finish_slot().unwrap();
+
+        // Create child at epoch boundary (first slot of epoch 1)
+        let epoch_1_start = SLOTS_PER_EPOCH;
+        let child_schedule =
+            Arc::new(LeaderSchedule::new(1, &[(leader, 1000)]).unwrap());
+        let child = Bank::new_from_parent(&parent, epoch_1_start, child_schedule);
+
+        assert!(child.is_epoch_boundary());
+
+        for _ in 0..TICKS_PER_SLOT {
+            child.register_tick().unwrap();
+        }
+        child.finish_slot().unwrap();
+
+        // After epoch boundary processing, the renter's balance should have decreased
+        let renter_account = accounts.get_published_account(&renter).unwrap();
+        assert!(
+            renter_account.meta.lamports < 100,
+            "Rent should have been collected: balance = {}",
+            renter_account.meta.lamports
+        );
+    }
+
+    #[test]
+    fn slot_context_reflects_bank_state() {
+        let accounts = Arc::new(AccountDatabase::new());
+        let epoch_schedule = Arc::new(EpochSchedule::default());
+        let leader_schedule = create_test_leader_schedule(0);
+
+        let bank = Bank::new_genesis_with_config(
+            accounts,
+            epoch_schedule,
+            leader_schedule,
+            1_000_000,
+            Rent::default(),
+            Inflation::default(),
+        );
+
+        let ctx = bank.slot_context();
+        assert_eq!(ctx.slot, bank.slot());
+        assert_eq!(ctx.epoch, bank.epoch());
+        assert_eq!(ctx.slots_per_epoch, SLOTS_PER_EPOCH);
+        assert!(ctx.exemption_threshold > 0.0);
+        assert!(ctx.lamports_per_byte_year > 0);
     }
 }

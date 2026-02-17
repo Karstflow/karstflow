@@ -99,6 +99,9 @@ pub mod consensus {
 
     /// Current version for tower persistence format.
     pub const TOWER_PERSISTENCE_VERSION: u32 = 1;
+
+    /// Number of consecutive slots assigned to the same leader.
+    pub const LEADER_SCHEDULE_ROTATION: u64 = 4;
 }
 
 pub mod rpc {

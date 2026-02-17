@@ -92,7 +92,7 @@ pub use sysvars::SysvarCache;
 
 pub use bank_executor::{
     BatchExecutionSummary, CompiledInstruction, ExecutionBackend, InstructionInfo,
-    InstructionResult, SanitizedTransaction, TransactionExecutionError,
+    InstructionResult, SanitizedTransaction, SlotContext, TransactionExecutionError,
     TransactionExecutionResult, VoteUpdate,
 };
 pub use cost_tracker::{CostTracker, CostTrackerError, TransactionCost};
