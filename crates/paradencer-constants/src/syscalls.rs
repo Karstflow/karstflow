@@ -11,6 +11,8 @@ pub const MAX_CPI_ACCOUNT_INFOS: usize = 128;
 pub const MAX_RETURN_DATA_SIZE: usize = 1024;
 pub const MAX_SIGNER_SEEDS: usize = 16;
 pub const MAX_SEED_BYTES: usize = 32;
+/// Maximum number of PDA signers per CPI call.
+pub const MAX_CPI_SIGNERS: usize = 16;
 
 // Compute costs for cryptographic hash operations
 pub const SHA256_BASE_COST: u64 = 100;

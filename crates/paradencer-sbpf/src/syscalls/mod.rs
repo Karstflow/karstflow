@@ -18,7 +18,10 @@ mod runtime;
 #[cfg(test)]
 mod tests;
 
-pub use cpi::{invoke, invoke_signed, CpiAccountInfo, CpiAccountMeta, CpiContext, CpiInstruction};
+pub use cpi::{
+    deduplicate_accounts, derive_pda_signers, invoke, invoke_signed, CpiAccountInfo,
+    CpiAccountMeta, CpiContext, CpiInstruction, InstructionAccount,
+};
 pub use crypto::{keccak256, secp256k1_recover, sha256};
 pub use curve::alt_bn128;
 pub use curve::curve25519;
@@ -54,6 +57,10 @@ pub struct SyscallContext {
     pub accounts: HashMap<Pubkey, Account>,
     /// Accounts that have been modified during execution.
     pub modified_accounts: HashMap<Pubkey, Account>,
+    /// Privilege metadata for accounts in the caller's instruction.
+    /// Each entry is (pubkey, is_signer, is_writable).
+    /// When empty, privilege checks fall back to account presence checks.
+    pub caller_account_privileges: Vec<(Pubkey, bool, bool)>,
 }
 
 impl SyscallContext {
@@ -67,6 +74,7 @@ impl SyscallContext {
             return_data: None,
             accounts: HashMap::new(),
             modified_accounts: HashMap::new(),
+            caller_account_privileges: Vec::new(),
         }
     }
 
@@ -110,6 +118,12 @@ pub enum SyscallError {
     InsufficientFunds,
     /// The target program account is not marked as executable.
     ProgramNotExecutable,
+    /// A callee attempted to gain privileges the caller does not hold.
+    PrivilegeEscalation(String),
+    /// An account referenced in the instruction was not found.
+    MissingAccount(String),
+    /// The target program is not authorized for CPI invocation.
+    ProgramNotSupported,
 }
 
 impl std::fmt::Display for SyscallError {
@@ -127,6 +141,9 @@ impl std::fmt::Display for SyscallError {
             Self::InvalidSeeds => write!(f, "invalid seeds"),
             Self::InsufficientFunds => write!(f, "insufficient funds"),
             Self::ProgramNotExecutable => write!(f, "program is not executable"),
+            Self::PrivilegeEscalation(msg) => write!(f, "privilege escalation: {}", msg),
+            Self::MissingAccount(msg) => write!(f, "missing account: {}", msg),
+            Self::ProgramNotSupported => write!(f, "program not supported for CPI"),
         }
     }
 }

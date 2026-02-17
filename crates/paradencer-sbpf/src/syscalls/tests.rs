@@ -67,18 +67,22 @@ fn cpi_invoke_with_valid_accounts() {
 
 #[test]
 fn cpi_invoke_signed_with_signer_seeds() {
-    let caller_id = Pubkey::new_unique();
+    let caller_id = Pubkey::new([10u8; 32]);
     let callee_id = Pubkey::new_unique();
-    let account_key = Pubkey::new_unique();
+
+    // Derive a PDA from the seeds + caller program ID (the real CPI flow)
+    let mut find_ctx = SyscallContext::new(caller_id, 1_000_000);
+    let (pda_key, bump) =
+        try_find_program_address(&mut find_ctx, &[b"pda_seed"], &caller_id).unwrap();
 
     let mut ctx = SyscallContext::new(caller_id, 1_000_000);
     ctx.accounts
-        .insert(account_key, Account::new(1000, vec![], caller_id));
+        .insert(pda_key, Account::new(1000, vec![], caller_id));
 
     let instruction = CpiInstruction {
         program_id: callee_id,
         accounts: vec![CpiAccountMeta {
-            pubkey: account_key,
+            pubkey: pda_key,
             is_signer: true,
             is_writable: true,
         }],
@@ -94,7 +98,7 @@ fn cpi_invoke_signed_with_signer_seeds() {
             executable: true,
         },
         CpiAccountInfo {
-            pubkey: account_key,
+            pubkey: pda_key,
             lamports: 1000,
             data: vec![],
             owner: caller_id,
@@ -102,7 +106,9 @@ fn cpi_invoke_signed_with_signer_seeds() {
         },
     ];
 
-    let seeds: &[&[u8]] = &[b"seed1", b"seed2"];
+    // Use the same seeds + bump that produce the PDA
+    let bump_bytes = [bump];
+    let seeds: &[&[u8]] = &[b"pda_seed", &bump_bytes];
     let result = invoke_signed(&mut ctx, &instruction, &account_infos, &[seeds]);
     assert!(result.is_ok());
 }
@@ -1330,4 +1336,713 @@ fn curve25519_invalid_curve_id_returns_error() {
     let point = [0u8; 32];
     let result = curve25519::validate_point(&mut ctx, 99, &point);
     assert!(result.is_err());
+}
+
+// ===========================================================================
+// CPI deduplication tests
+// ===========================================================================
+
+#[test]
+fn cpi_dedup_same_account_twice_merges_privileges() {
+    let account_key = Pubkey::new_unique();
+
+    let instruction = CpiInstruction {
+        program_id: Pubkey::new_unique(),
+        accounts: vec![
+            CpiAccountMeta {
+                pubkey: account_key,
+                is_signer: true,
+                is_writable: false,
+            },
+            CpiAccountMeta {
+                pubkey: account_key,
+                is_signer: false,
+                is_writable: true,
+            },
+        ],
+        data: vec![],
+    };
+
+    let deduped = deduplicate_accounts(&instruction).unwrap();
+    assert_eq!(deduped.len(), 1);
+    assert!(deduped[0].is_signer, "signer flag should be merged via OR");
+    assert!(
+        deduped[0].is_writable,
+        "writable flag should be merged via OR"
+    );
+    assert_eq!(deduped[0].pubkey, account_key);
+}
+
+#[test]
+fn cpi_dedup_three_references_all_merged() {
+    let account_key = Pubkey::new_unique();
+
+    let instruction = CpiInstruction {
+        program_id: Pubkey::new_unique(),
+        accounts: vec![
+            CpiAccountMeta {
+                pubkey: account_key,
+                is_signer: false,
+                is_writable: false,
+            },
+            CpiAccountMeta {
+                pubkey: account_key,
+                is_signer: true,
+                is_writable: false,
+            },
+            CpiAccountMeta {
+                pubkey: account_key,
+                is_signer: false,
+                is_writable: true,
+            },
+        ],
+        data: vec![],
+    };
+
+    let deduped = deduplicate_accounts(&instruction).unwrap();
+    assert_eq!(deduped.len(), 1);
+    assert!(deduped[0].is_signer);
+    assert!(deduped[0].is_writable);
+}
+
+#[test]
+fn cpi_dedup_different_accounts_not_merged() {
+    let key1 = Pubkey::new_unique();
+    let key2 = Pubkey::new_unique();
+
+    let instruction = CpiInstruction {
+        program_id: Pubkey::new_unique(),
+        accounts: vec![
+            CpiAccountMeta {
+                pubkey: key1,
+                is_signer: true,
+                is_writable: false,
+            },
+            CpiAccountMeta {
+                pubkey: key2,
+                is_signer: false,
+                is_writable: true,
+            },
+        ],
+        data: vec![],
+    };
+
+    let deduped = deduplicate_accounts(&instruction).unwrap();
+    assert_eq!(deduped.len(), 2);
+    assert_eq!(deduped[0].pubkey, key1);
+    assert!(deduped[0].is_signer);
+    assert!(!deduped[0].is_writable);
+    assert_eq!(deduped[1].pubkey, key2);
+    assert!(!deduped[1].is_signer);
+    assert!(deduped[1].is_writable);
+}
+
+#[test]
+fn cpi_dedup_preserves_first_occurrence_index() {
+    let key = Pubkey::new_unique();
+
+    let instruction = CpiInstruction {
+        program_id: Pubkey::new_unique(),
+        accounts: vec![
+            CpiAccountMeta {
+                pubkey: Pubkey::new_unique(),
+                is_signer: false,
+                is_writable: false,
+            },
+            CpiAccountMeta {
+                pubkey: key,
+                is_signer: false,
+                is_writable: false,
+            },
+            CpiAccountMeta {
+                pubkey: key,
+                is_signer: true,
+                is_writable: true,
+            },
+        ],
+        data: vec![],
+    };
+
+    let deduped = deduplicate_accounts(&instruction).unwrap();
+    assert_eq!(deduped.len(), 2);
+    // key first appears at index 1
+    let key_entry = deduped.iter().find(|a| a.pubkey == key).unwrap();
+    assert_eq!(key_entry.index_in_callee, 1);
+}
+
+// ===========================================================================
+// CPI privilege escalation tests
+// ===========================================================================
+
+#[test]
+fn cpi_writable_escalation_rejected() {
+    let caller_id = Pubkey::new_unique();
+    let callee_id = Pubkey::new_unique();
+    let account_key = Pubkey::new_unique();
+
+    let mut ctx = SyscallContext::new(caller_id, 1_000_000);
+    // Caller has the account as read-only
+    ctx.caller_account_privileges
+        .push((account_key, false, false));
+
+    let instruction = CpiInstruction {
+        program_id: callee_id,
+        accounts: vec![CpiAccountMeta {
+            pubkey: account_key,
+            is_signer: false,
+            is_writable: true, // Escalation!
+        }],
+        data: vec![],
+    };
+
+    let account_infos = vec![
+        CpiAccountInfo {
+            pubkey: callee_id,
+            lamports: 0,
+            data: vec![],
+            owner: Pubkey::new_unique(),
+            executable: true,
+        },
+        CpiAccountInfo {
+            pubkey: account_key,
+            lamports: 100,
+            data: vec![],
+            owner: caller_id,
+            executable: false,
+        },
+    ];
+
+    let result = invoke(&mut ctx, &instruction, &account_infos);
+    assert!(matches!(result, Err(SyscallError::PrivilegeEscalation(_))));
+}
+
+#[test]
+fn cpi_signer_escalation_rejected() {
+    let caller_id = Pubkey::new_unique();
+    let callee_id = Pubkey::new_unique();
+    let account_key = Pubkey::new_unique();
+
+    let mut ctx = SyscallContext::new(caller_id, 1_000_000);
+    // Caller has the account as writable but NOT signer
+    ctx.caller_account_privileges
+        .push((account_key, false, true));
+
+    let instruction = CpiInstruction {
+        program_id: callee_id,
+        accounts: vec![CpiAccountMeta {
+            pubkey: account_key,
+            is_signer: true, // Escalation!
+            is_writable: true,
+        }],
+        data: vec![],
+    };
+
+    let account_infos = vec![
+        CpiAccountInfo {
+            pubkey: callee_id,
+            lamports: 0,
+            data: vec![],
+            owner: Pubkey::new_unique(),
+            executable: true,
+        },
+        CpiAccountInfo {
+            pubkey: account_key,
+            lamports: 100,
+            data: vec![],
+            owner: caller_id,
+            executable: false,
+        },
+    ];
+
+    let result = invoke(&mut ctx, &instruction, &account_infos);
+    assert!(matches!(result, Err(SyscallError::PrivilegeEscalation(_))));
+}
+
+#[test]
+fn cpi_pda_signer_allows_escalation() {
+    let caller_id = Pubkey::new([20u8; 32]);
+    let callee_id = Pubkey::new_unique();
+
+    // Derive a PDA from the caller's program ID
+    let mut find_ctx = SyscallContext::new(caller_id, 1_000_000);
+    let (pda_key, bump) =
+        try_find_program_address(&mut find_ctx, &[b"auth"], &caller_id).unwrap();
+
+    let mut ctx = SyscallContext::new(caller_id, 1_000_000);
+    // Caller has the PDA account as writable but NOT signer
+    ctx.caller_account_privileges.push((pda_key, false, true));
+
+    let instruction = CpiInstruction {
+        program_id: callee_id,
+        accounts: vec![CpiAccountMeta {
+            pubkey: pda_key,
+            is_signer: true, // Would be escalation, but PDA signing allows it
+            is_writable: true,
+        }],
+        data: vec![],
+    };
+
+    let account_infos = vec![
+        CpiAccountInfo {
+            pubkey: callee_id,
+            lamports: 0,
+            data: vec![],
+            owner: Pubkey::new_unique(),
+            executable: true,
+        },
+        CpiAccountInfo {
+            pubkey: pda_key,
+            lamports: 100,
+            data: vec![],
+            owner: caller_id,
+            executable: false,
+        },
+    ];
+
+    let bump_bytes = [bump];
+    let seeds: &[&[u8]] = &[b"auth", &bump_bytes];
+    let result = invoke_signed(&mut ctx, &instruction, &account_infos, &[seeds]);
+    assert!(result.is_ok());
+}
+
+#[test]
+fn cpi_valid_privileges_accepted() {
+    let caller_id = Pubkey::new_unique();
+    let callee_id = Pubkey::new_unique();
+    let account_key = Pubkey::new_unique();
+
+    let mut ctx = SyscallContext::new(caller_id, 1_000_000);
+    // Caller has signer+writable
+    ctx.caller_account_privileges
+        .push((account_key, true, true));
+    ctx.accounts
+        .insert(account_key, Account::new(100, vec![], caller_id));
+
+    let instruction = CpiInstruction {
+        program_id: callee_id,
+        accounts: vec![CpiAccountMeta {
+            pubkey: account_key,
+            is_signer: true,
+            is_writable: true,
+        }],
+        data: vec![],
+    };
+
+    let account_infos = vec![
+        CpiAccountInfo {
+            pubkey: callee_id,
+            lamports: 0,
+            data: vec![],
+            owner: Pubkey::new_unique(),
+            executable: true,
+        },
+        CpiAccountInfo {
+            pubkey: account_key,
+            lamports: 100,
+            data: vec![],
+            owner: caller_id,
+            executable: false,
+        },
+    ];
+
+    let result = invoke(&mut ctx, &instruction, &account_infos);
+    assert!(result.is_ok());
+}
+
+// ===========================================================================
+// CPI PDA signer derivation tests
+// ===========================================================================
+
+#[test]
+fn cpi_derive_pda_signers_produces_valid_addresses() {
+    let program_id = Pubkey::new([15u8; 32]);
+
+    // Use try_find to get valid bump
+    let mut find_ctx = SyscallContext::new(program_id, 1_000_000);
+    let (_pda, bump) =
+        try_find_program_address(&mut find_ctx, &[b"test_signer"], &program_id).unwrap();
+
+    let bump_bytes = [bump];
+    let seeds: &[&[u8]] = &[b"test_signer", &bump_bytes];
+    let signers = derive_pda_signers(&[seeds], &program_id).unwrap();
+
+    assert_eq!(signers.len(), 1);
+    assert_eq!(signers[0], _pda);
+}
+
+#[test]
+fn cpi_derive_pda_signers_too_many_seeds() {
+    let program_id = Pubkey::new_unique();
+    let too_many: Vec<&[u8]> = (0..MAX_SIGNER_SEEDS + 1).map(|_| &b"x"[..]).collect();
+
+    let result = derive_pda_signers(&[&too_many], &program_id);
+    assert_eq!(result, Err(SyscallError::InvalidSeeds));
+}
+
+#[test]
+fn cpi_derive_pda_signers_seed_too_long() {
+    let program_id = Pubkey::new_unique();
+    let long_seed = vec![0u8; MAX_SEED_BYTES + 1];
+    let seeds: &[&[u8]] = &[&long_seed];
+
+    let result = derive_pda_signers(&[seeds], &program_id);
+    assert_eq!(result, Err(SyscallError::InvalidSeeds));
+}
+
+#[test]
+fn cpi_derive_pda_signers_deterministic() {
+    let program_id = Pubkey::new([5u8; 32]);
+    let mut find_ctx = SyscallContext::new(program_id, 1_000_000);
+    let (_, bump) =
+        try_find_program_address(&mut find_ctx, &[b"det"], &program_id).unwrap();
+    let bump_bytes = [bump];
+    let seeds: &[&[u8]] = &[b"det", &bump_bytes];
+
+    let signers1 = derive_pda_signers(&[seeds], &program_id).unwrap();
+    let signers2 = derive_pda_signers(&[seeds], &program_id).unwrap();
+
+    assert_eq!(signers1, signers2);
+}
+
+// ===========================================================================
+// CPI realloc limit tests
+// ===========================================================================
+
+#[test]
+fn cpi_realloc_within_limit_succeeds() {
+    let caller_id = Pubkey::new_unique();
+    let callee_id = Pubkey::new_unique();
+    let account_key = Pubkey::new_unique();
+
+    let mut ctx = SyscallContext::new(caller_id, 1_000_000);
+    // Existing account with 100 bytes
+    ctx.accounts.insert(
+        account_key,
+        Account::new(1000, vec![0u8; 100], caller_id),
+    );
+
+    let instruction = CpiInstruction {
+        program_id: callee_id,
+        accounts: vec![CpiAccountMeta {
+            pubkey: account_key,
+            is_signer: false,
+            is_writable: true,
+        }],
+        data: vec![],
+    };
+
+    // Callee grew the data by 5 KiB (within 10 KiB limit)
+    let new_data = vec![0u8; 100 + 5 * 1024];
+    let account_infos = vec![
+        CpiAccountInfo {
+            pubkey: callee_id,
+            lamports: 0,
+            data: vec![],
+            owner: Pubkey::new_unique(),
+            executable: true,
+        },
+        CpiAccountInfo {
+            pubkey: account_key,
+            lamports: 1000,
+            data: new_data.clone(),
+            owner: caller_id,
+            executable: false,
+        },
+    ];
+
+    let result = invoke(&mut ctx, &instruction, &account_infos);
+    assert!(result.is_ok());
+    // Verify the modified account has the new data
+    let modified = ctx.modified_accounts.get(&account_key).unwrap();
+    assert_eq!(modified.data.len(), new_data.len());
+}
+
+#[test]
+fn cpi_realloc_exceeds_limit_rejected() {
+    let caller_id = Pubkey::new_unique();
+    let callee_id = Pubkey::new_unique();
+    let account_key = Pubkey::new_unique();
+
+    let mut ctx = SyscallContext::new(caller_id, 1_000_000);
+    ctx.accounts.insert(
+        account_key,
+        Account::new(1000, vec![0u8; 100], caller_id),
+    );
+
+    let instruction = CpiInstruction {
+        program_id: callee_id,
+        accounts: vec![CpiAccountMeta {
+            pubkey: account_key,
+            is_signer: false,
+            is_writable: true,
+        }],
+        data: vec![],
+    };
+
+    // Callee grew the data by 11 KiB (exceeds 10 KiB limit)
+    let new_data = vec![0u8; 100 + 11 * 1024];
+    let account_infos = vec![
+        CpiAccountInfo {
+            pubkey: callee_id,
+            lamports: 0,
+            data: vec![],
+            owner: Pubkey::new_unique(),
+            executable: true,
+        },
+        CpiAccountInfo {
+            pubkey: account_key,
+            lamports: 1000,
+            data: new_data,
+            owner: caller_id,
+            executable: false,
+        },
+    ];
+
+    let result = invoke(&mut ctx, &instruction, &account_infos);
+    assert!(matches!(result, Err(SyscallError::InvalidArgument(_))));
+}
+
+#[test]
+fn cpi_data_shrink_allowed() {
+    let caller_id = Pubkey::new_unique();
+    let callee_id = Pubkey::new_unique();
+    let account_key = Pubkey::new_unique();
+
+    let mut ctx = SyscallContext::new(caller_id, 1_000_000);
+    ctx.accounts.insert(
+        account_key,
+        Account::new(1000, vec![42u8; 1000], caller_id),
+    );
+
+    let instruction = CpiInstruction {
+        program_id: callee_id,
+        accounts: vec![CpiAccountMeta {
+            pubkey: account_key,
+            is_signer: false,
+            is_writable: true,
+        }],
+        data: vec![],
+    };
+
+    // Callee shrank the data from 1000 to 100
+    let account_infos = vec![
+        CpiAccountInfo {
+            pubkey: callee_id,
+            lamports: 0,
+            data: vec![],
+            owner: Pubkey::new_unique(),
+            executable: true,
+        },
+        CpiAccountInfo {
+            pubkey: account_key,
+            lamports: 1000,
+            data: vec![42u8; 100],
+            owner: caller_id,
+            executable: false,
+        },
+    ];
+
+    let result = invoke(&mut ctx, &instruction, &account_infos);
+    assert!(result.is_ok());
+    let modified = ctx.modified_accounts.get(&account_key).unwrap();
+    assert_eq!(modified.data.len(), 100);
+}
+
+// ===========================================================================
+// CPI writeback tests
+// ===========================================================================
+
+#[test]
+fn cpi_writeback_propagates_lamports() {
+    let caller_id = Pubkey::new_unique();
+    let callee_id = Pubkey::new_unique();
+    let account_key = Pubkey::new_unique();
+
+    let mut ctx = SyscallContext::new(caller_id, 1_000_000);
+    ctx.accounts.insert(
+        account_key,
+        Account::new(1000, vec![], caller_id),
+    );
+
+    let instruction = CpiInstruction {
+        program_id: callee_id,
+        accounts: vec![CpiAccountMeta {
+            pubkey: account_key,
+            is_signer: false,
+            is_writable: true,
+        }],
+        data: vec![],
+    };
+
+    // Callee changed lamports to 500
+    let account_infos = vec![
+        CpiAccountInfo {
+            pubkey: callee_id,
+            lamports: 0,
+            data: vec![],
+            owner: Pubkey::new_unique(),
+            executable: true,
+        },
+        CpiAccountInfo {
+            pubkey: account_key,
+            lamports: 500,
+            data: vec![],
+            owner: caller_id,
+            executable: false,
+        },
+    ];
+
+    invoke(&mut ctx, &instruction, &account_infos).unwrap();
+
+    let modified = ctx.modified_accounts.get(&account_key).unwrap();
+    assert_eq!(modified.meta.lamports, 500);
+}
+
+#[test]
+fn cpi_writeback_propagates_owner() {
+    let caller_id = Pubkey::new_unique();
+    let callee_id = Pubkey::new_unique();
+    let account_key = Pubkey::new_unique();
+    let new_owner = Pubkey::new_unique();
+
+    let mut ctx = SyscallContext::new(caller_id, 1_000_000);
+    ctx.accounts.insert(
+        account_key,
+        Account::new(1000, vec![], caller_id),
+    );
+
+    let instruction = CpiInstruction {
+        program_id: callee_id,
+        accounts: vec![CpiAccountMeta {
+            pubkey: account_key,
+            is_signer: false,
+            is_writable: true,
+        }],
+        data: vec![],
+    };
+
+    // Callee changed owner
+    let account_infos = vec![
+        CpiAccountInfo {
+            pubkey: callee_id,
+            lamports: 0,
+            data: vec![],
+            owner: Pubkey::new_unique(),
+            executable: true,
+        },
+        CpiAccountInfo {
+            pubkey: account_key,
+            lamports: 1000,
+            data: vec![],
+            owner: new_owner,
+            executable: false,
+        },
+    ];
+
+    invoke(&mut ctx, &instruction, &account_infos).unwrap();
+
+    let modified = ctx.modified_accounts.get(&account_key).unwrap();
+    assert_eq!(modified.meta.owner, new_owner);
+}
+
+#[test]
+fn cpi_readonly_account_not_written_back() {
+    let caller_id = Pubkey::new_unique();
+    let callee_id = Pubkey::new_unique();
+    let account_key = Pubkey::new_unique();
+
+    let mut ctx = SyscallContext::new(caller_id, 1_000_000);
+    ctx.accounts.insert(
+        account_key,
+        Account::new(1000, vec![], caller_id),
+    );
+
+    let instruction = CpiInstruction {
+        program_id: callee_id,
+        accounts: vec![CpiAccountMeta {
+            pubkey: account_key,
+            is_signer: false,
+            is_writable: false, // Read-only
+        }],
+        data: vec![],
+    };
+
+    let account_infos = vec![
+        CpiAccountInfo {
+            pubkey: callee_id,
+            lamports: 0,
+            data: vec![],
+            owner: Pubkey::new_unique(),
+            executable: true,
+        },
+        CpiAccountInfo {
+            pubkey: account_key,
+            lamports: 999, // Callee "changed" lamports
+            data: vec![],
+            owner: caller_id,
+            executable: false,
+        },
+    ];
+
+    invoke(&mut ctx, &instruction, &account_infos).unwrap();
+
+    // Read-only account should NOT be in modified_accounts
+    assert!(!ctx.modified_accounts.contains_key(&account_key));
+}
+
+#[test]
+fn cpi_missing_account_info_rejected() {
+    let caller_id = Pubkey::new_unique();
+    let callee_id = Pubkey::new_unique();
+    let missing_key = Pubkey::new_unique();
+
+    let mut ctx = SyscallContext::new(caller_id, 1_000_000);
+    ctx.accounts.insert(
+        missing_key,
+        Account::new(100, vec![], caller_id),
+    );
+
+    let instruction = CpiInstruction {
+        program_id: callee_id,
+        accounts: vec![CpiAccountMeta {
+            pubkey: missing_key,
+            is_signer: false,
+            is_writable: false,
+        }],
+        data: vec![],
+    };
+
+    // account_infos does NOT include missing_key
+    let account_infos = vec![CpiAccountInfo {
+        pubkey: callee_id,
+        lamports: 0,
+        data: vec![],
+        owner: Pubkey::new_unique(),
+        executable: true,
+    }];
+
+    let result = invoke(&mut ctx, &instruction, &account_infos);
+    assert!(matches!(result, Err(SyscallError::MissingAccount(_))));
+}
+
+#[test]
+fn cpi_too_many_signers_rejected() {
+    let caller_id = Pubkey::new_unique();
+    let callee_id = Pubkey::new_unique();
+
+    let mut ctx = SyscallContext::new(caller_id, 1_000_000);
+
+    let instruction = CpiInstruction {
+        program_id: callee_id,
+        accounts: vec![],
+        data: vec![],
+    };
+
+    // Create 17 signer seed sets (exceeds MAX_CPI_SIGNERS = 16)
+    let seed_data: Vec<Vec<u8>> = (0..17u8).map(|i| vec![i]).collect();
+    let seed_refs: Vec<&[u8]> = seed_data.iter().map(|s| s.as_slice()).collect();
+    let all_seeds: Vec<&[&[u8]]> = seed_refs.iter().map(|s| std::slice::from_ref(s)).collect();
+
+    let result = invoke_signed(&mut ctx, &instruction, &[], &all_seeds);
+    assert!(matches!(result, Err(SyscallError::InvalidArgument(_))));
 }
