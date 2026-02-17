@@ -1,6 +1,12 @@
 use crate::{AssembledBlock, Entry};
-use paradencer_consensus::{Bank, CommitmentLevel, CommitmentTracker};
+use paradencer_consensus::{
+    Bank, CommitmentLevel, CommitmentTracker, CompiledInstruction, ExecutionBackend,
+    SanitizedTransaction, TransactionExecutionResult, VoteUpdate,
+};
+use paradencer_constants::execution::MAX_COMPUTE_UNITS;
+use paradencer_constants::transaction as tx_const;
 use paradencer_execution::ExecutionBridge;
+use paradencer_storage::Pubkey;
 use sha2::{Digest, Sha256};
 use std::sync::{Arc, Mutex};
 
@@ -35,6 +41,48 @@ impl TransactionResult {
             compute_units: 0,
         }
     }
+
+    /// Convert a Bank execution result into a BlockProcessor transaction result.
+    pub fn from_execution(index: usize, result: &TransactionExecutionResult) -> Self {
+        if result.success {
+            Self::success(index, result.compute_units_consumed)
+        } else {
+            let error_msg = result
+                .error
+                .as_ref()
+                .map(|e| e.to_string())
+                .unwrap_or_else(|| "unknown execution error".to_string());
+            Self {
+                index,
+                success: false,
+                error: Some(error_msg),
+                compute_units: result.compute_units_consumed,
+            }
+        }
+    }
+}
+
+/// Fallback execution backend that rejects all instructions.
+///
+/// Used when no real backend is provided (e.g., during testing with
+/// `BlockProcessor::new()`). In production, `SbpfExecutionAdapter`
+/// should be passed via `BlockProcessor::with_backend()`.
+struct NoopBackend;
+
+impl ExecutionBackend for NoopBackend {
+    fn execute_instruction(
+        &self,
+        _instruction: &paradencer_consensus::InstructionInfo,
+        _remaining_compute_units: u64,
+    ) -> paradencer_consensus::InstructionResult {
+        paradencer_consensus::InstructionResult {
+            success: false,
+            compute_units_consumed: 0,
+            modified_accounts: std::collections::HashMap::new(),
+            logs: vec!["no execution backend configured".to_string()],
+            error: Some("no execution backend configured".to_string()),
+        }
+    }
 }
 
 /// Outcome of processing a complete block
@@ -54,6 +102,8 @@ pub struct BlockOutcome {
     pub total_compute_units: u64,
     /// Hash of the final bank state
     pub final_hash: [u8; 32],
+    /// Vote updates extracted from successful vote transactions.
+    pub vote_updates: Vec<VoteUpdate>,
 }
 
 impl BlockOutcome {
@@ -66,6 +116,7 @@ impl BlockOutcome {
             failed_count: 0,
             total_compute_units: 0,
             final_hash,
+            vote_updates: Vec::new(),
         }
     }
 
@@ -116,12 +167,14 @@ pub enum BlockProcessorError {
 ///
 /// Orchestrates:
 /// - Entry processing
-/// - Transaction execution via ExecutionBridge
+/// - Transaction execution via Bank + ExecutionBackend
 /// - Tick registration
 /// - Commitment tracking updates
 pub struct BlockProcessor {
-    /// Execution bridge for transaction processing
+    /// Execution bridge for batch-level execution policies
     pub execution_bridge: Arc<ExecutionBridge>,
+    /// Backend for instruction-level execution (routes to sBPF runtime)
+    backend: Arc<dyn ExecutionBackend>,
     /// Commitment tracker for finality
     pub commitment_tracker: Arc<Mutex<CommitmentTracker>>,
 }
@@ -131,8 +184,21 @@ impl BlockProcessor {
         execution_bridge: Arc<ExecutionBridge>,
         commitment_tracker: Arc<Mutex<CommitmentTracker>>,
     ) -> Self {
+        Self::with_backend(
+            execution_bridge,
+            commitment_tracker,
+            Arc::new(NoopBackend),
+        )
+    }
+
+    pub fn with_backend(
+        execution_bridge: Arc<ExecutionBridge>,
+        commitment_tracker: Arc<Mutex<CommitmentTracker>>,
+        backend: Arc<dyn ExecutionBackend>,
+    ) -> Self {
         Self {
             execution_bridge,
+            backend,
             commitment_tracker,
         }
     }
@@ -191,8 +257,12 @@ impl BlockProcessor {
 
         // Process transactions in this entry
         if !entry.transactions.is_empty() {
-            let tx_results =
-                self.apply_transactions(&entry.transactions, bank, outcome.transactions.len())?;
+            let tx_results = self.apply_transactions(
+                &entry.transactions,
+                bank,
+                outcome.transactions.len(),
+                &mut outcome.vote_updates,
+            )?;
             for result in tx_results {
                 outcome.add_transaction_result(result);
             }
@@ -207,49 +277,54 @@ impl BlockProcessor {
         transactions: &[Vec<u8>],
         bank: &Arc<Bank>,
         starting_index: usize,
+        vote_updates: &mut Vec<VoteUpdate>,
     ) -> Result<Vec<TransactionResult>, BlockProcessorError> {
         let mut results = Vec::with_capacity(transactions.len());
 
         for (i, tx_data) in transactions.iter().enumerate() {
             let tx_index = starting_index + i;
-
-            // In a real implementation, this would:
-            // 1. Deserialize transaction from bytes
-            // 2. Validate transaction
-            // 3. Execute via ExecutionBridge
-            // 4. Update bank state
-
-            // For now, we simulate successful execution
-            // In production, this would use ExecutionBridge.try_execute_batch()
-            let result = self.execute_transaction(tx_data, tx_index, bank)?;
+            let result = self.execute_transaction(tx_data, tx_index, bank, vote_updates)?;
             results.push(result);
         }
 
         Ok(results)
     }
 
-    /// Execute a single transaction
+    /// Execute a single transaction through the Bank execution pipeline.
+    ///
+    /// Deserializes raw transaction bytes into a SanitizedTransaction,
+    /// then delegates to Bank::process_transaction() for full execution
+    /// including blockhash validation, signature verification, fee
+    /// collection, and instruction execution via the backend.
     fn execute_transaction(
         &mut self,
-        _tx_data: &[u8],
+        tx_data: &[u8],
         tx_index: usize,
         bank: &Arc<Bank>,
+        vote_updates: &mut Vec<VoteUpdate>,
     ) -> Result<TransactionResult, BlockProcessorError> {
-        // Verify bank can accept transactions
         if bank.is_frozen() {
             return Err(BlockProcessorError::BankFrozen(bank.slot()));
         }
 
-        // In a real implementation:
-        // 1. Deserialize transaction
-        // 2. Verify signatures
-        // 3. Execute via ExecutionBridge
-        // 4. Collect fees
-        // 5. Update accounts
+        // Deserialize transaction from wire format
+        let sanitized = match deserialize_transaction(tx_data) {
+            Ok(tx) => tx,
+            Err(msg) => {
+                return Ok(TransactionResult::failure(tx_index, msg));
+            }
+        };
 
-        // For now, simulate successful execution
-        let compute_units = 1000; // Mock compute units
-        Ok(TransactionResult::success(tx_index, compute_units))
+        // Execute through Bank pipeline (blockhash, sig verify, dedup, fees, instructions)
+        let exec_result =
+            bank.process_transaction(&sanitized, self.backend.as_ref(), MAX_COMPUTE_UNITS);
+
+        // Collect vote updates from successful vote transactions
+        if exec_result.success {
+            vote_updates.extend(exec_result.vote_updates.iter().cloned());
+        }
+
+        Ok(TransactionResult::from_execution(tx_index, &exec_result))
     }
 
     /// Complete remaining ticks for a slot
@@ -279,14 +354,10 @@ impl BlockProcessor {
     ) -> Result<(), BlockProcessorError> {
         let mut tracker = self.commitment_tracker.lock().unwrap();
 
-        // Mark slot as processed
-        tracker.mark_processed(block.slot, 0, 1000); // Mock stake values
-
-        // Update based on success rate
-        if outcome.success_rate() >= 0.9 {
-            // High success rate - potentially confirmable
-            tracker.update_stake(block.slot, 700, 1000); // Mock supermajority
-        }
+        // Mark slot as processed with execution metrics
+        let executed = outcome.executed_count as u64;
+        let total = outcome.transactions.len().max(1) as u64;
+        tracker.mark_processed(block.slot, executed, total);
 
         Ok(())
     }
@@ -366,6 +437,238 @@ impl BlockProcessor {
             total_compute_units: 0,
             average_success_rate: 0.0,
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Transaction wire-format deserialization
+// ---------------------------------------------------------------------------
+
+/// Decode a Solana compact-u16 value from the given byte slice.
+///
+/// Returns (decoded_value, bytes_consumed) or an error message.
+fn decode_compact_u16(data: &[u8]) -> Result<(usize, usize), String> {
+    if data.is_empty() {
+        return Err("unexpected end of data for compact-u16".to_string());
+    }
+
+    let first = data[0] as usize;
+    if first <= 0x7F {
+        Ok((first, 1))
+    } else {
+        if data.len() < 2 {
+            return Err("truncated compact-u16".to_string());
+        }
+        let value = ((first & 0x7F) << 8) | (data[1] as usize);
+        Ok((value, 2))
+    }
+}
+
+/// Deserialize a Solana binary transaction into a `SanitizedTransaction`.
+///
+/// Wire format (legacy transactions):
+///   [compact-u16: signature_count]
+///   [signature_count * 64 bytes: signatures]
+///   [message bytes]:
+///     [1 byte: num_required_signatures]
+///     [1 byte: num_readonly_signed]
+///     [1 byte: num_readonly_unsigned]
+///     [compact-u16: num_account_keys]
+///     [num_account_keys * 32 bytes: account keys]
+///     [32 bytes: recent_blockhash]
+///     [compact-u16: num_instructions]
+///     per instruction:
+///       [1 byte: program_id_index]
+///       [compact-u16: num_account_indices]
+///       [num_account_indices bytes: account indices]
+///       [compact-u16: data_length]
+///       [data_length bytes: instruction data]
+fn deserialize_transaction(data: &[u8]) -> Result<SanitizedTransaction, String> {
+    if data.len() < tx_const::MIN_TRANSACTION_SIZE {
+        return Err(format!(
+            "transaction too small: {} bytes (minimum {})",
+            data.len(),
+            tx_const::MIN_TRANSACTION_SIZE
+        ));
+    }
+    if data.len() > tx_const::MAX_TRANSACTION_SIZE {
+        return Err(format!(
+            "transaction too large: {} bytes (maximum {})",
+            data.len(),
+            tx_const::MAX_TRANSACTION_SIZE
+        ));
+    }
+
+    let mut offset = 0;
+
+    // --- Signatures ---
+    let (sig_count, compact_len) = decode_compact_u16(&data[offset..])?;
+    offset += compact_len;
+
+    if sig_count == 0 || sig_count > tx_const::MAX_SIGNATURES {
+        return Err(format!("invalid signature count: {}", sig_count));
+    }
+
+    let sigs_len = sig_count * tx_const::SIGNATURE_SIZE;
+    if data.len() < offset + sigs_len {
+        return Err("truncated signature data".to_string());
+    }
+
+    let mut signatures = Vec::with_capacity(sig_count);
+    for i in 0..sig_count {
+        let start = offset + i * tx_const::SIGNATURE_SIZE;
+        let mut sig = [0u8; 64];
+        sig.copy_from_slice(&data[start..start + tx_const::SIGNATURE_SIZE]);
+        signatures.push(sig);
+    }
+    offset += sigs_len;
+
+    // --- Message ---
+    let message_start = offset;
+    let message_bytes = data[message_start..].to_vec();
+
+    if data.len() < offset + 3 {
+        return Err("truncated message header".to_string());
+    }
+
+    let num_required_signatures = data[offset] as u64;
+    let _num_readonly_signed = data[offset + 1];
+    let _num_readonly_unsigned = data[offset + 2];
+    offset += 3;
+
+    // Account keys
+    let (account_count, compact_len) = decode_compact_u16(&data[offset..])?;
+    offset += compact_len;
+
+    if account_count > tx_const::MAX_ACCOUNTS {
+        return Err(format!("too many accounts: {}", account_count));
+    }
+
+    let keys_len = account_count * tx_const::PUBKEY_SIZE;
+    if data.len() < offset + keys_len {
+        return Err("truncated account keys".to_string());
+    }
+
+    let mut account_keys = Vec::with_capacity(account_count);
+    for i in 0..account_count {
+        let start = offset + i * tx_const::PUBKEY_SIZE;
+        let mut key = [0u8; 32];
+        key.copy_from_slice(&data[start..start + tx_const::PUBKEY_SIZE]);
+        account_keys.push(Pubkey::from(key));
+    }
+    offset += keys_len;
+
+    // Recent blockhash
+    if data.len() < offset + tx_const::BLOCKHASH_SIZE {
+        return Err("truncated blockhash".to_string());
+    }
+    let mut recent_blockhash = [0u8; 32];
+    recent_blockhash.copy_from_slice(&data[offset..offset + tx_const::BLOCKHASH_SIZE]);
+    offset += tx_const::BLOCKHASH_SIZE;
+
+    // Instructions
+    let (instruction_count, compact_len) = decode_compact_u16(&data[offset..])?;
+    offset += compact_len;
+
+    if instruction_count > tx_const::MAX_INSTRUCTIONS {
+        return Err(format!("too many instructions: {}", instruction_count));
+    }
+
+    let mut instructions = Vec::with_capacity(instruction_count);
+    for _ in 0..instruction_count {
+        if offset >= data.len() {
+            return Err("truncated instruction".to_string());
+        }
+
+        let program_id_index = data[offset];
+        offset += 1;
+
+        let (num_accounts, compact_len) = decode_compact_u16(&data[offset..])?;
+        offset += compact_len;
+
+        if data.len() < offset + num_accounts {
+            return Err("truncated instruction account indices".to_string());
+        }
+        let account_indices = data[offset..offset + num_accounts].to_vec();
+        offset += num_accounts;
+
+        let (data_len, compact_len) = decode_compact_u16(&data[offset..])?;
+        offset += compact_len;
+
+        if data.len() < offset + data_len {
+            return Err("truncated instruction data".to_string());
+        }
+        let instr_data = data[offset..offset + data_len].to_vec();
+        offset += data_len;
+
+        instructions.push(CompiledInstruction {
+            program_id_index,
+            account_indices,
+            data: instr_data,
+        });
+    }
+
+    Ok(SanitizedTransaction {
+        account_keys,
+        recent_blockhash,
+        instructions,
+        num_signatures: num_required_signatures,
+        signatures,
+        message_bytes,
+    })
+}
+
+/// Serialize a `SanitizedTransaction` into Solana wire format bytes.
+///
+/// Used in tests to create properly-formatted transaction data for
+/// the deserialization pipeline.
+#[cfg(test)]
+fn serialize_transaction(tx: &SanitizedTransaction) -> Vec<u8> {
+    let mut data = Vec::new();
+
+    // Signature count (compact-u16)
+    encode_compact_u16(&mut data, tx.signatures.len());
+
+    // Signatures
+    for sig in &tx.signatures {
+        data.extend_from_slice(sig);
+    }
+
+    // Message header
+    data.push(tx.num_signatures as u8);
+    data.push(0); // num_readonly_signed
+    data.push(0); // num_readonly_unsigned
+
+    // Account keys (compact-u16 count + keys)
+    encode_compact_u16(&mut data, tx.account_keys.len());
+    for key in &tx.account_keys {
+        data.extend_from_slice(key.as_bytes());
+    }
+
+    // Recent blockhash
+    data.extend_from_slice(&tx.recent_blockhash);
+
+    // Instructions
+    encode_compact_u16(&mut data, tx.instructions.len());
+    for ix in &tx.instructions {
+        data.push(ix.program_id_index);
+        encode_compact_u16(&mut data, ix.account_indices.len());
+        data.extend_from_slice(&ix.account_indices);
+        encode_compact_u16(&mut data, ix.data.len());
+        data.extend_from_slice(&ix.data);
+    }
+
+    data
+}
+
+/// Encode a value as Solana compact-u16.
+#[cfg(test)]
+fn encode_compact_u16(buf: &mut Vec<u8>, value: usize) {
+    if value <= 0x7F {
+        buf.push(value as u8);
+    } else {
+        buf.push(((value >> 8) & 0x7F) as u8 | 0x80);
+        buf.push((value & 0xFF) as u8);
     }
 }
 
@@ -621,5 +924,440 @@ mod tests {
         let wrong_initial = [0xCDu8; 32];
         let result = processor.verify_entry_chain(&entries, wrong_initial);
         assert!(result.is_err());
+    }
+
+    // --- Transaction deserialization tests ---
+
+    use ed25519_dalek::{Signer, SigningKey};
+
+    /// Build a signed serialized transaction for testing.
+    ///
+    /// Creates a real Ed25519 signature over the message bytes so that
+    /// Bank::process_transaction() signature verification passes.
+    fn build_signed_wire_tx(
+        signing_key: &SigningKey,
+        program: &Pubkey,
+        blockhash: [u8; 32],
+        instruction_data: Vec<u8>,
+    ) -> Vec<u8> {
+        build_signed_wire_tx_with_keys(
+            signing_key,
+            &[*program],
+            blockhash,
+            vec![CompiledInstruction {
+                program_id_index: 1,
+                account_indices: vec![0],
+                data: instruction_data,
+            }],
+        )
+    }
+
+    /// Build a signed wire transaction with custom account keys and instructions.
+    fn build_signed_wire_tx_with_keys(
+        signing_key: &SigningKey,
+        extra_keys: &[Pubkey],
+        blockhash: [u8; 32],
+        instructions: Vec<CompiledInstruction>,
+    ) -> Vec<u8> {
+        let payer = Pubkey::from(signing_key.verifying_key().to_bytes());
+        let mut account_keys = vec![payer];
+        account_keys.extend_from_slice(extra_keys);
+
+        // Build message bytes first (what gets signed)
+        let mut message_bytes = Vec::new();
+        // Header
+        message_bytes.push(1); // num_required_signatures
+        message_bytes.push(0); // num_readonly_signed
+        message_bytes.push(0); // num_readonly_unsigned
+        // Account keys
+        encode_compact_u16(&mut message_bytes, account_keys.len());
+        for key in &account_keys {
+            message_bytes.extend_from_slice(key.as_bytes());
+        }
+        // Blockhash
+        message_bytes.extend_from_slice(&blockhash);
+        // Instructions
+        encode_compact_u16(&mut message_bytes, instructions.len());
+        for ix in &instructions {
+            message_bytes.push(ix.program_id_index);
+            encode_compact_u16(&mut message_bytes, ix.account_indices.len());
+            message_bytes.extend_from_slice(&ix.account_indices);
+            encode_compact_u16(&mut message_bytes, ix.data.len());
+            message_bytes.extend_from_slice(&ix.data);
+        }
+
+        // Sign the message
+        let signature = signing_key.sign(&message_bytes);
+
+        // Build full wire-format transaction
+        let mut wire = Vec::new();
+        encode_compact_u16(&mut wire, 1); // 1 signature
+        wire.extend_from_slice(&signature.to_bytes());
+        wire.extend_from_slice(&message_bytes);
+
+        wire
+    }
+
+    #[test]
+    fn compact_u16_roundtrip() {
+        for &value in &[0usize, 1, 127, 128, 255, 300, 1000, 16383] {
+            let mut buf = Vec::new();
+            encode_compact_u16(&mut buf, value);
+            let (decoded, _len) = decode_compact_u16(&buf).unwrap();
+            assert_eq!(decoded, value, "compact-u16 roundtrip failed for {}", value);
+        }
+    }
+
+    #[test]
+    fn deserialize_roundtrip() {
+        let signing_key = SigningKey::from_bytes(&[1u8; 32]);
+        let payer = Pubkey::from(signing_key.verifying_key().to_bytes());
+        let program = Pubkey::new_unique();
+        let blockhash = [0x42u8; 32];
+        let instr_data = vec![1, 2, 3, 4, 5];
+
+        let wire_bytes =
+            build_signed_wire_tx(&signing_key, &program, blockhash, instr_data.clone());
+        let tx = deserialize_transaction(&wire_bytes).unwrap();
+
+        assert_eq!(tx.account_keys.len(), 2);
+        assert_eq!(tx.account_keys[0], payer);
+        assert_eq!(tx.account_keys[1], program);
+        assert_eq!(tx.recent_blockhash, blockhash);
+        assert_eq!(tx.num_signatures, 1);
+        assert_eq!(tx.signatures.len(), 1);
+        assert_eq!(tx.instructions.len(), 1);
+        assert_eq!(tx.instructions[0].program_id_index, 1);
+        assert_eq!(tx.instructions[0].account_indices, vec![0]);
+        assert_eq!(tx.instructions[0].data, instr_data);
+    }
+
+    #[test]
+    fn deserialize_rejects_truncated_data() {
+        // Way too short
+        assert!(deserialize_transaction(&[0u8; 10]).is_err());
+    }
+
+    #[test]
+    fn deserialize_rejects_zero_signatures() {
+        // compact-u16 value 0 for signature count
+        let mut data = vec![0u8; 200];
+        data[0] = 0; // sig count = 0
+        assert!(deserialize_transaction(&data).is_err());
+    }
+
+    #[test]
+    fn deserialize_multiple_instructions() {
+        let payer = Pubkey::new_unique();
+        let program = Pubkey::new_unique();
+        let recipient = Pubkey::new_unique();
+
+        let tx = SanitizedTransaction {
+            account_keys: vec![payer, program, recipient],
+            recent_blockhash: [0u8; 32],
+            instructions: vec![
+                CompiledInstruction {
+                    program_id_index: 1,
+                    account_indices: vec![0, 2],
+                    data: vec![10, 20],
+                },
+                CompiledInstruction {
+                    program_id_index: 1,
+                    account_indices: vec![2],
+                    data: vec![30],
+                },
+            ],
+            num_signatures: 1,
+            signatures: vec![[0u8; 64]],
+            message_bytes: vec![],
+        };
+        let wire = serialize_transaction(&tx);
+        let parsed = deserialize_transaction(&wire).unwrap();
+
+        assert_eq!(parsed.instructions.len(), 2);
+        assert_eq!(parsed.instructions[0].account_indices, vec![0, 2]);
+        assert_eq!(parsed.instructions[0].data, vec![10, 20]);
+        assert_eq!(parsed.instructions[1].account_indices, vec![2]);
+        assert_eq!(parsed.instructions[1].data, vec![30]);
+    }
+
+    // --- Live execution tests ---
+
+    use paradencer_consensus::{
+        BlockhashInfo, ExecutionBackend as ConsensusExecutionBackend, InstructionInfo,
+        InstructionResult,
+    };
+    use paradencer_storage::{Account, TransactionId};
+    use std::collections::HashMap;
+
+    /// Backend that passes all accounts through as modified (always succeeds).
+    struct TestPassthroughBackend;
+
+    impl ConsensusExecutionBackend for TestPassthroughBackend {
+        fn execute_instruction(
+            &self,
+            instruction: &InstructionInfo,
+            _remaining: u64,
+        ) -> InstructionResult {
+            let modified: HashMap<Pubkey, Account> = instruction
+                .accounts
+                .iter()
+                .map(|(k, a, _)| (*k, a.clone()))
+                .collect();
+            InstructionResult {
+                success: true,
+                compute_units_consumed: 200,
+                modified_accounts: modified,
+                logs: vec!["ok".to_string()],
+                error: None,
+            }
+        }
+    }
+
+    fn create_test_bank_with_blockhash(blockhash: [u8; 32]) -> Arc<Bank> {
+        let accounts = Arc::new(AccountDatabase::new());
+        let epoch_schedule = Arc::new(EpochSchedule::default());
+        let validator = Pubkey::new_unique();
+        let validators = vec![(validator, 1000)];
+        let leader_schedule = Arc::new(LeaderSchedule::new(0, &validators).unwrap());
+        let bank = Bank::new_genesis(accounts, epoch_schedule, leader_schedule);
+        // Register the given blockhash so transactions using it pass validation
+        let info = BlockhashInfo::new(Pubkey::from(blockhash), 5000, 0);
+        bank.blockhash_queue().write().unwrap().register_hash(info);
+        Arc::new(bank)
+    }
+
+    fn store_test_account(bank: &Bank, pubkey: &Pubkey, account: &Account) {
+        let db = bank.accounts();
+        let xid = TransactionId::new([0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0]);
+        db.write_account(xid, *pubkey, account.clone()).unwrap();
+        db.publish_transaction(xid).unwrap();
+    }
+
+    #[test]
+    fn execute_transaction_with_real_backend() {
+        let blockhash = [0u8; 32];
+        let bank = create_test_bank_with_blockhash(blockhash);
+
+        let signing_key = SigningKey::from_bytes(&[1u8; 32]);
+        let payer = Pubkey::from(signing_key.verifying_key().to_bytes());
+        let program = Pubkey::new_unique();
+        let payer_account = Account::new(1_000_000, vec![], Pubkey::default());
+        store_test_account(&bank, &payer, &payer_account);
+
+        let backend: Arc<dyn ConsensusExecutionBackend> = Arc::new(TestPassthroughBackend);
+        let mut processor = BlockProcessor::with_backend(
+            Arc::new(ExecutionBridge::new()),
+            Arc::new(Mutex::new(CommitmentTracker::default())),
+            backend,
+        );
+
+        let wire_tx = build_signed_wire_tx(&signing_key, &program, blockhash, vec![42]);
+        let mut vote_updates = Vec::new();
+        let result = processor
+            .execute_transaction(&wire_tx, 0, &bank, &mut vote_updates)
+            .unwrap();
+
+        assert!(result.success, "should succeed: {:?}", result.error);
+        assert!(result.compute_units > 0);
+    }
+
+    #[test]
+    fn execute_transaction_fails_with_bad_blockhash() {
+        let bank = create_test_bank_with_blockhash([0u8; 32]);
+
+        let signing_key = SigningKey::from_bytes(&[1u8; 32]);
+        let payer = Pubkey::from(signing_key.verifying_key().to_bytes());
+        let program = Pubkey::new_unique();
+        let payer_account = Account::new(1_000_000, vec![], Pubkey::default());
+        store_test_account(&bank, &payer, &payer_account);
+
+        let backend: Arc<dyn ConsensusExecutionBackend> = Arc::new(TestPassthroughBackend);
+        let mut processor = BlockProcessor::with_backend(
+            Arc::new(ExecutionBridge::new()),
+            Arc::new(Mutex::new(CommitmentTracker::default())),
+            backend,
+        );
+
+        // Use a blockhash that is NOT registered
+        let bad_blockhash = [0xFFu8; 32];
+        let wire_tx = build_signed_wire_tx(&signing_key, &program, bad_blockhash, vec![]);
+        let mut vote_updates = Vec::new();
+        let result = processor
+            .execute_transaction(&wire_tx, 0, &bank, &mut vote_updates)
+            .unwrap();
+
+        assert!(!result.success);
+        assert!(
+            result.error.as_ref().unwrap().contains("blockhash"),
+            "error should mention blockhash: {:?}",
+            result.error
+        );
+    }
+
+    #[test]
+    fn apply_transactions_processes_batch() {
+        let blockhash = [0u8; 32];
+        let bank = create_test_bank_with_blockhash(blockhash);
+
+        let signing_key = SigningKey::from_bytes(&[1u8; 32]);
+        let payer = Pubkey::from(signing_key.verifying_key().to_bytes());
+        let program = Pubkey::new_unique();
+        let payer_account = Account::new(100_000_000, vec![], Pubkey::default());
+        store_test_account(&bank, &payer, &payer_account);
+
+        let backend: Arc<dyn ConsensusExecutionBackend> = Arc::new(TestPassthroughBackend);
+        let mut processor = BlockProcessor::with_backend(
+            Arc::new(ExecutionBridge::new()),
+            Arc::new(Mutex::new(CommitmentTracker::default())),
+            backend,
+        );
+
+        let txs: Vec<Vec<u8>> = (0..3)
+            .map(|i| build_signed_wire_tx(&signing_key, &program, blockhash, vec![i]))
+            .collect();
+
+        let mut vote_updates = Vec::new();
+        let results = processor
+            .apply_transactions(&txs, &bank, 0, &mut vote_updates)
+            .unwrap();
+
+        assert_eq!(results.len(), 3);
+        // First transaction should always succeed; others may be rejected
+        // as duplicates since they use the same signing key
+        assert!(
+            results[0].success,
+            "first tx should succeed: {:?}",
+            results[0].error
+        );
+    }
+
+    #[test]
+    fn block_with_transactions_executes_through_bank() {
+        let blockhash = [0u8; 32];
+        let bank = create_test_bank_with_blockhash(blockhash);
+
+        let signing_key = SigningKey::from_bytes(&[1u8; 32]);
+        let payer = Pubkey::from(signing_key.verifying_key().to_bytes());
+        let program = Pubkey::new_unique();
+        let payer_account = Account::new(100_000_000, vec![], Pubkey::default());
+        store_test_account(&bank, &payer, &payer_account);
+
+        let backend: Arc<dyn ConsensusExecutionBackend> = Arc::new(TestPassthroughBackend);
+        let mut processor = BlockProcessor::with_backend(
+            Arc::new(ExecutionBridge::new()),
+            Arc::new(Mutex::new(CommitmentTracker::default())),
+            backend,
+        );
+
+        let wire_tx = build_signed_wire_tx(&signing_key, &program, blockhash, vec![1, 2, 3]);
+        let block = AssembledBlock {
+            slot: 0,
+            parent_slot: 0,
+            entries: vec![Entry {
+                num_hashes: 1,
+                hash: [1u8; 32], // skip PoH verification for this test
+                transactions: vec![wire_tx],
+            }],
+            transaction_count: 1,
+            total_bytes: 200,
+            shred_count: 1,
+        };
+
+        let outcome = processor.process_block(block, bank).unwrap();
+        assert_eq!(outcome.transactions.len(), 1);
+
+        let first = &outcome.transactions[0];
+        assert!(first.success, "tx should succeed: {:?}", first.error);
+        assert!(outcome.total_compute_units > 0);
+    }
+
+    #[test]
+    fn deserialization_failure_returns_transaction_failure() {
+        let bank = create_test_bank_with_blockhash([0u8; 32]);
+
+        let backend: Arc<dyn ConsensusExecutionBackend> = Arc::new(TestPassthroughBackend);
+        let mut processor = BlockProcessor::with_backend(
+            Arc::new(ExecutionBridge::new()),
+            Arc::new(Mutex::new(CommitmentTracker::default())),
+            backend,
+        );
+
+        // Garbage data that can't be deserialized
+        let garbage = vec![0xFF; 50];
+        let mut vote_updates = Vec::new();
+        let result = processor
+            .execute_transaction(&garbage, 0, &bank, &mut vote_updates)
+            .unwrap();
+
+        assert!(!result.success);
+        assert!(result.error.is_some());
+    }
+
+    #[test]
+    fn vote_updates_propagated_from_block_execution() {
+        use paradencer_ids::VOTE_PROGRAM_ID;
+
+        let blockhash = [0u8; 32];
+        let bank = create_test_bank_with_blockhash(blockhash);
+
+        let signing_key = SigningKey::from_bytes(&[1u8; 32]);
+        let payer = Pubkey::from(signing_key.verifying_key().to_bytes());
+        let vote_account = Pubkey::new_unique();
+        let payer_account = Account::new(100_000_000, vec![], Pubkey::default());
+        store_test_account(&bank, &payer, &payer_account);
+
+        let backend: Arc<dyn ConsensusExecutionBackend> = Arc::new(TestPassthroughBackend);
+        let mut processor = BlockProcessor::with_backend(
+            Arc::new(ExecutionBridge::new()),
+            Arc::new(Mutex::new(CommitmentTracker::default())),
+            backend,
+        );
+
+        // Build a vote transaction (instruction type 2 = Vote)
+        let mut vote_data = Vec::new();
+        vote_data.extend_from_slice(&2u32.to_le_bytes()); // Vote instruction type
+        vote_data.extend_from_slice(&1u64.to_le_bytes()); // 1 slot
+        vote_data.extend_from_slice(&42u64.to_le_bytes()); // slot 42
+        vote_data.extend_from_slice(&[0u8; 32]); // hash
+
+        let wire_tx = build_signed_wire_tx_with_keys(
+            &signing_key,
+            &[VOTE_PROGRAM_ID, vote_account],
+            blockhash,
+            vec![CompiledInstruction {
+                program_id_index: 1,
+                account_indices: vec![2],
+                data: vote_data,
+            }],
+        );
+
+        let block = AssembledBlock {
+            slot: 0,
+            parent_slot: 0,
+            entries: vec![Entry {
+                num_hashes: 1,
+                hash: [1u8; 32],
+                transactions: vec![wire_tx],
+            }],
+            transaction_count: 1,
+            total_bytes: 300,
+            shred_count: 1,
+        };
+
+        let outcome = processor.process_block(block, bank).unwrap();
+
+        assert_eq!(outcome.transactions.len(), 1);
+        assert!(
+            outcome.transactions[0].success,
+            "vote tx should succeed: {:?}",
+            outcome.transactions[0].error
+        );
+        assert!(
+            !outcome.vote_updates.is_empty(),
+            "should have extracted vote updates"
+        );
+        assert_eq!(outcome.vote_updates[0].vote_account, vote_account);
+        assert_eq!(outcome.vote_updates[0].voted_slot, Some(42));
     }
 }

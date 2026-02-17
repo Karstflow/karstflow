@@ -90,8 +90,9 @@ pub use vote_state::{
 pub use sysvars::SysvarCache;
 
 pub use bank_executor::{
-    BatchExecutionSummary, ExecutionBackend, InstructionInfo, InstructionResult,
-    TransactionExecutionError, TransactionExecutionResult, VoteUpdate,
+    BatchExecutionSummary, CompiledInstruction, ExecutionBackend, InstructionInfo,
+    InstructionResult, SanitizedTransaction, TransactionExecutionError,
+    TransactionExecutionResult, VoteUpdate,
 };
 pub use cost_tracker::{CostTracker, CostTrackerError, TransactionCost};
 pub use features::{FeatureActivation, FeatureSet};

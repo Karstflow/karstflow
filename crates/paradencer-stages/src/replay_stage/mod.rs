@@ -24,7 +24,9 @@ pub use slot_metrics::{
 pub use vote_integration::{VoteIntegration, VoteIntegrationError};
 
 use crate::{AssembledBlock, StageError};
-use paradencer_consensus::{BankForks, CommitmentTracker, ForkChoice, Tower, VoteProcessor};
+use paradencer_consensus::{
+    BankForks, CommitmentTracker, ExecutionBackend, ForkChoice, Tower, VoteProcessor,
+};
 use paradencer_execution::ExecutionBridge;
 use std::sync::{Arc, Mutex, RwLock};
 
@@ -179,6 +181,32 @@ impl ReplayStage {
         }
     }
 
+    /// Create a replay stage with a real execution backend for instruction
+    /// processing. In production, pass `SbpfExecutionAdapter` here.
+    pub fn with_backend(
+        config: ReplayConfig,
+        bank_forks: Arc<RwLock<BankForks>>,
+        fork_choice: Arc<Mutex<ForkChoice>>,
+        execution_bridge: Arc<ExecutionBridge>,
+        backend: Arc<dyn ExecutionBackend>,
+        vote_processor: Arc<Mutex<VoteProcessor>>,
+        tower: Arc<RwLock<Tower>>,
+        commitment_tracker: Arc<Mutex<CommitmentTracker>>,
+    ) -> Self {
+        let bank_transition = BankTransition::new(bank_forks.clone(), fork_choice.clone());
+        let block_processor =
+            BlockProcessor::with_backend(execution_bridge, commitment_tracker, backend);
+        let vote_integration = VoteIntegration::new(vote_processor, tower, fork_choice);
+
+        Self {
+            config,
+            bank_transition,
+            block_processor,
+            vote_integration,
+            stats: Arc::new(Mutex::new(ReplayStats::new())),
+        }
+    }
+
     /// Process a single assembled block through replay
     pub fn replay_block(&mut self, block: AssembledBlock) -> Result<BlockOutcome, StageError> {
         // Step 1: Get or create working bank for this slot
@@ -217,6 +245,19 @@ impl ReplayStage {
             .block_processor
             .process_block(block.clone(), bank.clone())
             .map_err(|e| StageError::ReplayError(format!("Block processing failed: {:?}", e)))?;
+
+        // Step 4b: Feed vote updates from executed transactions into ForkChoice
+        if self.config.process_votes && !outcome.vote_updates.is_empty() {
+            if let Err(e) = self
+                .vote_integration
+                .process_vote_updates(&outcome.vote_updates)
+            {
+                eprintln!(
+                    "Vote update processing warning for slot {}: {:?}",
+                    block.slot, e
+                );
+            }
+        }
 
         // Step 5: Freeze bank if slot is complete
         if self.config.auto_freeze_banks && bank.is_complete() {
