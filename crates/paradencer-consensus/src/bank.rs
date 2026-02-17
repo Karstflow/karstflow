@@ -362,6 +362,8 @@ impl Bank {
             exemption_threshold: 2.0,
             burn_percent: economics::DEFAULT_FEE_BURN_PERCENT,
             last_restart_slot: 0,
+            recent_blockhash: *self.last_blockhash.read().unwrap(),
+            lamports_per_signature: economics::LAMPORTS_PER_SIGNATURE,
         }
     }
 

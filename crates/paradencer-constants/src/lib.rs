@@ -68,7 +68,18 @@ pub mod ledger {
     pub const GENESIS_SLOT: u64 = 0;
 
     // Nonce account constants
-    pub const NONCE_ACCOUNT_SIZE: usize = 80; // Size of serialized nonce account data
+    pub const NONCE_ACCOUNT_SIZE: usize = 80;
+
+    /// Nonce state version discriminants (bincode u32 tags).
+    pub const NONCE_VERSION_LEGACY: u32 = 0;
+    pub const NONCE_VERSION_CURRENT: u32 = 1;
+
+    /// Nonce inner state discriminants (bincode u32 tags).
+    pub const NONCE_STATE_UNINITIALIZED: u32 = 0;
+    pub const NONCE_STATE_INITIALIZED: u32 = 1;
+
+    /// Prefix used for durable nonce derivation: SHA256("DURABLE_NONCE" || blockhash).
+    pub const DURABLE_NONCE_PREFIX: &[u8] = b"DURABLE_NONCE";
 }
 
 pub mod consensus {

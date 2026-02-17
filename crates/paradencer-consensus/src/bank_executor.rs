@@ -33,6 +33,8 @@ pub struct SlotContext {
     pub exemption_threshold: f64,
     pub burn_percent: u8,
     pub last_restart_slot: u64,
+    pub recent_blockhash: [u8; 32],
+    pub lamports_per_signature: u64,
 }
 
 /// Compiled instruction passed to the execution backend.

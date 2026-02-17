@@ -1,7 +1,14 @@
 use super::{ExecutionContext, ExecutionOutcome};
-use paradencer_constants::{ledger::NONCE_ACCOUNT_SIZE, system_program as constants};
+use paradencer_constants::{
+    ledger::{
+        self, DURABLE_NONCE_PREFIX, NONCE_ACCOUNT_SIZE, NONCE_STATE_INITIALIZED,
+        NONCE_STATE_UNINITIALIZED, NONCE_VERSION_CURRENT, NONCE_VERSION_LEGACY,
+    },
+    system_program as constants,
+};
 use paradencer_ids::SYSTEM_PROGRAM_ID;
 use paradencer_types::{Account, AccountData, Pubkey};
+use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 
 // System program instruction discriminants
@@ -62,6 +69,111 @@ impl SystemProgramError {
         }
     }
 }
+
+// ---------------------------------------------------------------------------
+// Nonce state serialization helpers
+// ---------------------------------------------------------------------------
+
+/// Parsed nonce account state.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum NonceVersionedState {
+    /// Legacy or current version, uninitialized.
+    Uninitialized { version: u32 },
+    /// Legacy or current version, initialized with data.
+    Initialized {
+        version: u32,
+        authority: Pubkey,
+        durable_nonce: [u8; 32],
+        lamports_per_signature: u64,
+    },
+}
+
+impl NonceVersionedState {
+    /// Deserialize nonce state from account data (bincode format, 80 bytes).
+    fn deserialize(data: &[u8]) -> Result<Self, String> {
+        if data.len() < 8 {
+            return Err("Nonce account data too short".to_string());
+        }
+        let version = u32::from_le_bytes(data[0..4].try_into().unwrap());
+        if version != NONCE_VERSION_LEGACY && version != NONCE_VERSION_CURRENT {
+            return Err(format!("Unknown nonce version: {}", version));
+        }
+        let state_disc = u32::from_le_bytes(data[4..8].try_into().unwrap());
+        match state_disc {
+            NONCE_STATE_UNINITIALIZED => Ok(Self::Uninitialized { version }),
+            NONCE_STATE_INITIALIZED => {
+                if data.len() < NONCE_ACCOUNT_SIZE {
+                    return Err("Nonce account data too short for initialized state".to_string());
+                }
+                let authority = Pubkey::new(data[8..40].try_into().unwrap());
+                let mut durable_nonce = [0u8; 32];
+                durable_nonce.copy_from_slice(&data[40..72]);
+                let lamports_per_signature =
+                    u64::from_le_bytes(data[72..80].try_into().unwrap());
+                Ok(Self::Initialized {
+                    version,
+                    authority,
+                    durable_nonce,
+                    lamports_per_signature,
+                })
+            }
+            _ => Err(format!("Unknown nonce state discriminant: {}", state_disc)),
+        }
+    }
+
+    /// Serialize nonce state to 80 bytes (bincode format).
+    fn serialize(&self) -> [u8; NONCE_ACCOUNT_SIZE] {
+        let mut buf = [0u8; NONCE_ACCOUNT_SIZE];
+        match self {
+            Self::Uninitialized { version } => {
+                buf[0..4].copy_from_slice(&version.to_le_bytes());
+                buf[4..8].copy_from_slice(&NONCE_STATE_UNINITIALIZED.to_le_bytes());
+            }
+            Self::Initialized {
+                version,
+                authority,
+                durable_nonce,
+                lamports_per_signature,
+            } => {
+                buf[0..4].copy_from_slice(&version.to_le_bytes());
+                buf[4..8].copy_from_slice(&NONCE_STATE_INITIALIZED.to_le_bytes());
+                buf[8..40].copy_from_slice(authority.as_bytes());
+                buf[40..72].copy_from_slice(durable_nonce);
+                buf[72..80].copy_from_slice(&lamports_per_signature.to_le_bytes());
+            }
+        }
+        buf
+    }
+
+    fn is_initialized(&self) -> bool {
+        matches!(self, Self::Initialized { .. })
+    }
+
+    fn is_legacy(&self) -> bool {
+        match self {
+            Self::Uninitialized { version } | Self::Initialized { version, .. } => {
+                *version == NONCE_VERSION_LEGACY
+            }
+        }
+    }
+}
+
+/// Derive a durable nonce from a blockhash: SHA256("DURABLE_NONCE" || blockhash).
+fn derive_durable_nonce(blockhash: &[u8; 32]) -> [u8; 32] {
+    let mut hasher = Sha256::new();
+    hasher.update(DURABLE_NONCE_PREFIX);
+    hasher.update(blockhash);
+    hasher.finalize().into()
+}
+
+/// Compute minimum rent-exempt balance for a given account data length.
+fn rent_exempt_minimum(lamports_per_byte_year: u64, exemption_threshold: f64, data_len: usize) -> u64 {
+    let account_storage = 128u64.saturating_add(data_len as u64);
+    let annual_cost = lamports_per_byte_year.saturating_mul(account_storage);
+    ((annual_cost as f64) * exemption_threshold) as u64
+}
+
+// ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone)]
 pub struct SystemProgramExecutor {
@@ -398,7 +510,7 @@ impl SystemProgramExecutor {
         let (account_pubkey, mut account, writable) = context.accounts[0].clone();
 
         if !writable {
-            return Err("InitializeNonceAccount requires writable account".to_string());
+            return Err("Initialize nonce account: account must be writable".to_string());
         }
 
         // Account must be owned by system program
@@ -406,16 +518,52 @@ impl SystemProgramExecutor {
             return Err("Nonce account must be owned by system program".to_string());
         }
 
-        // Account must have correct size for nonce state
+        // Ensure account data is correct size
         if account.data.as_ref().len() != NONCE_ACCOUNT_SIZE {
             account.data = AccountData::with_capacity(NONCE_ACCOUNT_SIZE);
         }
 
-        // In full implementation, would:
-        // 1. Get recent blockhash from sysvar
-        // 2. Derive durable nonce from blockhash
-        // 3. Create nonce state with authority and fee calculator
-        // 4. Serialize nonce state into account data
+        // Deserialize current state — must be uninitialized
+        let current_state = NonceVersionedState::deserialize(account.data.as_ref())?;
+        if current_state.is_initialized() {
+            return Err("Initialize nonce account: account state is invalid".to_string());
+        }
+
+        // Get recent blockhash from sysvar snapshot
+        let snapshot = context
+            .sysvar_snapshot
+            .as_ref()
+            .ok_or("Initialize nonce account: sysvar snapshot required")?;
+
+        if snapshot.recent_blockhash == [0u8; 32] {
+            return Err(SystemProgramError::NonceNoRecentBlockhashes.to_string());
+        }
+
+        // Check rent exemption
+        let min_balance = rent_exempt_minimum(
+            snapshot.lamports_per_byte_year,
+            snapshot.exemption_threshold,
+            NONCE_ACCOUNT_SIZE,
+        );
+        if account.meta.lamports < min_balance {
+            return Err(format!(
+                "Initialize nonce account: insufficient lamports {}, need {}",
+                account.meta.lamports, min_balance
+            ));
+        }
+
+        // Derive durable nonce from blockhash
+        let durable_nonce = derive_durable_nonce(&snapshot.recent_blockhash);
+
+        // Create initialized state
+        let new_state = NonceVersionedState::Initialized {
+            version: NONCE_VERSION_CURRENT,
+            authority,
+            durable_nonce,
+            lamports_per_signature: snapshot.lamports_per_signature,
+        };
+        let serialized = new_state.serialize();
+        account.data = AccountData::new(serialized.to_vec());
 
         modified_accounts.insert(account_pubkey, account);
         logs.push(format!(
@@ -438,18 +586,59 @@ impl SystemProgramExecutor {
             return Err("AdvanceNonceAccount requires at least 1 account".to_string());
         }
 
-        let (account_pubkey, account, writable) = context.accounts[0].clone();
+        let (account_pubkey, mut account, writable) = context.accounts[0].clone();
 
         if !writable {
-            return Err("AdvanceNonceAccount requires writable account".to_string());
+            return Err("Advance nonce account: account must be writable".to_string());
         }
 
-        // In real implementation, would:
-        // 1. Deserialize nonce state from account data
-        // 2. Verify authority signature
-        // 3. Generate new durable nonce from recent blockhash
-        // 4. Advance nonce with NonceAccount::advance()
-        // 5. Serialize updated nonce state back to account data
+        // Deserialize current state
+        let current_state = NonceVersionedState::deserialize(account.data.as_ref())?;
+
+        match &current_state {
+            NonceVersionedState::Initialized {
+                authority,
+                durable_nonce,
+                ..
+            } => {
+                // Verify authority is a signer (account index 0 is the nonce account,
+                // so check if authority matches any signer in the account list)
+                let authority_is_signer = context.accounts.iter().any(|(pk, _, _)| pk == authority);
+                if !authority_is_signer {
+                    return Err("Advance nonce account: authority must be a signer".to_string());
+                }
+
+                // Get recent blockhash from sysvar snapshot
+                let snapshot = context
+                    .sysvar_snapshot
+                    .as_ref()
+                    .ok_or("Advance nonce account: sysvar snapshot required")?;
+
+                if snapshot.recent_blockhash == [0u8; 32] {
+                    return Err(SystemProgramError::NonceNoRecentBlockhashes.to_string());
+                }
+
+                let next_durable_nonce = derive_durable_nonce(&snapshot.recent_blockhash);
+
+                // Nonce can only advance once per slot
+                if *durable_nonce == next_durable_nonce {
+                    return Err(SystemProgramError::NonceBlockhashNotExpired.to_string());
+                }
+
+                // Write new state (always upgrade to current version)
+                let new_state = NonceVersionedState::Initialized {
+                    version: NONCE_VERSION_CURRENT,
+                    authority: *authority,
+                    durable_nonce: next_durable_nonce,
+                    lamports_per_signature: snapshot.lamports_per_signature,
+                };
+                let serialized = new_state.serialize();
+                account.data = AccountData::new(serialized.to_vec());
+            }
+            NonceVersionedState::Uninitialized { .. } => {
+                return Err("Advance nonce account: account state is invalid".to_string());
+            }
+        }
 
         modified_accounts.insert(account_pubkey, account);
         logs.push("Advanced nonce account".to_string());
@@ -473,7 +662,7 @@ impl SystemProgramExecutor {
             return Err("WithdrawNonceAccount instruction data too short".to_string());
         }
 
-        let lamports = u64::from_le_bytes(
+        let requested_lamports = u64::from_le_bytes(
             context.instruction_data[4..12]
                 .try_into()
                 .map_err(|_| "Failed to parse lamports")?,
@@ -483,26 +672,92 @@ impl SystemProgramExecutor {
         let (to_pubkey, mut to_account, _to_writable) = context.accounts[1].clone();
 
         if !from_writable {
-            return Err("WithdrawNonceAccount requires writable source account".to_string());
+            return Err("Withdraw nonce account: account must be writable".to_string());
         }
 
-        // Validate sufficient lamports
-        if from_account.meta.lamports < lamports {
-            return Err(SystemProgramError::ResultWithNegativeLamports.to_string());
+        // Deserialize current state
+        let current_state = NonceVersionedState::deserialize(from_account.data.as_ref())?;
+
+        // Determine signer based on state
+        let signer: Pubkey;
+
+        match &current_state {
+            NonceVersionedState::Uninitialized { .. } => {
+                // For uninitialized accounts, just check balance
+                if requested_lamports > from_account.meta.lamports {
+                    return Err(format!(
+                        "Withdraw nonce account: insufficient lamports {}, need {}",
+                        from_account.meta.lamports, requested_lamports
+                    ));
+                }
+                signer = from_pubkey;
+            }
+            NonceVersionedState::Initialized {
+                authority,
+                durable_nonce,
+                ..
+            } => {
+                if requested_lamports == from_account.meta.lamports {
+                    // Closing the account — must verify nonce can advance
+                    let snapshot = context
+                        .sysvar_snapshot
+                        .as_ref()
+                        .ok_or("Withdraw nonce account: sysvar snapshot required")?;
+
+                    let next_durable_nonce = derive_durable_nonce(&snapshot.recent_blockhash);
+
+                    if *durable_nonce == next_durable_nonce {
+                        return Err(SystemProgramError::NonceBlockhashNotExpired.to_string());
+                    }
+
+                    // Reset to uninitialized state
+                    let new_state = NonceVersionedState::Uninitialized {
+                        version: NONCE_VERSION_CURRENT,
+                    };
+                    let serialized = new_state.serialize();
+                    from_account.data = AccountData::new(serialized.to_vec());
+                } else {
+                    // Partial withdrawal — must maintain rent exemption
+                    let snapshot = context
+                        .sysvar_snapshot
+                        .as_ref()
+                        .ok_or("Withdraw nonce account: sysvar snapshot required")?;
+
+                    let min_balance = rent_exempt_minimum(
+                        snapshot.lamports_per_byte_year,
+                        snapshot.exemption_threshold,
+                        from_account.data.as_ref().len(),
+                    );
+                    let required = requested_lamports
+                        .checked_add(min_balance)
+                        .ok_or("Withdraw nonce account: overflow computing required balance")?;
+
+                    if required > from_account.meta.lamports {
+                        return Err(format!(
+                            "Withdraw nonce account: insufficient lamports {}, need {}",
+                            from_account.meta.lamports, required
+                        ));
+                    }
+                }
+                signer = *authority;
+            }
         }
 
-        // In real implementation, would:
-        // 1. Deserialize nonce state
-        // 2. Verify authority signature
-        // 3. Check if withdrawing all lamports (closes account)
-        // 4. Validate rent exemption if partial withdrawal
+        // Verify signer
+        let signer_present = context.accounts.iter().any(|(pk, _, _)| *pk == signer);
+        if !signer_present {
+            return Err("Withdraw nonce account: required signer missing".to_string());
+        }
 
-        from_account.meta.lamports = from_account.meta.lamports.saturating_sub(lamports);
-        to_account.meta.lamports = to_account.meta.lamports.saturating_add(lamports);
+        from_account.meta.lamports = from_account.meta.lamports.saturating_sub(requested_lamports);
+        to_account.meta.lamports = to_account.meta.lamports.saturating_add(requested_lamports);
 
         modified_accounts.insert(from_pubkey, from_account);
         modified_accounts.insert(to_pubkey, to_account);
-        logs.push(format!("Withdrew {} lamports from nonce account", lamports));
+        logs.push(format!(
+            "Withdrew {} lamports from nonce account",
+            requested_lamports
+        ));
 
         Ok(())
     }
@@ -529,17 +784,43 @@ impl SystemProgramExecutor {
                 .map_err(|_| "Failed to parse new authority")?,
         );
 
-        let (account_pubkey, account, writable) = context.accounts[0].clone();
+        let (account_pubkey, mut account, writable) = context.accounts[0].clone();
 
         if !writable {
-            return Err("AuthorizeNonceAccount requires writable account".to_string());
+            return Err("Authorize nonce account: account must be writable".to_string());
         }
 
-        // In real implementation, would:
-        // 1. Deserialize nonce state
-        // 2. Verify current authority signature
-        // 3. Change authority with NonceAccount::authorize()
-        // 4. Serialize updated nonce state
+        // Deserialize current state
+        let current_state = NonceVersionedState::deserialize(account.data.as_ref())?;
+
+        match &current_state {
+            NonceVersionedState::Initialized {
+                version,
+                authority,
+                durable_nonce,
+                lamports_per_signature,
+            } => {
+                // Verify current authority is a signer
+                let authority_is_signer =
+                    context.accounts.iter().any(|(pk, _, _)| pk == authority);
+                if !authority_is_signer {
+                    return Err("Authorize nonce account: authority must sign".to_string());
+                }
+
+                // Update authority, preserving version
+                let new_state = NonceVersionedState::Initialized {
+                    version: *version,
+                    authority: new_authority,
+                    durable_nonce: *durable_nonce,
+                    lamports_per_signature: *lamports_per_signature,
+                };
+                let serialized = new_state.serialize();
+                account.data = AccountData::new(serialized.to_vec());
+            }
+            NonceVersionedState::Uninitialized { .. } => {
+                return Err("Authorize nonce account: account state is invalid".to_string());
+            }
+        }
 
         modified_accounts.insert(account_pubkey, account);
         logs.push(format!(
@@ -916,11 +1197,51 @@ impl SystemProgramExecutor {
             return Err("UpgradeNonceAccount requires at least 1 account".to_string());
         }
 
-        let (account_pubkey, account, _) = &context.accounts[0];
+        let (account_pubkey, mut account, writable) = context.accounts[0].clone();
 
-        // In real implementation, would upgrade nonce account format
-        // For now, just log
-        modified_accounts.insert(*account_pubkey, account.clone());
+        // Must be owned by system program
+        if account.meta.owner != SYSTEM_PROGRAM_ID {
+            return Err("Upgrade nonce account: invalid account owner".to_string());
+        }
+
+        if !writable {
+            return Err("Upgrade nonce account: account must be writable".to_string());
+        }
+
+        // Deserialize current state
+        let current_state = NonceVersionedState::deserialize(account.data.as_ref())?;
+
+        // Must be legacy version and initialized
+        match &current_state {
+            NonceVersionedState::Initialized {
+                version,
+                authority,
+                durable_nonce,
+                lamports_per_signature,
+            } => {
+                if *version != NONCE_VERSION_LEGACY {
+                    return Err("Upgrade nonce account: not a legacy account".to_string());
+                }
+
+                // Re-derive durable nonce through itself (legacy → current conversion)
+                let upgraded_nonce = derive_durable_nonce(durable_nonce);
+
+                // Write as current version
+                let new_state = NonceVersionedState::Initialized {
+                    version: NONCE_VERSION_CURRENT,
+                    authority: *authority,
+                    durable_nonce: upgraded_nonce,
+                    lamports_per_signature: *lamports_per_signature,
+                };
+                let serialized = new_state.serialize();
+                account.data = AccountData::new(serialized.to_vec());
+            }
+            _ => {
+                return Err("Upgrade nonce account: account state is invalid".to_string());
+            }
+        }
+
+        modified_accounts.insert(account_pubkey, account);
         logs.push(format!("Upgraded nonce account {}", account_pubkey));
 
         Ok(())
@@ -1110,131 +1431,553 @@ mod tests {
         assert!(result.unwrap_err().contains("already"));
     }
 
-    #[test]
-    fn system_initialize_nonce_account() {
-        let executor = SystemProgramExecutor::new(150);
+    // -----------------------------------------------------------------------
+    // Nonce test helpers
+    // -----------------------------------------------------------------------
 
-        let account = Account {
+    fn make_sysvar_snapshot() -> crate::SysvarSnapshot {
+        crate::SysvarSnapshot {
+            slot: 100,
+            recent_blockhash: [0xAA; 32],
+            lamports_per_signature: 5000,
+            lamports_per_byte_year: 3480,
+            exemption_threshold: 2.0,
+            ..Default::default()
+        }
+    }
+
+    /// Create an uninitialized nonce account (80 bytes of zeros).
+    fn make_uninitialized_nonce_account(lamports: u64) -> Account {
+        Account {
             meta: AccountMeta {
-                lamports: 10_000,
+                lamports,
                 owner: SYSTEM_PROGRAM_ID,
                 executable: false,
                 rent_epoch: 0,
             },
-            data: AccountData::with_capacity(NONCE_ACCOUNT_SIZE),
-        };
+            data: AccountData::new(vec![0u8; NONCE_ACCOUNT_SIZE]),
+        }
+    }
 
+    /// Create an initialized nonce account with the given authority and nonce.
+    fn make_initialized_nonce_account(
+        lamports: u64,
+        authority: &Pubkey,
+        durable_nonce: &[u8; 32],
+        lps: u64,
+    ) -> Account {
+        let state = NonceVersionedState::Initialized {
+            version: NONCE_VERSION_CURRENT,
+            authority: *authority,
+            durable_nonce: *durable_nonce,
+            lamports_per_signature: lps,
+        };
+        Account {
+            meta: AccountMeta {
+                lamports,
+                owner: SYSTEM_PROGRAM_ID,
+                executable: false,
+                rent_epoch: 0,
+            },
+            data: AccountData::new(state.serialize().to_vec()),
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Nonce state serialization
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn nonce_state_round_trip_uninitialized() {
+        let state = NonceVersionedState::Uninitialized {
+            version: NONCE_VERSION_CURRENT,
+        };
+        let data = state.serialize();
+        assert_eq!(data.len(), NONCE_ACCOUNT_SIZE);
+        let decoded = NonceVersionedState::deserialize(&data).unwrap();
+        assert_eq!(decoded, state);
+    }
+
+    #[test]
+    fn nonce_state_round_trip_initialized() {
         let authority = Pubkey::new_unique();
-        let mut instruction_data = vec![6, 0, 0, 0]; // InitializeNonceAccount
+        let nonce = [0xBB; 32];
+        let state = NonceVersionedState::Initialized {
+            version: NONCE_VERSION_CURRENT,
+            authority,
+            durable_nonce: nonce,
+            lamports_per_signature: 5000,
+        };
+        let data = state.serialize();
+        assert_eq!(data.len(), NONCE_ACCOUNT_SIZE);
+        let decoded = NonceVersionedState::deserialize(&data).unwrap();
+        assert_eq!(decoded, state);
+    }
+
+    #[test]
+    fn nonce_state_round_trip_legacy() {
+        let authority = Pubkey::new_unique();
+        let nonce = [0xCC; 32];
+        let state = NonceVersionedState::Initialized {
+            version: NONCE_VERSION_LEGACY,
+            authority,
+            durable_nonce: nonce,
+            lamports_per_signature: 3000,
+        };
+        let data = state.serialize();
+        let decoded = NonceVersionedState::deserialize(&data).unwrap();
+        assert!(decoded.is_legacy());
+        assert_eq!(decoded, state);
+    }
+
+    #[test]
+    fn durable_nonce_derivation_deterministic() {
+        let blockhash = [0xAA; 32];
+        let nonce1 = derive_durable_nonce(&blockhash);
+        let nonce2 = derive_durable_nonce(&blockhash);
+        assert_eq!(nonce1, nonce2);
+        // Different blockhash gives different nonce
+        let nonce3 = derive_durable_nonce(&[0xBB; 32]);
+        assert_ne!(nonce1, nonce3);
+    }
+
+    // -----------------------------------------------------------------------
+    // InitializeNonceAccount
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn system_initialize_nonce_account() {
+        let executor = SystemProgramExecutor::new(150);
+        let authority = Pubkey::new_unique();
+
+        let account = make_uninitialized_nonce_account(2_000_000);
+
+        let mut instruction_data = vec![6, 0, 0, 0];
         instruction_data.extend_from_slice(authority.as_bytes());
 
-        let context = ExecutionContext::new(
+        let mut context = ExecutionContext::new(
             SYSTEM_PROGRAM_ID,
             vec![(Pubkey::new_unique(), account, true)],
             instruction_data,
         );
+        context.sysvar_snapshot = Some(make_sysvar_snapshot());
 
         let outcome = executor.execute(&context).unwrap();
         assert!(outcome.success);
         assert_eq!(outcome.modified_accounts.len(), 1);
-        assert!(outcome.logs.iter().any(|log| log.contains("authority")));
+
+        // Verify the serialized state
+        let (_, modified) = outcome.modified_accounts.iter().next().unwrap();
+        let state = NonceVersionedState::deserialize(modified.data.as_ref()).unwrap();
+        match state {
+            NonceVersionedState::Initialized {
+                version,
+                authority: stored_auth,
+                durable_nonce,
+                lamports_per_signature,
+            } => {
+                assert_eq!(version, NONCE_VERSION_CURRENT);
+                assert_eq!(stored_auth, authority);
+                assert_eq!(durable_nonce, derive_durable_nonce(&[0xAA; 32]));
+                assert_eq!(lamports_per_signature, 5000);
+            }
+            _ => panic!("Expected initialized state"),
+        }
     }
+
+    #[test]
+    fn system_initialize_nonce_rejects_already_initialized() {
+        let executor = SystemProgramExecutor::new(150);
+        let authority = Pubkey::new_unique();
+        let nonce = [0xDD; 32];
+
+        let account = make_initialized_nonce_account(1_000_000, &authority, &nonce, 5000);
+
+        let mut instruction_data = vec![6, 0, 0, 0];
+        instruction_data.extend_from_slice(authority.as_bytes());
+
+        let mut context = ExecutionContext::new(
+            SYSTEM_PROGRAM_ID,
+            vec![(Pubkey::new_unique(), account, true)],
+            instruction_data,
+        );
+        context.sysvar_snapshot = Some(make_sysvar_snapshot());
+
+        let result = executor.execute(&context);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("state is invalid"));
+    }
+
+    #[test]
+    fn system_initialize_nonce_rejects_no_blockhash() {
+        let executor = SystemProgramExecutor::new(150);
+        let authority = Pubkey::new_unique();
+
+        let account = make_uninitialized_nonce_account(1_000_000);
+
+        let mut instruction_data = vec![6, 0, 0, 0];
+        instruction_data.extend_from_slice(authority.as_bytes());
+
+        let mut context = ExecutionContext::new(
+            SYSTEM_PROGRAM_ID,
+            vec![(Pubkey::new_unique(), account, true)],
+            instruction_data,
+        );
+        // Zero blockhash = no recent blockhashes
+        context.sysvar_snapshot = Some(crate::SysvarSnapshot::default());
+
+        let result = executor.execute(&context);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("no recent blockhashes"));
+    }
+
+    // -----------------------------------------------------------------------
+    // AdvanceNonceAccount
+    // -----------------------------------------------------------------------
 
     #[test]
     fn system_advance_nonce_account() {
         let executor = SystemProgramExecutor::new(150);
+        let authority = Pubkey::new_unique();
+        let old_nonce = [0x11; 32];
 
-        let account = Account {
-            meta: AccountMeta {
-                lamports: 10_000,
-                owner: SYSTEM_PROGRAM_ID,
-                executable: false,
-                rent_epoch: 0,
-            },
-            data: AccountData::with_capacity(NONCE_ACCOUNT_SIZE),
-        };
+        let account_pubkey = Pubkey::new_unique();
+        let account = make_initialized_nonce_account(1_000_000, &authority, &old_nonce, 5000);
 
-        let instruction_data = vec![4, 0, 0, 0]; // AdvanceNonceAccount
+        let instruction_data = vec![4, 0, 0, 0];
 
-        let context = ExecutionContext::new(
+        let mut context = ExecutionContext::new(
+            SYSTEM_PROGRAM_ID,
+            vec![
+                (account_pubkey, account, true),
+                (authority, make_uninitialized_nonce_account(0), false), // authority as signer
+            ],
+            instruction_data,
+        );
+        context.sysvar_snapshot = Some(make_sysvar_snapshot());
+
+        let outcome = executor.execute(&context).unwrap();
+        assert!(outcome.success);
+
+        let modified = &outcome.modified_accounts[&account_pubkey];
+        let state = NonceVersionedState::deserialize(modified.data.as_ref()).unwrap();
+        match state {
+            NonceVersionedState::Initialized {
+                durable_nonce, ..
+            } => {
+                assert_ne!(durable_nonce, old_nonce);
+                assert_eq!(durable_nonce, derive_durable_nonce(&[0xAA; 32]));
+            }
+            _ => panic!("Expected initialized state"),
+        }
+    }
+
+    #[test]
+    fn system_advance_nonce_rejects_uninitialized() {
+        let executor = SystemProgramExecutor::new(150);
+
+        let account = make_uninitialized_nonce_account(1_000_000);
+
+        let instruction_data = vec![4, 0, 0, 0];
+
+        let mut context = ExecutionContext::new(
             SYSTEM_PROGRAM_ID,
             vec![(Pubkey::new_unique(), account, true)],
             instruction_data,
         );
+        context.sysvar_snapshot = Some(make_sysvar_snapshot());
 
-        let outcome = executor.execute(&context).unwrap();
-        assert!(outcome.success);
-        assert_eq!(outcome.modified_accounts.len(), 1);
+        let result = executor.execute(&context);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("state is invalid"));
     }
+
+    #[test]
+    fn system_advance_nonce_rejects_same_blockhash() {
+        let executor = SystemProgramExecutor::new(150);
+        let authority = Pubkey::new_unique();
+
+        // Create nonce that already matches the durable nonce derived from current blockhash
+        let current_durable = derive_durable_nonce(&[0xAA; 32]);
+        let account_pubkey = Pubkey::new_unique();
+        let account =
+            make_initialized_nonce_account(1_000_000, &authority, &current_durable, 5000);
+
+        let instruction_data = vec![4, 0, 0, 0];
+
+        let mut context = ExecutionContext::new(
+            SYSTEM_PROGRAM_ID,
+            vec![
+                (account_pubkey, account, true),
+                (authority, make_uninitialized_nonce_account(0), false),
+            ],
+            instruction_data,
+        );
+        context.sysvar_snapshot = Some(make_sysvar_snapshot());
+
+        let result = executor.execute(&context);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("blockhash not expired"));
+    }
+
+    // -----------------------------------------------------------------------
+    // WithdrawNonceAccount
+    // -----------------------------------------------------------------------
 
     #[test]
     fn system_withdraw_nonce_account() {
         let executor = SystemProgramExecutor::new(150);
+        let authority = Pubkey::new_unique();
+        let nonce = [0x33; 32];
 
-        let from_account = Account {
-            meta: AccountMeta {
-                lamports: 10_000,
-                owner: SYSTEM_PROGRAM_ID,
-                executable: false,
-                rent_epoch: 0,
-            },
-            data: AccountData::with_capacity(NONCE_ACCOUNT_SIZE),
-        };
+        let nonce_pubkey = Pubkey::new_unique();
+        let from_account = make_initialized_nonce_account(5_000_000, &authority, &nonce, 5000);
 
-        let to_account = Account {
-            meta: AccountMeta {
-                lamports: 0,
-                owner: SYSTEM_PROGRAM_ID,
-                executable: false,
-                rent_epoch: 0,
-            },
-            data: AccountData::empty(),
-        };
+        let to_pubkey = Pubkey::new_unique();
+        let to_account = Account::zeroed();
 
-        let mut instruction_data = vec![5, 0, 0, 0]; // WithdrawNonceAccount
-        instruction_data.extend_from_slice(&5_000u64.to_le_bytes());
+        let mut instruction_data = vec![5, 0, 0, 0];
+        instruction_data.extend_from_slice(&100_000u64.to_le_bytes());
+
+        let mut context = ExecutionContext::new(
+            SYSTEM_PROGRAM_ID,
+            vec![
+                (nonce_pubkey, from_account, true),
+                (to_pubkey, to_account, true),
+                (authority, make_uninitialized_nonce_account(0), false), // authority as signer
+            ],
+            instruction_data,
+        );
+        context.sysvar_snapshot = Some(make_sysvar_snapshot());
+
+        let outcome = executor.execute(&context).unwrap();
+        assert!(outcome.success);
+        assert_eq!(outcome.modified_accounts.len(), 2);
+
+        let from_modified = &outcome.modified_accounts[&nonce_pubkey];
+        assert_eq!(from_modified.meta.lamports, 4_900_000);
+
+        let to_modified = &outcome.modified_accounts[&to_pubkey];
+        assert_eq!(to_modified.meta.lamports, 100_000);
+    }
+
+    #[test]
+    fn system_withdraw_nonce_close_account() {
+        let executor = SystemProgramExecutor::new(150);
+        let authority = Pubkey::new_unique();
+        let nonce = [0x33; 32]; // different from derived nonce
+
+        let nonce_pubkey = Pubkey::new_unique();
+        let from_account = make_initialized_nonce_account(1_000_000, &authority, &nonce, 5000);
+
+        let to_pubkey = Pubkey::new_unique();
+        let to_account = Account::zeroed();
+
+        // Withdraw ALL lamports — closes the account
+        let mut instruction_data = vec![5, 0, 0, 0];
+        instruction_data.extend_from_slice(&1_000_000u64.to_le_bytes());
+
+        let mut context = ExecutionContext::new(
+            SYSTEM_PROGRAM_ID,
+            vec![
+                (nonce_pubkey, from_account, true),
+                (to_pubkey, to_account, true),
+                (authority, make_uninitialized_nonce_account(0), false),
+            ],
+            instruction_data,
+        );
+        context.sysvar_snapshot = Some(make_sysvar_snapshot());
+
+        let outcome = executor.execute(&context).unwrap();
+        assert!(outcome.success);
+
+        // Account should be reset to uninitialized
+        let from_modified = &outcome.modified_accounts[&nonce_pubkey];
+        assert_eq!(from_modified.meta.lamports, 0);
+        let state = NonceVersionedState::deserialize(from_modified.data.as_ref()).unwrap();
+        assert!(!state.is_initialized());
+    }
+
+    #[test]
+    fn system_withdraw_nonce_insufficient_for_rent() {
+        let executor = SystemProgramExecutor::new(150);
+        let authority = Pubkey::new_unique();
+        let nonce = [0x33; 32];
+
+        let nonce_pubkey = Pubkey::new_unique();
+        // Only 2000 lamports — not enough for rent + withdrawal
+        let from_account = make_initialized_nonce_account(2_000, &authority, &nonce, 5000);
+
+        let to_pubkey = Pubkey::new_unique();
+        let to_account = Account::zeroed();
+
+        // Try to withdraw 1500 — would leave less than rent exempt
+        let mut instruction_data = vec![5, 0, 0, 0];
+        instruction_data.extend_from_slice(&1_500u64.to_le_bytes());
+
+        let mut context = ExecutionContext::new(
+            SYSTEM_PROGRAM_ID,
+            vec![
+                (nonce_pubkey, from_account, true),
+                (to_pubkey, to_account, true),
+                (authority, make_uninitialized_nonce_account(0), false),
+            ],
+            instruction_data,
+        );
+        context.sysvar_snapshot = Some(make_sysvar_snapshot());
+
+        let result = executor.execute(&context);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("insufficient lamports"));
+    }
+
+    // -----------------------------------------------------------------------
+    // AuthorizeNonceAccount
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn system_authorize_nonce_account() {
+        let executor = SystemProgramExecutor::new(150);
+        let authority = Pubkey::new_unique();
+        let nonce = [0x44; 32];
+
+        let account_pubkey = Pubkey::new_unique();
+        let account = make_initialized_nonce_account(1_000_000, &authority, &nonce, 5000);
+
+        let new_authority = Pubkey::new_unique();
+        let mut instruction_data = vec![7, 0, 0, 0];
+        instruction_data.extend_from_slice(new_authority.as_bytes());
 
         let context = ExecutionContext::new(
             SYSTEM_PROGRAM_ID,
             vec![
-                (Pubkey::new_unique(), from_account, true),
-                (Pubkey::new_unique(), to_account, true),
+                (account_pubkey, account, true),
+                (authority, make_uninitialized_nonce_account(0), false), // authority as signer
             ],
             instruction_data,
         );
 
         let outcome = executor.execute(&context).unwrap();
         assert!(outcome.success);
-        assert_eq!(outcome.modified_accounts.len(), 2);
+
+        let modified = &outcome.modified_accounts[&account_pubkey];
+        let state = NonceVersionedState::deserialize(modified.data.as_ref()).unwrap();
+        match state {
+            NonceVersionedState::Initialized {
+                authority: stored_auth,
+                ..
+            } => {
+                assert_eq!(stored_auth, new_authority);
+            }
+            _ => panic!("Expected initialized state"),
+        }
     }
 
     #[test]
-    fn system_authorize_nonce_account() {
+    fn system_authorize_nonce_rejects_wrong_signer() {
         let executor = SystemProgramExecutor::new(150);
+        let authority = Pubkey::new_unique();
+        let wrong_signer = Pubkey::new_unique();
+        let nonce = [0x44; 32];
 
+        let account_pubkey = Pubkey::new_unique();
+        let account = make_initialized_nonce_account(1_000_000, &authority, &nonce, 5000);
+
+        let new_authority = Pubkey::new_unique();
+        let mut instruction_data = vec![7, 0, 0, 0];
+        instruction_data.extend_from_slice(new_authority.as_bytes());
+
+        // Pass wrong_signer, not the actual authority
+        let context = ExecutionContext::new(
+            SYSTEM_PROGRAM_ID,
+            vec![
+                (account_pubkey, account, true),
+                (wrong_signer, make_uninitialized_nonce_account(0), false),
+            ],
+            instruction_data,
+        );
+
+        let result = executor.execute(&context);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("authority must sign"));
+    }
+
+    // -----------------------------------------------------------------------
+    // UpgradeNonceAccount
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn system_upgrade_nonce_account() {
+        let executor = SystemProgramExecutor::new(150);
+        let authority = Pubkey::new_unique();
+        let old_nonce = [0x55; 32];
+
+        // Create a LEGACY initialized account
+        let legacy_state = NonceVersionedState::Initialized {
+            version: NONCE_VERSION_LEGACY,
+            authority,
+            durable_nonce: old_nonce,
+            lamports_per_signature: 5000,
+        };
+        let account_pubkey = Pubkey::new_unique();
         let account = Account {
             meta: AccountMeta {
-                lamports: 10_000,
+                lamports: 1_000_000,
                 owner: SYSTEM_PROGRAM_ID,
                 executable: false,
                 rent_epoch: 0,
             },
-            data: AccountData::with_capacity(NONCE_ACCOUNT_SIZE),
+            data: AccountData::new(legacy_state.serialize().to_vec()),
         };
 
-        let new_authority = Pubkey::new_unique();
-        let mut instruction_data = vec![7, 0, 0, 0]; // AuthorizeNonceAccount
-        instruction_data.extend_from_slice(new_authority.as_bytes());
+        let instruction_data = vec![12, 0, 0, 0]; // UpgradeNonceAccount
 
         let context = ExecutionContext::new(
             SYSTEM_PROGRAM_ID,
-            vec![(Pubkey::new_unique(), account, true)],
+            vec![(account_pubkey, account, true)],
             instruction_data,
         );
 
         let outcome = executor.execute(&context).unwrap();
         assert!(outcome.success);
-        assert_eq!(outcome.modified_accounts.len(), 1);
-        assert!(outcome.logs.iter().any(|log| log.contains("authority")));
+
+        let modified = &outcome.modified_accounts[&account_pubkey];
+        let state = NonceVersionedState::deserialize(modified.data.as_ref()).unwrap();
+        match state {
+            NonceVersionedState::Initialized {
+                version,
+                durable_nonce,
+                ..
+            } => {
+                assert_eq!(version, NONCE_VERSION_CURRENT);
+                // Nonce was re-derived through itself
+                assert_eq!(durable_nonce, derive_durable_nonce(&old_nonce));
+                assert_ne!(durable_nonce, old_nonce);
+            }
+            _ => panic!("Expected initialized state"),
+        }
+    }
+
+    #[test]
+    fn system_upgrade_nonce_rejects_already_current() {
+        let executor = SystemProgramExecutor::new(150);
+        let authority = Pubkey::new_unique();
+        let nonce = [0x55; 32];
+
+        // Already current version
+        let account_pubkey = Pubkey::new_unique();
+        let account = make_initialized_nonce_account(1_000_000, &authority, &nonce, 5000);
+
+        let instruction_data = vec![12, 0, 0, 0];
+
+        let context = ExecutionContext::new(
+            SYSTEM_PROGRAM_ID,
+            vec![(account_pubkey, account, true)],
+            instruction_data,
+        );
+
+        let result = executor.execute(&context);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("not a legacy account"));
     }
 }

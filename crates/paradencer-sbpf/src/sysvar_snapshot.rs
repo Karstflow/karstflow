@@ -26,6 +26,10 @@ pub struct SysvarSnapshot {
     pub burn_percent: u8,
     // LastRestartSlot
     pub last_restart_slot: u64,
+    // RecentBlockhashes — most recent blockhash for nonce derivation
+    pub recent_blockhash: [u8; 32],
+    /// Lamports per signature from the most recent blockhash entry.
+    pub lamports_per_signature: u64,
 }
 
 impl Default for SysvarSnapshot {
@@ -45,6 +49,8 @@ impl Default for SysvarSnapshot {
             exemption_threshold: 0.0,
             burn_percent: 0,
             last_restart_slot: 0,
+            recent_blockhash: [0u8; 32],
+            lamports_per_signature: 0,
         }
     }
 }
@@ -70,6 +76,8 @@ mod tests {
         assert_eq!(snap.exemption_threshold, 0.0);
         assert_eq!(snap.burn_percent, 0);
         assert_eq!(snap.last_restart_slot, 0);
+        assert_eq!(snap.recent_blockhash, [0u8; 32]);
+        assert_eq!(snap.lamports_per_signature, 0);
     }
 
     #[test]
@@ -89,6 +97,8 @@ mod tests {
             exemption_threshold: 2.0,
             burn_percent: 50,
             last_restart_slot: 100,
+            recent_blockhash: [0xAB; 32],
+            lamports_per_signature: 5000,
         };
         assert_eq!(snap.slot, 12345);
         assert_eq!(snap.epoch, 7);
@@ -103,5 +113,7 @@ mod tests {
         assert_eq!(snap.exemption_threshold, 2.0);
         assert_eq!(snap.burn_percent, 50);
         assert_eq!(snap.last_restart_slot, 100);
+        assert_eq!(snap.recent_blockhash, [0xAB; 32]);
+        assert_eq!(snap.lamports_per_signature, 5000);
     }
 }
