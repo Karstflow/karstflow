@@ -7,20 +7,10 @@
 /// - Validator performance (vote credits earned)
 /// - Stake weight (amount delegated to validator)
 use crate::Inflation;
-
-/// Lamports per SOL constant.
-pub const LAMPORTS_PER_SOL: u64 = 1_000_000_000;
-
-/// Number of blocks used for reward calculation and vote account updates.
-/// Stake account distribution begins after this many blocks.
-pub const REWARD_CALCULATION_NUM_BLOCKS: u64 = 1;
-
-/// Number of stake accounts to store per block during partitioned distribution.
-/// Target: 64 rewards per entry/tick, with minimum 64 entries per block = 4096 total.
-pub const STAKE_ACCOUNTS_PER_BLOCK: usize = 4096;
-
-/// Maximum factor of reward blocks relative to epoch length.
-pub const MAX_REWARD_BLOCKS_FACTOR: u64 = 10;
+use paradencer_constants::economics::{
+    LAMPORTS_PER_SOL, MAX_REWARD_BLOCKS_FACTOR, REWARD_CALCULATION_NUM_BLOCKS,
+    STAKE_ACCOUNTS_PER_BLOCK,
+};
 
 /// Calculates total validator rewards for an epoch.
 ///

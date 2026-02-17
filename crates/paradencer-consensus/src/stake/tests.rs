@@ -472,13 +472,34 @@ fn warmup_cooldown_returns_new_rate_after_activation() {
 
 // -- Rewards tests --
 
+fn make_epoch_credits(credits: u64, prev_credits: u64, epoch: u64) -> Vec<EpochCreditEntry> {
+    vec![EpochCreditEntry {
+        epoch,
+        credits,
+        prev_credits,
+    }]
+}
+
+fn identity_stake(amount: u64) -> impl Fn(u64) -> u64 {
+    move |_epoch| amount
+}
+
 #[test]
 fn rewards_returns_none_for_zero_credits() {
     let delegation = Delegation::new(Pubkey::new_unique(), 1_000_000, 0);
     let stake = StakeAccount::new(delegation, 100);
 
-    // Current credits == observed credits -> no new credits
-    let result = rewards::calculate_stake_rewards(&stake, 100, 0, 10, 1_000_000, 1000);
+    // Credits == observed credits -> no new credits -> None (no reward)
+    let credits = make_epoch_credits(100, 0, 1);
+    let result = rewards::calculate_stake_rewards(
+        &stake,
+        &credits,
+        10,
+        1,
+        1_000_000,
+        1000,
+        identity_stake(1_000_000),
+    );
     assert!(result.is_none());
 }
 
@@ -487,7 +508,16 @@ fn rewards_calculates_proportional_reward() {
     let delegation = Delegation::new(Pubkey::new_unique(), 1_000_000, 0);
     let stake = StakeAccount::new(delegation, 0);
 
-    let result = rewards::calculate_stake_rewards(&stake, 100, 0, 10, 1_000_000, 100_000_000);
+    let credits = make_epoch_credits(100, 0, 1);
+    let result = rewards::calculate_stake_rewards(
+        &stake,
+        &credits,
+        10,
+        1,
+        1_000_000,
+        100_000_000,
+        identity_stake(1_000_000),
+    );
     assert!(result.is_some());
 
     let result = result.unwrap();
@@ -495,9 +525,9 @@ fn rewards_calculates_proportional_reward() {
     assert!(result.voter_reward > 0);
     assert_eq!(result.new_credits_observed, 100);
 
-    // Voter gets 10% commission
+    // Voter gets 10% commission via u128 arithmetic
     let total = result.staker_reward + result.voter_reward;
-    let expected_voter = (total as f64 * 0.10) as u64;
+    let expected_voter = (total as u128 * 10 / 100) as u64;
     assert!(
         (result.voter_reward as i64 - expected_voter as i64).unsigned_abs() <= 1,
         "voter_reward={} expected={}",
@@ -511,7 +541,16 @@ fn rewards_zero_commission_gives_all_to_staker() {
     let delegation = Delegation::new(Pubkey::new_unique(), 1_000_000, 0);
     let stake = StakeAccount::new(delegation, 0);
 
-    let result = rewards::calculate_stake_rewards(&stake, 100, 0, 0, 1_000_000, 100_000_000);
+    let credits = make_epoch_credits(100, 0, 1);
+    let result = rewards::calculate_stake_rewards(
+        &stake,
+        &credits,
+        0,
+        1,
+        1_000_000,
+        100_000_000,
+        identity_stake(1_000_000),
+    );
     let result = result.unwrap();
     assert_eq!(result.voter_reward, 0);
     assert!(result.staker_reward > 0);
@@ -522,8 +561,246 @@ fn rewards_returns_none_for_zero_total_points() {
     let delegation = Delegation::new(Pubkey::new_unique(), 1_000_000, 0);
     let stake = StakeAccount::new(delegation, 0);
 
-    let result = rewards::calculate_stake_rewards(&stake, 100, 0, 10, 1_000_000, 0);
+    let credits = make_epoch_credits(100, 0, 1);
+    let result = rewards::calculate_stake_rewards(
+        &stake,
+        &credits,
+        10,
+        1,
+        1_000_000,
+        0,
+        identity_stake(1_000_000),
+    );
     assert!(result.is_none());
+}
+
+// -- Commission split tests --
+
+#[test]
+fn commission_split_zero_percent() {
+    let split = rewards::split_commission(10_000, 0);
+    assert_eq!(split.voter_portion, 0);
+    assert_eq!(split.staker_portion, 10_000);
+    assert!(!split.is_split);
+}
+
+#[test]
+fn commission_split_100_percent() {
+    let split = rewards::split_commission(10_000, 100);
+    assert_eq!(split.voter_portion, 10_000);
+    assert_eq!(split.staker_portion, 0);
+    assert!(!split.is_split);
+}
+
+#[test]
+fn commission_split_symmetric_u128_arithmetic() {
+    // 33% commission on 100 lamports:
+    // voter = 100 * 33 / 100 = 33
+    // staker = 100 * 67 / 100 = 67
+    // Total = 100 (no dust in this case)
+    let split = rewards::split_commission(100, 33);
+    assert_eq!(split.voter_portion, 33);
+    assert_eq!(split.staker_portion, 67);
+    assert!(split.is_split);
+}
+
+#[test]
+fn commission_split_discards_fractional_from_both_sides() {
+    // 33% commission on 10 lamports:
+    // voter = 10 * 33 / 100 = 3 (3.3 truncated)
+    // staker = 10 * 67 / 100 = 6 (6.7 truncated)
+    // Total = 9 (1 lamport "dust" discarded)
+    let split = rewards::split_commission(10, 33);
+    assert_eq!(split.voter_portion, 3);
+    assert_eq!(split.staker_portion, 6);
+    assert!(split.is_split);
+    // Dust: 10 - 3 - 6 = 1
+    assert_eq!(10 - split.voter_portion - split.staker_portion, 1);
+}
+
+#[test]
+fn commission_split_clamps_above_100() {
+    // Commission > 100 is treated as 100
+    let split = rewards::split_commission(10_000, 150);
+    assert_eq!(split.voter_portion, 10_000);
+    assert_eq!(split.staker_portion, 0);
+    assert!(!split.is_split);
+}
+
+// -- Points calculation tests --
+
+#[test]
+fn points_calculation_empty_credits() {
+    let delegation = Delegation::new(Pubkey::new_unique(), 1_000, 0);
+    let stake = StakeAccount::new(delegation, 0);
+
+    let calc = rewards::calculate_points_and_credits(&stake, &[], identity_stake(1_000));
+    assert_eq!(calc.points, 0);
+    assert_eq!(calc.new_credits_observed, 0);
+    assert!(!calc.force_credits_update_with_skipped_reward);
+}
+
+#[test]
+fn points_calculation_vote_credits_less_than_stake() {
+    let delegation = Delegation::new(Pubkey::new_unique(), 1_000, 0);
+    let stake = StakeAccount::new(delegation, 100);
+
+    // Vote account has only 50 credits but stake expects 100
+    let credits = make_epoch_credits(50, 0, 1);
+    let calc = rewards::calculate_points_and_credits(&stake, &credits, identity_stake(1_000));
+
+    assert_eq!(calc.points, 0);
+    assert_eq!(calc.new_credits_observed, 50);
+    assert!(calc.force_credits_update_with_skipped_reward);
+}
+
+#[test]
+fn points_calculation_multi_epoch_credits() {
+    let delegation = Delegation::new(Pubkey::new_unique(), 1_000, 0);
+    let stake = StakeAccount::new(delegation, 0);
+
+    let credits = vec![
+        EpochCreditEntry {
+            epoch: 1,
+            credits: 50,
+            prev_credits: 0,
+        },
+        EpochCreditEntry {
+            epoch: 2,
+            credits: 120,
+            prev_credits: 50,
+        },
+        EpochCreditEntry {
+            epoch: 3,
+            credits: 200,
+            prev_credits: 120,
+        },
+    ];
+
+    let calc = rewards::calculate_points_and_credits(&stake, &credits, identity_stake(1_000));
+
+    // 50 earned in epoch 1 + 70 in epoch 2 + 80 in epoch 3 = 200 total credits
+    // points = 1000 * 200 = 200_000
+    assert_eq!(calc.points, 200_000);
+    assert_eq!(calc.new_credits_observed, 200);
+}
+
+#[test]
+fn points_calculation_partial_epoch_credits() {
+    // Stake observed 30 credits, epoch history starts at 0->50
+    let delegation = Delegation::new(Pubkey::new_unique(), 1_000, 0);
+    let stake = StakeAccount::new(delegation, 30);
+
+    let credits = vec![EpochCreditEntry {
+        epoch: 1,
+        credits: 50,
+        prev_credits: 0,
+    }];
+
+    let calc = rewards::calculate_points_and_credits(&stake, &credits, identity_stake(1_000));
+
+    // credits_in_stake (30) >= initial (0) but < final (50)
+    // earned = final - new_credits_observed = 50 - 30 = 20
+    assert_eq!(calc.points, 20_000);
+    assert_eq!(calc.new_credits_observed, 50);
+}
+
+// -- Full reward calculation tests --
+
+#[test]
+fn rewards_activation_epoch_forces_credits_update() {
+    let delegation = Delegation::new(Pubkey::new_unique(), 1_000_000, 5);
+    let stake = StakeAccount::new(delegation, 0);
+
+    let credits = make_epoch_credits(100, 0, 5);
+    // rewarded_epoch == activation_epoch => force credits update
+    let result = rewards::calculate_stake_rewards(
+        &stake,
+        &credits,
+        10,
+        5, // activation epoch
+        1_000_000,
+        100_000_000,
+        identity_stake(1_000_000),
+    );
+    let result = result.unwrap();
+    assert_eq!(result.staker_reward, 0);
+    assert_eq!(result.voter_reward, 0);
+    assert_eq!(result.new_credits_observed, 100);
+}
+
+#[test]
+fn rewards_zero_total_rewards_forces_credits_update() {
+    let delegation = Delegation::new(Pubkey::new_unique(), 1_000_000, 0);
+    let stake = StakeAccount::new(delegation, 0);
+
+    let credits = make_epoch_credits(100, 0, 1);
+    let result = rewards::calculate_stake_rewards(
+        &stake,
+        &credits,
+        10,
+        1,
+        0, // zero total rewards
+        100_000_000,
+        identity_stake(1_000_000),
+    );
+    let result = result.unwrap();
+    assert_eq!(result.staker_reward, 0);
+    assert_eq!(result.voter_reward, 0);
+    assert_eq!(result.new_credits_observed, 100);
+}
+
+#[test]
+fn rewards_fractional_split_skips_tiny_reward() {
+    // With 1 lamport reward and 50% commission:
+    // voter = 1 * 50 / 100 = 0
+    // staker = 1 * 50 / 100 = 0
+    // is_split=true but both are 0 => skip
+    let delegation = Delegation::new(Pubkey::new_unique(), 1, 0);
+    let stake = StakeAccount::new(delegation, 0);
+
+    let credits = make_epoch_credits(1, 0, 1);
+    // total_points = 1 * 1 = 1, total_rewards = 1 => reward = 1
+    let result = rewards::calculate_stake_rewards(
+        &stake,
+        &credits,
+        50,
+        1,
+        1,
+        1,
+        identity_stake(1),
+    );
+    // With is_split=true and voter_portion=0 or staker_portion=0 => None
+    assert!(result.is_none());
+}
+
+// -- Total points aggregation tests --
+
+#[test]
+fn total_points_aggregates_multiple_stakes() {
+    let d1 = Delegation::new(Pubkey::new_unique(), 1_000, 0);
+    let d2 = Delegation::new(Pubkey::new_unique(), 2_000, 0);
+    let s1 = StakeAccount::new(d1, 0);
+    let s2 = StakeAccount::new(d2, 0);
+
+    let c1 = vec![EpochCreditEntry {
+        epoch: 1,
+        credits: 100,
+        prev_credits: 0,
+    }];
+    let c2 = vec![EpochCreditEntry {
+        epoch: 1,
+        credits: 50,
+        prev_credits: 0,
+    }];
+
+    let stakes = vec![(s1, c1), (s2, c2)];
+    let total = rewards::calculate_total_points(&stakes, |stake, _epoch| {
+        stake.delegation.stake_amount
+    });
+
+    // s1: 1000 * 100 = 100_000, s2: 2000 * 50 = 100_000
+    assert_eq!(total, 200_000);
 }
 
 // -- StakeTracker tests --

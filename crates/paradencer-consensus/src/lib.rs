@@ -65,17 +65,18 @@ pub use rent::{CollectedRent, Rent, RentCollector, RentDue};
 pub use reward_application::{RewardApplicationResult, RewardApplicator};
 pub use rewards::{
     calculate_epoch_rewards, calculate_reward_blocks, calculate_stake_points,
-    calculate_stake_reward, EpochRewards, LAMPORTS_PER_SOL, MAX_REWARD_BLOCKS_FACTOR,
-    REWARD_CALCULATION_NUM_BLOCKS, STAKE_ACCOUNTS_PER_BLOCK,
+    calculate_stake_reward, EpochRewards,
 };
 pub use rewards_calculator::{
     DelegatorReward, EpochRewardsSummary, RewardsCalculator, ValidatorReward, VoteAccountInfo,
 };
 pub use rewards_distribution::{PendingReward, RewardsDistributor};
 pub use stake::{
-    calculate_stake_rewards, deserialize_stake_state, serialize_stake_state, warmup_cooldown_rate,
-    ActivationStatus, AuthorityType, Authorized, Delegation, Lockup, Meta, StakeAccount,
-    StakeError, StakeFlags, StakeState, StakeTracker,
+    calculate_points_and_credits, calculate_stake_rewards, calculate_total_points,
+    deserialize_stake_state, serialize_stake_state, split_commission, warmup_cooldown_rate,
+    ActivationStatus, AuthorityType, Authorized, CommissionSplit, Delegation, EpochCreditEntry,
+    Lockup, Meta, PointsCalculation, StakeAccount, StakeError, StakeFlags, StakeRewardResult,
+    StakeState, StakeTracker,
 };
 pub use stake_history::{EpochStakeEntry, StakeHistory, StakeHistoryEntry, STAKE_HISTORY_CAP};
 pub use tower::{Tower, TowerError, TowerVote};

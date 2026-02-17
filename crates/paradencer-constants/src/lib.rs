@@ -55,6 +55,17 @@ pub mod economics {
     pub const PARTITIONED_REWARDS_DISTRIBUTION_SLOTS: u64 = 4_096;
     /// Maximum number of reward entries distributed per slot.
     pub const MAX_REWARDS_PER_SLOT: usize = 4_096;
+    /// Number of blocks used for reward calculation and vote account updates.
+    /// Stake distribution begins after this many blocks.
+    pub const REWARD_CALCULATION_NUM_BLOCKS: u64 = 1;
+    /// Maximum number of stake accounts stored per block during distribution.
+    pub const STAKE_ACCOUNTS_PER_BLOCK: usize = 4_096;
+    /// Maximum fraction of epoch slots that can be used for reward blocks.
+    pub const MAX_REWARD_BLOCKS_FACTOR: u64 = 10;
+    /// One SOL in lamports.
+    pub const LAMPORTS_PER_SOL: u64 = 1_000_000_000;
+    /// Maximum commission percentage for vote account rewards.
+    pub const MAX_COMMISSION_PERCENT: u8 = 100;
 }
 
 pub mod ledger {

@@ -146,15 +146,13 @@ impl RewardsCalculator {
 
     /// Split a validator's total reward into commission and delegator portions.
     ///
+    /// Uses symmetric u128 integer arithmetic matching protocol behavior:
+    /// both portions are computed independently, discarding fractional lamports.
+    ///
     /// Returns (commission_amount, delegator_pool).
     pub fn split_commission(total_reward: u64, commission_percent: u8) -> (u64, u64) {
-        let commission = (total_reward as u128)
-            .saturating_mul(commission_percent as u128)
-            .checked_div(100)
-            .unwrap_or(0) as u64;
-
-        let delegator_pool = total_reward.saturating_sub(commission);
-        (commission, delegator_pool)
+        let split = crate::stake::split_commission(total_reward, commission_percent);
+        (split.voter_portion, split.staker_portion)
     }
 
     /// Calculate individual delegator rewards from a validator's delegator pool.

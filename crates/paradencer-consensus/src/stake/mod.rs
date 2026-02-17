@@ -14,7 +14,10 @@ mod warmup_cooldown;
 mod tests;
 
 pub use delegation::{Delegation, StakeAccount};
-pub use rewards::calculate_stake_rewards;
+pub use rewards::{
+    calculate_points_and_credits, calculate_stake_rewards, calculate_total_points,
+    split_commission, CommissionSplit, EpochCreditEntry, PointsCalculation, StakeRewardResult,
+};
 pub use serialization::{deserialize_stake_state, serialize_stake_state};
 pub use tracker::StakeTracker;
 pub use warmup_cooldown::{warmup_cooldown_rate, ActivationStatus};
