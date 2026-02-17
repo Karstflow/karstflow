@@ -546,10 +546,16 @@ fn create_program_address_seed_too_long() {
 #[test]
 fn create_program_address_deducts_compute() {
     let mut ctx = test_context();
-    let initial = ctx.compute_meter;
-    let program_id = Pubkey::new_unique();
+    let program_id = Pubkey::new([20u8; 32]);
 
-    create_program_address(&mut ctx, &[b"test"], &program_id).unwrap();
+    // Use try_find to get seeds that produce a valid off-curve PDA
+    let (_pda, bump) = try_find_program_address(&mut ctx, &[b"compute_test"], &program_id).unwrap();
+
+    // Reset meter and verify create_program_address deducts exactly the base cost
+    ctx.compute_meter = 1_000_000;
+    let initial = ctx.compute_meter;
+    let bump_bytes = [bump];
+    create_program_address(&mut ctx, &[b"compute_test", &bump_bytes], &program_id).unwrap();
 
     assert_eq!(ctx.compute_meter, initial - CREATE_PROGRAM_ADDRESS_COST);
 }
@@ -564,8 +570,8 @@ fn try_find_program_address_returns_valid_pda() {
 
     // The PDA should be a valid 32-byte pubkey
     assert_eq!(pda.as_bytes().len(), 32);
-    // Bump should be <= 255
-    assert!(bump <= 255);
+    // Bump is a u8, always valid
+    let _ = bump;
 }
 
 #[test]

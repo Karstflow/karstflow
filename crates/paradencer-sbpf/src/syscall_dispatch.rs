@@ -1078,8 +1078,156 @@ impl SyscallHandler for SolAllocHandler {
 ///
 /// Reads a CPI instruction from VM memory, validates privileges and depth,
 /// then executes the target program through the InstructionExecutor.
+/// Account data is read from the caller's serialized input region and
+/// written back after execution for writable accounts.
 struct SolInvokeHandler {
     executor: Arc<dyn InstructionExecutor>,
+}
+
+/// Entry in the input region offset table, mapping a pubkey to its byte offset.
+struct InputRegionEntry {
+    pubkey: Pubkey,
+    offset: usize,
+}
+
+/// Scan the serialized input region and build an offset table for each account.
+///
+/// Input region layout (from BytecodeVm::serialize_accounts):
+///   [account_count: u64]
+///   per account:
+///     is_signer(1) | is_writable(1) | pubkey(32) | owner(32) |
+///     lamports(8) | data_len(8) | data(data_len) | padding to 8-byte align
+///   [instruction_data_len: u64 | instruction_data | program_id(32)]
+fn scan_input_region(input: &[u8]) -> Vec<InputRegionEntry> {
+    if input.len() < 8 {
+        return Vec::new();
+    }
+
+    let account_count = u64::from_le_bytes(input[..8].try_into().unwrap()) as usize;
+    let mut entries = Vec::with_capacity(account_count);
+    let mut offset = 8;
+
+    for _ in 0..account_count {
+        if offset + paradencer_constants::vm::ACCOUNT_SERIALIZED_META_SIZE > input.len() {
+            break;
+        }
+
+        // Record offset for this account (points to is_signer byte)
+        let entry_offset = offset;
+
+        // Skip is_signer(1) + is_writable(1) = 2
+        offset += 2;
+
+        // Read pubkey (32 bytes)
+        let mut pk = [0u8; 32];
+        pk.copy_from_slice(&input[offset..offset + 32]);
+        offset += 32;
+
+        // Skip owner(32) + lamports(8) = 40
+        offset += 40;
+
+        // Read data_len(8)
+        let data_len =
+            u64::from_le_bytes(input[offset..offset + 8].try_into().unwrap()) as usize;
+        offset += 8;
+
+        // Skip data + padding
+        offset += data_len;
+        let padding = (8 - (offset % 8)) % 8;
+        offset += padding;
+
+        entries.push(InputRegionEntry {
+            pubkey: Pubkey::new(pk),
+            offset: entry_offset,
+        });
+    }
+
+    entries
+}
+
+/// Read an Account from the input region at the given byte offset.
+fn read_account_from_input(input: &[u8], offset: usize) -> Option<(bool, Account)> {
+    if offset + paradencer_constants::vm::ACCOUNT_SERIALIZED_META_SIZE > input.len() {
+        return None;
+    }
+
+    let _is_signer = input[offset];
+    let is_writable = input[offset + 1] != 0;
+    let pos = offset + 2;
+
+    // Skip pubkey (32 bytes) — caller already knows it
+    let pos = pos + 32;
+
+    // Owner (32 bytes)
+    let mut owner = [0u8; 32];
+    owner.copy_from_slice(&input[pos..pos + 32]);
+    let pos = pos + 32;
+
+    // Lamports (8 bytes)
+    let lamports = u64::from_le_bytes(input[pos..pos + 8].try_into().unwrap());
+    let pos = pos + 8;
+
+    // Data length (8 bytes)
+    let data_len = u64::from_le_bytes(input[pos..pos + 8].try_into().unwrap()) as usize;
+    let pos = pos + 8;
+
+    if pos + data_len > input.len() {
+        return None;
+    }
+
+    let data = &input[pos..pos + data_len];
+
+    Some((
+        is_writable,
+        Account {
+            meta: TypesAccountMeta {
+                lamports,
+                owner: Pubkey::new(owner),
+                executable: false,
+                rent_epoch: 0,
+            },
+            data: AccountData::new(data.to_vec()),
+        },
+    ))
+}
+
+/// Write modified account data back to the input region after CPI.
+/// Only updates lamports, owner, and data bytes (pubkey and data_len unchanged).
+/// Returns error if the callee's data exceeds the original allocation.
+fn writeback_account_to_input(
+    input: &mut [u8],
+    offset: usize,
+    account: &Account,
+) -> Result<(), VmError> {
+    let pos = offset + 2 + 32; // skip is_signer(1) + is_writable(1) + pubkey(32)
+
+    // Write owner (32 bytes)
+    input[pos..pos + 32].copy_from_slice(account.meta.owner.as_ref());
+    let pos = pos + 32;
+
+    // Write lamports (8 bytes)
+    input[pos..pos + 8].copy_from_slice(&account.meta.lamports.to_le_bytes());
+    let pos = pos + 8;
+
+    // Read original data_len to check bounds
+    let original_data_len =
+        u64::from_le_bytes(input[pos..pos + 8].try_into().unwrap()) as usize;
+    let pos = pos + 8;
+
+    let new_data = account.data.as_slice();
+    if new_data.len() > original_data_len {
+        return Err(VmError::MemoryError(
+            "CPI callee cannot grow account data".to_string(),
+        ));
+    }
+
+    // Write data (may be shorter; zero-fill remainder)
+    input[pos..pos + new_data.len()].copy_from_slice(new_data);
+    if new_data.len() < original_data_len {
+        input[pos + new_data.len()..pos + original_data_len].fill(0);
+    }
+
+    Ok(())
 }
 
 impl SyscallHandler for SolInvokeHandler {
@@ -1099,8 +1247,8 @@ impl SyscallHandler for SolInvokeHandler {
             syscalls::CPI_BASE_COST + syscalls::CPI_PER_ACCOUNT_COST * account_count as u64;
         deduct_compute(vm, base_cost)?;
 
-        // Enforce CPI depth limit
-        if vm.call_stack.len() >= syscalls::MAX_CPI_DEPTH {
+        // Enforce CPI depth limit using dedicated counter
+        if vm.cpi_depth >= syscalls::MAX_CPI_DEPTH {
             vm.logs.push("CPI depth limit exceeded".to_string());
             return Ok(1);
         }
@@ -1174,21 +1322,22 @@ impl SyscallHandler for SolInvokeHandler {
             cpi_account_metas.push((Pubkey::new(pk), is_signer, is_writable));
         }
 
-        // Read account infos from r2: each is (pubkey_ptr:8, lamports_ptr:8, data_len:8, data_ptr:8, owner_ptr:8, ...)
-        // Simplified: read from the VM's input region accounts
-        // For now, build accounts from the serialized input region
+        // Scan the input region to build an offset table for account lookup
+        let input_data = vm.memory.input_data().to_vec();
+        let input_entries = scan_input_region(&input_data);
+
+        // Build execution accounts from the input region
         let mut accounts = Vec::new();
         for (pubkey, _is_signer, is_writable) in &cpi_account_metas {
-            // Try to find the account in the input region
-            // For now, create a default account — real CPI would read from VM memory
-            let account = Account {
-                meta: TypesAccountMeta {
-                    lamports: 0,
-                    owner: Pubkey::default(),
-                    executable: false,
-                    rent_epoch: 0,
-                },
-                data: AccountData::empty(),
+            // Find this account in the input region
+            let account = if let Some(entry) = input_entries.iter().find(|e| e.pubkey == *pubkey) {
+                if let Some((_is_wr, acct)) = read_account_from_input(&input_data, entry.offset) {
+                    acct
+                } else {
+                    Account::default()
+                }
+            } else {
+                Account::default()
             };
             accounts.push((*pubkey, account, *is_writable));
         }
@@ -1196,8 +1345,41 @@ impl SyscallHandler for SolInvokeHandler {
         // Execute the target program
         let context = ExecutionContext::new(target_program_id, accounts, instruction_data);
 
-        match self.executor.execute_instruction(context) {
+        vm.cpi_depth += 1;
+        let result = self.executor.execute_instruction(context);
+        vm.cpi_depth -= 1;
+
+        match result {
             Ok(outcome) => {
+                // Write back modified accounts to the caller's input region
+                if outcome.success {
+                    let input_mut = unsafe {
+                        // The input region is owned by this VM and we have &mut vm.
+                        // We need mutable access to write back account data.
+                        let ptr = vm.memory.input_data().as_ptr() as *mut u8;
+                        let len = vm.memory.input_data().len();
+                        std::slice::from_raw_parts_mut(ptr, len)
+                    };
+
+                    for (pubkey, modified_account) in &outcome.modified_accounts {
+                        if let Some(entry) =
+                            input_entries.iter().find(|e| e.pubkey == *pubkey)
+                        {
+                            // Only write back if the CPI meta marked it writable
+                            let is_writable = cpi_account_metas
+                                .iter()
+                                .any(|(pk, _, w)| pk == pubkey && *w);
+                            if is_writable {
+                                writeback_account_to_input(
+                                    input_mut,
+                                    entry.offset,
+                                    modified_account,
+                                )?;
+                            }
+                        }
+                    }
+                }
+
                 // Copy logs from callee
                 for log in &outcome.logs {
                     vm.logs.push(log.clone());
@@ -1603,5 +1785,225 @@ mod tests {
         assert_eq!(ret, 0);
         let buf = vm.memory.read_slice(REGION_HEAP_BASE, 8).unwrap();
         assert!(buf.iter().all(|&b| b == 0), "default last_restart should be all zeros");
+    }
+
+    // -----------------------------------------------------------------------
+    // CPI input region tests
+    // -----------------------------------------------------------------------
+
+    /// Build a minimal serialized input region with one account.
+    fn make_input_region(
+        pubkey: &Pubkey,
+        owner: &Pubkey,
+        lamports: u64,
+        data: &[u8],
+        is_writable: bool,
+    ) -> Vec<u8> {
+        let mut buf = Vec::new();
+        // account_count = 1
+        buf.extend_from_slice(&1u64.to_le_bytes());
+        // is_signer
+        buf.push(0);
+        // is_writable
+        buf.push(if is_writable { 1 } else { 0 });
+        // pubkey
+        buf.extend_from_slice(pubkey.as_ref());
+        // owner
+        buf.extend_from_slice(owner.as_ref());
+        // lamports
+        buf.extend_from_slice(&lamports.to_le_bytes());
+        // data_len
+        buf.extend_from_slice(&(data.len() as u64).to_le_bytes());
+        // data
+        buf.extend_from_slice(data);
+        // padding
+        let padding = (8 - (buf.len() % 8)) % 8;
+        buf.extend(std::iter::repeat_n(0u8, padding));
+        buf
+    }
+
+    #[test]
+    fn scan_input_region_finds_account() {
+        let pk = Pubkey::new([1u8; 32]);
+        let owner = Pubkey::new([2u8; 32]);
+        let input = make_input_region(&pk, &owner, 1000, &[0xAA; 16], true);
+
+        let entries = scan_input_region(&input);
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].pubkey, pk);
+        assert_eq!(entries[0].offset, 8); // starts right after account_count
+    }
+
+    #[test]
+    fn read_account_from_input_returns_correct_data() {
+        let pk = Pubkey::new([1u8; 32]);
+        let owner = Pubkey::new([2u8; 32]);
+        let data = vec![0xBB; 24];
+        let input = make_input_region(&pk, &owner, 5000, &data, true);
+
+        let entries = scan_input_region(&input);
+        let (is_wr, account) = read_account_from_input(&input, entries[0].offset).unwrap();
+        assert!(is_wr);
+        assert_eq!(account.meta.lamports, 5000);
+        assert_eq!(account.meta.owner, owner);
+        assert_eq!(account.data.as_slice(), &data);
+    }
+
+    #[test]
+    fn writeback_updates_lamports_in_input() {
+        let pk = Pubkey::new([1u8; 32]);
+        let owner = Pubkey::new([2u8; 32]);
+        let mut input = make_input_region(&pk, &owner, 1000, &[0; 8], true);
+
+        let entries = scan_input_region(&input);
+
+        // Build a modified account with updated lamports
+        let modified = Account {
+            meta: TypesAccountMeta {
+                lamports: 9999,
+                owner,
+                executable: false,
+                rent_epoch: 0,
+            },
+            data: AccountData::new(vec![0xFF; 8]),
+        };
+
+        writeback_account_to_input(&mut input, entries[0].offset, &modified).unwrap();
+
+        // Re-read and verify
+        let (_, readback) = read_account_from_input(&input, entries[0].offset).unwrap();
+        assert_eq!(readback.meta.lamports, 9999);
+        assert_eq!(readback.data.as_slice(), &[0xFF; 8]);
+    }
+
+    #[test]
+    fn writeback_rejects_data_growth() {
+        let pk = Pubkey::new([1u8; 32]);
+        let owner = Pubkey::new([2u8; 32]);
+        let mut input = make_input_region(&pk, &owner, 1000, &[0; 8], true);
+
+        let entries = scan_input_region(&input);
+
+        // Try to write back with larger data
+        let modified = Account {
+            meta: TypesAccountMeta {
+                lamports: 1000,
+                owner,
+                executable: false,
+                rent_epoch: 0,
+            },
+            data: AccountData::new(vec![0; 16]), // 16 > original 8
+        };
+
+        let result = writeback_account_to_input(&mut input, entries[0].offset, &modified);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn writeback_allows_shorter_data() {
+        let pk = Pubkey::new([1u8; 32]);
+        let owner = Pubkey::new([2u8; 32]);
+        let mut input = make_input_region(&pk, &owner, 1000, &[0xAA; 16], true);
+
+        let entries = scan_input_region(&input);
+
+        // Write back with shorter data (remainder should be zeroed)
+        let modified = Account {
+            meta: TypesAccountMeta {
+                lamports: 1000,
+                owner,
+                executable: false,
+                rent_epoch: 0,
+            },
+            data: AccountData::new(vec![0xBB; 4]),
+        };
+
+        writeback_account_to_input(&mut input, entries[0].offset, &modified).unwrap();
+
+        let (_, readback) = read_account_from_input(&input, entries[0].offset).unwrap();
+        // First 4 bytes are 0xBB, remaining 12 are zeroed
+        assert_eq!(&readback.data.as_slice()[..4], &[0xBB; 4]);
+        assert_eq!(&readback.data.as_slice()[4..], &[0; 12]);
+    }
+
+    #[test]
+    fn scan_input_region_handles_empty() {
+        let entries = scan_input_region(&[]);
+        assert!(entries.is_empty());
+
+        // Zero accounts
+        let input = 0u64.to_le_bytes().to_vec();
+        let entries = scan_input_region(&input);
+        assert!(entries.is_empty());
+    }
+
+    #[test]
+    fn scan_input_region_handles_multiple_accounts() {
+        let pk1 = Pubkey::new([1u8; 32]);
+        let pk2 = Pubkey::new([2u8; 32]);
+        let owner = Pubkey::new([3u8; 32]);
+
+        let mut buf = Vec::new();
+        buf.extend_from_slice(&2u64.to_le_bytes()); // 2 accounts
+
+        // Account 1
+        buf.push(0); buf.push(1); // is_signer=0, is_writable=1
+        buf.extend_from_slice(pk1.as_ref());
+        buf.extend_from_slice(owner.as_ref());
+        buf.extend_from_slice(&100u64.to_le_bytes());
+        buf.extend_from_slice(&8u64.to_le_bytes());
+        buf.extend_from_slice(&[0xAA; 8]);
+        // No padding needed (8 + 2 + 32 + 32 + 8 + 8 + 8 = 98; 98%8=2 → pad 6)
+        let padding = (8 - (buf.len() % 8)) % 8;
+        buf.extend(std::iter::repeat_n(0u8, padding));
+
+        // Account 2
+        buf.push(0); buf.push(0); // is_signer=0, is_writable=0
+        buf.extend_from_slice(pk2.as_ref());
+        buf.extend_from_slice(owner.as_ref());
+        buf.extend_from_slice(&200u64.to_le_bytes());
+        buf.extend_from_slice(&4u64.to_le_bytes());
+        buf.extend_from_slice(&[0xBB; 4]);
+        let padding = (8 - (buf.len() % 8)) % 8;
+        buf.extend(std::iter::repeat_n(0u8, padding));
+
+        let entries = scan_input_region(&buf);
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].pubkey, pk1);
+        assert_eq!(entries[1].pubkey, pk2);
+
+        let (wr1, a1) = read_account_from_input(&buf, entries[0].offset).unwrap();
+        assert!(wr1);
+        assert_eq!(a1.meta.lamports, 100);
+
+        let (wr2, a2) = read_account_from_input(&buf, entries[1].offset).unwrap();
+        assert!(!wr2);
+        assert_eq!(a2.meta.lamports, 200);
+    }
+
+    #[test]
+    fn cpi_depth_limit_uses_dedicated_field() {
+        // Verify that CPI depth uses vm.cpi_depth, not call_stack.len()
+        let executor = Arc::new(CountingExecutor::new());
+        let handler = SolInvokeHandler {
+            executor: executor.clone(),
+        };
+
+        let mut vm = make_sysvar_test_vm(crate::sysvar_snapshot::SysvarSnapshot::default());
+        // Set cpi_depth to the limit
+        vm.cpi_depth = syscalls::MAX_CPI_DEPTH;
+
+        // The handler should reject due to depth limit (return 1, not error)
+        // We need r1 to point to valid instruction data, but the depth check
+        // happens before reading the instruction, so this should return 1.
+        // However, base_cost deduction happens first. Give enough compute.
+        vm.compute_meter = 10_000_000;
+
+        // Build a minimal instruction in heap: just zeros (invalid but depth check comes first)
+        // Actually, base_cost is deducted before depth check in the current code.
+        // After the base cost deduction, depth check happens, and returns Ok(1).
+        let ret = handler.call(&mut vm, REGION_HEAP_BASE, 0, 0, 0, 0).unwrap();
+        assert_eq!(ret, 1);
+        assert!(vm.logs.iter().any(|l| l.contains("CPI depth limit")));
     }
 }
