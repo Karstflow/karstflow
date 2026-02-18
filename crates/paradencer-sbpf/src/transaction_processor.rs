@@ -349,6 +349,20 @@ impl Default for TransactionProcessor {
     }
 }
 
+/// Enables the `TransactionProcessor` to serve as a CPI executor.
+///
+/// When a BPF program invokes another program via `sol_invoke_signed`,
+/// the CPI syscall handler calls back through this trait to execute
+/// the nested instruction using the same processor routing logic.
+impl crate::syscall_dispatch::InstructionExecutor for TransactionProcessor {
+    fn execute_instruction(
+        &self,
+        context: ExecutionContext,
+    ) -> Result<ExecutionOutcome, crate::vm::SbpfExecutionError> {
+        Ok(self.execute_instruction(&context))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -546,5 +560,278 @@ mod tests {
             vec![], // Empty data
         );
         assert!(outcome.success);
+    }
+
+    // -------------------------------------------------------------------
+    // Full pipeline integration tests
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn full_pipeline_bpf_success_returns_zero() {
+        use crate::elf_loader::TestElfBuilder;
+        use crate::instruction::{Instruction, Opcode};
+
+        let processor = TransactionProcessor::new();
+        let program_id = Pubkey::new_unique();
+        let user_account = Pubkey::new_unique();
+
+        // BPF program: mov r0, 0; exit (returns 0 = success)
+        let elf = TestElfBuilder::new()
+            .text(encode_instructions(&[
+                Instruction::new(Opcode::Mov64Imm as u8, 0, 0, 0, 0),
+                Instruction::new(Opcode::Exit as u8, 0, 0, 0, 0),
+            ]))
+            .build();
+
+        let program_account = Account {
+            meta: TypesAccountMeta {
+                lamports: 1,
+                owner: BPF_LOADER_PROGRAM_ID,
+                executable: true,
+                rent_epoch: 0,
+            },
+            data: AccountData::new(elf),
+        };
+
+        let user = Account {
+            meta: TypesAccountMeta {
+                lamports: 5000,
+                owner: program_id,
+                executable: false,
+                rent_epoch: 0,
+            },
+            data: AccountData::new(vec![1, 2, 3, 4]),
+        };
+
+        let mut account_state = HashMap::new();
+        account_state.insert(program_id, program_account);
+        account_state.insert(user_account, user);
+
+        // Build transaction with one instruction invoking the BPF program
+        let transaction = Transaction {
+            signatures: vec![[0u8; 64]],
+            message: TransactionMessage {
+                account_keys: vec![user_account, program_id],
+                recent_blockhash: [0u8; 32],
+                instructions: vec![CompiledInstruction {
+                    program_id_index: 1,  // program_id
+                    accounts: vec![0, 1], // user + program
+                    data: vec![],
+                }],
+            },
+        };
+
+        let result = processor.process_transaction(&transaction, &account_state);
+        assert!(
+            result.success,
+            "Transaction should succeed: {:?}",
+            result.error
+        );
+        assert!(result.compute_units_consumed > 0);
+    }
+
+    #[test]
+    fn full_pipeline_bpf_failure_returns_nonzero() {
+        use crate::elf_loader::TestElfBuilder;
+        use crate::instruction::{Instruction, Opcode};
+
+        let processor = TransactionProcessor::new();
+        let program_id = Pubkey::new_unique();
+
+        // BPF program: mov r0, 1; exit (returns 1 = failure)
+        let elf = TestElfBuilder::new()
+            .text(encode_instructions(&[
+                Instruction::new(Opcode::Mov64Imm as u8, 0, 0, 0, 1),
+                Instruction::new(Opcode::Exit as u8, 0, 0, 0, 0),
+            ]))
+            .build();
+
+        let program_account = Account {
+            meta: TypesAccountMeta {
+                lamports: 1,
+                owner: BPF_LOADER_PROGRAM_ID,
+                executable: true,
+                rent_epoch: 0,
+            },
+            data: AccountData::new(elf),
+        };
+
+        let outcome = processor.process_instruction(
+            program_id,
+            vec![(program_id, program_account, false)],
+            vec![],
+        );
+        assert!(!outcome.success, "Non-zero exit should be a failure");
+    }
+
+    #[test]
+    fn full_pipeline_compute_budget_exhaustion() {
+        use crate::elf_loader::TestElfBuilder;
+        use crate::instruction::{Instruction, Opcode};
+
+        let processor = TransactionProcessor::new().with_compute_limit(5);
+        let program_id = Pubkey::new_unique();
+
+        // BPF program with a tight loop that should exhaust the tiny budget
+        let elf = TestElfBuilder::new()
+            .text(encode_instructions(&[
+                Instruction::new(Opcode::Mov64Imm as u8, 1, 0, 0, 100), // r1 = 100
+                Instruction::new(Opcode::Add64Imm as u8, 1, 0, 0, 1),   // r1 += 1
+                Instruction::new(Opcode::Add64Imm as u8, 1, 0, 0, 1),   // r1 += 1
+                Instruction::new(Opcode::Add64Imm as u8, 1, 0, 0, 1),   // r1 += 1
+                Instruction::new(Opcode::Add64Imm as u8, 1, 0, 0, 1),   // r1 += 1
+                Instruction::new(Opcode::Add64Imm as u8, 1, 0, 0, 1),   // r1 += 1
+                Instruction::new(Opcode::Mov64Imm as u8, 0, 0, 0, 0),
+                Instruction::new(Opcode::Exit as u8, 0, 0, 0, 0),
+            ]))
+            .build();
+
+        let program_account = Account {
+            meta: TypesAccountMeta {
+                lamports: 1,
+                owner: BPF_LOADER_PROGRAM_ID,
+                executable: true,
+                rent_epoch: 0,
+            },
+            data: AccountData::new(elf),
+        };
+
+        let outcome = processor.process_instruction(
+            program_id,
+            vec![(program_id, program_account, false)],
+            vec![],
+        );
+        // Should fail due to compute budget exhaustion
+        assert!(!outcome.success, "Should fail with compute budget exceeded");
+    }
+
+    #[test]
+    fn full_pipeline_cached_reexecution() {
+        use crate::elf_loader::TestElfBuilder;
+        use crate::instruction::{Instruction, Opcode};
+
+        let processor = TransactionProcessor::new();
+        let program_id = Pubkey::new_unique();
+
+        let elf = TestElfBuilder::new()
+            .text(encode_instructions(&[
+                Instruction::new(Opcode::Mov64Imm as u8, 0, 0, 0, 0),
+                Instruction::new(Opcode::Exit as u8, 0, 0, 0, 0),
+            ]))
+            .build();
+
+        let program_account = Account {
+            meta: TypesAccountMeta {
+                lamports: 1,
+                owner: BPF_LOADER_PROGRAM_ID,
+                executable: true,
+                rent_epoch: 0,
+            },
+            data: AccountData::new(elf),
+        };
+
+        // Execute the same BPF program twice — second time should use cache
+        for i in 0..2 {
+            let outcome = processor.process_instruction(
+                program_id,
+                vec![(program_id, program_account.clone(), false)],
+                vec![],
+            );
+            assert!(
+                outcome.success,
+                "Execution {} should succeed (cached={})",
+                i,
+                i > 0
+            );
+        }
+    }
+
+    #[test]
+    fn cpi_executor_trait_implemented() {
+        use crate::syscall_dispatch::InstructionExecutor;
+
+        let processor = TransactionProcessor::new();
+        let context = ExecutionContext::new(SYSTEM_PROGRAM_ID, vec![], vec![]);
+
+        // TransactionProcessor implements InstructionExecutor for CPI
+        let result = InstructionExecutor::execute_instruction(&processor, context);
+        assert!(result.is_ok());
+        let outcome = result.unwrap();
+        // System program with empty data returns success (base cost)
+        assert!(outcome.success);
+    }
+
+    #[test]
+    fn transaction_with_multiple_instructions() {
+        let processor = TransactionProcessor::new();
+        let account1 = Pubkey::new_unique();
+        let account2 = Pubkey::new_unique();
+
+        let mut account_state = HashMap::new();
+        account_state.insert(
+            account1,
+            Account {
+                meta: TypesAccountMeta {
+                    lamports: 10_000,
+                    owner: SYSTEM_PROGRAM_ID,
+                    executable: false,
+                    rent_epoch: 0,
+                },
+                data: AccountData::empty(),
+            },
+        );
+        account_state.insert(
+            account2,
+            Account {
+                meta: TypesAccountMeta {
+                    lamports: 1_000,
+                    owner: SYSTEM_PROGRAM_ID,
+                    executable: false,
+                    rent_epoch: 0,
+                },
+                data: AccountData::empty(),
+            },
+        );
+
+        // Two system program transfer instructions in sequence
+        let mut transfer_data = vec![2, 0, 0, 0]; // type 2 = transfer
+        transfer_data.extend_from_slice(&100u64.to_le_bytes());
+
+        let transaction = Transaction {
+            signatures: vec![[0u8; 64]],
+            message: TransactionMessage {
+                account_keys: vec![account1, account2, SYSTEM_PROGRAM_ID],
+                recent_blockhash: [0u8; 32],
+                instructions: vec![
+                    CompiledInstruction {
+                        program_id_index: 2,
+                        accounts: vec![0, 1],
+                        data: transfer_data.clone(),
+                    },
+                    CompiledInstruction {
+                        program_id_index: 2,
+                        accounts: vec![0, 1],
+                        data: transfer_data,
+                    },
+                ],
+            },
+        };
+
+        let result = processor.process_transaction(&transaction, &account_state);
+        assert!(
+            result.success,
+            "Multi-instruction tx should succeed: {:?}",
+            result.error
+        );
+        assert!(result.compute_units_consumed > 0);
+    }
+
+    /// Encode a list of instructions into raw bytecode.
+    fn encode_instructions(insns: &[crate::instruction::Instruction]) -> Vec<u8> {
+        let mut text = Vec::new();
+        for insn in insns {
+            text.extend_from_slice(&insn.encode().to_le_bytes());
+        }
+        text
     }
 }

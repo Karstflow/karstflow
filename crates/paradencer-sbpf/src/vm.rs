@@ -3,6 +3,7 @@ use super::{
     COMPUTE_UNIT_COST_ACCOUNT_WRITEBACK, COMPUTE_UNIT_COST_PER_ACCOUNT,
     COMPUTE_UNIT_COST_PER_DATA_BYTE, DEFAULT_INSTRUCTION_BASE_COST,
 };
+use crate::bpf_serialization::{self, InputAccount};
 use crate::elf_loader::LoadedProgram;
 use crate::interpreter::{self, VmError};
 use crate::memory::MemoryMap;
@@ -10,7 +11,7 @@ use crate::program_cache::ProgramCache;
 use crate::syscall_dispatch::{InstructionExecutor, RuntimeSyscallDispatch};
 use crate::sysvar_snapshot::SysvarSnapshot;
 use crate::validation;
-use paradencer_constants::vm::{ACCOUNT_SERIALIZED_META_SIZE, DEFAULT_HEAP_SIZE};
+use paradencer_constants::vm::DEFAULT_HEAP_SIZE;
 use paradencer_ids::{SYSTEM_PROGRAM_ID, VOTE_PROGRAM_ID};
 use paradencer_types::{Account, AccountData, AccountMeta, Pubkey};
 use std::collections::HashMap;
@@ -179,151 +180,104 @@ impl BytecodeVm {
         Ok(program)
     }
 
-    /// Serialize account data into the input region for the VM.
-    ///
-    /// Format per account:
-    /// - 1 byte: is_signer (0/1) — always 0 for now
-    /// - 1 byte: is_writable (0/1)
-    /// - 32 bytes: pubkey
-    /// - 32 bytes: owner
-    /// - 8 bytes: lamports (little-endian)
-    /// - 8 bytes: data length (little-endian)
-    /// - N bytes: account data
-    /// - padding to 8-byte alignment
-    fn serialize_accounts(context: &ExecutionContext) -> Vec<u8> {
-        let mut buf = Vec::new();
-
-        // Number of accounts
-        buf.extend_from_slice(&(context.accounts.len() as u64).to_le_bytes());
-
-        for (pubkey, account, writable) in &context.accounts {
-            // is_signer placeholder
-            buf.push(0u8);
-            // is_writable
-            buf.push(if *writable { 1 } else { 0 });
-            // pubkey (32 bytes)
-            buf.extend_from_slice(pubkey.as_ref());
-            // owner (32 bytes)
-            buf.extend_from_slice(account.meta.owner.as_ref());
-            // lamports
-            buf.extend_from_slice(&account.meta.lamports.to_le_bytes());
-            // data length
-            let data = account.data.as_slice();
-            buf.extend_from_slice(&(data.len() as u64).to_le_bytes());
-            // data
-            buf.extend_from_slice(data);
-            // padding to 8-byte alignment
-            let padding = (8 - (buf.len() % 8)) % 8;
-            buf.extend(std::iter::repeat_n(0u8, padding));
-        }
-
-        // Instruction data
-        buf.extend_from_slice(&(context.instruction_data.len() as u64).to_le_bytes());
-        buf.extend_from_slice(&context.instruction_data);
-
-        // Program ID
-        buf.extend_from_slice(context.program_id.as_ref());
-
-        buf
+    /// Convert execution context accounts to the BPF serialization input format.
+    fn to_input_accounts(context: &ExecutionContext) -> Vec<InputAccount> {
+        context
+            .accounts
+            .iter()
+            .map(|(pubkey, account, writable)| InputAccount {
+                key: *pubkey,
+                owner: account.meta.owner,
+                lamports: account.meta.lamports,
+                data: account.data.as_slice().to_vec(),
+                is_signer: false,
+                is_writable: *writable,
+                is_executable: account.meta.executable,
+                rent_epoch: account.meta.rent_epoch,
+            })
+            .collect()
     }
 
-    /// Deserialize accounts from the VM input region after execution.
+    /// Deserialize modified accounts from the VM output region after execution.
     ///
-    /// Reads the same format written by `serialize_accounts`, extracting
-    /// only writable accounts whose data actually changed compared to originals.
-    fn deserialize_accounts(
+    /// Uses the standard aligned BPF serialization format. Extracts writable
+    /// accounts whose data changed compared to the originals.
+    fn collect_modified_accounts(
         input_region: &[u8],
+        serialized: &bpf_serialization::SerializedInput,
         original_accounts: &[(Pubkey, Account, bool)],
-    ) -> Result<HashMap<Pubkey, Account>, SbpfExecutionError> {
+    ) -> HashMap<Pubkey, Account> {
+        let deserialized = bpf_serialization::deserialize_aligned(
+            input_region,
+            &serialized.account_metas,
+            &serialized.pre_lens,
+            &serialized.duplicate_indices,
+        );
+
         let mut modified = HashMap::new();
+        let results = match deserialized {
+            Ok(r) => r,
+            Err(_) => return modified,
+        };
 
-        if input_region.len() < 8 {
-            return Ok(modified);
-        }
+        for (i, result) in results.into_iter().enumerate() {
+            if let Some(deser) = result {
+                if i < original_accounts.len() {
+                    let (pubkey, orig_account, _) = &original_accounts[i];
+                    let orig_data = orig_account.data.as_slice();
 
-        let account_count = u64::from_le_bytes(input_region[..8].try_into().unwrap()) as usize;
+                    // Only include accounts that actually changed
+                    let changed = deser.lamports != orig_account.meta.lamports
+                        || deser.owner != orig_account.meta.owner
+                        || deser.data.len() != orig_data.len()
+                        || deser.data != orig_data;
 
-        if account_count != original_accounts.len() {
-            return Err(SbpfExecutionError::InvalidAccountData);
-        }
-
-        let mut offset = 8;
-
-        for (orig_pubkey, orig_account, orig_writable) in original_accounts {
-            // Ensure enough data for fixed metadata
-            if offset + ACCOUNT_SERIALIZED_META_SIZE > input_region.len() {
-                return Err(SbpfExecutionError::InvalidAccountData);
-            }
-
-            let _is_signer = input_region[offset];
-            let is_writable = input_region[offset + 1];
-            offset += 2;
-
-            // Read pubkey (32 bytes)
-            let mut pubkey_bytes = [0u8; 32];
-            pubkey_bytes.copy_from_slice(&input_region[offset..offset + 32]);
-            let pubkey = Pubkey::new(pubkey_bytes);
-            offset += 32;
-
-            // Read owner (32 bytes)
-            let mut owner_bytes = [0u8; 32];
-            owner_bytes.copy_from_slice(&input_region[offset..offset + 32]);
-            let owner = Pubkey::new(owner_bytes);
-            offset += 32;
-
-            // Read lamports (8 bytes)
-            let lamports = u64::from_le_bytes(input_region[offset..offset + 8].try_into().unwrap());
-            offset += 8;
-
-            // Read data length (8 bytes)
-            let data_len =
-                u64::from_le_bytes(input_region[offset..offset + 8].try_into().unwrap()) as usize;
-            offset += 8;
-
-            // Read data
-            if offset + data_len > input_region.len() {
-                return Err(SbpfExecutionError::InvalidAccountData);
-            }
-            let data = &input_region[offset..offset + data_len];
-            offset += data_len;
-
-            // Skip padding to 8-byte alignment
-            let padding = (8 - (offset % 8)) % 8;
-            offset += padding;
-
-            // Only track writable accounts that changed
-            if is_writable != 0 && *orig_writable {
-                let orig_data = orig_account.data.as_slice();
-                let changed = lamports != orig_account.meta.lamports
-                    || owner != orig_account.meta.owner
-                    || data.len() != orig_data.len()
-                    || data != orig_data;
-
-                if changed {
-                    let account = Account {
-                        meta: AccountMeta {
-                            lamports,
-                            owner,
-                            executable: orig_account.meta.executable,
-                            rent_epoch: orig_account.meta.rent_epoch,
-                        },
-                        data: AccountData::new(data.to_vec()),
-                    };
-                    modified.insert(pubkey, account);
+                    if changed {
+                        modified.insert(
+                            *pubkey,
+                            Account {
+                                meta: AccountMeta {
+                                    lamports: deser.lamports,
+                                    owner: deser.owner,
+                                    executable: orig_account.meta.executable,
+                                    rent_epoch: orig_account.meta.rent_epoch,
+                                },
+                                data: AccountData::new(deser.data),
+                            },
+                        );
+                    }
                 }
             }
         }
 
-        Ok(modified)
+        modified
     }
 
     /// Execute a loaded program with the given context.
+    ///
+    /// Serializes accounts into the standard aligned BPF input format,
+    /// runs the interpreter, and deserializes modified accounts.
     fn run_program(
         &self,
         program: &LoadedProgram,
         context: &ExecutionContext,
     ) -> SbpfExecutionResult {
-        let input_data = Self::serialize_accounts(context);
+        let input_accounts = Self::to_input_accounts(context);
+        let serialized = bpf_serialization::serialize_aligned(
+            &input_accounts,
+            &context.instruction_data,
+            &context.program_id,
+        )
+        .map_err(|e| SbpfExecutionError::ExecutionFailed { message: e })?;
+
+        // Separate the buffer (moved into MemoryMap) from the metadata (kept for deserialization).
+        let bpf_serialization::SerializedInput {
+            buffer: input_buffer,
+            account_metas,
+            pre_lens,
+            duplicate_indices,
+            ..
+        } = serialized;
 
         let rodata = if program.rodata.is_empty() {
             &program.text_bytes
@@ -331,13 +285,22 @@ impl BytecodeVm {
             &program.rodata
         };
 
-        let memory = MemoryMap::new(rodata, DEFAULT_HEAP_SIZE, DEFAULT_HEAP_SIZE, input_data);
+        let memory = MemoryMap::new(rodata, DEFAULT_HEAP_SIZE, DEFAULT_HEAP_SIZE, input_buffer);
 
         // Use the context's snapshot if provided, falling back to the VM default.
         let snapshot = context
             .sysvar_snapshot
             .clone()
             .unwrap_or_else(|| self.sysvar_snapshot.clone());
+
+        // Re-assemble metadata struct for deserialization (buffer comes from VM result).
+        let deser_meta = bpf_serialization::SerializedInput {
+            buffer: Vec::new(), // not used by collect_modified_accounts
+            account_metas,
+            pre_lens,
+            duplicate_indices,
+            instruction_data_offset: 0,
+        };
 
         match interpreter::execute(
             program,
@@ -347,9 +310,11 @@ impl BytecodeVm {
             snapshot,
         ) {
             Ok(result) => {
-                let modified_accounts =
-                    Self::deserialize_accounts(&result.input_region, &context.accounts)
-                        .unwrap_or_default();
+                let modified_accounts = Self::collect_modified_accounts(
+                    &result.input_region,
+                    &deser_meta,
+                    &context.accounts,
+                );
 
                 Ok(ExecutionOutcome {
                     success: result.return_value == 0,
@@ -731,10 +696,10 @@ mod tests {
         assert!(outcome.success); // r0 = 0
     }
 
-    // --- Account deserialization tests ---
+    // --- Account serialization/deserialization integration tests ---
 
     #[test]
-    fn deserialize_accounts_roundtrip() {
+    fn serialization_roundtrip_unmodified() {
         let pubkey_a = Pubkey::new_unique();
         let pubkey_b = Pubkey::new_unique();
         let owner = Pubkey::new_unique();
@@ -764,15 +729,22 @@ mod tests {
         ];
 
         let context = ExecutionContext::new(Pubkey::new_unique(), accounts.clone(), vec![]);
-        let serialized = BytecodeVm::serialize_accounts(&context);
+        let input_accounts = BytecodeVm::to_input_accounts(&context);
+        let serialized = crate::bpf_serialization::serialize_aligned(
+            &input_accounts,
+            &context.instruction_data,
+            &context.program_id,
+        )
+        .unwrap();
 
         // Roundtrip: no modification means no accounts returned
-        let result = BytecodeVm::deserialize_accounts(&serialized, &accounts).unwrap();
+        let result =
+            BytecodeVm::collect_modified_accounts(&serialized.buffer, &serialized, &accounts);
         assert!(result.is_empty(), "Unmodified accounts should not appear");
     }
 
     #[test]
-    fn deserialize_modified_lamports() {
+    fn serialization_detects_modified_lamports() {
         let pubkey = Pubkey::new_unique();
         let owner = Pubkey::new_unique();
 
@@ -788,15 +760,24 @@ mod tests {
 
         let accounts = vec![(pubkey, account.clone(), true)];
         let context = ExecutionContext::new(Pubkey::new_unique(), accounts.clone(), vec![]);
-        let mut serialized = BytecodeVm::serialize_accounts(&context);
+        let input_accounts = BytecodeVm::to_input_accounts(&context);
+        let serialized = crate::bpf_serialization::serialize_aligned(
+            &input_accounts,
+            &context.instruction_data,
+            &context.program_id,
+        )
+        .unwrap();
 
-        // Patch lamports in serialized buffer: offset is 8 (count) + 2 (flags) + 32 (pubkey) + 32 (owner) = 74
-        let lamports_offset = 8 + 2 + 32 + 32;
+        // Patch lamports in aligned format:
+        // offset = 8(count) + 1(dup_marker) + 1(is_signer) + 1(is_writable)
+        //        + 1(is_executable) + 4(padding) + 32(pubkey) + 32(owner) = 80
+        let lamports_offset = 80;
+        let mut modified_buf = serialized.buffer.clone();
         let new_lamports: u64 = 2000;
-        serialized[lamports_offset..lamports_offset + 8]
+        modified_buf[lamports_offset..lamports_offset + 8]
             .copy_from_slice(&new_lamports.to_le_bytes());
 
-        let result = BytecodeVm::deserialize_accounts(&serialized, &accounts).unwrap();
+        let result = BytecodeVm::collect_modified_accounts(&modified_buf, &serialized, &accounts);
         assert_eq!(result.len(), 1);
         let modified = result.get(&pubkey).unwrap();
         assert_eq!(modified.meta.lamports, 2000);
@@ -804,7 +785,7 @@ mod tests {
     }
 
     #[test]
-    fn deserialize_readonly_ignored() {
+    fn serialization_ignores_readonly_changes() {
         let pubkey = Pubkey::new_unique();
         let owner = Pubkey::new_unique();
 
@@ -821,15 +802,22 @@ mod tests {
         // Account is NOT writable
         let accounts = vec![(pubkey, account.clone(), false)];
         let context = ExecutionContext::new(Pubkey::new_unique(), accounts.clone(), vec![]);
-        let mut serialized = BytecodeVm::serialize_accounts(&context);
+        let input_accounts = BytecodeVm::to_input_accounts(&context);
+        let serialized = crate::bpf_serialization::serialize_aligned(
+            &input_accounts,
+            &context.instruction_data,
+            &context.program_id,
+        )
+        .unwrap();
 
         // Patch lamports even though it's read-only
-        let lamports_offset = 8 + 2 + 32 + 32;
+        let lamports_offset = 80;
+        let mut modified_buf = serialized.buffer.clone();
         let new_lamports: u64 = 9999;
-        serialized[lamports_offset..lamports_offset + 8]
+        modified_buf[lamports_offset..lamports_offset + 8]
             .copy_from_slice(&new_lamports.to_le_bytes());
 
-        let result = BytecodeVm::deserialize_accounts(&serialized, &accounts).unwrap();
+        let result = BytecodeVm::collect_modified_accounts(&modified_buf, &serialized, &accounts);
         assert!(
             result.is_empty(),
             "Read-only account changes should be ignored"
