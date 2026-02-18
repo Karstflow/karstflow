@@ -159,6 +159,115 @@ impl SnapshotArchive {
     }
 }
 
+/// Build a Solana-compatible snapshot archive as an uncompressed tar.
+///
+/// The archive contains:
+/// - `version` — version string (default "1.18.26")
+/// - `snapshots/<slot>/<slot>` — manifest data (bincode-encoded bank state)
+/// - `snapshots/status_cache` — status cache data
+/// - `accounts/<slot>.<id>` — AppendVec account files
+///
+/// Returns the uncompressed tar bytes. Caller can compress with zstd.
+#[allow(dead_code)]
+pub struct SnapshotArchiveBuilder {
+    entries: Vec<(String, Vec<u8>)>,
+}
+
+#[allow(dead_code)]
+impl SnapshotArchiveBuilder {
+    pub fn new() -> Self {
+        Self {
+            entries: Vec::new(),
+        }
+    }
+
+    /// Set the version string (e.g., "1.18.26").
+    pub fn set_version(&mut self, version: &str) -> &mut Self {
+        self.entries
+            .push(("version".to_string(), version.as_bytes().to_vec()));
+        self
+    }
+
+    /// Add the bank state manifest for a given slot.
+    pub fn set_manifest(&mut self, slot: u64, data: Vec<u8>) -> &mut Self {
+        let path = format!("snapshots/{slot}/{slot}");
+        self.entries.push((path, data));
+        self
+    }
+
+    /// Add the status cache.
+    pub fn set_status_cache(&mut self, data: Vec<u8>) -> &mut Self {
+        self.entries
+            .push(("snapshots/status_cache".to_string(), data));
+        self
+    }
+
+    /// Add an AppendVec account file.
+    pub fn add_account_vec(&mut self, slot: u64, vec_id: u64, data: Vec<u8>) -> &mut Self {
+        let path = format!("accounts/{slot}.{vec_id}");
+        self.entries.push((path, data));
+        self
+    }
+
+    /// Build the tar archive (uncompressed).
+    pub fn build_tar(&self) -> Vec<u8> {
+        let mut archive = Vec::new();
+
+        for (name, content) in &self.entries {
+            Self::write_tar_entry(&mut archive, name, content);
+        }
+
+        // End-of-archive marker: two 512-byte zero blocks.
+        archive.extend(std::iter::repeat_n(0u8, TAR_BLOCK_SIZE * 2));
+        archive
+    }
+
+    /// Build the archive and compress with zstd.
+    pub fn build_compressed(&self, compression_level: i32) -> Result<Vec<u8>, ArchiveError> {
+        let tar = self.build_tar();
+        zstd::bulk::compress(&tar, compression_level)
+            .map_err(|e| ArchiveError::Io(format!("zstd compression failed: {e}")))
+    }
+
+    fn write_tar_entry(archive: &mut Vec<u8>, name: &str, content: &[u8]) {
+        let mut header = [0u8; TAR_BLOCK_SIZE];
+
+        // Name (bytes 0-99).
+        let name_bytes = name.as_bytes();
+        let copy_len = name_bytes.len().min(100);
+        header[..copy_len].copy_from_slice(&name_bytes[..copy_len]);
+
+        // Size (bytes 124-135, octal 11 chars).
+        let size_str = format!("{:011o}", content.len());
+        header[124..124 + size_str.len()].copy_from_slice(size_str.as_bytes());
+
+        // Typeflag '0' for regular file.
+        header[156] = b'0';
+
+        // Magic "ustar\0".
+        header[257..263].copy_from_slice(b"ustar\0");
+
+        // Compute checksum: treat checksum field (148-155) as spaces.
+        header[148..156].copy_from_slice(b"        ");
+        let checksum: u32 = header.iter().map(|&b| b as u32).sum();
+        let cksum_str = format!("{checksum:06o}\0 ");
+        header[148..156].copy_from_slice(&cksum_str.as_bytes()[..8]);
+
+        archive.extend_from_slice(&header);
+        archive.extend_from_slice(content);
+
+        // Pad to 512-byte boundary.
+        let pad = (TAR_BLOCK_SIZE - (content.len() % TAR_BLOCK_SIZE)) % TAR_BLOCK_SIZE;
+        archive.extend(std::iter::repeat_n(0u8, pad));
+    }
+}
+
+impl Default for SnapshotArchiveBuilder {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// Minimal TAR header parser.
 struct TarHeader {
     name: String,
@@ -392,6 +501,115 @@ mod tests {
                 assert_eq!(data, b"hello");
             }
             other => panic!("expected Unknown, got {other:?}"),
+        }
+    }
+
+    // -------------------------------------------------------------------
+    // Archive builder tests
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn builder_version_roundtrip() {
+        let mut builder = SnapshotArchiveBuilder::new();
+        builder.set_version("1.18.26");
+        let tar = builder.build_tar();
+        let entries = SnapshotArchive::parse_tar_bytes(&tar).unwrap();
+        assert_eq!(entries.len(), 1);
+        match &entries[0] {
+            SnapshotArchiveEntry::Version(v) => assert_eq!(v, "1.18.26"),
+            other => panic!("expected Version, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn builder_manifest_roundtrip() {
+        let mut builder = SnapshotArchiveBuilder::new();
+        builder.set_manifest(100, vec![1, 2, 3, 4, 5]);
+        let tar = builder.build_tar();
+        let entries = SnapshotArchive::parse_tar_bytes(&tar).unwrap();
+        assert_eq!(entries.len(), 1);
+        match &entries[0] {
+            SnapshotArchiveEntry::Manifest(data) => assert_eq!(data, &[1, 2, 3, 4, 5]),
+            other => panic!("expected Manifest, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn builder_account_vec_roundtrip() {
+        let mut builder = SnapshotArchiveBuilder::new();
+        builder.add_account_vec(42, 7, vec![10, 20, 30]);
+        let tar = builder.build_tar();
+        let entries = SnapshotArchive::parse_tar_bytes(&tar).unwrap();
+        assert_eq!(entries.len(), 1);
+        match &entries[0] {
+            SnapshotArchiveEntry::AccountVec { slot, vec_id, data } => {
+                assert_eq!(*slot, 42);
+                assert_eq!(*vec_id, 7);
+                assert_eq!(data, &[10, 20, 30]);
+            }
+            other => panic!("expected AccountVec, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn builder_full_snapshot_structure() {
+        let mut builder = SnapshotArchiveBuilder::new();
+        builder.set_version("1.18.26");
+        builder.set_manifest(100, vec![1, 2, 3]);
+        builder.set_status_cache(vec![4, 5]);
+        builder.add_account_vec(100, 0, vec![6, 7]);
+        builder.add_account_vec(100, 1, vec![8, 9, 10]);
+
+        let tar = builder.build_tar();
+        let entries = SnapshotArchive::parse_tar_bytes(&tar).unwrap();
+        assert_eq!(entries.len(), 5);
+        assert!(matches!(&entries[0], SnapshotArchiveEntry::Version(_)));
+        assert!(matches!(&entries[1], SnapshotArchiveEntry::Manifest(_)));
+        assert!(matches!(&entries[2], SnapshotArchiveEntry::StatusCache(_)));
+        assert!(matches!(
+            &entries[3],
+            SnapshotArchiveEntry::AccountVec { .. }
+        ));
+        assert!(matches!(
+            &entries[4],
+            SnapshotArchiveEntry::AccountVec { .. }
+        ));
+    }
+
+    #[test]
+    fn builder_compressed_roundtrip() {
+        let mut builder = SnapshotArchiveBuilder::new();
+        builder.set_version("1.18.26");
+        builder.add_account_vec(50, 0, vec![42; 100]);
+
+        let compressed = builder.build_compressed(3).unwrap();
+        let entries = SnapshotArchive::parse_bytes(&compressed).unwrap();
+        assert_eq!(entries.len(), 2);
+    }
+
+    #[test]
+    fn builder_empty_archive() {
+        let builder = SnapshotArchiveBuilder::new();
+        let tar = builder.build_tar();
+        let entries = SnapshotArchive::parse_tar_bytes(&tar).unwrap();
+        assert!(entries.is_empty());
+    }
+
+    #[test]
+    fn builder_large_account_data() {
+        let mut builder = SnapshotArchiveBuilder::new();
+        let big_data = vec![0xAB; 100_000];
+        builder.add_account_vec(1, 0, big_data.clone());
+
+        let tar = builder.build_tar();
+        let entries = SnapshotArchive::parse_tar_bytes(&tar).unwrap();
+        assert_eq!(entries.len(), 1);
+        match &entries[0] {
+            SnapshotArchiveEntry::AccountVec { data, .. } => {
+                assert_eq!(data.len(), 100_000);
+                assert_eq!(data, &big_data);
+            }
+            _ => panic!("expected AccountVec"),
         }
     }
 }

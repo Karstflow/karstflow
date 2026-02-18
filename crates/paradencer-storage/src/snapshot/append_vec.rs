@@ -144,6 +144,80 @@ pub fn parse_append_vec(buf: &[u8]) -> Result<Vec<AppendVecAccount>, AppendVecEr
     AppendVecIter::new(buf).collect()
 }
 
+#[allow(dead_code)]
+/// Serialize a single account into AppendVec binary format.
+///
+/// Produces a 136-byte header followed by account data, padded to
+/// 8-byte alignment. The `hash` field is written as provided (caller
+/// is responsible for computing it if needed).
+pub fn serialize_append_vec_record(account: &AppendVecAccount) -> Vec<u8> {
+    let data_len = account.data.len();
+    let unpadded = HEADER_SIZE + data_len;
+    let padded = (unpadded + RECORD_ALIGNMENT - 1) & !(RECORD_ALIGNMENT - 1);
+    let mut buf = vec![0u8; padded];
+
+    // Bytes 0-7: reserved (zeros)
+    // Bytes 8-15: data_len
+    buf[8..16].copy_from_slice(&(data_len as u64).to_le_bytes());
+    // Bytes 16-47: pubkey
+    buf[16..48].copy_from_slice(account.pubkey.as_bytes());
+    // Bytes 48-55: lamports
+    buf[48..56].copy_from_slice(&account.lamports.to_le_bytes());
+    // Bytes 56-63: rent_epoch
+    buf[56..64].copy_from_slice(&account.rent_epoch.to_le_bytes());
+    // Bytes 64-95: owner
+    buf[64..96].copy_from_slice(account.owner.as_bytes());
+    // Byte 96: executable
+    buf[96] = account.executable as u8;
+    // Bytes 97-103: padding (zeros, already initialized)
+    // Bytes 104-135: hash
+    buf[104..136].copy_from_slice(&account.hash);
+    // Data
+    buf[HEADER_SIZE..HEADER_SIZE + data_len].copy_from_slice(&account.data);
+    // Padding bytes are already zeros from vec initialization
+
+    buf
+}
+
+#[allow(dead_code)]
+/// Serialize multiple accounts into a single AppendVec buffer.
+pub fn serialize_append_vec(accounts: &[AppendVecAccount]) -> Vec<u8> {
+    let mut buf = Vec::new();
+    for account in accounts {
+        buf.extend(serialize_append_vec_record(account));
+    }
+    buf
+}
+
+#[allow(dead_code)]
+/// Convert an internal Account into an AppendVecAccount for serialization.
+///
+/// The hash is computed as SHA-256 over the canonical account fields
+/// (lamports, rent_epoch, data, executable, owner, pubkey) matching
+/// the Solana protocol.
+pub fn account_to_append_vec(pubkey: &Pubkey, account: &Account) -> AppendVecAccount {
+    use sha2::{Digest, Sha256};
+
+    let mut hasher = Sha256::new();
+    hasher.update(account.meta.lamports.to_le_bytes());
+    hasher.update(account.meta.rent_epoch.to_le_bytes());
+    hasher.update(account.data.as_ref());
+    hasher.update([account.meta.executable as u8]);
+    hasher.update(account.meta.owner.as_bytes());
+    hasher.update(pubkey.as_bytes());
+    let hash: [u8; 32] = hasher.finalize().into();
+
+    AppendVecAccount {
+        pubkey: *pubkey,
+        lamports: account.meta.lamports,
+        rent_epoch: account.meta.rent_epoch,
+        owner: account.meta.owner,
+        executable: account.meta.executable,
+        hash,
+        data: account.data.as_slice().to_vec(),
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AppendVecError {
     TruncatedHeader {
@@ -344,5 +418,167 @@ mod tests {
         buf[96] = 1;
         let accounts = parse_append_vec(&buf).unwrap();
         assert!(accounts[0].executable);
+    }
+
+    // -------------------------------------------------------------------
+    // Writer tests
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn serialize_roundtrip_no_data() {
+        let account = AppendVecAccount {
+            pubkey: Pubkey::new([1u8; 32]),
+            lamports: 1000,
+            rent_epoch: 42,
+            owner: Pubkey::new([2u8; 32]),
+            executable: false,
+            hash: [0xAB; 32],
+            data: vec![],
+        };
+        let buf = serialize_append_vec_record(&account);
+        let parsed = parse_append_vec(&buf).unwrap();
+        assert_eq!(parsed.len(), 1);
+        assert_eq!(parsed[0].pubkey, account.pubkey);
+        assert_eq!(parsed[0].lamports, 1000);
+        assert_eq!(parsed[0].owner, account.owner);
+        assert_eq!(parsed[0].rent_epoch, 42);
+        assert_eq!(parsed[0].hash, [0xAB; 32]);
+        assert!(parsed[0].data.is_empty());
+    }
+
+    #[test]
+    fn serialize_roundtrip_with_data() {
+        let account = AppendVecAccount {
+            pubkey: Pubkey::new([3u8; 32]),
+            lamports: 5000,
+            rent_epoch: 0,
+            owner: Pubkey::new([4u8; 32]),
+            executable: true,
+            hash: [0xCD; 32],
+            data: vec![10, 20, 30, 40, 50],
+        };
+        let buf = serialize_append_vec_record(&account);
+        let parsed = parse_append_vec(&buf).unwrap();
+        assert_eq!(parsed.len(), 1);
+        assert_eq!(parsed[0].data, vec![10, 20, 30, 40, 50]);
+        assert!(parsed[0].executable);
+    }
+
+    #[test]
+    fn serialize_multiple_roundtrip() {
+        let accounts = vec![
+            AppendVecAccount {
+                pubkey: Pubkey::new([1u8; 32]),
+                lamports: 100,
+                rent_epoch: 0,
+                owner: Pubkey::new([10u8; 32]),
+                executable: false,
+                hash: [0; 32],
+                data: vec![],
+            },
+            AppendVecAccount {
+                pubkey: Pubkey::new([2u8; 32]),
+                lamports: 200,
+                rent_epoch: 5,
+                owner: Pubkey::new([20u8; 32]),
+                executable: false,
+                hash: [1; 32],
+                data: vec![1, 2, 3],
+            },
+            AppendVecAccount {
+                pubkey: Pubkey::new([3u8; 32]),
+                lamports: 300,
+                rent_epoch: 10,
+                owner: Pubkey::new([30u8; 32]),
+                executable: true,
+                hash: [2; 32],
+                data: vec![4, 5, 6, 7, 8, 9, 10],
+            },
+        ];
+        let buf = serialize_append_vec(&accounts);
+        let parsed = parse_append_vec(&buf).unwrap();
+        assert_eq!(parsed.len(), 3);
+        for (orig, read) in accounts.iter().zip(parsed.iter()) {
+            assert_eq!(orig.pubkey, read.pubkey);
+            assert_eq!(orig.lamports, read.lamports);
+            assert_eq!(orig.owner, read.owner);
+            assert_eq!(orig.executable, read.executable);
+            assert_eq!(orig.data, read.data);
+        }
+    }
+
+    #[test]
+    fn serialize_alignment_correct() {
+        // 5 bytes of data → 136 + 5 = 141 → padded to 144
+        let account = AppendVecAccount {
+            pubkey: Pubkey::new([1u8; 32]),
+            lamports: 42,
+            rent_epoch: 0,
+            owner: Pubkey::zeroed(),
+            executable: false,
+            hash: [0; 32],
+            data: vec![1, 2, 3, 4, 5],
+        };
+        let buf = serialize_append_vec_record(&account);
+        assert_eq!(buf.len(), 144);
+        assert_eq!(buf.len() % RECORD_ALIGNMENT, 0);
+    }
+
+    #[test]
+    fn account_to_append_vec_produces_valid_hash() {
+        let pubkey = Pubkey::new([5u8; 32]);
+        let account = Account {
+            meta: AccountMeta {
+                lamports: 1000,
+                owner: Pubkey::new([6u8; 32]),
+                executable: false,
+                rent_epoch: 0,
+            },
+            data: AccountData::new(vec![1, 2, 3]),
+        };
+        let av = account_to_append_vec(&pubkey, &account);
+        assert_eq!(av.pubkey, pubkey);
+        assert_eq!(av.lamports, 1000);
+        assert_eq!(av.data, vec![1, 2, 3]);
+        // Hash should be non-zero (SHA-256 of non-trivial data)
+        assert_ne!(av.hash, [0; 32]);
+    }
+
+    #[test]
+    fn account_to_append_vec_deterministic_hash() {
+        let pubkey = Pubkey::new([7u8; 32]);
+        let account = Account {
+            meta: AccountMeta {
+                lamports: 500,
+                owner: Pubkey::new([8u8; 32]),
+                executable: true,
+                rent_epoch: 99,
+            },
+            data: AccountData::new(vec![10, 20]),
+        };
+        let av1 = account_to_append_vec(&pubkey, &account);
+        let av2 = account_to_append_vec(&pubkey, &account);
+        assert_eq!(av1.hash, av2.hash);
+    }
+
+    #[test]
+    fn full_account_serialize_parse_roundtrip() {
+        let pubkey = Pubkey::new([9u8; 32]);
+        let account = Account {
+            meta: AccountMeta {
+                lamports: 42_000,
+                owner: Pubkey::new([10u8; 32]),
+                executable: false,
+                rent_epoch: 7,
+            },
+            data: AccountData::new(vec![0xFF; 100]),
+        };
+        let av = account_to_append_vec(&pubkey, &account);
+        let buf = serialize_append_vec_record(&av);
+        let parsed = parse_append_vec(&buf).unwrap();
+        assert_eq!(parsed.len(), 1);
+        let (pk, acc) = parsed[0].clone().into_account();
+        assert_eq!(pk, pubkey);
+        assert_eq!(acc, account);
     }
 }

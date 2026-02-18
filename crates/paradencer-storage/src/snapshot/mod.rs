@@ -10,7 +10,11 @@ pub mod status_cache;
 #[cfg(doc)]
 pub mod doc;
 
-pub use append_vec::{AppendVecAccount, AppendVecError, AppendVecIter};
+#[allow(unused_imports)]
+pub use append_vec::{
+    account_to_append_vec, serialize_append_vec, serialize_append_vec_record, AppendVecAccount,
+    AppendVecError, AppendVecIter,
+};
 pub use bank_fields::{
     EpochScheduleConfig, FeeRateConfig, InflationConfig, RecentBlockhash, RentConfig,
     SnapshotBankState, StakeHistoryRecord, StakeSummary,
@@ -24,5 +28,6 @@ pub use creator::IncrementalStats;
 pub use loader::{LoadProgress, LoadProgressInfo, LoadedSnapshot, SnapshotLoader};
 pub use metadata::{CompressionType, SnapshotConfig, SnapshotManifest, SnapshotMetadata};
 pub use restore::{RestoreResult, SnapshotRestorer};
-pub use solana_archive::{SnapshotArchive, SnapshotArchiveEntry};
+#[allow(unused_imports)]
+pub use solana_archive::{SnapshotArchive, SnapshotArchiveBuilder, SnapshotArchiveEntry};
 pub use status_cache::{StatusCacheEntry, StatusCacheParseResult};
