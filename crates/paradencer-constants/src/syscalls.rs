@@ -67,11 +67,71 @@ pub const GET_EPOCH_STAKE_COST: u64 = 100;
 /// Maximum length for a single generic sysvar read.
 pub const MAX_GENERIC_SYSVAR_READ_LEN: usize = 10 * 1024;
 
-// alt_bn128 curve operation costs
-pub const ALT_BN128_ADD_COST: u64 = 334;
-pub const ALT_BN128_MUL_COST: u64 = 3_840;
-pub const ALT_BN128_PAIRING_BASE_COST: u64 = 36_364;
-pub const ALT_BN128_PAIRING_PER_PAIR_COST: u64 = 12_121;
+// alt_bn128 (BN254) curve operation costs — G1
+pub const ALT_BN128_G1_ADD_COST: u64 = 334;
+pub const ALT_BN128_G1_MUL_COST: u64 = 3_840;
+
+// alt_bn128 (BN254) curve operation costs — G2
+pub const ALT_BN128_G2_ADD_COST: u64 = 535;
+pub const ALT_BN128_G2_MUL_COST: u64 = 15_670;
+
+// alt_bn128 pairing costs
+pub const ALT_BN128_PAIRING_FIRST_PAIR_COST: u64 = 36_364;
+pub const ALT_BN128_PAIRING_EACH_ADDITIONAL_PAIR_COST: u64 = 12_121;
+
+// alt_bn128 compression/decompression costs
+pub const ALT_BN128_G1_COMPRESS_COST: u64 = 30;
+pub const ALT_BN128_G1_DECOMPRESS_COST: u64 = 398;
+pub const ALT_BN128_G2_COMPRESS_COST: u64 = 86;
+pub const ALT_BN128_G2_DECOMPRESS_COST: u64 = 13_610;
+
+// Backwards-compatible aliases used by existing code
+pub const ALT_BN128_ADD_COST: u64 = ALT_BN128_G1_ADD_COST;
+pub const ALT_BN128_MUL_COST: u64 = ALT_BN128_G1_MUL_COST;
+pub const ALT_BN128_PAIRING_BASE_COST: u64 = ALT_BN128_PAIRING_FIRST_PAIR_COST;
+pub const ALT_BN128_PAIRING_PER_PAIR_COST: u64 = ALT_BN128_PAIRING_EACH_ADDITIONAL_PAIR_COST;
+
+// alt_bn128 group operation IDs (big-endian variants)
+pub const ALT_BN128_G1_ADD_BE: u64 = 0;
+pub const ALT_BN128_G1_SUB_BE: u64 = 1;
+pub const ALT_BN128_G1_MUL_BE: u64 = 2;
+pub const ALT_BN128_PAIRING_BE: u64 = 3;
+pub const ALT_BN128_G2_ADD_BE: u64 = 4;
+pub const ALT_BN128_G2_SUB_BE: u64 = 5;
+pub const ALT_BN128_G2_MUL_BE: u64 = 6;
+
+/// Bit flag that converts a big-endian op ID to its little-endian variant (SIMD-0284).
+pub const ALT_BN128_LITTLE_ENDIAN_FLAG: u64 = 0x80;
+
+// alt_bn128 compression operation IDs (big-endian variants)
+pub const ALT_BN128_G1_COMPRESS_BE: u64 = 0;
+pub const ALT_BN128_G1_DECOMPRESS_BE: u64 = 1;
+pub const ALT_BN128_G2_COMPRESS_BE: u64 = 2;
+pub const ALT_BN128_G2_DECOMPRESS_BE: u64 = 3;
+
+// alt_bn128 point sizes
+pub const ALT_BN128_G1_POINT_SIZE: usize = 64;
+pub const ALT_BN128_G1_COMPRESSED_SIZE: usize = 32;
+pub const ALT_BN128_G2_POINT_SIZE: usize = 128;
+pub const ALT_BN128_G2_COMPRESSED_SIZE: usize = 64;
+pub const ALT_BN128_SCALAR_SIZE: usize = 32;
+pub const ALT_BN128_PAIRING_PAIR_SIZE: usize = 192;
+pub const ALT_BN128_PAIRING_OUTPUT_SIZE: usize = 32;
+
+// Poseidon hash costs: cost = A * n^2 + C, where n = number of inputs
+pub const POSEIDON_COST_COEFFICIENT_A: u64 = 61;
+pub const POSEIDON_COST_COEFFICIENT_C: u64 = 542;
+/// Maximum number of input values for a single Poseidon hash.
+pub const POSEIDON_MAX_INPUTS: usize = 12;
+/// Poseidon parameter set: Light protocol BN254 x5.
+pub const POSEIDON_PARAMS_LIGHT: u64 = 0;
+/// Poseidon endianness: big-endian input.
+pub const POSEIDON_ENDIAN_BIG: u64 = 0;
+/// Poseidon endianness: little-endian input.
+pub const POSEIDON_ENDIAN_LITTLE: u64 = 1;
+
+// Syscall base cost (used by compression syscall)
+pub const SYSCALL_BASE_COST: u64 = 100;
 
 // Curve25519 (ed25519 / ristretto255) operation costs
 pub const CURVE25519_EDWARDS_VALIDATE_POINT_COST: u64 = 159;

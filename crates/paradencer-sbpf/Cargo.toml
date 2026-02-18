@@ -16,4 +16,6 @@ tiny-keccak = { workspace = true }
 k256 = { workspace = true }
 substrate-bn = { workspace = true }
 curve25519-dalek = { workspace = true }
+light-poseidon = { workspace = true }
+ark-bn254 = { workspace = true }
 bs58 = { workspace = true }

@@ -165,6 +165,19 @@ impl RuntimeSyscallDispatch {
             Box::new(SolCurveMultiscalarMulHandler),
         );
 
+        // ALT-BN128 group operations and compression
+        dispatch.register_by_name(
+            "sol_alt_bn128_group_op",
+            Box::new(SolAltBn128GroupOpHandler),
+        );
+        dispatch.register_by_name(
+            "sol_alt_bn128_compression",
+            Box::new(SolAltBn128CompressionHandler),
+        );
+
+        // Poseidon hash
+        dispatch.register_by_name("sol_poseidon", Box::new(SolPoseidonHandler));
+
         dispatch
     }
 
@@ -1359,6 +1372,253 @@ fn curve25519_group_op(
         }
         _ => Ok(None),
     }
+}
+
+/// sol_alt_bn128_group_op: BN254 elliptic curve group operation.
+///
+/// r1 = group_op (operation ID with optional LE flag in bit 7)
+/// r2 = input address in VM memory
+/// r3 = input size in bytes
+/// r4 = result address in VM memory
+/// Returns 0 on success, 1 on soft error (invalid point/input).
+struct SolAltBn128GroupOpHandler;
+
+impl SyscallHandler for SolAltBn128GroupOpHandler {
+    fn call(
+        &self,
+        vm: &mut VmState,
+        r1: u64, // group_op
+        r2: u64, // input_addr
+        r3: u64, // input_sz
+        r4: u64, // result_addr
+        _r5: u64,
+    ) -> Result<u64, VmError> {
+        let input_sz = r3 as usize;
+        let input = vm
+            .memory
+            .read_slice(r2, input_sz)
+            .map_err(|e| VmError::MemoryError(e.to_string()))?;
+
+        // Determine output size based on operation
+        let base_op = r1 & !syscalls::ALT_BN128_LITTLE_ENDIAN_FLAG;
+        let output_sz = match base_op {
+            syscalls::ALT_BN128_G1_ADD_BE
+            | syscalls::ALT_BN128_G1_SUB_BE
+            | syscalls::ALT_BN128_G1_MUL_BE => syscalls::ALT_BN128_G1_POINT_SIZE,
+            syscalls::ALT_BN128_PAIRING_BE => syscalls::ALT_BN128_PAIRING_OUTPUT_SIZE,
+            syscalls::ALT_BN128_G2_ADD_BE
+            | syscalls::ALT_BN128_G2_SUB_BE
+            | syscalls::ALT_BN128_G2_MUL_BE => syscalls::ALT_BN128_G2_POINT_SIZE,
+            _ => {
+                return Err(VmError::SyscallError(format!(
+                    "invalid alt_bn128 group op: {}",
+                    r1
+                )));
+            }
+        };
+
+        let mut output = vec![0u8; output_sz];
+        let mut ctx = create_syscall_context(vm);
+
+        let ret = match crate::syscalls::alt_bn128::group_op(&mut ctx, r1, &input, &mut output) {
+            Ok(ret) => {
+                vm.compute_meter = ctx.compute_meter;
+                if ret == 0 {
+                    vm.memory
+                        .write_slice(r4, &output)
+                        .map_err(|e| VmError::MemoryError(e.to_string()))?;
+                }
+                ret
+            }
+            Err(e) => {
+                vm.compute_meter = ctx.compute_meter;
+                return Err(VmError::SyscallError(e.to_string()));
+            }
+        };
+
+        Ok(ret)
+    }
+}
+
+/// sol_alt_bn128_compression: BN254 point compression/decompression.
+///
+/// r1 = operation ID (compress/decompress G1/G2, with optional LE flag)
+/// r2 = input address in VM memory
+/// r3 = input size in bytes
+/// r4 = result address in VM memory
+/// Returns 0 on success, 1 on soft error.
+struct SolAltBn128CompressionHandler;
+
+impl SyscallHandler for SolAltBn128CompressionHandler {
+    fn call(
+        &self,
+        vm: &mut VmState,
+        r1: u64, // op
+        r2: u64, // input_addr
+        r3: u64, // input_sz
+        r4: u64, // result_addr
+        _r5: u64,
+    ) -> Result<u64, VmError> {
+        let input_sz = r3 as usize;
+        let input = vm
+            .memory
+            .read_slice(r2, input_sz)
+            .map_err(|e| VmError::MemoryError(e.to_string()))?;
+
+        // Determine output size based on operation
+        let base_op = r1 & !syscalls::ALT_BN128_LITTLE_ENDIAN_FLAG;
+        let output_sz = match base_op {
+            syscalls::ALT_BN128_G1_COMPRESS_BE => syscalls::ALT_BN128_G1_COMPRESSED_SIZE,
+            syscalls::ALT_BN128_G1_DECOMPRESS_BE => syscalls::ALT_BN128_G1_POINT_SIZE,
+            syscalls::ALT_BN128_G2_COMPRESS_BE => syscalls::ALT_BN128_G2_COMPRESSED_SIZE,
+            syscalls::ALT_BN128_G2_DECOMPRESS_BE => syscalls::ALT_BN128_G2_POINT_SIZE,
+            _ => {
+                return Err(VmError::SyscallError(format!(
+                    "invalid alt_bn128 compression op: {}",
+                    r1
+                )));
+            }
+        };
+
+        let mut output = vec![0u8; output_sz];
+        let mut ctx = create_syscall_context(vm);
+
+        let ret = match crate::syscalls::alt_bn128::compression(&mut ctx, r1, &input, &mut output) {
+            Ok(ret) => {
+                vm.compute_meter = ctx.compute_meter;
+                if ret == 0 {
+                    vm.memory
+                        .write_slice(r4, &output)
+                        .map_err(|e| VmError::MemoryError(e.to_string()))?;
+                }
+                ret
+            }
+            Err(e) => {
+                vm.compute_meter = ctx.compute_meter;
+                return Err(VmError::SyscallError(e.to_string()));
+            }
+        };
+
+        Ok(ret)
+    }
+}
+
+/// sol_poseidon: Poseidon hash over BN254 field elements.
+///
+/// r1 = parameter set (0 = Light protocol)
+/// r2 = endianness (0 = big-endian, 1 = little-endian)
+/// r3 = pointer to array of (addr, len) pairs in VM memory
+/// r4 = number of input values
+/// r5 = result address (32 bytes)
+/// Returns 0 on success, 1 on soft error.
+struct SolPoseidonHandler;
+
+impl SyscallHandler for SolPoseidonHandler {
+    fn call(
+        &self,
+        vm: &mut VmState,
+        r1: u64, // params
+        r2: u64, // endianness
+        r3: u64, // vals_addr (pointer to array of vm_vec_t structs)
+        r4: u64, // vals_len
+        r5: u64, // result_addr
+    ) -> Result<u64, VmError> {
+        let vals_len = r4 as usize;
+
+        // Validate parameter set
+        if r1 != syscalls::POSEIDON_PARAMS_LIGHT {
+            return Err(VmError::SyscallError(
+                "invalid poseidon parameter set".into(),
+            ));
+        }
+
+        // Validate endianness
+        if r2 != syscalls::POSEIDON_ENDIAN_BIG && r2 != syscalls::POSEIDON_ENDIAN_LITTLE {
+            return Err(VmError::SyscallError("invalid poseidon endianness".into()));
+        }
+
+        // Validate input count
+        if vals_len > syscalls::POSEIDON_MAX_INPUTS {
+            return Err(VmError::SyscallError(format!(
+                "Poseidon hashing {} sequences is not supported",
+                vals_len
+            )));
+        }
+
+        // Compute cost: A * n^2 + C
+        let cost = syscalls::POSEIDON_COST_COEFFICIENT_A
+            .saturating_mul((vals_len as u64).saturating_mul(vals_len as u64))
+            .saturating_add(syscalls::POSEIDON_COST_COEFFICIENT_C);
+        deduct_compute(vm, cost)?;
+
+        // Empty input returns soft error
+        if vals_len == 0 {
+            return Ok(1);
+        }
+
+        // Read the vector of (addr, len) pairs
+        // Each entry is a vm_vec_t: u64 addr + u64 len = 16 bytes
+        let vec_data = vm
+            .memory
+            .read_slice(r3, vals_len * 16)
+            .map_err(|e| VmError::MemoryError(e.to_string()))?;
+
+        // Collect all input slices
+        let mut inputs: Vec<Vec<u8>> = Vec::with_capacity(vals_len);
+        for i in 0..vals_len {
+            let offset = i * 16;
+            let addr = u64::from_le_bytes(vec_data[offset..offset + 8].try_into().unwrap());
+            let len = u64::from_le_bytes(vec_data[offset + 8..offset + 16].try_into().unwrap());
+            let data = vm
+                .memory
+                .read_slice(addr, len as usize)
+                .map_err(|e| VmError::MemoryError(e.to_string()))?;
+            inputs.push(data);
+        }
+
+        let input_refs: Vec<&[u8]> = inputs.iter().map(|v| v.as_slice()).collect();
+        let mut result = [0u8; 32];
+
+        let mut ctx = create_syscall_context(vm);
+        // We already deducted compute above, so give the poseidon_hash a large budget
+        // and don't let it deduct again. Instead we pass directly to the internal function.
+        let is_big_endian = r2 == syscalls::POSEIDON_ENDIAN_BIG;
+        let ret = match compute_poseidon_hash(&input_refs, is_big_endian) {
+            Ok(hash) => {
+                result.copy_from_slice(&hash);
+                vm.memory
+                    .write_slice(r5, &result)
+                    .map_err(|e| VmError::MemoryError(e.to_string()))?;
+                0u64
+            }
+            Err(_) => 1u64,
+        };
+
+        // Restore compute meter from ctx (unused in this path)
+        let _ = ctx;
+
+        Ok(ret)
+    }
+}
+
+/// Internal Poseidon computation helper.
+fn compute_poseidon_hash(
+    inputs: &[&[u8]],
+    big_endian: bool,
+) -> Result<[u8; 32], light_poseidon::PoseidonError> {
+    use light_poseidon::{Poseidon, PoseidonBytesHasher};
+    let mut hasher = Poseidon::<ark_bn254::Fr>::new_circom(inputs.len())?;
+    if big_endian {
+        hasher.hash_bytes_be(inputs)
+    } else {
+        hasher.hash_bytes_le(inputs)
+    }
+}
+
+/// Create a SyscallContext from a VmState for use with the higher-level
+/// syscall functions in the `syscalls` module.
+fn create_syscall_context(vm: &VmState) -> crate::syscalls::SyscallContext {
+    crate::syscalls::SyscallContext::new(paradencer_types::Pubkey::zeroed(), vm.compute_meter)
 }
 
 /// sol_log_pubkey: Log a public key as base58.

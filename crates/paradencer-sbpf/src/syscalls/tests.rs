@@ -2033,3 +2033,233 @@ fn cpi_too_many_signers_rejected() {
     let result = invoke_signed(&mut ctx, &instruction, &[], &all_seeds);
     assert!(matches!(result, Err(SyscallError::InvalidArgument(_))));
 }
+
+// ===========================================================================
+// ALT-BN128 group_op syscall tests
+// ===========================================================================
+
+/// The BN254 G1 generator: (1, 2).
+fn g1_gen() -> [u8; 64] {
+    let mut buf = [0u8; 64];
+    buf[31] = 1;
+    buf[63] = 2;
+    buf
+}
+
+#[test]
+fn alt_bn128_g1_add_identity() {
+    let mut ctx = test_context();
+    let gen = g1_gen();
+    let zero = [0u8; 64];
+    let mut input = [0u8; 128];
+    input[..64].copy_from_slice(&gen);
+    input[64..].copy_from_slice(&zero);
+
+    let mut output = [0u8; 64];
+    let ret = alt_bn128::group_op(&mut ctx, ALT_BN128_G1_ADD_BE, &input, &mut output).unwrap();
+    assert_eq!(ret, 0);
+    assert_eq!(&output, &gen);
+}
+
+#[test]
+fn alt_bn128_g1_add_to_self() {
+    let mut ctx = test_context();
+    let gen = g1_gen();
+    let mut input = [0u8; 128];
+    input[..64].copy_from_slice(&gen);
+    input[64..].copy_from_slice(&gen);
+
+    let mut output = [0u8; 64];
+    let ret = alt_bn128::group_op(&mut ctx, ALT_BN128_G1_ADD_BE, &input, &mut output).unwrap();
+    assert_eq!(ret, 0);
+    assert_ne!(&output, &gen); // 2G != G
+    assert_ne!(&output, &[0u8; 64]); // 2G != 0
+}
+
+#[test]
+fn alt_bn128_g1_sub_from_self_gives_identity() {
+    let mut ctx = test_context();
+    let gen = g1_gen();
+    let mut input = [0u8; 128];
+    input[..64].copy_from_slice(&gen);
+    input[64..].copy_from_slice(&gen);
+
+    let mut output = [0u8; 64];
+    let ret = alt_bn128::group_op(&mut ctx, ALT_BN128_G1_SUB_BE, &input, &mut output).unwrap();
+    assert_eq!(ret, 0);
+    assert_eq!(&output, &[0u8; 64]); // G - G = 0
+}
+
+#[test]
+fn alt_bn128_g1_mul_by_one() {
+    let mut ctx = test_context();
+    let gen = g1_gen();
+    let mut input = [0u8; 96];
+    input[..64].copy_from_slice(&gen);
+    input[95] = 1;
+
+    let mut output = [0u8; 64];
+    let ret = alt_bn128::group_op(&mut ctx, ALT_BN128_G1_MUL_BE, &input, &mut output).unwrap();
+    assert_eq!(ret, 0);
+    assert_eq!(&output, &gen);
+}
+
+#[test]
+fn alt_bn128_g1_mul_by_two_equals_add() {
+    let mut ctx1 = test_context();
+    let mut ctx2 = test_context();
+    let gen = g1_gen();
+
+    // 2*G via mul
+    let mut mul_input = [0u8; 96];
+    mul_input[..64].copy_from_slice(&gen);
+    mul_input[95] = 2;
+    let mut mul_output = [0u8; 64];
+    alt_bn128::group_op(&mut ctx1, ALT_BN128_G1_MUL_BE, &mul_input, &mut mul_output).unwrap();
+
+    // G+G via add
+    let mut add_input = [0u8; 128];
+    add_input[..64].copy_from_slice(&gen);
+    add_input[64..].copy_from_slice(&gen);
+    let mut add_output = [0u8; 64];
+    alt_bn128::group_op(&mut ctx2, ALT_BN128_G1_ADD_BE, &add_input, &mut add_output).unwrap();
+
+    assert_eq!(&mul_output, &add_output);
+}
+
+#[test]
+fn alt_bn128_g1_add_little_endian() {
+    let mut ctx_be = test_context();
+    let mut ctx_le = test_context();
+    let gen = g1_gen();
+    let zero = [0u8; 64];
+
+    // Big-endian add
+    let mut be_input = [0u8; 128];
+    be_input[..64].copy_from_slice(&gen);
+    be_input[64..].copy_from_slice(&zero);
+    let mut be_output = [0u8; 64];
+    alt_bn128::group_op(&mut ctx_be, ALT_BN128_G1_ADD_BE, &be_input, &mut be_output).unwrap();
+
+    // Little-endian: reverse each 32-byte element
+    let mut le_input = be_input;
+    for chunk in le_input.chunks_exact_mut(32) {
+        chunk.reverse();
+    }
+    let mut le_output = [0u8; 64];
+    let le_op = ALT_BN128_G1_ADD_BE | ALT_BN128_LITTLE_ENDIAN_FLAG;
+    alt_bn128::group_op(&mut ctx_le, le_op, &le_input, &mut le_output).unwrap();
+
+    // Convert LE output back to BE for comparison
+    for chunk in le_output.chunks_exact_mut(32) {
+        chunk.reverse();
+    }
+    assert_eq!(&be_output, &le_output);
+}
+
+#[test]
+fn alt_bn128_pairing_empty_passes() {
+    let mut ctx = test_context();
+    let mut output = [0u8; 32];
+    let ret = alt_bn128::group_op(&mut ctx, ALT_BN128_PAIRING_BE, &[], &mut output).unwrap();
+    assert_eq!(ret, 0);
+    assert_eq!(output[31], 1); // Pairing passes: result = 1
+}
+
+#[test]
+fn alt_bn128_pairing_zero_pair_passes() {
+    let mut ctx = test_context();
+    let input = [0u8; 192]; // Zero G1 + zero G2
+    let mut output = [0u8; 32];
+    let ret = alt_bn128::group_op(&mut ctx, ALT_BN128_PAIRING_BE, &input, &mut output).unwrap();
+    assert_eq!(ret, 0);
+    assert_eq!(output[31], 1);
+}
+
+#[test]
+fn alt_bn128_invalid_op_errors() {
+    let mut ctx = test_context();
+    let mut output = [0u8; 64];
+    let result = alt_bn128::group_op(&mut ctx, 99, &[], &mut output);
+    assert!(result.is_err());
+}
+
+// ===========================================================================
+// ALT-BN128 compression tests
+// ===========================================================================
+
+#[test]
+fn alt_bn128_g1_compress_decompress_roundtrip() {
+    let mut ctx = test_context();
+    let gen = g1_gen();
+
+    // Compress
+    let mut compressed = [0u8; 32];
+    let ret =
+        alt_bn128::compression(&mut ctx, ALT_BN128_G1_COMPRESS_BE, &gen, &mut compressed).unwrap();
+    assert_eq!(ret, 0);
+    assert_ne!(&compressed, &[0u8; 32]); // Should be non-zero
+
+    // Decompress
+    let mut decompressed = [0u8; 64];
+    let ret = alt_bn128::compression(
+        &mut ctx,
+        ALT_BN128_G1_DECOMPRESS_BE,
+        &compressed,
+        &mut decompressed,
+    )
+    .unwrap();
+    assert_eq!(ret, 0);
+    assert_eq!(&decompressed, &gen);
+}
+
+#[test]
+fn alt_bn128_g1_compress_zero_point() {
+    let mut ctx = test_context();
+    let zero = [0u8; 64];
+    let mut compressed = [0u8; 32];
+    let ret =
+        alt_bn128::compression(&mut ctx, ALT_BN128_G1_COMPRESS_BE, &zero, &mut compressed).unwrap();
+    assert_eq!(ret, 0);
+    assert_eq!(&compressed, &[0u8; 32]);
+}
+
+#[test]
+fn alt_bn128_g1_decompress_zero_point() {
+    let mut ctx = test_context();
+    let zero = [0u8; 32];
+    let mut decompressed = [0u8; 64];
+    let ret = alt_bn128::compression(
+        &mut ctx,
+        ALT_BN128_G1_DECOMPRESS_BE,
+        &zero,
+        &mut decompressed,
+    )
+    .unwrap();
+    assert_eq!(ret, 0);
+    assert_eq!(&decompressed, &[0u8; 64]);
+}
+
+#[test]
+fn alt_bn128_compression_wrong_input_size_returns_soft_error() {
+    let mut ctx = test_context();
+    let short_input = [0u8; 10];
+    let mut output = [0u8; 32];
+    let ret = alt_bn128::compression(
+        &mut ctx,
+        ALT_BN128_G1_COMPRESS_BE,
+        &short_input,
+        &mut output,
+    )
+    .unwrap();
+    assert_eq!(ret, 1); // Soft error
+}
+
+#[test]
+fn alt_bn128_compression_invalid_op_errors() {
+    let mut ctx = test_context();
+    let input = [0u8; 64];
+    let mut output = [0u8; 64];
+    let result = alt_bn128::compression(&mut ctx, 99, &input, &mut output);
+    assert!(result.is_err());
+}
