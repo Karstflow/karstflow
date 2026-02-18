@@ -231,23 +231,32 @@ pub struct BatchExecutionSummary {
 // Transaction hashing
 // ---------------------------------------------------------------------------
 
-/// Compute a SHA-256 hash of the transaction message for deduplication.
+/// Compute a truncated SHA-256 hash of the transaction message for deduplication.
 ///
-/// Uses message_bytes if available, otherwise falls back to the first
-/// signature as a unique identifier.
-fn compute_message_hash(tx: &SanitizedTransaction) -> [u8; 32] {
+/// Returns the first 20 bytes of the message hash, matching the Solana
+/// protocol's status cache key format. Uses message_bytes if available,
+/// otherwise falls back to the first signature as a unique identifier.
+fn compute_message_hash(
+    tx: &SanitizedTransaction,
+) -> [u8; paradencer_constants::block_limits::MESSAGE_HASH_PREFIX_BYTES] {
+    use paradencer_constants::block_limits::MESSAGE_HASH_PREFIX_BYTES;
     use sha2::{Digest, Sha256};
+
     if !tx.message_bytes.is_empty() {
-        let mut hasher = Sha256::new();
-        hasher.update(&tx.message_bytes);
-        hasher.finalize().into()
+        let full_hash: [u8; 32] = {
+            let mut hasher = Sha256::new();
+            hasher.update(&tx.message_bytes);
+            hasher.finalize().into()
+        };
+        let mut prefix = [0u8; MESSAGE_HASH_PREFIX_BYTES];
+        prefix.copy_from_slice(&full_hash[..MESSAGE_HASH_PREFIX_BYTES]);
+        prefix
     } else if let Some(sig) = tx.signatures.first() {
-        // Use first 32 bytes of the 64-byte signature as a unique hash
-        let mut hash = [0u8; 32];
-        hash.copy_from_slice(&sig[..32]);
-        hash
+        let mut prefix = [0u8; MESSAGE_HASH_PREFIX_BYTES];
+        prefix.copy_from_slice(&sig[..MESSAGE_HASH_PREFIX_BYTES]);
+        prefix
     } else {
-        [0u8; 32]
+        [0u8; MESSAGE_HASH_PREFIX_BYTES]
     }
 }
 

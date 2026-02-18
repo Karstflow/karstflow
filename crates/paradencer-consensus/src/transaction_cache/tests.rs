@@ -1,9 +1,17 @@
 use super::*;
+use paradencer_constants::block_limits::MESSAGE_HASH_PREFIX_BYTES;
 
-fn make_hash(seed: u8) -> [u8; 32] {
+fn make_blockhash(seed: u8) -> [u8; 32] {
     let mut h = [0u8; 32];
     h[0] = seed;
     h[31] = seed.wrapping_mul(7);
+    h
+}
+
+fn make_message_hash(seed: u8) -> [u8; MESSAGE_HASH_PREFIX_BYTES] {
+    let mut h = [0u8; MESSAGE_HASH_PREFIX_BYTES];
+    h[0] = seed;
+    h[MESSAGE_HASH_PREFIX_BYTES - 1] = seed.wrapping_mul(7);
     h
 }
 
@@ -12,8 +20,8 @@ fn make_hash(seed: u8) -> [u8; 32] {
 #[test]
 fn insert_and_query_single_entry() {
     let cache = TransactionCache::new();
-    let bh = make_hash(1);
-    let mh = make_hash(2);
+    let bh = make_blockhash(1);
+    let mh = make_message_hash(2);
 
     assert!(cache.insert(&bh, &mh, 100, 0));
     assert!(cache.contains(&bh, &mh, 0));
@@ -23,8 +31,8 @@ fn insert_and_query_single_entry() {
 #[test]
 fn detect_duplicate_same_fork() {
     let cache = TransactionCache::new();
-    let bh = make_hash(1);
-    let mh = make_hash(2);
+    let bh = make_blockhash(1);
+    let mh = make_message_hash(2);
 
     assert!(cache.insert(&bh, &mh, 100, 0));
     // Second insert of the exact same tx on the same fork is a duplicate.
@@ -35,8 +43,8 @@ fn detect_duplicate_same_fork() {
 #[test]
 fn allow_same_tx_on_different_forks() {
     let cache = TransactionCache::new();
-    let bh = make_hash(1);
-    let mh = make_hash(2);
+    let bh = make_blockhash(1);
+    let mh = make_message_hash(2);
 
     assert!(cache.insert(&bh, &mh, 100, 0));
     // Same transaction on a different fork should be accepted.
@@ -51,8 +59,8 @@ fn allow_same_tx_on_different_forks() {
 #[test]
 fn not_found_returns_false() {
     let cache = TransactionCache::new();
-    let bh = make_hash(1);
-    let mh = make_hash(2);
+    let bh = make_blockhash(1);
+    let mh = make_message_hash(2);
 
     assert!(!cache.contains(&bh, &mh, 0));
 }
@@ -62,9 +70,9 @@ fn not_found_returns_false() {
 #[test]
 fn purge_by_slot_removes_target() {
     let cache = TransactionCache::new();
-    let bh = make_hash(1);
-    let mh1 = make_hash(10);
-    let mh2 = make_hash(20);
+    let bh = make_blockhash(1);
+    let mh1 = make_message_hash(10);
+    let mh2 = make_message_hash(20);
 
     cache.insert(&bh, &mh1, 100, 0);
     cache.insert(&bh, &mh2, 200, 0);
@@ -79,10 +87,10 @@ fn purge_by_slot_removes_target() {
 #[test]
 fn purge_before_slot_removes_old_entries() {
     let cache = TransactionCache::new();
-    let bh = make_hash(1);
+    let bh = make_blockhash(1);
 
     for i in 0u8..5 {
-        let mh = make_hash(100 + i);
+        let mh = make_message_hash(100 + i);
         cache.insert(&bh, &mh, i as u64, 0);
     }
     assert_eq!(cache.entry_count(), 5);
@@ -99,15 +107,15 @@ fn capacity_limits_reject_inserts() {
     let cache = TransactionCache::with_capacity(3);
 
     for i in 0u8..3 {
-        let bh = make_hash(i);
-        let mh = make_hash(i + 100);
+        let bh = make_blockhash(i);
+        let mh = make_message_hash(i + 100);
         assert!(cache.insert(&bh, &mh, i as u64, 0));
     }
     assert_eq!(cache.entry_count(), 3);
 
     // Fourth insert should be rejected (at capacity).
-    let bh = make_hash(50);
-    let mh = make_hash(51);
+    let bh = make_blockhash(50);
+    let mh = make_message_hash(51);
     assert!(!cache.insert(&bh, &mh, 10, 0));
     assert_eq!(cache.entry_count(), 3);
 }
@@ -122,7 +130,8 @@ fn entry_count_across_shards() {
     for i in 0..count {
         let mut bh = [0u8; 32];
         bh[0..8].copy_from_slice(&(i as u64).to_le_bytes());
-        let mh = make_hash((i % 256) as u8);
+        let mut mh = [0u8; MESSAGE_HASH_PREFIX_BYTES];
+        mh[0] = (i % 256) as u8;
         cache.insert(&bh, &mh, i as u64, 0);
     }
     assert_eq!(cache.entry_count(), count);
@@ -133,7 +142,7 @@ fn entry_count_across_shards() {
 #[test]
 fn shard_index_is_deterministic() {
     let cache = TransactionCache::new();
-    let hash = make_hash(42);
+    let hash = make_blockhash(42);
 
     let idx1 = cache.shard_for_hash(&hash);
     let idx2 = cache.shard_for_hash(&hash);
@@ -144,7 +153,7 @@ fn shard_index_is_deterministic() {
 fn shard_index_within_bounds() {
     let cache = TransactionCache::new();
     for seed in 0u8..=255 {
-        let hash = make_hash(seed);
+        let hash = make_blockhash(seed);
         let idx = cache.shard_for_hash(&hash);
         assert!(idx < TRANSACTION_CACHE_SHARDS);
     }
@@ -168,7 +177,7 @@ fn concurrent_inserts_from_multiple_threads() {
             for i in 0..entries_per_thread {
                 let mut bh = [0u8; 32];
                 bh[0..8].copy_from_slice(&((t * entries_per_thread + i) as u64).to_le_bytes());
-                let mut mh = [0u8; 32];
+                let mut mh = [0u8; MESSAGE_HASH_PREFIX_BYTES];
                 mh[0..8].copy_from_slice(&(i as u64).to_le_bytes());
                 mh[8] = t as u8;
                 cache.insert(&bh, &mh, i as u64, t as u64);
@@ -203,4 +212,153 @@ fn nonce_key_extraction() {
     let accounts = [5u8, 3, 1];
     assert_eq!(extract_nonce_key_index(&accounts), Some(5));
     assert_eq!(extract_nonce_key_index(&[]), None);
+}
+
+// ── seed from status cache ──────────────────────────────────────────
+
+#[test]
+fn seed_populates_cache_entries() {
+    let cache = TransactionCache::new();
+
+    let entries = vec![
+        SeedEntry {
+            slot: 100,
+            blockhash: make_blockhash(1),
+            message_hash: make_message_hash(10),
+        },
+        SeedEntry {
+            slot: 100,
+            blockhash: make_blockhash(1),
+            message_hash: make_message_hash(20),
+        },
+        SeedEntry {
+            slot: 200,
+            blockhash: make_blockhash(2),
+            message_hash: make_message_hash(30),
+        },
+    ];
+
+    let seeded = cache.seed(entries);
+    assert_eq!(seeded, 3);
+    assert_eq!(cache.entry_count(), 3);
+
+    // Verify lookups work (fork == slot for seeded entries).
+    assert!(cache.contains(&make_blockhash(1), &make_message_hash(10), 100));
+    assert!(cache.contains(&make_blockhash(1), &make_message_hash(20), 100));
+    assert!(cache.contains(&make_blockhash(2), &make_message_hash(30), 200));
+}
+
+#[test]
+fn seed_skips_duplicates() {
+    let cache = TransactionCache::new();
+
+    let entry = SeedEntry {
+        slot: 100,
+        blockhash: make_blockhash(1),
+        message_hash: make_message_hash(10),
+    };
+    let dup = SeedEntry {
+        slot: 100,
+        blockhash: make_blockhash(1),
+        message_hash: make_message_hash(10),
+    };
+
+    let seeded = cache.seed(vec![entry, dup]);
+    assert_eq!(seeded, 1);
+    assert_eq!(cache.entry_count(), 1);
+}
+
+#[test]
+fn seed_respects_capacity_limit() {
+    let cache = TransactionCache::with_capacity(2);
+
+    let entries = vec![
+        SeedEntry {
+            slot: 100,
+            blockhash: make_blockhash(1),
+            message_hash: make_message_hash(10),
+        },
+        SeedEntry {
+            slot: 200,
+            blockhash: make_blockhash(2),
+            message_hash: make_message_hash(20),
+        },
+        SeedEntry {
+            slot: 300,
+            blockhash: make_blockhash(3),
+            message_hash: make_message_hash(30),
+        },
+    ];
+
+    let seeded = cache.seed(entries);
+    assert_eq!(seeded, 2);
+    assert_eq!(cache.entry_count(), 2);
+}
+
+#[test]
+fn seed_entries_are_queryable_and_purgeable() {
+    let cache = TransactionCache::new();
+
+    cache.seed(vec![
+        SeedEntry {
+            slot: 50,
+            blockhash: make_blockhash(1),
+            message_hash: make_message_hash(10),
+        },
+        SeedEntry {
+            slot: 100,
+            blockhash: make_blockhash(2),
+            message_hash: make_message_hash(20),
+        },
+        SeedEntry {
+            slot: 200,
+            blockhash: make_blockhash(3),
+            message_hash: make_message_hash(30),
+        },
+    ]);
+    assert_eq!(cache.entry_count(), 3);
+
+    // Purge entries before slot 100.
+    cache.purge_before_slot(100);
+    assert_eq!(cache.entry_count(), 2);
+
+    // Slot 50 entry should be gone.
+    assert!(!cache.contains(&make_blockhash(1), &make_message_hash(10), 50));
+    // Slot 100 and 200 entries should remain.
+    assert!(cache.contains(&make_blockhash(2), &make_message_hash(20), 100));
+    assert!(cache.contains(&make_blockhash(3), &make_message_hash(30), 200));
+}
+
+#[test]
+fn seed_empty_iterator_returns_zero() {
+    let cache = TransactionCache::new();
+    let seeded = cache.seed(std::iter::empty());
+    assert_eq!(seeded, 0);
+    assert_eq!(cache.entry_count(), 0);
+}
+
+#[test]
+fn seed_multiple_blockhashes_same_slot() {
+    let cache = TransactionCache::new();
+
+    let entries = vec![
+        SeedEntry {
+            slot: 100,
+            blockhash: make_blockhash(1),
+            message_hash: make_message_hash(10),
+        },
+        SeedEntry {
+            slot: 100,
+            blockhash: make_blockhash(2),
+            message_hash: make_message_hash(10),
+        },
+    ];
+
+    let seeded = cache.seed(entries);
+    assert_eq!(seeded, 2);
+    assert_eq!(cache.entry_count(), 2);
+
+    // Both should be queryable on fork 100.
+    assert!(cache.contains(&make_blockhash(1), &make_message_hash(10), 100));
+    assert!(cache.contains(&make_blockhash(2), &make_message_hash(10), 100));
 }

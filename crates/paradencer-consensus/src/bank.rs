@@ -534,6 +534,18 @@ impl Bank {
         &self.transaction_cache
     }
 
+    /// Seed the transaction cache from status cache entries.
+    ///
+    /// Used during snapshot restore to populate recently processed
+    /// transactions for deduplication. Returns the number of entries
+    /// successfully inserted.
+    pub fn seed_transaction_cache<I>(&self, entries: I) -> usize
+    where
+        I: IntoIterator<Item = crate::transaction_cache::SeedEntry>,
+    {
+        self.transaction_cache.seed(entries)
+    }
+
     /// Get the per-block cost tracker.
     pub fn cost_tracker(&self) -> &crate::cost_tracker::CostTracker {
         &self.cost_tracker

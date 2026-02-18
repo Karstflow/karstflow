@@ -1,14 +1,16 @@
 use std::collections::HashMap;
 
+use paradencer_constants::block_limits::MESSAGE_HASH_PREFIX_BYTES;
+
 use super::entry::CacheEntry;
 
 /// A single shard of the transaction deduplication cache.
 ///
-/// Each shard owns an independent hash map, keyed by blockhash then message hash,
+/// Each shard owns an independent hash map, keyed by blockhash then message hash prefix,
 /// so that concurrent readers and writers on different shards do not contend.
 pub struct CacheShard {
-    /// blockhash -> (message_hash -> CacheEntry)
-    entries: HashMap<[u8; 32], HashMap<[u8; 32], CacheEntry>>,
+    /// blockhash -> (message_hash_prefix -> CacheEntry)
+    entries: HashMap<[u8; 32], HashMap<[u8; MESSAGE_HASH_PREFIX_BYTES], CacheEntry>>,
     entry_count: usize,
 }
 
@@ -28,7 +30,7 @@ impl CacheShard {
     pub fn insert(
         &mut self,
         blockhash: &[u8; 32],
-        message_hash: &[u8; 32],
+        message_hash: &[u8; MESSAGE_HASH_PREFIX_BYTES],
         slot: u64,
         fork: u64,
     ) -> bool {
@@ -50,7 +52,12 @@ impl CacheShard {
     }
 
     /// Check whether a transaction exists on the given fork.
-    pub fn contains(&self, blockhash: &[u8; 32], message_hash: &[u8; 32], fork: u64) -> bool {
+    pub fn contains(
+        &self,
+        blockhash: &[u8; 32],
+        message_hash: &[u8; MESSAGE_HASH_PREFIX_BYTES],
+        fork: u64,
+    ) -> bool {
         self.entries
             .get(blockhash)
             .and_then(|m| m.get(message_hash))

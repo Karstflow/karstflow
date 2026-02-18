@@ -25,6 +25,13 @@ pub const TRANSACTION_CACHE_SHARDS: usize = 64;
 /// Default maximum entries in transaction cache.
 pub const DEFAULT_TRANSACTION_CACHE_MAX_ENTRIES: usize = 1_000_000;
 
+/// Number of bytes stored per message hash in the transaction cache.
+///
+/// Only the first 20 bytes of the SHA-256 message hash are used for
+/// deduplication. This matches the Solana protocol's status cache format
+/// and provides sufficient collision resistance (~2^-160).
+pub const MESSAGE_HASH_PREFIX_BYTES: usize = 20;
+
 /// Base cost for signature verification.
 pub const SIGNATURE_COST: u64 = 720;
 

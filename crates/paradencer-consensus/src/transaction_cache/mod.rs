@@ -14,7 +14,7 @@ pub use entry::CacheEntry;
 pub use nonce::{extract_nonce_key_index, is_nonce_instruction};
 
 use paradencer_constants::block_limits::{
-    DEFAULT_TRANSACTION_CACHE_MAX_ENTRIES, TRANSACTION_CACHE_SHARDS,
+    DEFAULT_TRANSACTION_CACHE_MAX_ENTRIES, MESSAGE_HASH_PREFIX_BYTES, TRANSACTION_CACHE_SHARDS,
 };
 use shard::CacheShard;
 use std::sync::RwLock;
@@ -24,6 +24,9 @@ use std::sync::RwLock;
 /// Transactions are distributed across shards by hashing the first 8 bytes
 /// of the blockhash. Each shard is independently locked so that concurrent
 /// insertions from different scheduling threads rarely contend.
+///
+/// Message hashes are stored as 20-byte prefixes matching the Solana
+/// protocol's status cache format.
 pub struct TransactionCache {
     shards: Vec<RwLock<CacheShard>>,
     max_entries: usize,
@@ -64,7 +67,7 @@ impl TransactionCache {
     pub fn insert(
         &self,
         blockhash: &[u8; 32],
-        message_hash: &[u8; 32],
+        message_hash: &[u8; MESSAGE_HASH_PREFIX_BYTES],
         slot: u64,
         fork: u64,
     ) -> bool {
@@ -81,12 +84,42 @@ impl TransactionCache {
     }
 
     /// Check whether a transaction already exists on a particular fork.
-    pub fn contains(&self, blockhash: &[u8; 32], message_hash: &[u8; 32], fork: u64) -> bool {
+    pub fn contains(
+        &self,
+        blockhash: &[u8; 32],
+        message_hash: &[u8; MESSAGE_HASH_PREFIX_BYTES],
+        fork: u64,
+    ) -> bool {
         let idx = self.shard_for_hash(blockhash);
         let shard = self.shards[idx]
             .read()
             .expect("transaction cache shard lock poisoned");
         shard.contains(blockhash, message_hash, fork)
+    }
+
+    /// Seed the cache with entries from a parsed status cache.
+    ///
+    /// Used during snapshot restore to populate the transaction dedup cache
+    /// with recently processed transactions. Each entry is inserted using
+    /// its slot as the fork identifier (rooted entries have slot == fork).
+    ///
+    /// Returns the number of entries successfully inserted.
+    pub fn seed<I>(&self, entries: I) -> usize
+    where
+        I: IntoIterator<Item = SeedEntry>,
+    {
+        let mut count = 0;
+        for entry in entries {
+            if self.insert(
+                &entry.blockhash,
+                &entry.message_hash,
+                entry.slot,
+                entry.slot,
+            ) {
+                count += 1;
+            }
+        }
+        count
     }
 
     /// Remove all entries for a specific slot across every shard.
@@ -135,4 +168,15 @@ impl Default for TransactionCache {
     fn default() -> Self {
         Self::new()
     }
+}
+
+/// Entry for seeding the transaction cache from external sources
+/// (e.g. snapshot status cache).
+pub struct SeedEntry {
+    /// Slot where the transaction was processed.
+    pub slot: u64,
+    /// Recent blockhash referenced by the transaction.
+    pub blockhash: [u8; 32],
+    /// First 20 bytes of the transaction message hash.
+    pub message_hash: [u8; MESSAGE_HASH_PREFIX_BYTES],
 }

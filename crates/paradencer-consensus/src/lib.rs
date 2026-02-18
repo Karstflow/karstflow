@@ -98,4 +98,4 @@ pub use bank_executor::{
 };
 pub use cost_tracker::{CostTracker, CostTrackerError, TransactionCost};
 pub use features::{FeatureActivation, FeatureSet};
-pub use transaction_cache::TransactionCache;
+pub use transaction_cache::{SeedEntry, TransactionCache};
