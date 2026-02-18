@@ -328,6 +328,73 @@ impl MemoryMap {
     }
 
     // -----------------------------------------------------------------------
+    // Slice translation (zero-copy access for syscalls)
+    // -----------------------------------------------------------------------
+
+    /// Translate a virtual address range to a read-only byte slice.
+    ///
+    /// Returns a direct reference into the backing memory, avoiding copies.
+    /// Used by syscall handlers to read program data efficiently.
+    pub fn translate_slice(&self, addr: u64, len: usize) -> Result<&[u8], MemoryError> {
+        if len == 0 {
+            return Ok(&[]);
+        }
+        let (region, offset) = self.resolve_read(addr, len)?;
+        Ok(&region.data[offset..offset + len])
+    }
+
+    /// Translate a virtual address range to a mutable byte slice.
+    ///
+    /// Returns a direct mutable reference into the backing memory.
+    /// Used by syscall handlers to write results back efficiently.
+    pub fn translate_slice_mut(&mut self, addr: u64, len: usize) -> Result<&mut [u8], MemoryError> {
+        if len == 0 {
+            return Ok(&mut []);
+        }
+        let (region, offset) = self.resolve_write(addr, len)?;
+        Ok(&mut region.data[offset..offset + len])
+    }
+
+    /// Translate a virtual address to a reference to a typed value.
+    ///
+    /// Checks alignment to `align_of::<T>()` and bounds.
+    pub fn translate_type<T: Copy>(&self, addr: u64) -> Result<&T, MemoryError> {
+        let size = std::mem::size_of::<T>();
+        let align = std::mem::align_of::<T>();
+        let offset = (addr & REGION_OFFSET_MASK) as usize;
+
+        if align > 1 && !offset.is_multiple_of(align) {
+            return Err(MemoryError::UnalignedAccess {
+                addr,
+                alignment: align,
+            });
+        }
+
+        let (region, offset) = self.resolve_read(addr, size)?;
+        // SAFETY: bounds checked, alignment checked above
+        let ptr = region.data[offset..offset + size].as_ptr() as *const T;
+        Ok(unsafe { &*ptr })
+    }
+
+    /// Translate a virtual address to a mutable reference to a typed value.
+    pub fn translate_type_mut<T: Copy>(&mut self, addr: u64) -> Result<&mut T, MemoryError> {
+        let size = std::mem::size_of::<T>();
+        let align = std::mem::align_of::<T>();
+        let offset = (addr & REGION_OFFSET_MASK) as usize;
+
+        if align > 1 && !offset.is_multiple_of(align) {
+            return Err(MemoryError::UnalignedAccess {
+                addr,
+                alignment: align,
+            });
+        }
+
+        let (region, offset) = self.resolve_write(addr, size)?;
+        let ptr = region.data[offset..offset + size].as_mut_ptr() as *mut T;
+        Ok(unsafe { &mut *ptr })
+    }
+
+    // -----------------------------------------------------------------------
     // Region access
     // -----------------------------------------------------------------------
 
@@ -607,5 +674,189 @@ mod tests {
         let map = make_map();
         let input = map.input_data();
         assert_eq!(input, &[1, 2, 3, 4, 5, 6, 7, 8]);
+    }
+
+    // -------------------------------------------------------------------
+    // Null pointer and unmapped region tests
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn null_pointer_read_fails() {
+        let map = make_map();
+        let result = map.load8(0x0);
+        assert!(matches!(
+            result,
+            Err(MemoryError::UnmappedAddress { addr: 0 })
+        ));
+    }
+
+    #[test]
+    fn null_pointer_write_fails() {
+        let mut map = make_map();
+        let result = map.store8(0x0, 42);
+        assert!(matches!(
+            result,
+            Err(MemoryError::UnmappedAddress { addr: 0 })
+        ));
+    }
+
+    #[test]
+    fn region_5_unmapped() {
+        let map = make_map();
+        let result = map.load8(0x5_0000_0000);
+        assert!(matches!(result, Err(MemoryError::UnmappedAddress { .. })));
+    }
+
+    #[test]
+    fn region_f_unmapped() {
+        let map = make_map();
+        let result = map.load8(0xF_0000_0000);
+        assert!(matches!(result, Err(MemoryError::UnmappedAddress { .. })));
+    }
+
+    // -------------------------------------------------------------------
+    // translate_slice tests
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn translate_slice_read_program() {
+        let map = make_map();
+        let slice = map.translate_slice(REGION_PROGRAM_BASE, 4).unwrap();
+        assert_eq!(slice, &[0xB7, 0x01, 0x00, 0x00]);
+    }
+
+    #[test]
+    fn translate_slice_zero_length() {
+        let map = make_map();
+        let slice = map.translate_slice(REGION_PROGRAM_BASE, 0).unwrap();
+        assert!(slice.is_empty());
+    }
+
+    #[test]
+    fn translate_slice_full_input() {
+        let map = make_map();
+        let slice = map.translate_slice(REGION_INPUT_BASE, 8).unwrap();
+        assert_eq!(slice, &[1, 2, 3, 4, 5, 6, 7, 8]);
+    }
+
+    #[test]
+    fn translate_slice_out_of_bounds() {
+        let map = make_map();
+        let result = map.translate_slice(REGION_PROGRAM_BASE, 100);
+        assert!(matches!(result, Err(MemoryError::OutOfBounds { .. })));
+    }
+
+    #[test]
+    fn translate_slice_unmapped() {
+        let map = make_map();
+        let result = map.translate_slice(0x0, 4);
+        assert!(matches!(result, Err(MemoryError::UnmappedAddress { .. })));
+    }
+
+    #[test]
+    fn translate_slice_mut_heap() {
+        let mut map = make_map();
+        let slice = map.translate_slice_mut(REGION_HEAP_BASE, 4).unwrap();
+        slice.copy_from_slice(&[10, 20, 30, 40]);
+        assert_eq!(map.load8(REGION_HEAP_BASE).unwrap(), 10);
+        assert_eq!(map.load8(REGION_HEAP_BASE + 3).unwrap(), 40);
+    }
+
+    #[test]
+    fn translate_slice_mut_zero_length() {
+        let mut map = make_map();
+        let slice = map.translate_slice_mut(REGION_HEAP_BASE, 0).unwrap();
+        assert!(slice.is_empty());
+    }
+
+    #[test]
+    fn translate_slice_mut_read_only_fails() {
+        let mut map = make_map();
+        let result = map.translate_slice_mut(REGION_PROGRAM_BASE, 4);
+        assert!(matches!(result, Err(MemoryError::ReadOnlyRegion { .. })));
+    }
+
+    // -------------------------------------------------------------------
+    // translate_type tests
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn translate_type_u32_from_input() {
+        let map = make_map();
+        // Input region has [1, 2, 3, 4, 5, 6, 7, 8]
+        let val: &u32 = map.translate_type::<u32>(REGION_INPUT_BASE).unwrap();
+        assert_eq!(*val, u32::from_le_bytes([1, 2, 3, 4]));
+    }
+
+    #[test]
+    fn translate_type_u64_from_input() {
+        let map = make_map();
+        let val: &u64 = map.translate_type::<u64>(REGION_INPUT_BASE).unwrap();
+        assert_eq!(*val, u64::from_le_bytes([1, 2, 3, 4, 5, 6, 7, 8]));
+    }
+
+    #[test]
+    fn translate_type_unaligned_u32_fails() {
+        let map = make_map();
+        // Offset 1 is not 4-byte aligned
+        let result = map.translate_type::<u32>(REGION_INPUT_BASE + 1);
+        assert!(matches!(
+            result,
+            Err(MemoryError::UnalignedAccess { alignment: 4, .. })
+        ));
+    }
+
+    #[test]
+    fn translate_type_unaligned_u64_fails() {
+        let map = make_map();
+        // Offset 4 is 4-byte aligned but NOT 8-byte aligned
+        let result = map.translate_type::<u64>(REGION_INPUT_BASE + 4);
+        assert!(matches!(
+            result,
+            Err(MemoryError::UnalignedAccess { alignment: 8, .. })
+        ));
+    }
+
+    #[test]
+    fn translate_type_u8_no_alignment_required() {
+        let map = make_map();
+        // u8 has alignment 1, so any address works
+        let val = map.translate_type::<u8>(REGION_INPUT_BASE + 3).unwrap();
+        assert_eq!(*val, 4);
+    }
+
+    #[test]
+    fn translate_type_out_of_bounds() {
+        let map = make_map();
+        // Input is 8 bytes, reading u64 at offset 4 goes out of bounds
+        let result = map.translate_type::<u64>(REGION_INPUT_BASE + 8);
+        assert!(matches!(result, Err(MemoryError::OutOfBounds { .. })));
+    }
+
+    #[test]
+    fn translate_type_mut_u32() {
+        let mut map = make_map();
+        // Write to heap (writable, starts at 0)
+        map.store32(REGION_HEAP_BASE, 0).unwrap();
+        let val: &mut u32 = map.translate_type_mut::<u32>(REGION_HEAP_BASE).unwrap();
+        *val = 0xCAFEBABE;
+        assert_eq!(map.load32(REGION_HEAP_BASE).unwrap(), 0xCAFEBABE);
+    }
+
+    #[test]
+    fn translate_type_mut_read_only_fails() {
+        let mut map = make_map();
+        let result = map.translate_type_mut::<u32>(REGION_PROGRAM_BASE);
+        assert!(matches!(result, Err(MemoryError::ReadOnlyRegion { .. })));
+    }
+
+    #[test]
+    fn translate_type_mut_unaligned_fails() {
+        let mut map = make_map();
+        let result = map.translate_type_mut::<u32>(REGION_HEAP_BASE + 1);
+        assert!(matches!(
+            result,
+            Err(MemoryError::UnalignedAccess { alignment: 4, .. })
+        ));
     }
 }
