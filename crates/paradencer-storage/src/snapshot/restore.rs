@@ -10,6 +10,7 @@
 use super::append_vec::AppendVecIter;
 use super::bank_fields::{self, SnapshotBankState};
 use super::solana_archive::{ArchiveError, SnapshotArchive, SnapshotArchiveEntry};
+use super::status_cache::{self, StatusCacheParseResult};
 use crate::accounts::{AccountDatabase, Pubkey};
 use crate::StorageError;
 use std::io::Read;
@@ -33,6 +34,8 @@ pub struct RestoreResult {
     pub validation_errors: u64,
     /// Parsed bank state from the snapshot manifest (if present).
     pub bank_state: Option<SnapshotBankState>,
+    /// Parsed status cache entries (if present).
+    pub status_cache: Option<StatusCacheParseResult>,
 }
 
 /// Progress tracking for snapshot restoration.
@@ -161,6 +164,7 @@ impl SnapshotRestorer {
         let mut version = String::new();
         let mut slot = 0u64;
         let mut bank_state: Option<SnapshotBankState> = None;
+        let mut status_cache: Option<StatusCacheParseResult> = None;
 
         for entry in &entries {
             match entry {
@@ -191,9 +195,16 @@ impl SnapshotRestorer {
                         }
                     }
                 }
-                SnapshotArchiveEntry::StatusCache(_) => {
-                    // TODO: Parse status cache and populate TransactionCache
-                    // for transaction deduplication after snapshot restore.
+                SnapshotArchiveEntry::StatusCache(data) => {
+                    match status_cache::parse_status_cache(data) {
+                        Ok(result) => {
+                            status_cache = Some(result);
+                        }
+                        Err(_) => {
+                            // Non-fatal — accounts can still be loaded without
+                            // the status cache. Transaction dedup will start empty.
+                        }
+                    }
                 }
                 SnapshotArchiveEntry::Unknown { .. } => {}
             }
@@ -208,6 +219,7 @@ impl SnapshotRestorer {
             append_vecs_processed: info.append_vecs_processed,
             validation_errors: info.validation_errors,
             bank_state,
+            status_cache,
         })
     }
 

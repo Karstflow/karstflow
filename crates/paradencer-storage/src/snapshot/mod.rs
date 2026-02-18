@@ -5,6 +5,7 @@ pub(crate) mod loader;
 pub(crate) mod metadata;
 pub mod restore;
 pub mod solana_archive;
+pub mod status_cache;
 
 #[cfg(doc)]
 pub mod doc;
@@ -21,3 +22,4 @@ pub use loader::{LoadProgress, LoadProgressInfo, LoadedSnapshot, SnapshotLoader}
 pub use metadata::{CompressionType, SnapshotConfig, SnapshotManifest, SnapshotMetadata};
 pub use restore::{RestoreResult, SnapshotRestorer};
 pub use solana_archive::{SnapshotArchive, SnapshotArchiveEntry};
+pub use status_cache::{StatusCacheEntry, StatusCacheParseResult};
