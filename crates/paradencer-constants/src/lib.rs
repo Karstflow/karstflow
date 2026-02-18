@@ -441,6 +441,7 @@ pub mod quic {
 
 pub mod durable_store;
 pub mod loader_v4;
+pub mod network;
 pub mod syscalls;
 pub mod sysvars;
 pub mod vm;

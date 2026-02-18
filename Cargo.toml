@@ -19,6 +19,7 @@ members = [
   "crates/paradencer-types",
   "crates/paradencer-ids",
   "crates/paradencer-crypto",
+  "crates/paradencer-net",
 ]
 resolver = "2"
 
@@ -44,6 +45,8 @@ toml = "0.8"
 
 # Cryptography
 sha2 = "0.10"
+hmac = "0.12"
+aes = "0.8"
 ed25519-dalek = { version = "2.1", features = ["rand_core"] }
 blake3 = "1.5"
 tiny-keccak = { version = "2", features = ["keccak"] }
