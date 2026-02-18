@@ -18,6 +18,9 @@ pub use bank_fields::{
 pub use creator::{
     SerializedAccount, SnapshotCreator, SnapshotData, SnapshotProgress, SnapshotProgressInfo,
 };
+// Re-export once consumed externally.
+#[allow(unused_imports)]
+pub use creator::IncrementalStats;
 pub use loader::{LoadProgress, LoadProgressInfo, LoadedSnapshot, SnapshotLoader};
 pub use metadata::{CompressionType, SnapshotConfig, SnapshotManifest, SnapshotMetadata};
 pub use restore::{RestoreResult, SnapshotRestorer};

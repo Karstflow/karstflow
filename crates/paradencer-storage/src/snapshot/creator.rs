@@ -74,6 +74,19 @@ impl SnapshotData {
     }
 }
 
+/// Statistics from creating an incremental snapshot via the dirty-set path.
+#[derive(Debug, Clone)]
+pub struct IncrementalStats {
+    /// Number of unique pubkeys tracked as dirty since the base slot.
+    pub dirty_pubkeys_tracked: usize,
+    /// Number of accounts actually included in the snapshot (still exist in DB).
+    pub accounts_included: usize,
+    /// The base slot for this incremental snapshot.
+    pub base_slot: u64,
+    /// The snapshot slot.
+    pub snapshot_slot: u64,
+}
+
 pub struct SnapshotCreator {
     config: SnapshotConfig,
     progress: Arc<SnapshotProgress>,
@@ -193,6 +206,47 @@ impl SnapshotCreator {
         let delta_accounts = self.compute_delta(current_accounts, base_accounts);
         let snapshot_data = self.serialize_accounts(delta_accounts, slot)?;
         self.write_snapshot(snapshot_data, Some(base_slot), output_dir)
+    }
+
+    /// Create an incremental snapshot using the dirty-set tracker.
+    ///
+    /// Instead of diffing all accounts against a base snapshot, this method
+    /// only includes accounts that were modified since `base_slot`, using
+    /// the AccountDatabase's built-in dirty-set tracking. This is much more
+    /// efficient for large account sets with small deltas.
+    ///
+    /// After creation, dirty slots through `slot` are drained from the tracker.
+    pub fn create_incremental_from_dirty_set(
+        &self,
+        db: &AccountDatabase,
+        slot: u64,
+        base_slot: u64,
+        output_dir: &Path,
+    ) -> Result<(SnapshotManifest, IncrementalStats), StorageError> {
+        let dirty_pubkeys = db.drain_dirty_slots_through(slot);
+        let dirty_count = dirty_pubkeys.len();
+
+        let mut delta_accounts = HashMap::with_capacity(dirty_count);
+        for pubkey in &dirty_pubkeys {
+            if let Some(account) = db.get_published_account(pubkey) {
+                delta_accounts.insert(*pubkey, account);
+            }
+            // If account was deleted (not found), we skip it.
+            // A full snapshot will capture the correct final state.
+        }
+
+        let accounts_included = delta_accounts.len();
+        let snapshot_data = self.serialize_accounts(delta_accounts, slot)?;
+        let manifest = self.write_snapshot(snapshot_data, Some(base_slot), output_dir)?;
+
+        let stats = IncrementalStats {
+            dirty_pubkeys_tracked: dirty_count,
+            accounts_included,
+            base_slot,
+            snapshot_slot: slot,
+        };
+
+        Ok((manifest, stats))
     }
 
     fn collect_all_accounts(
@@ -417,5 +471,144 @@ mod tests {
 
         let delta = creator.compute_delta(current, &base);
         assert_eq!(delta.len(), 0);
+    }
+
+    #[test]
+    fn incremental_from_dirty_set_captures_modified_accounts() {
+        let db = AccountDatabase::new();
+        let config = SnapshotConfig::new();
+        let creator = SnapshotCreator::new(config);
+
+        // Store some initial accounts.
+        let pk1 = Pubkey::new_unique();
+        let pk2 = Pubkey::new_unique();
+        db.store_published_account_at_slot(pk1, Account::new(1_000, vec![], Pubkey::zeroed()), 10);
+        db.store_published_account_at_slot(pk2, Account::new(2_000, vec![], Pubkey::zeroed()), 11);
+
+        let dir = tempfile::tempdir().unwrap();
+        let (manifest, stats) = creator
+            .create_incremental_from_dirty_set(&db, 11, 0, dir.path())
+            .unwrap();
+
+        assert_eq!(stats.dirty_pubkeys_tracked, 2);
+        assert_eq!(stats.accounts_included, 2);
+        assert_eq!(stats.base_slot, 0);
+        assert_eq!(stats.snapshot_slot, 11);
+        assert!(manifest.metadata.incremental_base.is_some());
+        assert_eq!(manifest.metadata.incremental_base, Some(0));
+    }
+
+    #[test]
+    fn incremental_from_dirty_set_drains_dirty_tracking() {
+        let db = AccountDatabase::new();
+        let config = SnapshotConfig::new();
+        let creator = SnapshotCreator::new(config);
+
+        let pk = Pubkey::new_unique();
+        db.store_published_account_at_slot(pk, Account::new(1_000, vec![], Pubkey::zeroed()), 5);
+
+        assert_eq!(db.dirty_account_count(), 1);
+
+        let dir = tempfile::tempdir().unwrap();
+        creator
+            .create_incremental_from_dirty_set(&db, 5, 0, dir.path())
+            .unwrap();
+
+        // Dirty set should be drained after incremental snapshot.
+        assert_eq!(db.dirty_account_count(), 0);
+    }
+
+    #[test]
+    fn incremental_from_dirty_set_only_includes_modified_slots() {
+        let db = AccountDatabase::new();
+        let config = SnapshotConfig::new();
+        let creator = SnapshotCreator::new(config);
+
+        let pk1 = Pubkey::new_unique();
+        let pk2 = Pubkey::new_unique();
+        let pk3 = Pubkey::new_unique();
+
+        db.store_published_account_at_slot(pk1, Account::new(100, vec![], Pubkey::zeroed()), 10);
+        db.store_published_account_at_slot(pk2, Account::new(200, vec![], Pubkey::zeroed()), 20);
+        db.store_published_account_at_slot(pk3, Account::new(300, vec![], Pubkey::zeroed()), 30);
+
+        // Create incremental through slot 20 — should only include pk1 and pk2.
+        let dir = tempfile::tempdir().unwrap();
+        let (_, stats) = creator
+            .create_incremental_from_dirty_set(&db, 20, 0, dir.path())
+            .unwrap();
+
+        assert_eq!(stats.dirty_pubkeys_tracked, 2);
+        assert_eq!(stats.accounts_included, 2);
+
+        // pk3 should still be tracked.
+        assert_eq!(db.dirty_account_count(), 1);
+    }
+
+    #[test]
+    fn incremental_from_dirty_set_empty_delta() {
+        let db = AccountDatabase::new();
+        let config = SnapshotConfig::new();
+        let creator = SnapshotCreator::new(config);
+
+        let dir = tempfile::tempdir().unwrap();
+        let (manifest, stats) = creator
+            .create_incremental_from_dirty_set(&db, 100, 50, dir.path())
+            .unwrap();
+
+        assert_eq!(stats.dirty_pubkeys_tracked, 0);
+        assert_eq!(stats.accounts_included, 0);
+        assert_eq!(manifest.metadata.total_accounts, 0);
+    }
+
+    #[test]
+    fn full_then_incremental_snapshot_workflow() {
+        let db = AccountDatabase::new();
+        let config = SnapshotConfig::new();
+        let creator = SnapshotCreator::new(config);
+        let dir = tempfile::tempdir().unwrap();
+
+        // Step 1: Create initial state and take a full snapshot.
+        let pk1 = Pubkey::new_unique();
+        let pk2 = Pubkey::new_unique();
+        db.store_published_account_at_slot(
+            pk1,
+            Account::new(1_000, vec![1], Pubkey::zeroed()),
+            100,
+        );
+        db.store_published_account_at_slot(
+            pk2,
+            Account::new(2_000, vec![2], Pubkey::zeroed()),
+            100,
+        );
+
+        let full_manifest = creator.create_full_snapshot(&db, 100, dir.path()).unwrap();
+        assert_eq!(full_manifest.metadata.total_accounts, 2);
+
+        // Drain dirty set after full snapshot.
+        db.drain_dirty_slots_through(100);
+
+        // Step 2: Modify one account, add a new one.
+        db.store_published_account_at_slot(
+            pk1,
+            Account::new(5_000, vec![1, 2, 3], Pubkey::zeroed()),
+            200,
+        );
+        let pk3 = Pubkey::new_unique();
+        db.store_published_account_at_slot(
+            pk3,
+            Account::new(3_000, vec![3], Pubkey::zeroed()),
+            200,
+        );
+
+        // Step 3: Create incremental snapshot with dirty-set.
+        let (incr_manifest, stats) = creator
+            .create_incremental_from_dirty_set(&db, 200, 100, dir.path())
+            .unwrap();
+
+        assert_eq!(stats.dirty_pubkeys_tracked, 2); // pk1 (modified) + pk3 (new)
+        assert_eq!(stats.accounts_included, 2);
+        assert_eq!(incr_manifest.metadata.incremental_base, Some(100));
+        assert_eq!(incr_manifest.metadata.total_accounts, 2);
     }
 }
