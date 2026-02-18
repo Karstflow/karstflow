@@ -181,6 +181,121 @@ impl RuntimeSyscallDispatch {
         dispatch
     }
 
+    /// Create a dispatcher with feature-gated syscall registration.
+    ///
+    /// Registers the always-available syscalls unconditionally, then
+    /// conditionally registers feature-gated syscalls only when their
+    /// corresponding feature is present in `active_features`.
+    ///
+    /// Feature names match the protocol feature strings:
+    /// - `enable_alt_bn128_syscall` — sol_alt_bn128_group_op
+    /// - `enable_alt_bn128_compression_syscall` — sol_alt_bn128_compression
+    /// - `enable_poseidon_syscall` — sol_poseidon
+    /// - `get_sysvar_syscall_enabled` — sol_get_sysvar
+    /// - `enable_get_epoch_stake_syscall` — sol_get_epoch_stake
+    pub fn with_features(active_features: &std::collections::HashSet<&str>) -> Self {
+        use paradencer_constants::features::{
+            FEATURE_ENABLE_ALT_BN128_COMPRESSION, FEATURE_ENABLE_ALT_BN128_SYSCALL,
+            FEATURE_ENABLE_GET_EPOCH_STAKE, FEATURE_ENABLE_POSEIDON_SYSCALL,
+            FEATURE_GET_SYSVAR_SYSCALL,
+        };
+
+        let mut dispatch = Self::new();
+
+        // Always-available syscalls (no feature gate)
+        dispatch.register_by_name("sol_log_", Box::new(SolLogHandler));
+        dispatch.register_by_name("sol_log_64_", Box::new(SolLog64Handler));
+        dispatch.register_by_name(
+            "sol_log_compute_units_",
+            Box::new(SolLogComputeUnitsHandler),
+        );
+        dispatch.register_by_name("sol_log_data", Box::new(SolLogDataHandler));
+        dispatch.register_by_name("sol_log_pubkey", Box::new(SolLogPubkeyHandler));
+        dispatch.register_by_name("sol_memcpy_", Box::new(SolMemcpyHandler));
+        dispatch.register_by_name("sol_memmove_", Box::new(SolMemmoveHandler));
+        dispatch.register_by_name("sol_memcmp_", Box::new(SolMemcmpHandler));
+        dispatch.register_by_name("sol_memset_", Box::new(SolMemsetHandler));
+        dispatch.register_by_name("sol_sha256", Box::new(SolSha256Handler));
+        dispatch.register_by_name("sol_keccak256", Box::new(SolKeccak256Handler));
+        dispatch.register_by_name("sol_blake3", Box::new(SolBlake3Handler));
+        dispatch.register_by_name("sol_alloc_free_", Box::new(SolAllocHandler));
+        dispatch.register_by_name(
+            "sol_create_program_address",
+            Box::new(SolCreateProgramAddressHandler),
+        );
+        dispatch.register_by_name(
+            "sol_try_find_program_address",
+            Box::new(SolTryFindProgramAddressHandler),
+        );
+        dispatch.register_by_name("sol_set_return_data", Box::new(SolSetReturnDataHandler));
+        dispatch.register_by_name("sol_get_return_data", Box::new(SolGetReturnDataHandler));
+        dispatch.register_by_name("sol_get_clock_sysvar", Box::new(SolGetClockSysvarHandler));
+        dispatch.register_by_name("sol_get_rent_sysvar", Box::new(SolGetRentSysvarHandler));
+        dispatch.register_by_name(
+            "sol_get_epoch_schedule_sysvar",
+            Box::new(SolGetEpochScheduleHandler),
+        );
+        dispatch.register_by_name(
+            "sol_get_last_restart_slot",
+            Box::new(SolGetLastRestartSlotHandler),
+        );
+        dispatch.register_by_name("sol_get_stack_height", Box::new(SolGetStackHeightHandler));
+        dispatch.register_by_name(
+            "sol_get_processed_sibling_instruction",
+            Box::new(SolGetProcessedSiblingInstructionHandler),
+        );
+        dispatch.register_by_name(
+            "sol_get_epoch_rewards_sysvar",
+            Box::new(SolGetEpochRewardsSysvarHandler),
+        );
+        dispatch.register_by_name(
+            "sol_secp256k1_recover",
+            Box::new(SolSecp256k1RecoverHandler),
+        );
+        dispatch.register_by_name(
+            "sol_curve_validate_point",
+            Box::new(SolCurveValidatePointHandler),
+        );
+        dispatch.register_by_name("sol_curve_group_op", Box::new(SolCurveGroupOpHandler));
+        dispatch.register_by_name(
+            "sol_curve_multiscalar_mul",
+            Box::new(SolCurveMultiscalarMulHandler),
+        );
+
+        // Feature-gated: ALT-BN128 group operations
+        if active_features.contains(FEATURE_ENABLE_ALT_BN128_SYSCALL) {
+            dispatch.register_by_name(
+                "sol_alt_bn128_group_op",
+                Box::new(SolAltBn128GroupOpHandler),
+            );
+        }
+
+        // Feature-gated: ALT-BN128 compression
+        if active_features.contains(FEATURE_ENABLE_ALT_BN128_COMPRESSION) {
+            dispatch.register_by_name(
+                "sol_alt_bn128_compression",
+                Box::new(SolAltBn128CompressionHandler),
+            );
+        }
+
+        // Feature-gated: Poseidon hash
+        if active_features.contains(FEATURE_ENABLE_POSEIDON_SYSCALL) {
+            dispatch.register_by_name("sol_poseidon", Box::new(SolPoseidonHandler));
+        }
+
+        // Feature-gated: Generic sysvar access (SIMD-0127)
+        if active_features.contains(FEATURE_GET_SYSVAR_SYSCALL) {
+            dispatch.register_by_name("sol_get_sysvar", Box::new(SolGetSysvarHandler));
+        }
+
+        // Feature-gated: Epoch stake query
+        if active_features.contains(FEATURE_ENABLE_GET_EPOCH_STAKE) {
+            dispatch.register_by_name("sol_get_epoch_stake", Box::new(SolGetEpochStakeHandler));
+        }
+
+        dispatch
+    }
+
     /// Create a dispatcher with standard syscalls plus CPI support.
     ///
     /// The provided executor is called when a program invokes another
@@ -3116,5 +3231,98 @@ mod tests {
         let ret = handler.call(&mut vm, REGION_HEAP_BASE, 0, 0, 0, 0).unwrap();
         assert_eq!(ret, 1);
         assert!(vm.logs.iter().any(|l| l.contains("CPI depth limit")));
+    }
+
+    // -----------------------------------------------------------------------
+    // Feature-gated syscall registration tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn feature_gated_all_features_active() {
+        use paradencer_constants::features::*;
+        let features: std::collections::HashSet<&str> = [
+            FEATURE_ENABLE_ALT_BN128_SYSCALL,
+            FEATURE_ENABLE_ALT_BN128_COMPRESSION,
+            FEATURE_ENABLE_POSEIDON_SYSCALL,
+            FEATURE_GET_SYSVAR_SYSCALL,
+            FEATURE_ENABLE_GET_EPOCH_STAKE,
+        ]
+        .into_iter()
+        .collect();
+
+        let dispatch = RuntimeSyscallDispatch::with_features(&features);
+        let ids = dispatch.registered_ids();
+
+        // All gated syscalls should be present
+        assert!(ids.contains(&murmur3_hash("sol_alt_bn128_group_op")));
+        assert!(ids.contains(&murmur3_hash("sol_alt_bn128_compression")));
+        assert!(ids.contains(&murmur3_hash("sol_poseidon")));
+        assert!(ids.contains(&murmur3_hash("sol_get_sysvar")));
+        assert!(ids.contains(&murmur3_hash("sol_get_epoch_stake")));
+
+        // Always-available syscalls still present
+        assert!(ids.contains(&murmur3_hash("sol_log_")));
+        assert!(ids.contains(&murmur3_hash("sol_sha256")));
+    }
+
+    #[test]
+    fn feature_gated_no_features_active() {
+        let features: std::collections::HashSet<&str> = std::collections::HashSet::new();
+        let dispatch = RuntimeSyscallDispatch::with_features(&features);
+        let ids = dispatch.registered_ids();
+
+        // Gated syscalls should NOT be present
+        assert!(!ids.contains(&murmur3_hash("sol_alt_bn128_group_op")));
+        assert!(!ids.contains(&murmur3_hash("sol_alt_bn128_compression")));
+        assert!(!ids.contains(&murmur3_hash("sol_poseidon")));
+        assert!(!ids.contains(&murmur3_hash("sol_get_sysvar")));
+        assert!(!ids.contains(&murmur3_hash("sol_get_epoch_stake")));
+
+        // Always-available syscalls still present
+        assert!(ids.contains(&murmur3_hash("sol_log_")));
+        assert!(ids.contains(&murmur3_hash("sol_sha256")));
+        assert!(ids.contains(&murmur3_hash("sol_memcpy_")));
+        assert!(ids.contains(&murmur3_hash("sol_get_clock_sysvar")));
+    }
+
+    #[test]
+    fn feature_gated_partial_activation() {
+        use paradencer_constants::features::*;
+        let features: std::collections::HashSet<&str> =
+            [FEATURE_ENABLE_POSEIDON_SYSCALL, FEATURE_GET_SYSVAR_SYSCALL]
+                .into_iter()
+                .collect();
+
+        let dispatch = RuntimeSyscallDispatch::with_features(&features);
+        let ids = dispatch.registered_ids();
+
+        // Only poseidon and get_sysvar should be gated-in
+        assert!(ids.contains(&murmur3_hash("sol_poseidon")));
+        assert!(ids.contains(&murmur3_hash("sol_get_sysvar")));
+
+        // ALT-BN128 and epoch_stake should NOT be present
+        assert!(!ids.contains(&murmur3_hash("sol_alt_bn128_group_op")));
+        assert!(!ids.contains(&murmur3_hash("sol_alt_bn128_compression")));
+        assert!(!ids.contains(&murmur3_hash("sol_get_epoch_stake")));
+    }
+
+    #[test]
+    fn feature_gated_matches_standard_when_all_active() {
+        use paradencer_constants::features::*;
+        let features: std::collections::HashSet<&str> = [
+            FEATURE_ENABLE_ALT_BN128_SYSCALL,
+            FEATURE_ENABLE_ALT_BN128_COMPRESSION,
+            FEATURE_ENABLE_POSEIDON_SYSCALL,
+            FEATURE_GET_SYSVAR_SYSCALL,
+            FEATURE_ENABLE_GET_EPOCH_STAKE,
+        ]
+        .into_iter()
+        .collect();
+
+        let gated = RuntimeSyscallDispatch::with_features(&features);
+        let standard = RuntimeSyscallDispatch::with_standard_syscalls();
+
+        // Both should have the same syscall set
+        assert_eq!(gated.registered_ids(), standard.registered_ids());
     }
 }
