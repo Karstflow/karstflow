@@ -324,6 +324,70 @@ pub const TLS_SERVER_CERT_MAX_SIZE: usize = 1011;
 // Packet buffer sizing
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// QUIC transport error codes (RFC 9000 Section 20)
+// ---------------------------------------------------------------------------
+
+pub const QUIC_ERR_NO_ERROR: u64 = 0x00;
+pub const QUIC_ERR_INTERNAL: u64 = 0x01;
+pub const QUIC_ERR_CONNECTION_REFUSED: u64 = 0x02;
+pub const QUIC_ERR_FLOW_CONTROL: u64 = 0x03;
+pub const QUIC_ERR_STREAM_LIMIT: u64 = 0x04;
+pub const QUIC_ERR_STREAM_STATE: u64 = 0x05;
+pub const QUIC_ERR_FINAL_SIZE: u64 = 0x06;
+pub const QUIC_ERR_FRAME_ENCODING: u64 = 0x07;
+pub const QUIC_ERR_TRANSPORT_PARAMETER: u64 = 0x08;
+pub const QUIC_ERR_CONN_ID_LIMIT: u64 = 0x09;
+pub const QUIC_ERR_PROTOCOL_VIOLATION: u64 = 0x0a;
+pub const QUIC_ERR_INVALID_TOKEN: u64 = 0x0b;
+pub const QUIC_ERR_APPLICATION: u64 = 0x0c;
+pub const QUIC_ERR_CRYPTO_BUFFER_EXCEEDED: u64 = 0x0d;
+pub const QUIC_ERR_KEY_UPDATE: u64 = 0x0e;
+pub const QUIC_ERR_AEAD_LIMIT_REACHED: u64 = 0x0f;
+pub const QUIC_ERR_NO_VIABLE_PATH: u64 = 0x10;
+/// Base error code for TLS alerts mapped to QUIC (+ alert code).
+pub const QUIC_ERR_CRYPTO_BASE: u64 = 0x100;
+
+// ---------------------------------------------------------------------------
+// QUIC transport parameter IDs (RFC 9000 Section 18.2)
+// ---------------------------------------------------------------------------
+
+pub const TP_ORIGINAL_DST_CONN_ID: u64 = 0x00;
+pub const TP_MAX_IDLE_TIMEOUT: u64 = 0x01;
+pub const TP_STATELESS_RESET_TOKEN: u64 = 0x02;
+pub const TP_MAX_UDP_PAYLOAD_SIZE: u64 = 0x03;
+pub const TP_INITIAL_MAX_DATA: u64 = 0x04;
+pub const TP_INITIAL_MAX_STREAM_DATA_BIDI_LOCAL: u64 = 0x05;
+pub const TP_INITIAL_MAX_STREAM_DATA_BIDI_REMOTE: u64 = 0x06;
+pub const TP_INITIAL_MAX_STREAM_DATA_UNI: u64 = 0x07;
+pub const TP_INITIAL_MAX_STREAMS_BIDI: u64 = 0x08;
+pub const TP_INITIAL_MAX_STREAMS_UNI: u64 = 0x09;
+pub const TP_ACK_DELAY_EXPONENT: u64 = 0x0a;
+pub const TP_MAX_ACK_DELAY: u64 = 0x0b;
+pub const TP_DISABLE_ACTIVE_MIGRATION: u64 = 0x0c;
+pub const TP_PREFERRED_ADDRESS: u64 = 0x0d;
+pub const TP_ACTIVE_CONN_ID_LIMIT: u64 = 0x0e;
+pub const TP_INITIAL_SOURCE_CONN_ID: u64 = 0x0f;
+pub const TP_RETRY_SOURCE_CONN_ID: u64 = 0x10;
+
+// ---------------------------------------------------------------------------
+// QUIC varint limits (RFC 9000 Section 16)
+// ---------------------------------------------------------------------------
+
+/// Maximum value representable in a QUIC variable-length integer (2^62 - 1).
+pub const QUIC_VARINT_MAX: u64 = 0x3fff_ffff_ffff_ffff;
+
+// ---------------------------------------------------------------------------
+// QUIC connection ID sizing
+// ---------------------------------------------------------------------------
+
+/// Default connection ID size in bytes (matching Firedancer's default).
+pub const QUIC_DEFAULT_CONN_ID_SIZE: usize = 8;
+
+// ---------------------------------------------------------------------------
+// Packet buffer sizing
+// ---------------------------------------------------------------------------
+
 /// Default packet buffer size (aligned to power of 2, fits MTU + headroom).
 pub const PACKET_BUFFER_SIZE: usize = 2048;
 /// Default batch size for packet I/O operations.
