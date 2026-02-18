@@ -472,3 +472,143 @@ fn slot_range_query() {
     let range = bs.slot_range(5, 12).unwrap();
     assert_eq!(range, vec![5, 7, 10]);
 }
+
+// -----------------------------------------------------------------------
+// Persistent backend tests
+// -----------------------------------------------------------------------
+
+#[test]
+fn persistent_open_and_write() {
+    let dir = tempfile::tempdir().expect("tmpdir");
+    let path = dir.path().join("blockstore_test");
+
+    let bs = Blockstore::open(&path).unwrap();
+    bs.insert_data_shred(100, 0, &[1, 2, 3]).unwrap();
+
+    let data = bs.get_data_shred(100, 0).unwrap();
+    assert_eq!(data, Some(vec![1, 2, 3]));
+}
+
+#[test]
+fn persistent_data_survives_reopen() {
+    let dir = tempfile::tempdir().expect("tmpdir");
+    let path = dir.path().join("blockstore_persist");
+
+    // Write data.
+    {
+        let bs = Blockstore::open(&path).unwrap();
+        bs.insert_data_shred(50, 0, &[0xAA; 16]).unwrap();
+        bs.insert_data_shred(50, 1, &[0xBB; 16]).unwrap();
+        bs.backend.flush().unwrap();
+    }
+
+    // Reopen and verify.
+    {
+        let bs = Blockstore::open(&path).unwrap();
+        assert_eq!(bs.get_data_shred(50, 0).unwrap(), Some(vec![0xAA; 16]));
+        assert_eq!(bs.get_data_shred(50, 1).unwrap(), Some(vec![0xBB; 16]));
+    }
+}
+
+#[test]
+fn persistent_slot_meta_survives_reopen() {
+    let dir = tempfile::tempdir().expect("tmpdir");
+    let path = dir.path().join("blockstore_meta");
+
+    {
+        let bs = Blockstore::open(&path).unwrap();
+        bs.insert_data_shred(42, 0, &[1]).unwrap();
+        bs.insert_data_shred(42, 1, &[2]).unwrap();
+        bs.backend.flush().unwrap();
+    }
+
+    {
+        let bs = Blockstore::open(&path).unwrap();
+        let meta = bs.get_slot_meta(42).unwrap().expect("should exist");
+        assert_eq!(meta.slot, 42);
+        assert_eq!(meta.received_data_shreds, 2);
+    }
+}
+
+#[test]
+fn persistent_roots_survive_reopen() {
+    let dir = tempfile::tempdir().expect("tmpdir");
+    let path = dir.path().join("blockstore_roots");
+
+    {
+        let bs = Blockstore::open(&path).unwrap();
+        bs.set_roots(&[10, 20, 30]).unwrap();
+        bs.backend.flush().unwrap();
+    }
+
+    {
+        let bs = Blockstore::open(&path).unwrap();
+        assert!(bs.is_root(10));
+        assert!(bs.is_root(20));
+        assert!(bs.is_root(30));
+        assert!(!bs.is_root(15));
+        assert_eq!(bs.latest_root(), Some(30));
+    }
+}
+
+#[test]
+fn persistent_purge_removes_from_disk() {
+    let dir = tempfile::tempdir().expect("tmpdir");
+    let path = dir.path().join("blockstore_purge");
+
+    {
+        let bs = Blockstore::open(&path).unwrap();
+        bs.insert_data_shred(5, 0, &[1]).unwrap();
+        bs.insert_data_shred(10, 0, &[2]).unwrap();
+        bs.insert_data_shred(15, 0, &[3]).unwrap();
+        bs.set_roots(&[5, 10, 15]).unwrap();
+        bs.purge_slots_below(12).unwrap();
+        bs.backend.flush().unwrap();
+    }
+
+    {
+        let bs = Blockstore::open(&path).unwrap();
+        // Slots 5 and 10 should be purged.
+        assert!(bs.get_slot_meta(5).unwrap().is_none());
+        assert!(bs.get_slot_meta(10).unwrap().is_none());
+        // Slot 15 should remain.
+        assert!(bs.get_slot_meta(15).unwrap().is_some());
+        // Roots 5 and 10 should be gone from disk.
+        assert!(!bs.is_root(5));
+        assert!(!bs.is_root(10));
+        assert!(bs.is_root(15));
+    }
+}
+
+#[test]
+fn persistent_dead_slot_survives_reopen() {
+    let dir = tempfile::tempdir().expect("tmpdir");
+    let path = dir.path().join("blockstore_dead");
+
+    {
+        let bs = Blockstore::open(&path).unwrap();
+        bs.insert_data_shred(99, 0, &[1]).unwrap();
+        bs.mark_dead(99).unwrap();
+        bs.backend.flush().unwrap();
+    }
+
+    {
+        let bs = Blockstore::open(&path).unwrap();
+        let meta = bs.get_slot_meta(99).unwrap().expect("should exist");
+        assert_eq!(meta.status, SlotStatus::Dead);
+    }
+}
+
+#[test]
+fn persistent_backend_is_persistent() {
+    let dir = tempfile::tempdir().expect("tmpdir");
+    let path = dir.path().join("blockstore_check");
+    let bs = Blockstore::open(&path).unwrap();
+    assert!(bs.backend.is_persistent());
+}
+
+#[test]
+fn in_memory_backend_is_not_persistent() {
+    let bs = Blockstore::in_memory();
+    assert!(!bs.backend.is_persistent());
+}

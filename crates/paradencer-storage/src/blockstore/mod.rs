@@ -36,10 +36,30 @@ pub struct Blockstore {
 
 impl Blockstore {
     /// Open or create a blockstore at the given path.
+    ///
+    /// Reopens the persistent backend from disk and rebuilds the root
+    /// set from persisted root markers.
     pub fn open(path: &std::path::Path) -> Result<Self, BlockstoreError> {
+        let backend = BlockstoreBackend::open(path)?;
+
+        // Recover root set from disk.
+        let mut recovered_roots = BTreeSet::new();
+        let root_entries = backend.prefix_scan(CF_ROOTS, &[])?;
+        for (key_bytes, _) in root_entries {
+            if key_bytes.len() == 8 {
+                let slot = u64::from_be_bytes(
+                    key_bytes
+                        .as_slice()
+                        .try_into()
+                        .unwrap_or_else(|_| unreachable!()),
+                );
+                recovered_roots.insert(slot);
+            }
+        }
+
         Ok(Self {
-            backend: BlockstoreBackend::open(path)?,
-            roots: RwLock::new(BTreeSet::new()),
+            backend,
+            roots: RwLock::new(recovered_roots),
             lowest_cleanup_slot: RwLock::new(0),
         })
     }
