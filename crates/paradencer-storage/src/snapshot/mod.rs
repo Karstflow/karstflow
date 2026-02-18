@@ -4,6 +4,7 @@ pub(crate) mod creator;
 pub(crate) mod loader;
 pub(crate) mod metadata;
 pub mod restore;
+pub(crate) mod scheduler;
 pub mod solana_archive;
 pub mod status_cache;
 
@@ -30,6 +31,8 @@ pub use creator::SolanaArchiveStats;
 pub use loader::{LoadProgress, LoadProgressInfo, LoadedSnapshot, SnapshotLoader};
 pub use metadata::{CompressionType, SnapshotConfig, SnapshotManifest, SnapshotMetadata};
 pub use restore::{RestoreResult, SnapshotRestorer};
+#[allow(unused_imports)]
+pub use scheduler::{SnapshotAction, SnapshotScheduler};
 #[allow(unused_imports)]
 pub use solana_archive::{SnapshotArchive, SnapshotArchiveBuilder, SnapshotArchiveEntry};
 pub use status_cache::{StatusCacheEntry, StatusCacheParseResult};
