@@ -60,6 +60,13 @@ pub const DEFAULT_CACHE_SIZE_BYTES: u64 = 256 * 1024 * 1024;
 /// Default flush interval in milliseconds.
 pub const DEFAULT_FLUSH_INTERVAL_MS: u64 = 1_000;
 
+/// Fanout factor for the accounts Merkle hash tree.
+///
+/// All per-account SHA-256 hashes are divided into this many chunks,
+/// each chunk is hashed separately, and the chunk hashes are combined
+/// to produce the final accounts hash.
+pub const ACCOUNTS_HASH_FANOUT: usize = 16;
+
 /// All standard column families created on database open.
 pub const STANDARD_COLUMN_FAMILIES: &[&str] = &[
     CF_ACCOUNTS,

@@ -7,7 +7,7 @@ use crate::durable::{DurableStore, WriteBatch};
 use crate::StorageError;
 use ahash::AHasher;
 use dashmap::DashMap;
-use paradencer_constants::durable_store::CF_ACCOUNTS;
+use paradencer_constants::durable_store::{ACCOUNTS_HASH_FANOUT, CF_ACCOUNTS};
 use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
 use std::sync::{Arc, RwLock};
@@ -590,6 +590,69 @@ impl AccountDatabase {
 
         hasher.finish()
     }
+
+    /// Compute a SHA-256 Merkle hash over all published accounts.
+    ///
+    /// Each account is hashed as:
+    ///   `SHA-256(lamports_le || rent_epoch_le || data || executable_byte || owner || pubkey)`
+    ///
+    /// All per-account hashes are sorted by pubkey and accumulated
+    /// into a 16-way fanout Merkle hash. Accounts with zero lamports
+    /// are excluded (matching the Solana protocol behavior).
+    ///
+    /// Returns `(hash, account_count)` where `account_count` is the
+    /// number of non-zero-lamport accounts included.
+    pub fn compute_accounts_hash(&self) -> ([u8; 32], usize) {
+        use paradencer_crypto::sha256::Sha256StreamingHasher;
+
+        let published_accounts = self.get_all_published_accounts();
+
+        // Compute per-account hashes, sorted by pubkey.
+        let mut account_hashes: Vec<([u8; 32], [u8; 32])> = Vec::new();
+        for (pubkey, account) in &published_accounts {
+            if account.meta.lamports == 0 {
+                continue;
+            }
+            let mut h = Sha256StreamingHasher::new();
+            h.update(&account.meta.lamports.to_le_bytes());
+            h.update(&account.meta.rent_epoch.to_le_bytes());
+            h.update(account.data.as_ref());
+            h.update(&[account.meta.executable as u8]);
+            h.update(account.meta.owner.as_bytes());
+            h.update(pubkey.as_bytes());
+            account_hashes.push((*pubkey.as_bytes(), h.finalize()));
+        }
+
+        // Sort by pubkey bytes for deterministic ordering.
+        account_hashes.sort_by(|a, b| a.0.cmp(&b.0));
+
+        let count = account_hashes.len();
+
+        if count == 0 {
+            return ([0u8; 32], 0);
+        }
+
+        // 16-way fanout Merkle hash.
+        let fanout = ACCOUNTS_HASH_FANOUT;
+        let chunk_size = count.div_ceil(fanout);
+        let mut chunk_hashes = Vec::with_capacity(fanout);
+
+        for chunk in account_hashes.chunks(chunk_size.max(1)) {
+            let mut h = Sha256StreamingHasher::new();
+            for (_, account_hash) in chunk {
+                h.update(account_hash);
+            }
+            chunk_hashes.push(h.finalize());
+        }
+
+        // Combine chunk hashes.
+        let mut final_hash = Sha256StreamingHasher::new();
+        for chunk_hash in &chunk_hashes {
+            final_hash.update(chunk_hash);
+        }
+
+        (final_hash.finalize(), count)
+    }
 }
 
 impl Default for AccountDatabase {
@@ -983,5 +1046,117 @@ mod tests {
 
         // But should be in memory.
         assert!(db.get_published_account(&pk).is_some());
+    }
+
+    // -----------------------------------------------------------------------
+    // SHA-256 accounts hash
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn accounts_hash_empty_db() {
+        let db = AccountDatabase::new();
+        let (hash, count) = db.compute_accounts_hash();
+        assert_eq!(count, 0);
+        assert_eq!(hash, [0u8; 32]);
+    }
+
+    #[test]
+    fn accounts_hash_deterministic() {
+        let pk1 = Pubkey::from([0x01; 32]);
+        let pk2 = Pubkey::from([0x02; 32]);
+        let acct1 = Account::new(1000, vec![1, 2, 3], Pubkey::from([0xFF; 32]));
+        let acct2 = Account::new(2000, vec![4, 5, 6], Pubkey::from([0xEE; 32]));
+
+        // Two databases with same accounts should produce same hash.
+        let db1 = AccountDatabase::new();
+        db1.store_published_account(pk1, acct1.clone());
+        db1.store_published_account(pk2, acct2.clone());
+
+        let db2 = AccountDatabase::new();
+        db2.store_published_account(pk1, acct1);
+        db2.store_published_account(pk2, acct2);
+
+        let (hash1, count1) = db1.compute_accounts_hash();
+        let (hash2, count2) = db2.compute_accounts_hash();
+
+        assert_eq!(hash1, hash2);
+        assert_eq!(count1, 2);
+        assert_eq!(count2, 2);
+        // SHA-256 should produce a non-zero hash.
+        assert_ne!(hash1, [0u8; 32]);
+    }
+
+    #[test]
+    fn accounts_hash_excludes_zero_lamports() {
+        let db = AccountDatabase::new();
+
+        // Zero-lamport account should be excluded.
+        let pk_zero = Pubkey::from([0x01; 32]);
+        db.store_published_account(
+            pk_zero,
+            Account::new(0, vec![1, 2, 3], Pubkey::from([0xFF; 32])),
+        );
+
+        // Non-zero account should be included.
+        let pk_nonzero = Pubkey::from([0x02; 32]);
+        db.store_published_account(
+            pk_nonzero,
+            Account::new(1000, vec![4, 5, 6], Pubkey::from([0xFF; 32])),
+        );
+
+        let (hash, count) = db.compute_accounts_hash();
+        assert_eq!(count, 1); // Only non-zero lamport account.
+        assert_ne!(hash, [0u8; 32]);
+
+        // Hash with zero-lamport only should equal empty hash.
+        let db_zero_only = AccountDatabase::new();
+        db_zero_only.store_published_account(
+            pk_zero,
+            Account::new(0, vec![1, 2, 3], Pubkey::from([0xFF; 32])),
+        );
+        let (hash_zero, count_zero) = db_zero_only.compute_accounts_hash();
+        assert_eq!(count_zero, 0);
+        assert_eq!(hash_zero, [0u8; 32]);
+    }
+
+    #[test]
+    fn accounts_hash_different_data_different_hash() {
+        let pk = Pubkey::from([0x42; 32]);
+
+        let db1 = AccountDatabase::new();
+        db1.store_published_account(pk, Account::new(1000, vec![1], Pubkey::from([0xFF; 32])));
+
+        let db2 = AccountDatabase::new();
+        db2.store_published_account(pk, Account::new(1000, vec![2], Pubkey::from([0xFF; 32])));
+
+        let (hash1, _) = db1.compute_accounts_hash();
+        let (hash2, _) = db2.compute_accounts_hash();
+        assert_ne!(hash1, hash2);
+    }
+
+    #[test]
+    fn accounts_hash_insertion_order_independent() {
+        let pk1 = Pubkey::from([0x01; 32]);
+        let pk2 = Pubkey::from([0x02; 32]);
+        let pk3 = Pubkey::from([0x03; 32]);
+        let acct1 = Account::new(100, vec![1], Pubkey::from([0xAA; 32]));
+        let acct2 = Account::new(200, vec![2], Pubkey::from([0xBB; 32]));
+        let acct3 = Account::new(300, vec![3], Pubkey::from([0xCC; 32]));
+
+        // Insert in forward order.
+        let db_fwd = AccountDatabase::new();
+        db_fwd.store_published_account(pk1, acct1.clone());
+        db_fwd.store_published_account(pk2, acct2.clone());
+        db_fwd.store_published_account(pk3, acct3.clone());
+
+        // Insert in reverse order.
+        let db_rev = AccountDatabase::new();
+        db_rev.store_published_account(pk3, acct3);
+        db_rev.store_published_account(pk2, acct2);
+        db_rev.store_published_account(pk1, acct1);
+
+        let (hash_fwd, _) = db_fwd.compute_accounts_hash();
+        let (hash_rev, _) = db_rev.compute_accounts_hash();
+        assert_eq!(hash_fwd, hash_rev);
     }
 }
