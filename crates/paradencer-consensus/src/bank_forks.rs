@@ -24,6 +24,28 @@ impl BankForks {
         }
     }
 
+    /// Initialize BankForks from a snapshot-restored bank.
+    ///
+    /// The snapshot bank becomes the root and working bank.
+    /// Unlike `new()`, this validates that the bank's slot, epoch,
+    /// and status are consistent with a restored snapshot.
+    pub fn new_from_snapshot(snapshot_bank: Bank) -> Result<Self, BankForksError> {
+        if snapshot_bank.status() != BankStatus::Rooted {
+            return Err(BankForksError::SnapshotBankNotRooted);
+        }
+
+        let root_slot = snapshot_bank.slot();
+        let bank = Arc::new(snapshot_bank);
+        let mut banks = HashMap::new();
+        banks.insert(root_slot, bank.clone());
+
+        Ok(Self {
+            banks,
+            root_slot,
+            working_bank: bank,
+        })
+    }
+
     pub fn root_slot(&self) -> u64 {
         self.root_slot
     }
@@ -185,6 +207,7 @@ pub enum BankForksError {
     RootBankNotFound(u64),
     BankNotRooted(u64),
     BankNotFound(u64),
+    SnapshotBankNotRooted,
 }
 
 #[cfg(test)]
@@ -338,6 +361,146 @@ mod tests {
         let descendants = forks.descendants(1);
         assert_eq!(descendants.len(), 1);
         assert!(descendants.contains(&2));
+    }
+
+    // -- Snapshot restore integration tests --
+
+    fn make_snapshot_bank(slot: u64, epoch: u64) -> Bank {
+        use paradencer_storage::{
+            EpochScheduleConfig as SnapEpochSchedule, FeeRateConfig, InflationConfig,
+            RecentBlockhash, RentConfig, SnapshotBankState, StakeSummary,
+        };
+
+        let ticks_per_slot = 64u64;
+        let tick_height = slot * ticks_per_slot + ticks_per_slot;
+
+        let state = SnapshotBankState {
+            recent_blockhashes: vec![RecentBlockhash {
+                hash: [0xAA; 32],
+                lamports_per_signature: 5000,
+                hash_index: 100,
+                timestamp: 1_000_000,
+            }],
+            last_blockhash: Some([0xAA; 32]),
+            max_blockhash_age: 300,
+            last_blockhash_index: 100,
+            slot,
+            parent_slot: slot.saturating_sub(1),
+            block_height: slot,
+            epoch,
+            hash: [0x11; 32],
+            parent_hash: [0x22; 32],
+            transaction_count: 50_000,
+            tick_height,
+            max_tick_height: tick_height,
+            signature_count: 25_000,
+            capitalization: 500_000_000_000,
+            accounts_data_len: 1_000_000,
+            hashes_per_tick: Some(12500),
+            ticks_per_slot,
+            ns_per_slot: 400_000_000,
+            genesis_creation_time: 1_700_000_000,
+            slots_per_year: 78_892_314.0,
+            collector_id: [0x33; 32],
+            collector_fees: 0,
+            fee_rate_governor: FeeRateConfig {
+                target_lamports_per_signature: 10_000,
+                target_signatures_per_slot: 20_000,
+                min_lamports_per_signature: 5_000,
+                max_lamports_per_signature: 100_000,
+                burn_percent: 50,
+            },
+            rent: RentConfig {
+                lamports_per_byte_year: 3_480,
+                exemption_threshold: 2.0,
+                burn_percent: 50,
+                collector_epoch: epoch,
+                collector_slots_per_year: 78_892_314.0,
+            },
+            collected_rent: 0,
+            epoch_schedule: SnapEpochSchedule {
+                slots_per_epoch: 432_000,
+                leader_schedule_slot_offset: 432_000,
+                warmup: false,
+                first_normal_epoch: 0,
+                first_normal_slot: 0,
+            },
+            inflation: InflationConfig {
+                initial: 0.08,
+                terminal: 0.015,
+                taper: 0.15,
+                foundation: 0.05,
+                foundation_term: 7.0,
+            },
+            hard_forks: vec![],
+            ancestor_count: 0,
+            stake_summary: StakeSummary::default(),
+            is_delta: true,
+        };
+
+        let accounts = Arc::new(AccountDatabase::new());
+        let leader_schedule = create_test_leader_schedule(epoch);
+        Bank::new_from_snapshot(accounts, &state, leader_schedule)
+    }
+
+    #[test]
+    fn bank_forks_from_snapshot_bank() {
+        let snap_bank = make_snapshot_bank(1000, 2);
+        let forks = BankForks::new_from_snapshot(snap_bank).unwrap();
+
+        assert_eq!(forks.root_slot(), 1000);
+        assert_eq!(forks.working_bank().slot(), 1000);
+        assert_eq!(forks.len(), 1);
+    }
+
+    #[test]
+    fn bank_forks_snapshot_rejects_non_rooted() {
+        // A genesis bank is in Processing status, not Rooted
+        let genesis = create_genesis_bank();
+        let result = BankForks::new_from_snapshot(genesis);
+        assert!(matches!(result, Err(BankForksError::SnapshotBankNotRooted)));
+    }
+
+    #[test]
+    fn bank_forks_snapshot_accepts_child_slot() {
+        let snap_bank = make_snapshot_bank(1000, 2);
+        let mut forks = BankForks::new_from_snapshot(snap_bank).unwrap();
+
+        let parent = forks.working_bank();
+        let leader_schedule = create_test_leader_schedule(2);
+        let child = Bank::new_from_parent(&parent, 1001, leader_schedule);
+
+        assert!(forks.insert(child).is_ok());
+        assert_eq!(forks.len(), 2);
+        assert!(forks.get(1001).is_some());
+    }
+
+    #[test]
+    fn bank_forks_snapshot_full_lifecycle() {
+        let snap_bank = make_snapshot_bank(1000, 2);
+        let mut forks = BankForks::new_from_snapshot(snap_bank).unwrap();
+
+        // Create child from snapshot root
+        let parent = forks.working_bank();
+        let leader_schedule = create_test_leader_schedule(2);
+        let child = Bank::new_from_parent(&parent, 1001, leader_schedule);
+
+        // Complete, freeze, and root the child
+        for _ in 0..paradencer_constants::ledger::TICKS_PER_SLOT {
+            child.register_tick().unwrap();
+        }
+        child.freeze().unwrap();
+        child.mark_rooted().unwrap();
+
+        forks.insert(child).unwrap();
+
+        // Advance root to the child
+        assert!(forks.set_root(1001).is_ok());
+        assert_eq!(forks.root_slot(), 1001);
+
+        // Old snapshot root should be pruned
+        assert!(forks.get(1000).is_none());
+        assert!(forks.get(1001).is_some());
     }
 
     #[test]

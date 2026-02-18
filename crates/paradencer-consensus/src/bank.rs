@@ -218,7 +218,8 @@ impl Bank {
             slot: bank_state.slot,
             parent_slot: Some(bank_state.parent_slot),
             parent_hash: bank_state.parent_hash,
-            status: AtomicU8::new(BankStatus::Frozen.to_u8()),
+            // Snapshot represents a rooted (finalized) slot.
+            status: AtomicU8::new(BankStatus::Rooted.to_u8()),
             tick_height: AtomicU64::new(bank_state.tick_height),
             max_tick_height: bank_state.max_tick_height,
             epoch: bank_state.epoch,
@@ -2489,15 +2490,15 @@ mod tests {
     }
 
     #[test]
-    fn snapshot_bank_is_frozen() {
+    fn snapshot_bank_is_rooted() {
         let accounts = Arc::new(AccountDatabase::new());
         let state = make_test_bank_state(500, 1, 1_000_000);
         let leader_schedule = create_test_leader_schedule(1);
 
         let bank = Bank::new_from_snapshot(accounts, &state, leader_schedule);
 
-        assert_eq!(bank.status(), BankStatus::Frozen);
-        assert!(bank.is_frozen());
+        assert_eq!(bank.status(), BankStatus::Rooted);
+        assert!(bank.is_frozen()); // Rooted implies frozen
     }
 
     #[test]
