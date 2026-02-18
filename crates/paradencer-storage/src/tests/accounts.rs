@@ -1,5 +1,6 @@
 use crate::accounts::*;
 use crate::StorageError;
+use std::collections::HashMap;
 
 #[test]
 fn test_account_database_create() {
@@ -342,4 +343,155 @@ fn fork_clear_resets_tree() {
     db.clear_all_accounts();
     assert_eq!(db.fork_count(), 0);
     assert_eq!(db.count_records(), 0);
+}
+
+// ---------------------------------------------------------------------------
+// Owner index tests
+// ---------------------------------------------------------------------------
+
+#[test]
+fn owner_index_basic_lookup() {
+    let db = AccountDatabase::new();
+    let program = Pubkey::new([100u8; 32]);
+    let pk_a = Pubkey::new([1u8; 32]);
+    let pk_b = Pubkey::new([2u8; 32]);
+
+    db.store_published_account(pk_a, Account::new(100, vec![], program));
+    db.store_published_account(pk_b, Account::new(200, vec![], program));
+
+    let accounts = db.get_accounts_by_owner(&program);
+    assert_eq!(accounts.len(), 2);
+    assert_eq!(db.accounts_owned_by(&program), 2);
+}
+
+#[test]
+fn owner_index_tracks_lamports() {
+    let db = AccountDatabase::new();
+    let program = Pubkey::new([100u8; 32]);
+
+    db.store_published_account(Pubkey::new([1u8; 32]), Account::new(100, vec![], program));
+    db.store_published_account(Pubkey::new([2u8; 32]), Account::new(200, vec![], program));
+
+    assert_eq!(db.indexed_total_lamports(), 300);
+    assert_eq!(db.indexed_account_count(), 2);
+}
+
+#[test]
+fn owner_index_updates_on_lamport_change() {
+    let db = AccountDatabase::new();
+    let program = Pubkey::new([100u8; 32]);
+    let pk = Pubkey::new([1u8; 32]);
+
+    db.store_published_account(pk, Account::new(100, vec![], program));
+    assert_eq!(db.indexed_total_lamports(), 100);
+
+    // Update same account with different lamports.
+    db.store_published_account(pk, Account::new(250, vec![], program));
+    assert_eq!(db.indexed_total_lamports(), 250);
+    assert_eq!(db.indexed_account_count(), 1);
+}
+
+#[test]
+fn owner_index_multiple_programs() {
+    let db = AccountDatabase::new();
+    let prog_a = Pubkey::new([100u8; 32]);
+    let prog_b = Pubkey::new([200u8; 32]);
+
+    db.store_published_account(Pubkey::new([1u8; 32]), Account::new(100, vec![], prog_a));
+    db.store_published_account(Pubkey::new([2u8; 32]), Account::new(200, vec![], prog_b));
+    db.store_published_account(Pubkey::new([3u8; 32]), Account::new(300, vec![], prog_a));
+
+    assert_eq!(db.accounts_owned_by(&prog_a), 2);
+    assert_eq!(db.accounts_owned_by(&prog_b), 1);
+    assert_eq!(db.owner_count(), 2);
+
+    let prog_a_accounts = db.get_accounts_by_owner(&prog_a);
+    let total: u64 = prog_a_accounts.iter().map(|(_, a)| a.meta.lamports).sum();
+    assert_eq!(total, 400);
+}
+
+#[test]
+fn owner_index_slot_tracking() {
+    let db = AccountDatabase::new();
+    let program = Pubkey::new([100u8; 32]);
+    let pk = Pubkey::new([1u8; 32]);
+
+    db.store_published_account_at_slot(pk, Account::new(100, vec![], program), 5);
+    assert_eq!(db.account_last_updated_slot(&pk), Some(5));
+
+    db.store_published_account_at_slot(pk, Account::new(200, vec![], program), 10);
+    assert_eq!(db.account_last_updated_slot(&pk), Some(10));
+}
+
+#[test]
+fn owner_index_modified_since() {
+    let db = AccountDatabase::new();
+    let program = Pubkey::new([100u8; 32]);
+
+    db.store_published_account_at_slot(
+        Pubkey::new([1u8; 32]),
+        Account::new(100, vec![], program),
+        5,
+    );
+    db.store_published_account_at_slot(
+        Pubkey::new([2u8; 32]),
+        Account::new(200, vec![], program),
+        10,
+    );
+    db.store_published_account_at_slot(
+        Pubkey::new([3u8; 32]),
+        Account::new(300, vec![], program),
+        15,
+    );
+
+    let modified = db.accounts_modified_since(10);
+    assert_eq!(modified.len(), 2);
+}
+
+#[test]
+fn owner_index_cleared_on_reset() {
+    let db = AccountDatabase::new();
+    let program = Pubkey::new([100u8; 32]);
+    db.store_published_account(Pubkey::new([1u8; 32]), Account::new(100, vec![], program));
+
+    assert_eq!(db.indexed_account_count(), 1);
+    db.clear_all_accounts();
+    assert_eq!(db.indexed_account_count(), 0);
+    assert_eq!(db.indexed_total_lamports(), 0);
+}
+
+#[test]
+fn owner_index_updated_on_publish() {
+    let db = AccountDatabase::new();
+    let program = Pubkey::new([100u8; 32]);
+    let pk = Pubkey::new([1u8; 32]);
+
+    let s1 = TransactionId::from_slot(1);
+    db.prepare_transaction(TransactionId::root(), s1).unwrap();
+    db.write_account(s1, pk, Account::new(500, vec![], program))
+        .unwrap();
+    db.publish_transaction(s1).unwrap();
+
+    assert_eq!(db.indexed_account_count(), 1);
+    assert_eq!(db.indexed_total_lamports(), 500);
+    assert_eq!(db.accounts_owned_by(&program), 1);
+}
+
+#[test]
+fn owner_index_bulk_insert_tracked() {
+    let db = AccountDatabase::new();
+    let prog_a = Pubkey::new([100u8; 32]);
+    let prog_b = Pubkey::new([200u8; 32]);
+
+    let mut accounts = HashMap::new();
+    accounts.insert(Pubkey::new([1u8; 32]), Account::new(100, vec![], prog_a));
+    accounts.insert(Pubkey::new([2u8; 32]), Account::new(200, vec![], prog_b));
+    accounts.insert(Pubkey::new([3u8; 32]), Account::new(300, vec![], prog_a));
+
+    db.bulk_insert_published_accounts(accounts).unwrap();
+
+    assert_eq!(db.indexed_account_count(), 3);
+    assert_eq!(db.indexed_total_lamports(), 600);
+    assert_eq!(db.accounts_owned_by(&prog_a), 2);
+    assert_eq!(db.accounts_owned_by(&prog_b), 1);
 }
