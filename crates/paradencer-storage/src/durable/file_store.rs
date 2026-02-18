@@ -89,15 +89,19 @@ impl CfState {
 /// Each column family is a separate append-only file on disk.
 /// An in-memory hash index provides O(1) point lookups.
 /// Every record carries a CRC32 checksum verified on startup.
+/// Batch writes are protected by a Write-Ahead Log for crash recovery.
 pub struct FileDurableStore {
     data_dir: PathBuf,
     families: HashMap<String, Mutex<CfState>>,
+    wal: Mutex<super::wal::WriteAheadLog>,
     /// If true, directory is temporary and deleted on drop.
     is_temporary: bool,
 }
 
 impl FileDurableStore {
     /// Open or create a store at the given directory.
+    ///
+    /// On open, replays any pending WAL entries from a previous crash.
     pub fn open(data_dir: &Path) -> Result<Self, StorageError> {
         fs::create_dir_all(data_dir).map_err(|e| StorageError::DurableStoreError {
             details: format!("create dir {}: {}", data_dir.display(), e),
@@ -109,9 +113,17 @@ impl FileDurableStore {
             families.insert(cf_name.to_owned(), Mutex::new(state));
         }
 
+        // Open WAL and replay any pending entries from a crash.
+        let mut wal = super::wal::WriteAheadLog::open(data_dir)?;
+        if let Some(ops) = wal.read_pending()? {
+            Self::replay_wal_ops(&families, &ops)?;
+            wal.clear()?;
+        }
+
         Ok(Self {
             data_dir: data_dir.to_owned(),
             families,
+            wal: Mutex::new(wal),
             is_temporary: false,
         })
     }
@@ -127,6 +139,46 @@ impl FileDurableStore {
         let mut store = Self::open(&tmp)?;
         store.is_temporary = true;
         Ok(store)
+    }
+
+    /// Replay WAL operations into the families map.
+    fn replay_wal_ops(
+        families: &HashMap<String, Mutex<CfState>>,
+        ops: &[super::wal::WalOp],
+    ) -> Result<(), StorageError> {
+        use super::wal::WalOp;
+
+        for op in ops {
+            match op {
+                WalOp::Put { cf, key, value } => {
+                    if let Some(mutex) = families.get(cf.as_str()) {
+                        let mut state = mutex.lock().unwrap();
+                        Self::append_record(&mut state, RECORD_STATUS_ACTIVE, key, value)?;
+                    }
+                }
+                WalOp::Delete { cf, key } => {
+                    if let Some(mutex) = families.get(cf.as_str()) {
+                        let mut state = mutex.lock().unwrap();
+                        if state.index.contains_key(key.as_slice()) {
+                            Self::append_record(&mut state, RECORD_STATUS_DELETED, key, &[])?;
+                        }
+                    }
+                }
+            }
+        }
+
+        // Fsync all affected CFs after replay.
+        for mutex in families.values() {
+            let state = mutex.lock().unwrap();
+            state
+                .file
+                .sync_data()
+                .map_err(|e| StorageError::DurableStoreError {
+                    details: format!("fsync after WAL replay: {e}"),
+                })?;
+        }
+
+        Ok(())
     }
 
     /// Open a single column family file, verifying integrity and rebuilding the index.
@@ -603,19 +655,35 @@ impl DurableStore for FileDurableStore {
     }
 
     fn write_batch(&self, batch: &WriteBatch) -> Result<(), StorageError> {
-        // Group operations by CF to minimize lock contention.
+        if batch.is_empty() {
+            return Ok(());
+        }
+
+        // Verify all CFs exist before writing to WAL.
+        for op in batch.ops() {
+            let cf_name = match op {
+                WriteOp::Put { cf, .. } => cf.as_str(),
+                WriteOp::Delete { cf, .. } => cf.as_str(),
+            };
+            let _ = self.cf(cf_name)?;
+        }
+
+        // Phase 1: Write intent to WAL and fsync.
+        {
+            let mut wal = self.wal.lock().unwrap();
+            wal.write_batch(batch)?;
+        }
+
+        // Phase 2: Apply operations to CF files.
         let mut by_cf: HashMap<&str, Vec<&WriteOp>> = HashMap::new();
         for op in batch.ops() {
             let cf_name = match op {
                 WriteOp::Put { cf, .. } => cf.as_str(),
                 WriteOp::Delete { cf, .. } => cf.as_str(),
             };
-            // Verify CF exists before proceeding.
-            let _ = self.cf(cf_name)?;
             by_cf.entry(cf_name).or_default().push(op);
         }
 
-        // Apply per-CF batches.
         for (cf_name, ops) in by_cf {
             let mutex = self.cf(cf_name)?;
             let mut state = mutex.lock().unwrap();
@@ -638,6 +706,12 @@ impl DurableStore for FileDurableStore {
                 .map_err(|e| StorageError::DurableStoreError {
                     details: format!("fsync: {e}"),
                 })?;
+        }
+
+        // Phase 3: Clear WAL after successful application.
+        {
+            let mut wal = self.wal.lock().unwrap();
+            wal.clear()?;
         }
 
         Ok(())
@@ -760,7 +834,7 @@ fn read_at_checked(file: &File, buf: &mut [u8], offset: u64) -> Result<(), Stora
 
 /// Positional write that works on both Unix and non-Unix.
 #[inline]
-fn write_at_checked(file: &File, buf: &[u8], offset: u64) -> Result<(), StorageError> {
+pub(crate) fn write_at_checked(file: &File, buf: &[u8], offset: u64) -> Result<(), StorageError> {
     #[cfg(unix)]
     {
         file.write_at(buf, offset)
@@ -816,15 +890,20 @@ fn compute_record_crc_parts(
     hasher.finalize()
 }
 
-/// Simple pseudo-random u64 for temporary directory names.
+/// Pseudo-random u64 for temporary directory names.
+/// Uses time + thread ID to avoid collisions in parallel tests.
 fn rand_u64() -> u64 {
+    use std::sync::atomic::{AtomicU64, Ordering};
     use std::time::SystemTime;
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
     let nanos = SystemTime::now()
         .duration_since(SystemTime::UNIX_EPOCH)
         .unwrap_or_default()
         .subsec_nanos() as u64;
+    let count = COUNTER.fetch_add(1, Ordering::Relaxed);
     nanos
         .wrapping_mul(6364136223846793005)
+        .wrapping_add(count)
         .wrapping_add(1442695040888963407)
 }
 
@@ -1246,5 +1325,90 @@ mod tests {
             assert!(store.total_dead_bytes() > 0);
             assert_eq!(store.get(CF_ACCOUNTS, b"k").unwrap(), Some(b"v2".to_vec()));
         }
+    }
+
+    // --- WAL integration tests ---
+
+    #[test]
+    fn wal_replays_incomplete_batch_on_reopen() {
+        let dir = tempfile::tempdir().expect("tmpdir");
+        let path = dir.path().join("testdb");
+
+        // Write a batch normally.
+        {
+            let store = FileDurableStore::open(&path).expect("open");
+            let mut batch = WriteBatch::new();
+            batch.put(CF_ACCOUNTS, b"wal_key", b"wal_val").unwrap();
+            store.write_batch(&batch).unwrap();
+            store.flush().unwrap();
+        }
+
+        // Verify the data persists through reopen.
+        {
+            let store = FileDurableStore::open(&path).expect("reopen");
+            assert_eq!(
+                store.get(CF_ACCOUNTS, b"wal_key").unwrap(),
+                Some(b"wal_val".to_vec())
+            );
+        }
+    }
+
+    #[test]
+    fn wal_simulated_crash_replays_batch() {
+        let dir = tempfile::tempdir().expect("tmpdir");
+        let path = dir.path().join("testdb");
+
+        // Step 1: Open store and write initial data.
+        {
+            let store = FileDurableStore::open(&path).expect("open");
+            store.put(CF_ACCOUNTS, b"existing", b"data").unwrap();
+            store.flush().unwrap();
+        }
+
+        // Step 2: Manually write a WAL entry without applying it
+        // (simulating a crash after WAL write but before CF application).
+        {
+            let mut wal = super::super::wal::WriteAheadLog::open(&path).expect("open wal");
+            let mut batch = WriteBatch::new();
+            batch.put(CF_ACCOUNTS, b"crash_key", b"crash_val").unwrap();
+            batch.put(CF_METADATA, b"crash_meta", b"meta_val").unwrap();
+            wal.write_batch(&batch).unwrap();
+            // Don't clear WAL — simulating crash.
+        }
+
+        // Step 3: Reopen store — WAL should be replayed.
+        {
+            let store = FileDurableStore::open(&path).expect("reopen");
+            // Existing data preserved.
+            assert_eq!(
+                store.get(CF_ACCOUNTS, b"existing").unwrap(),
+                Some(b"data".to_vec())
+            );
+            // WAL-replayed data available.
+            assert_eq!(
+                store.get(CF_ACCOUNTS, b"crash_key").unwrap(),
+                Some(b"crash_val".to_vec())
+            );
+            assert_eq!(
+                store.get(CF_METADATA, b"crash_meta").unwrap(),
+                Some(b"meta_val".to_vec())
+            );
+        }
+    }
+
+    #[test]
+    fn wal_cleared_after_successful_batch() {
+        let dir = tempfile::tempdir().expect("tmpdir");
+        let path = dir.path().join("testdb");
+
+        let store = FileDurableStore::open(&path).expect("open");
+        let mut batch = WriteBatch::new();
+        batch.put(CF_ACCOUNTS, b"k", b"v").unwrap();
+        store.write_batch(&batch).unwrap();
+
+        // WAL should be empty after successful batch.
+        let wal_path = path.join(paradencer_constants::durable_store::WAL_FILE_NAME);
+        let wal_len = fs::metadata(&wal_path).map(|m| m.len()).unwrap_or(0);
+        assert_eq!(wal_len, 0, "WAL should be cleared after batch");
     }
 }

@@ -107,6 +107,20 @@ pub const RECORD_STATUS_DELETED: u8 = 1;
 /// Maximum value size per record (256 MB).
 pub const MAX_RECORD_VALUE_SIZE: u32 = 256 * 1024 * 1024;
 
+// Write-Ahead Log constants
+
+/// Sentinel value marking a complete WAL entry.
+pub const WAL_ENTRY_SENTINEL: u32 = 0x454E_4421; // "END!"
+
+/// WAL operation type: put a key-value pair.
+pub const WAL_OP_PUT: u8 = 0;
+
+/// WAL operation type: delete a key.
+pub const WAL_OP_DELETE: u8 = 1;
+
+/// WAL file name within the data directory.
+pub const WAL_FILE_NAME: &str = "wal.log";
+
 // Compaction thresholds
 
 /// Dead space ratio above which compaction is recommended (50%).

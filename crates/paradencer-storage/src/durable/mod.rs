@@ -8,6 +8,7 @@ mod compaction;
 mod engine;
 mod file_store;
 pub mod recovery;
+mod wal;
 
 pub use batch::{WriteBatch, WriteOp};
 pub use compaction::{compact_below_slot, compact_below_slot_and_reclaim, CompactionStats};
