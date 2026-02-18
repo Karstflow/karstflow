@@ -421,3 +421,22 @@ pub const QUIC_DEFAULT_CONN_ID_SIZE: usize = 8;
 pub const PACKET_BUFFER_SIZE: usize = 2048;
 /// Default batch size for packet I/O operations.
 pub const PACKET_BATCH_DEFAULT: usize = 64;
+
+// ---------------------------------------------------------------------------
+// AF_XDP / XDP (Linux kernel bypass)
+// ---------------------------------------------------------------------------
+
+/// Default XDP UMEM frame size (power of 2, fits one packet).
+pub const XDP_FRAME_SIZE: usize = 4096;
+/// Required UMEM alignment (page-aligned).
+pub const XDP_UMEM_ALIGN: usize = 4096;
+/// Default number of UMEM frames.
+pub const XDP_DEFAULT_FRAME_COUNT: u32 = 4096;
+/// Default depth for each XDP ring (power of 2).
+pub const XDP_DEFAULT_RING_DEPTH: u32 = 2048;
+/// Minimum ring depth.
+pub const XDP_MIN_RING_DEPTH: u32 = 64;
+/// Sentinel for empty ring slot or invalid frame.
+pub const XDP_FRAME_INVALID: u64 = u64::MAX;
+/// XDP headroom reserved before packet data in each frame.
+pub const XDP_HEADROOM: usize = 256;

@@ -6,3 +6,4 @@ pub mod quic;
 pub mod socket;
 pub mod tls;
 pub mod wire;
+pub mod xdp;
