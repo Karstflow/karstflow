@@ -185,6 +185,13 @@ pub const BPF_LOADER_V2_PROGRAM_ID: Pubkey = Pubkey::new([
     0xd7, 0xba, 0x39, 0x95, 0x68, 0x49, 0x12, 0xee, 0x20, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
 ]);
 
+/// Feature Program ID - owner of on-chain feature gate accounts
+/// Feature111111111111111111111111111111111111
+pub const FEATURE_PROGRAM_ID: Pubkey = Pubkey::new([
+    3, 192, 160, 205, 203, 6, 210, 218, 239, 174, 130, 209, 111, 238, 122, 207, 97, 236, 115, 123,
+    35, 72, 27, 33, 148, 106, 118, 112, 0, 0, 0, 0,
+]);
+
 /// Fees sysvar (deprecated) - SysvarFees111111111111111111111111111111111
 pub const FEES_SYSVAR_ID: Pubkey = Pubkey::new([
     6, 167, 213, 23, 24, 199, 116, 201, 40, 86, 99, 152, 105, 29, 94, 182, 139, 94, 184, 163, 155,

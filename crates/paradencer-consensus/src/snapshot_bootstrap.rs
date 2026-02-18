@@ -8,6 +8,8 @@ use crate::bank::Bank;
 use crate::bank_forks::{BankForks, BankForksError};
 use crate::clock::Clock;
 use crate::epoch_schedule::EpochScheduleConfig;
+use crate::features::known_features;
+use crate::features::FeatureSet;
 use crate::rent::Rent;
 use crate::stake::{deserialize_stake_state, StakeState};
 use crate::stake_history::{StakeHistory, StakeHistoryEntry};
@@ -15,7 +17,7 @@ use crate::sysvars::SysvarCache;
 use crate::transaction_cache::SeedEntry;
 use crate::{EpochSchedule, LeaderSchedule, StakeTracker};
 use paradencer_constants::block_limits::MESSAGE_HASH_PREFIX_BYTES;
-use paradencer_ids::STAKE_PROGRAM_ID;
+use paradencer_ids::{FEATURE_PROGRAM_ID, STAKE_PROGRAM_ID};
 use paradencer_storage::{AccountDatabase, RestoreResult, SnapshotBankState, StatusCacheEntry};
 use std::sync::{Arc, RwLock};
 
@@ -36,8 +38,23 @@ pub struct BootstrapResult {
     pub lthash_accounts: usize,
     /// Number of stake history epochs loaded.
     pub stake_history_entries: usize,
+    /// Feature set initialization statistics.
+    pub feature_init: FeatureInitStats,
     /// Snapshot slot number.
     pub slot: u64,
+}
+
+/// Statistics from initializing features after snapshot restore.
+#[derive(Debug, Clone, Default)]
+pub struct FeatureInitStats {
+    /// Total feature-program-owned accounts found in the database.
+    pub feature_accounts_scanned: usize,
+    /// Number of features that matched a known feature ID and were activated.
+    pub features_activated: usize,
+    /// Number of feature accounts that were not recognized as known features.
+    pub unknown_features: usize,
+    /// Number of feature accounts with data too short or missing activation slot.
+    pub not_yet_activated: usize,
 }
 
 /// Statistics from initializing stake state after snapshot restore.
@@ -89,8 +106,9 @@ impl From<BankForksError> for BootstrapError {
 /// 3. Initializes stake tracker from restored accounts
 /// 4. Loads stake history from the snapshot for warmup/cooldown
 /// 5. Initializes the sysvar cache (clock, epoch schedule, rent)
-/// 6. Seeds the transaction cache from the status cache
-/// 7. Wraps in `BankForks` as the root bank
+/// 6. Initializes feature set from on-chain feature gate accounts
+/// 7. Seeds the transaction cache from the status cache
+/// 8. Wraps in `BankForks` as the root bank
 ///
 /// The caller is responsible for running the `SnapshotRestorer` first
 /// to populate the `AccountDatabase` and produce the `RestoreResult`.
@@ -123,7 +141,11 @@ pub fn bootstrap_from_snapshot(
     let sysvar_cache = initialize_sysvar_cache(bank_state);
     bank.set_sysvar_cache(Arc::new(sysvar_cache));
 
-    // Step 6: Seed transaction cache from status cache.
+    // Step 6: Initialize feature set from feature-program-owned accounts.
+    let (feature_set, feature_init) = initialize_features(&accounts);
+    bank.set_feature_set(Arc::new(RwLock::new(feature_set)));
+
+    // Step 7: Seed transaction cache from status cache.
     let transactions_seeded = if let Some(status_cache) = &restore_result.status_cache {
         let seed_entries = status_cache.entries.iter().map(convert_status_cache_entry);
         bank.seed_transaction_cache(seed_entries)
@@ -131,7 +153,7 @@ pub fn bootstrap_from_snapshot(
         0
     };
 
-    // Step 7: Wrap in BankForks.
+    // Step 8: Wrap in BankForks.
     let bank_forks = BankForks::new_from_snapshot(bank)?;
 
     Ok(BootstrapResult {
@@ -142,6 +164,7 @@ pub fn bootstrap_from_snapshot(
         stake_init,
         lthash_accounts,
         stake_history_entries,
+        feature_init,
         slot: restore_result.slot,
     })
 }
@@ -206,6 +229,46 @@ fn initialize_sysvar_cache(bank_state: &SnapshotBankState) -> SysvarCache {
     };
 
     SysvarCache::new(clock, epoch_schedule, rent)
+}
+
+/// Initialize the feature set from on-chain feature gate accounts.
+///
+/// Scans all accounts owned by the Feature program, checks if each one matches
+/// a known feature ID, and reads the activation slot from the account data.
+/// The Solana feature account data format is `Option<Slot>` serialized with
+/// bincode: `[0]` for not-yet-activated, `[1, slot_le_bytes]` for activated.
+fn initialize_features(accounts: &AccountDatabase) -> (FeatureSet, FeatureInitStats) {
+    let feature_accounts = accounts.get_accounts_by_owner(&FEATURE_PROGRAM_ID);
+    let known = known_features::all_known_features();
+    let known_set: std::collections::HashSet<paradencer_types::Pubkey> =
+        known.iter().map(|f| f.feature_id).collect();
+
+    let mut feature_set = FeatureSet::with_known_features();
+    let mut stats = FeatureInitStats {
+        feature_accounts_scanned: feature_accounts.len(),
+        ..Default::default()
+    };
+
+    for (pubkey, account) in &feature_accounts {
+        if !known_set.contains(pubkey) {
+            stats.unknown_features += 1;
+            continue;
+        }
+
+        // Parse feature account data: Option<Slot> in bincode.
+        // Activated: [1, slot_u64_le] (9 bytes)
+        // Not activated: [0] (1 byte) or empty data
+        let data = account.data.as_ref();
+        if data.len() >= 9 && data[0] == 1 {
+            let slot = u64::from_le_bytes(data[1..9].try_into().unwrap_or_else(|_| unreachable!()));
+            feature_set.activate(*pubkey, slot);
+            stats.features_activated += 1;
+        } else {
+            stats.not_yet_activated += 1;
+        }
+    }
+
+    (feature_set, stats)
 }
 
 /// Build stake history from snapshot's parsed stake summary.
@@ -959,5 +1022,153 @@ mod tests {
         let rent = cache.rent();
         assert_eq!(rent.lamports_per_byte_year, 3_480);
         assert!((rent.exemption_threshold - 2.0).abs() < f64::EPSILON);
+    }
+
+    // ── feature set initialization tests ──────────────────────────────
+
+    /// Create feature account data for an activated feature.
+    fn make_activated_feature_data(activation_slot: u64) -> Vec<u8> {
+        let mut data = vec![1u8]; // Some tag
+        data.extend_from_slice(&activation_slot.to_le_bytes());
+        data
+    }
+
+    /// Create feature account data for a not-yet-activated feature.
+    fn make_pending_feature_data() -> Vec<u8> {
+        vec![0u8] // None tag
+    }
+
+    /// Insert a feature account into the database.
+    fn insert_feature_account(db: &AccountDatabase, pubkey: Pubkey, data: Vec<u8>) {
+        let account = Account {
+            data: data.into(),
+            meta: paradencer_storage::AccountMeta {
+                lamports: 1,
+                owner: FEATURE_PROGRAM_ID,
+                executable: false,
+                rent_epoch: 0,
+            },
+        };
+        db.store_published_account(pubkey, account);
+    }
+
+    #[test]
+    fn bootstrap_initializes_feature_set_empty() {
+        let db = Arc::new(AccountDatabase::new());
+        let result = make_restore_result(1000);
+        let leader_schedule = make_leader_schedule();
+
+        let bootstrap = bootstrap_from_snapshot(db, &result, leader_schedule).unwrap();
+        assert_eq!(bootstrap.feature_init.feature_accounts_scanned, 0);
+        assert_eq!(bootstrap.feature_init.features_activated, 0);
+        assert_eq!(bootstrap.feature_init.unknown_features, 0);
+        assert_eq!(bootstrap.feature_init.not_yet_activated, 0);
+
+        // Feature set should be attached to the bank.
+        let bank = bootstrap.bank_forks.working_bank();
+        assert!(bank.feature_set().is_some());
+    }
+
+    #[test]
+    fn bootstrap_activates_known_features() {
+        use crate::features::known_features;
+
+        let db = Arc::new(AccountDatabase::new());
+
+        // Pick two known features and insert them as activated.
+        let known = known_features::all_known_features();
+        assert!(known.len() >= 2, "need at least 2 known features for test");
+
+        let feat_a = known[0].feature_id;
+        let feat_b = known[1].feature_id;
+
+        insert_feature_account(&db, feat_a, make_activated_feature_data(100));
+        insert_feature_account(&db, feat_b, make_activated_feature_data(200));
+
+        let result = make_restore_result(1000);
+        let leader_schedule = make_leader_schedule();
+
+        let bootstrap = bootstrap_from_snapshot(db, &result, leader_schedule).unwrap();
+        assert_eq!(bootstrap.feature_init.feature_accounts_scanned, 2);
+        assert_eq!(bootstrap.feature_init.features_activated, 2);
+        assert_eq!(bootstrap.feature_init.unknown_features, 0);
+        assert_eq!(bootstrap.feature_init.not_yet_activated, 0);
+
+        // Verify features are active on the bank.
+        let bank = bootstrap.bank_forks.working_bank();
+        let fs_lock = bank.feature_set().unwrap();
+        let fs = fs_lock.read().unwrap();
+        assert!(fs.is_active(&feat_a));
+        assert_eq!(fs.activated_slot(&feat_a), Some(100));
+        assert!(fs.is_active(&feat_b));
+        assert_eq!(fs.activated_slot(&feat_b), Some(200));
+    }
+
+    #[test]
+    fn bootstrap_tracks_pending_features() {
+        use crate::features::known_features;
+
+        let db = Arc::new(AccountDatabase::new());
+
+        let known = known_features::all_known_features();
+        let feat = known[0].feature_id;
+
+        // Insert a known feature that is NOT yet activated.
+        insert_feature_account(&db, feat, make_pending_feature_data());
+
+        let result = make_restore_result(1000);
+        let leader_schedule = make_leader_schedule();
+
+        let bootstrap = bootstrap_from_snapshot(db, &result, leader_schedule).unwrap();
+        assert_eq!(bootstrap.feature_init.feature_accounts_scanned, 1);
+        assert_eq!(bootstrap.feature_init.features_activated, 0);
+        assert_eq!(bootstrap.feature_init.not_yet_activated, 1);
+
+        // Feature should NOT be active.
+        let bank = bootstrap.bank_forks.working_bank();
+        let fs_lock = bank.feature_set().unwrap();
+        let fs = fs_lock.read().unwrap();
+        assert!(!fs.is_active(&feat));
+    }
+
+    #[test]
+    fn bootstrap_counts_unknown_features() {
+        let db = Arc::new(AccountDatabase::new());
+
+        // Insert a feature account with a pubkey that doesn't match any known feature.
+        let unknown_pubkey = Pubkey::new_unique();
+        insert_feature_account(&db, unknown_pubkey, make_activated_feature_data(50));
+
+        let result = make_restore_result(1000);
+        let leader_schedule = make_leader_schedule();
+
+        let bootstrap = bootstrap_from_snapshot(db, &result, leader_schedule).unwrap();
+        assert_eq!(bootstrap.feature_init.feature_accounts_scanned, 1);
+        assert_eq!(bootstrap.feature_init.features_activated, 0);
+        assert_eq!(bootstrap.feature_init.unknown_features, 1);
+    }
+
+    #[test]
+    fn bootstrap_feature_set_inherits_to_child() {
+        use crate::features::known_features;
+
+        let db = Arc::new(AccountDatabase::new());
+
+        let known = known_features::all_known_features();
+        let feat = known[0].feature_id;
+        insert_feature_account(&db, feat, make_activated_feature_data(42));
+
+        let result = make_restore_result(1000);
+        let leader_schedule = make_leader_schedule();
+
+        let bootstrap = bootstrap_from_snapshot(db, &result, leader_schedule.clone()).unwrap();
+        let root_bank = bootstrap.bank_forks.working_bank();
+
+        // Child bank should inherit the feature set.
+        let child = Bank::new_from_parent(&root_bank, 1001, leader_schedule);
+        let child_fs = child.feature_set().unwrap();
+        let fs = child_fs.read().unwrap();
+        assert!(fs.is_active(&feat));
+        assert_eq!(fs.activated_slot(&feat), Some(42));
     }
 }
