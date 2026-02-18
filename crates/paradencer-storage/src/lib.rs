@@ -36,7 +36,8 @@ pub use shred_window::{
     ShredWindowConfig, ShredWindowError, ShredWindowResult, ShredWindowStats, ShredWindowStore,
 };
 pub use snapshot::{
-    CompressionType, LoadProgress, LoadProgressInfo, LoadedSnapshot, SerializedAccount,
+    AppendVecAccount, AppendVecError, AppendVecIter, CompressionType, LoadProgress,
+    LoadProgressInfo, LoadedSnapshot, SerializedAccount, SnapshotArchive, SnapshotArchiveEntry,
     SnapshotConfig, SnapshotCreator, SnapshotData, SnapshotLoader, SnapshotManifest,
     SnapshotMetadata, SnapshotProgress, SnapshotProgressInfo,
 };
