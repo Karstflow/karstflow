@@ -96,6 +96,9 @@ pub enum StorageError {
     #[error("Account not found: {pubkey:?}")]
     AccountNotFound { pubkey: String },
 
+    #[error("Transaction is frozen (has children) and cannot be modified")]
+    TransactionFrozen,
+
     #[error("Account database error: {details}")]
     AccountDatabaseError { details: String },
 
