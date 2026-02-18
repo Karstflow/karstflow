@@ -21,18 +21,23 @@ mod block_assembler;
 mod block_producer;
 mod edge_intake;
 mod errors;
+mod exec_stage;
 mod execution_adapter;
 #[cfg(test)]
 mod integration_tests;
 mod metrics_reporter;
+pub mod pack_stage;
 mod replay_stage;
+mod resolv_stage;
 mod shred_assembler;
 mod shred_filter;
+mod shred_network;
 mod stats;
 #[cfg(test)]
 mod testsuite;
 mod tx_filter;
 mod types;
+mod verify_stage;
 
 pub use block_assembler::BlockAssembler;
 pub use edge_intake::EdgeIntake;
@@ -62,6 +67,27 @@ pub use types::{
     ReplaySafetyPolicy, ReplayWindowPolicy, SanitizedShred, SanitizedTransaction,
     SchedulerRuntimePolicy, SnapshotRetentionPolicy, StorageRuntimePolicy, StorageStartupPolicy,
     StorageStartupStrictRestorePolicy,
+};
+
+pub use exec_stage::{
+    ExecConfig, ExecStage, ExecStats, ExecStatsSnapshot, ExecutionEngine, MicroblockExecResult,
+    MockExecutionEngine, TransactionExecResult,
+};
+pub use pack_stage::{
+    AccountLock, ConflictDetector, LockKind, Microblock, PackConfig, PackLimits, PackOutcome,
+    PackScheduler, PackStats, PackStatsSnapshot, PackedTransaction, TransactionQueue,
+};
+pub use resolv_stage::{
+    Blockhash, ResolvConfig, ResolvOutcome, ResolvStage, ResolvStats, ResolvStatsSnapshot,
+    ResolvedTransaction,
+};
+pub use shred_network::{
+    NetworkShred, RetransmitDecision, ShredInsertOutcome, ShredNetworkConfig, ShredNetworkStage,
+    ShredNetworkStats, ShredNetworkStatsSnapshot, ShredSource,
+};
+pub use verify_stage::{
+    TransactionSource, UnverifiedTransaction, VerifiedTransaction, VerifyConfig, VerifyOutcome,
+    VerifyStage, VerifyStats, VerifyStatsSnapshot,
 };
 
 pub(crate) use stats::{BlockAssemblyMetrics, IngressFilterMetrics, ShredFilterMetrics};
