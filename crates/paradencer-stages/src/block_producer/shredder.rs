@@ -394,7 +394,7 @@ impl EntryShredder {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use paradencer_consensus::Hash;
+    use paradencer_types::Hash;
 
     fn create_test_entry(num_txs: usize) -> PohEntry {
         let transactions: Vec<Vec<u8>> = (0..num_txs).map(|i| vec![i as u8; 100]).collect();

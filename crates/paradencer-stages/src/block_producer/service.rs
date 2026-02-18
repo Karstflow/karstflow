@@ -6,10 +6,11 @@
 use super::entry_creator::{EntryCreator, EntryCreatorConfig};
 use super::poh::{PohEntry, PohService};
 use super::shredder::{EntryShredder, ShredderConfig, ShredderError};
-use paradencer_consensus::{Hash, LeaderSchedule};
+use paradencer_consensus::LeaderSchedule;
 use paradencer_mesh::{Receiver, Sender};
 use paradencer_storage::Pubkey;
 use paradencer_types::shred::Shred;
+use paradencer_types::Hash;
 use std::sync::{
     atomic::{AtomicBool, Ordering},
     Arc, Mutex,

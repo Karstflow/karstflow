@@ -76,6 +76,25 @@ pub mod ledger {
     pub const TICKS_PER_SLOT: u64 = 64;
     pub const DEFAULT_TICKS_PER_SECOND: u64 = 160;
     pub const DEFAULT_MS_PER_SLOT: u64 = 400;
+
+    /// Mainnet default hashes per tick (after update_hashes_per_tick6 feature).
+    pub const DEFAULT_HASHES_PER_TICK: u64 = 62_500;
+
+    /// Hash count per slot = hashes_per_tick * ticks_per_slot.
+    pub const HASHCNT_PER_SLOT: u64 = DEFAULT_HASHES_PER_TICK * TICKS_PER_SLOT;
+
+    /// Target duration per hash in nanoseconds (mainnet).
+    pub const HASHCNT_DURATION_NS: u64 = 100;
+
+    /// Target tick duration in nanoseconds: hashes_per_tick * hashcnt_duration.
+    pub const DEFAULT_TICK_DURATION_NS: u64 = DEFAULT_HASHES_PER_TICK * HASHCNT_DURATION_NS;
+
+    /// Maximum microblocks pack can produce per slot.
+    pub const MAX_MICROBLOCKS_PER_SLOT: u64 = 131_072;
+
+    /// Maximum skipped ticks stored for proof-of-skipping.
+    /// Bounded by max block data / tick entry size.
+    pub const MAX_SKIPPED_TICKS: usize = 569_424;
     pub const GENESIS_EPOCH: u64 = 0;
     pub const GENESIS_SLOT: u64 = 0;
 

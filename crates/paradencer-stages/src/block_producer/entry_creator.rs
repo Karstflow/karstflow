@@ -4,6 +4,7 @@
 //! It batches transactions together and manages tick generation.
 
 use super::poh::{PohEntry, PohService, MAX_TRANSACTIONS_PER_ENTRY};
+use paradencer_types::Hash;
 use std::sync::{Arc, Mutex};
 
 /// Configuration for entry creator
@@ -148,7 +149,6 @@ impl EntryCreator {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use paradencer_consensus::Hash;
 
     fn create_test_poh() -> Arc<Mutex<PohService>> {
         Arc::new(Mutex::new(PohService::new(Hash::new_unique())))

@@ -8,9 +8,10 @@
 //! - End-to-end block production
 
 use super::*;
-use paradencer_consensus::{Hash, LeaderSchedule};
+use paradencer_consensus::LeaderSchedule;
 use paradencer_mesh::bounded_link;
 use paradencer_storage::Pubkey;
+use paradencer_types::Hash;
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
