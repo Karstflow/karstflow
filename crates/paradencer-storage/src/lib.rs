@@ -47,7 +47,7 @@ pub use snapshot::{
     RecentBlockhash, RentConfig, RestoreResult, SerializedAccount, SnapshotArchive,
     SnapshotArchiveEntry, SnapshotBankState, SnapshotConfig, SnapshotCreator, SnapshotData,
     SnapshotLoader, SnapshotManifest, SnapshotMetadata, SnapshotProgress, SnapshotProgressInfo,
-    SnapshotRestorer, StakeSummary, StatusCacheEntry, StatusCacheParseResult,
+    SnapshotRestorer, StakeHistoryRecord, StakeSummary, StatusCacheEntry, StatusCacheParseResult,
 };
 pub use types::{CommittedFragmentRecord, SnapshotImage};
 

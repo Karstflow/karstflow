@@ -7,6 +7,7 @@
 use crate::bank::Bank;
 use crate::bank_forks::{BankForks, BankForksError};
 use crate::stake::{deserialize_stake_state, StakeState};
+use crate::stake_history::{StakeHistory, StakeHistoryEntry};
 use crate::transaction_cache::SeedEntry;
 use crate::{LeaderSchedule, StakeTracker};
 use paradencer_constants::block_limits::MESSAGE_HASH_PREFIX_BYTES;
@@ -29,6 +30,8 @@ pub struct BootstrapResult {
     pub stake_init: StakeInitStats,
     /// Number of accounts included in the lattice hash computation.
     pub lthash_accounts: usize,
+    /// Number of stake history epochs loaded.
+    pub stake_history_entries: usize,
     /// Snapshot slot number.
     pub slot: u64,
 }
@@ -80,8 +83,9 @@ impl From<BankForksError> for BootstrapError {
 /// 1. Constructs a `Bank` from the snapshot bank state
 /// 2. Computes the cumulative lattice hash from all restored accounts
 /// 3. Initializes stake tracker from restored accounts
-/// 4. Seeds the transaction cache from the status cache
-/// 5. Wraps in `BankForks` as the root bank
+/// 4. Loads stake history from the snapshot for warmup/cooldown
+/// 5. Seeds the transaction cache from the status cache
+/// 6. Wraps in `BankForks` as the root bank
 ///
 /// The caller is responsible for running the `SnapshotRestorer` first
 /// to populate the `AccountDatabase` and produce the `RestoreResult`.
@@ -105,7 +109,12 @@ pub fn bootstrap_from_snapshot(
     let (tracker, stake_init) = initialize_stakes(&accounts, bank_state.epoch);
     bank.set_stake_tracker(Arc::new(RwLock::new(tracker)));
 
-    // Step 4: Seed transaction cache from status cache.
+    // Step 4: Initialize stake history from snapshot.
+    let stake_history = initialize_stake_history(&bank_state.stake_summary);
+    let stake_history_entries = stake_history.len();
+    bank.set_stake_history(Arc::new(RwLock::new(stake_history)));
+
+    // Step 5: Seed transaction cache from status cache.
     let transactions_seeded = if let Some(status_cache) = &restore_result.status_cache {
         let seed_entries = status_cache.entries.iter().map(convert_status_cache_entry);
         bank.seed_transaction_cache(seed_entries)
@@ -113,7 +122,7 @@ pub fn bootstrap_from_snapshot(
         0
     };
 
-    // Step 5: Wrap in BankForks.
+    // Step 6: Wrap in BankForks.
     let bank_forks = BankForks::new_from_snapshot(bank)?;
 
     Ok(BootstrapResult {
@@ -123,6 +132,7 @@ pub fn bootstrap_from_snapshot(
         transactions_seeded,
         stake_init,
         lthash_accounts,
+        stake_history_entries,
         slot: restore_result.slot,
     })
 }
@@ -157,6 +167,21 @@ fn initialize_stakes(accounts: &AccountDatabase, epoch: u64) -> (StakeTracker, S
 
     stats.vote_accounts_with_stake = tracker.stake_by_vote_account().len();
     (tracker, stats)
+}
+
+/// Build stake history from snapshot's parsed stake summary.
+///
+/// Converts the raw stake history records from the snapshot manifest into
+/// the consensus-layer StakeHistory used for warmup/cooldown calculations.
+fn initialize_stake_history(summary: &paradencer_storage::StakeSummary) -> StakeHistory {
+    let mut history = StakeHistory::new();
+    for record in &summary.stake_history {
+        history.add(
+            record.epoch,
+            StakeHistoryEntry::new(record.effective, record.activating, record.deactivating),
+        );
+    }
+    history
 }
 
 /// Convert a storage-layer status cache entry to a consensus-layer seed entry.
@@ -735,5 +760,116 @@ mod tests {
 
         let bootstrap = bootstrap_from_snapshot(db, &result, leader_schedule).unwrap();
         assert_eq!(bootstrap.lthash_accounts, 1); // Only non-zero lamport counts.
+    }
+
+    // ── stake history initialization tests ─────────────────────────────
+
+    #[test]
+    fn bootstrap_loads_empty_stake_history() {
+        let db = Arc::new(AccountDatabase::new());
+        let result = make_restore_result(1000);
+        let leader_schedule = make_leader_schedule();
+
+        let bootstrap = bootstrap_from_snapshot(db, &result, leader_schedule).unwrap();
+        assert_eq!(bootstrap.stake_history_entries, 0);
+
+        // Stake history should be attached to the bank.
+        let bank = bootstrap.bank_forks.working_bank();
+        assert!(bank.stake_history().is_some());
+    }
+
+    #[test]
+    fn bootstrap_loads_stake_history_from_snapshot() {
+        use paradencer_storage::StakeHistoryRecord;
+
+        let db = Arc::new(AccountDatabase::new());
+        let mut result = make_restore_result(1000);
+
+        // Populate stake history in the snapshot.
+        result
+            .bank_state
+            .as_mut()
+            .unwrap()
+            .stake_summary
+            .stake_history = vec![
+            StakeHistoryRecord {
+                epoch: 5,
+                effective: 100_000_000,
+                activating: 10_000_000,
+                deactivating: 5_000_000,
+            },
+            StakeHistoryRecord {
+                epoch: 6,
+                effective: 110_000_000,
+                activating: 5_000_000,
+                deactivating: 3_000_000,
+            },
+            StakeHistoryRecord {
+                epoch: 7,
+                effective: 112_000_000,
+                activating: 2_000_000,
+                deactivating: 1_000_000,
+            },
+        ];
+        result
+            .bank_state
+            .as_mut()
+            .unwrap()
+            .stake_summary
+            .stake_history_entries = 3;
+
+        let leader_schedule = make_leader_schedule();
+        let bootstrap = bootstrap_from_snapshot(db, &result, leader_schedule).unwrap();
+        assert_eq!(bootstrap.stake_history_entries, 3);
+
+        // Verify the history is accessible from the bank.
+        let bank = bootstrap.bank_forks.working_bank();
+        let history_lock = bank.stake_history().unwrap();
+        let history = history_lock.read().unwrap();
+        assert_eq!(history.len(), 3);
+
+        let entry5 = history.get(5).unwrap();
+        assert_eq!(entry5.effective, 100_000_000);
+        assert_eq!(entry5.activating, 10_000_000);
+        assert_eq!(entry5.deactivating, 5_000_000);
+
+        let entry7 = history.get(7).unwrap();
+        assert_eq!(entry7.effective, 112_000_000);
+    }
+
+    #[test]
+    fn bootstrap_stake_history_inherits_to_child() {
+        use paradencer_storage::StakeHistoryRecord;
+
+        let db = Arc::new(AccountDatabase::new());
+        let mut result = make_restore_result(1000);
+        result
+            .bank_state
+            .as_mut()
+            .unwrap()
+            .stake_summary
+            .stake_history = vec![StakeHistoryRecord {
+            epoch: 10,
+            effective: 500_000_000,
+            activating: 0,
+            deactivating: 0,
+        }];
+        result
+            .bank_state
+            .as_mut()
+            .unwrap()
+            .stake_summary
+            .stake_history_entries = 1;
+
+        let leader_schedule = make_leader_schedule();
+        let bootstrap = bootstrap_from_snapshot(db, &result, leader_schedule.clone()).unwrap();
+        let root_bank = bootstrap.bank_forks.working_bank();
+
+        // Child bank should inherit the stake history.
+        let child = Bank::new_from_parent(&root_bank, 1001, leader_schedule);
+        let child_history = child.stake_history().unwrap();
+        let history = child_history.read().unwrap();
+        assert_eq!(history.len(), 1);
+        assert!(history.get(10).is_some());
     }
 }

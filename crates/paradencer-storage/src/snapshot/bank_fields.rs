@@ -144,6 +144,17 @@ pub struct StakeSummary {
     pub stakes_epoch: u64,
     pub total_delegated_stake: u64,
     pub stake_history_entries: u64,
+    /// Parsed stake history: (epoch, effective, activating, deactivating).
+    pub stake_history: Vec<StakeHistoryRecord>,
+}
+
+/// A single entry in the stake history from the snapshot.
+#[derive(Debug, Clone)]
+pub struct StakeHistoryRecord {
+    pub epoch: u64,
+    pub effective: u64,
+    pub activating: u64,
+    pub deactivating: u64,
 }
 
 // ---------------------------------------------------------------------------
@@ -473,8 +484,19 @@ fn parse_stakes_summary(r: &mut BincodeReader) -> Result<StakeSummary, StorageEr
     // stake_history: StakeHistory (Vec<(u64, StakeHistoryEntry)>)
     //   StakeHistoryEntry: { effective: u64, activating: u64, deactivating: u64 }
     let history_count = r.read_vec_len()?;
-    // Each entry: u64 epoch (8) + 3 * u64 (24) = 32 bytes
-    r.skip(history_count as usize * 32)?;
+    let mut stake_history = Vec::with_capacity(history_count as usize);
+    for _ in 0..history_count {
+        let epoch = r.read_u64()?;
+        let effective = r.read_u64()?;
+        let activating = r.read_u64()?;
+        let deactivating = r.read_u64()?;
+        stake_history.push(StakeHistoryRecord {
+            epoch,
+            effective,
+            activating,
+            deactivating,
+        });
+    }
 
     Ok(StakeSummary {
         vote_account_count: vote_count,
@@ -482,6 +504,7 @@ fn parse_stakes_summary(r: &mut BincodeReader) -> Result<StakeSummary, StorageEr
         stakes_epoch,
         total_delegated_stake,
         stake_history_entries: history_count,
+        stake_history,
     })
 }
 

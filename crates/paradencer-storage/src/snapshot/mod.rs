@@ -13,7 +13,7 @@ pub mod doc;
 pub use append_vec::{AppendVecAccount, AppendVecError, AppendVecIter};
 pub use bank_fields::{
     EpochScheduleConfig, FeeRateConfig, InflationConfig, RecentBlockhash, RentConfig,
-    SnapshotBankState, StakeSummary,
+    SnapshotBankState, StakeHistoryRecord, StakeSummary,
 };
 pub use creator::{
     SerializedAccount, SnapshotCreator, SnapshotData, SnapshotProgress, SnapshotProgressInfo,
