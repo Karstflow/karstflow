@@ -81,3 +81,33 @@ pub const STANDARD_COLUMN_FAMILIES: &[&str] = &[
     CF_ERASURE_META,
     CF_BLOCK_HEIGHT,
 ];
+
+// File format constants
+
+/// Magic number at the start of each column family file ("PDFS" in ASCII).
+pub const CF_FILE_MAGIC: u32 = 0x5044_4653;
+
+/// Current file format version (v2 = CRC32 checksums).
+pub const CF_FILE_FORMAT_VERSION: u16 = 2;
+
+/// Size of the per-file header: magic(4) + version(2) + flags(2) + reserved(8).
+pub const CF_FILE_HEADER_SIZE: usize = 16;
+
+// Record format constants
+
+/// Size of each record header: crc32(4) + status(1) + key_len(4) + value_len(4).
+pub const RECORD_HEADER_SIZE: usize = 13;
+
+/// Record status: active key-value pair.
+pub const RECORD_STATUS_ACTIVE: u8 = 0;
+
+/// Record status: tombstone marking a deleted key.
+pub const RECORD_STATUS_DELETED: u8 = 1;
+
+/// Maximum value size per record (256 MB).
+pub const MAX_RECORD_VALUE_SIZE: u32 = 256 * 1024 * 1024;
+
+// Compaction thresholds
+
+/// Dead space ratio above which compaction is recommended (50%).
+pub const COMPACTION_DEAD_SPACE_RATIO: f64 = 0.5;
