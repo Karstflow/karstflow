@@ -1,24 +1,33 @@
 /// QUIC v1 protocol implementation.
 pub mod ack;
+pub mod callbacks;
+pub mod config;
 pub mod conn_id;
 pub mod conn_map;
 pub mod connection;
 pub mod crypto;
+pub mod engine;
 pub mod frames;
 pub mod header;
+pub mod metrics;
 pub mod pkt_number;
+pub mod retry;
 pub mod service_queue;
 pub mod stream;
 pub mod stream_pool;
 pub mod transport_params;
 pub mod varint;
 
+pub use callbacks::{EngineCallbacks, StreamNotify};
+pub use config::{EngineConfig, EngineLimits, EngineRole};
 pub use conn_id::ConnectionId;
 pub use conn_map::ConnectionMap;
 pub use connection::{Connection, ConnectionState, Role};
 pub use crypto::{ConnectionSecrets, ProtectionKeys};
+pub use engine::{PeerAddress, QuicEngine, ReceiveResult, ServiceResult};
 pub use frames::Frame;
 pub use header::{LongHeader, PacketHeader, ShortHeader};
+pub use metrics::EngineMetrics;
 pub use pkt_number::PacketNumberSpace;
 pub use stream::{Stream, StreamState};
 pub use stream_pool::StreamPool;
