@@ -5,9 +5,11 @@
 pub mod account_encoding;
 mod batch;
 mod file_store;
+pub mod recovery;
 
 pub use batch::{WriteBatch, WriteOp};
 pub use file_store::FileDurableStore;
+pub use recovery::{recover_accounts, RecoveryStats};
 
 use crate::StorageError;
 

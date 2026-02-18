@@ -54,10 +54,10 @@ pub const META_KEY_STATE_HASH: &[u8] = b"state_hash";
 /// Maximum number of key-value pairs in a single write batch.
 pub const MAX_WRITE_BATCH_SIZE: usize = 10_000;
 
-/// Default sled cache size (256 MB).
+/// Default storage cache size (256 MB).
 pub const DEFAULT_CACHE_SIZE_BYTES: u64 = 256 * 1024 * 1024;
 
-/// Default sled flush interval in milliseconds.
+/// Default flush interval in milliseconds.
 pub const DEFAULT_FLUSH_INTERVAL_MS: u64 = 1_000;
 
 /// All standard column families created on database open.

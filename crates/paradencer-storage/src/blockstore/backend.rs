@@ -1,8 +1,7 @@
 //! Storage backend abstraction.
 //!
-//! Uses an in-memory HashMap for now. Can be replaced with a persistent
-//! key-value store (sled, RocksDB) later. The abstraction layer makes
-//! this swap straightforward.
+//! // TODO: Replace in-memory HashMap with DurableStore-backed persistent
+//! // storage (Cycle 3 of the persistent storage plan).
 
 use super::BlockstoreError;
 use paradencer_constants::blockstore::*;
@@ -46,8 +45,7 @@ impl BlockstoreBackend {
 
     /// Open a persistent backend at the given path.
     ///
-    /// Currently uses in-memory storage; persistent storage can be added later
-    /// by replacing the internal implementation without changing the public API.
+    /// // TODO: Wire to DurableStore for actual persistence (Cycle 3).
     pub fn open(_path: &std::path::Path) -> Result<Self, BlockstoreError> {
         Ok(Self::in_memory())
     }
