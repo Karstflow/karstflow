@@ -7,7 +7,7 @@ Primary residual tracker:
 - `docs/04_module_residual_matrix.md` -> `Firedancer Logic Weight And Migration Table` (weight-based parity tracking table)
 
 ## Rough Migration Progress
-- Paradencer total lines: **156,000** (19 crates, 3,009 tests)
+- Paradencer total lines: **160,000** (20 crates, 3,088 tests)
 - Firedancer total lines (native only, no Frankendancer): **~623,600** (C+H across 13 subsystems)
 - Paradencer framework completion: **~100%**
 - Firedancer logic parity (estimated): **~63%** (weighted by functional importance)
@@ -23,7 +23,7 @@ Primary residual tracker:
   - VM + Syscalls: ~80% (interpreter, CPI/crypto/PDA syscalls, SBPF versions, memory model)
   - Types: ~55% (core types done, many inline, not all generated types)
   - Crypto: ~50% (ed25519 batch, blake3, sha256, keccak, secp, bn254, reed-solomon, lthash; missing BLS)
-  - Network Stack: ~30% (QUIC via quinn, gossip/repair basic, protocol behavior partial)
+  - Network Stack: ~35% (custom paradencer-net: packet types, I/O traits, UDP socket, TLS crypto, QUIC key derivation; plus quinn ingress, gossip/repair basic)
   - Tile Pipeline: ~30% (replay stage, block production, shred assembly; pack/net/metrics gaps)
   - Storage: ~67% (MVCC accounts, blockstore, snapshots, DurableStore persistent backend, StorageEngine facade, snapshot manifest parser + serializer, status cache parser, disk persistence + recovery, blockstore persistence, compaction, full snapshot bootstrap: lthash/stakes/history/sysvars/features/txcache, genesis bootstrap, bank hash verification, SHA-256 accounts hash, incremental dirty-set tracking, incremental snapshot creation, snapshot loader DB integration, AppendVec writer, Solana-compatible archive builder + creator with full roundtrip, bank state manifest serializer, AccountsDbFields serializer, incremental Solana-compatible archives, snapshot scheduler)
   - App/Config/IPC: ~25% (config done, control plane basic, no tango/shared-memory IPC)
@@ -33,6 +33,7 @@ Primary residual tracker:
   - deep re-analysis performed 2026-02-17 comparing all Firedancer C modules against Paradencer crates
   - updated 2026-02-18: storage 50%→60% (cycles 15-19), overall 60%→62%
   - updated 2026-02-18: storage 64%→67% (cycles 25-27: manifest serializer, incremental Solana archives, AccountsDbFields), overall 63%→64%
+  - updated 2026-02-18: network 30%→35% (net cycles 0-5: paradencer-net crate, packets, I/O, UDP socket, TLS crypto, QUIC key derivation, 91 tests)
 
 ## Firedancer Module Comparison (deep analysis 2026-02-17, updated 2026-02-18)
 
@@ -48,7 +49,7 @@ Primary residual tracker:
 | **Crypto** (ed25519, blake3, bn254...) | ~30,000 | ~5,000 | **50%** | Medium |
 | **Storage** (accdb, funk, vinyl, snapshots) | ~25,500 | ~16,300 | **60%** | Critical |
 | **Tile Pipeline** (replay, pack, shred) | ~125,600 | ~44,300 | **40%** | Critical |
-| **Network Stack** (QUIC, TLS, HTTP) | ~56,300 | ~10,000 | **30%** | High |
+| **Network Stack** (QUIC, TLS, HTTP) | ~56,300 | ~14,000 | **35%** | High |
 | **App/Config/IPC** (config, tango, util) | ~145,000 | ~9,500 | **25%** | Medium |
 
 **Weighted overall estimate: ~62%** (by importance for working validator)
@@ -61,7 +62,7 @@ Primary residual tracker:
 | **flamenco** | 114,117 | 18.3% | Runtime, VM, types, accounts, programs | consensus + sbpf + types | **~70%** |
 | **util** | 105,836 | 17.0% | Utilities, data structures, allocators | Rust stdlib + crates | **~25%** |
 | **disco** | 69,950 | 11.2% | Shared tile infrastructure (pack, shred, net) | stages + ingress | **~30%** |
-| **waltz** | 56,301 | 9.0% | Network stack (QUIC, TLS, HTTP, gRPC) | quinn/hyper/rustls | **~30%** |
+| **waltz** | 56,301 | 9.0% | Network stack (QUIC, TLS, HTTP, gRPC) | paradencer-net + quinn/hyper | **~35%** |
 | **discof** | 55,608 | 8.9% | Native tiles (replay, restore, repair, PoH) | stages + storage | **~25%** |
 | **app** | 30,457 | 4.9% | CLI, config, orchestration | config + control + node | **~35%** |
 | **vinyl** | 17,301 | 2.8% | Persistent storage | DurableStore + FileDurableStore | **~40%** |
