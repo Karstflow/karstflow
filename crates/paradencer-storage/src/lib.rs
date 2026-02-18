@@ -42,10 +42,12 @@ pub use shred_window::{
     ShredWindowConfig, ShredWindowError, ShredWindowResult, ShredWindowStats, ShredWindowStore,
 };
 pub use snapshot::{
-    AppendVecAccount, AppendVecError, AppendVecIter, CompressionType, LoadProgress,
-    LoadProgressInfo, LoadedSnapshot, RestoreResult, SerializedAccount, SnapshotArchive,
-    SnapshotArchiveEntry, SnapshotConfig, SnapshotCreator, SnapshotData, SnapshotLoader,
-    SnapshotManifest, SnapshotMetadata, SnapshotProgress, SnapshotProgressInfo, SnapshotRestorer,
+    AppendVecAccount, AppendVecError, AppendVecIter, CompressionType, EpochScheduleConfig,
+    FeeRateConfig, InflationConfig, LoadProgress, LoadProgressInfo, LoadedSnapshot,
+    RecentBlockhash, RentConfig, RestoreResult, SerializedAccount, SnapshotArchive,
+    SnapshotArchiveEntry, SnapshotBankState, SnapshotConfig, SnapshotCreator, SnapshotData,
+    SnapshotLoader, SnapshotManifest, SnapshotMetadata, SnapshotProgress, SnapshotProgressInfo,
+    SnapshotRestorer, StakeSummary,
 };
 pub use types::{CommittedFragmentRecord, SnapshotImage};
 

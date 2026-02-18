@@ -8,6 +8,7 @@
 //! are applied on top of an existing database state.
 
 use super::append_vec::AppendVecIter;
+use super::bank_fields::{self, SnapshotBankState};
 use super::solana_archive::{ArchiveError, SnapshotArchive, SnapshotArchiveEntry};
 use crate::accounts::{AccountDatabase, Pubkey};
 use crate::StorageError;
@@ -30,6 +31,8 @@ pub struct RestoreResult {
     pub append_vecs_processed: u64,
     /// Number of accounts that failed validation (skipped).
     pub validation_errors: u64,
+    /// Parsed bank state from the snapshot manifest (if present).
+    pub bank_state: Option<SnapshotBankState>,
 }
 
 /// Progress tracking for snapshot restoration.
@@ -157,6 +160,7 @@ impl SnapshotRestorer {
     ) -> Result<RestoreResult, StorageError> {
         let mut version = String::new();
         let mut slot = 0u64;
+        let mut bank_state: Option<SnapshotBankState> = None;
 
         for entry in &entries {
             match entry {
@@ -173,12 +177,23 @@ impl SnapshotRestorer {
                     }
                     self.process_append_vec(data, db, slot)?;
                 }
-                SnapshotArchiveEntry::Manifest(_) => {
-                    // Manifest contains bank state — will be used for
-                    // bank reconstruction in future cycles.
+                SnapshotArchiveEntry::Manifest(data) => {
+                    match bank_fields::parse_bank_state(data) {
+                        Ok(state) => {
+                            // Use the manifest slot as the authoritative slot.
+                            slot = state.slot;
+                            bank_state = Some(state);
+                        }
+                        Err(_) => {
+                            // TODO: Log manifest parse failure. Non-fatal for
+                            // account restoration — accounts can still be loaded
+                            // even if the manifest is unparseable (version mismatch, etc.)
+                        }
+                    }
                 }
                 SnapshotArchiveEntry::StatusCache(_) => {
-                    // Status cache restoration deferred.
+                    // TODO: Parse status cache and populate TransactionCache
+                    // for transaction deduplication after snapshot restore.
                 }
                 SnapshotArchiveEntry::Unknown { .. } => {}
             }
@@ -192,6 +207,7 @@ impl SnapshotRestorer {
             total_lamports: info.total_lamports,
             append_vecs_processed: info.append_vecs_processed,
             validation_errors: info.validation_errors,
+            bank_state,
         })
     }
 
