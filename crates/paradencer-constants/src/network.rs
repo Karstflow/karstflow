@@ -440,3 +440,47 @@ pub const XDP_MIN_RING_DEPTH: u32 = 64;
 pub const XDP_FRAME_INVALID: u64 = u64::MAX;
 /// XDP headroom reserved before packet data in each frame.
 pub const XDP_HEADROOM: usize = 256;
+
+// ---------------------------------------------------------------------------
+// IPv4 routing (FIB4)
+// ---------------------------------------------------------------------------
+
+/// Route type: unspecified / invalid.
+pub const ROUTE_TYPE_UNSPEC: u8 = 0;
+/// Route type: normal unicast forwarding.
+pub const ROUTE_TYPE_UNICAST: u8 = 1;
+/// Route type: destination is a local address.
+pub const ROUTE_TYPE_LOCAL: u8 = 2;
+/// Route type: broadcast address.
+pub const ROUTE_TYPE_BROADCAST: u8 = 3;
+/// Route type: silently drop the packet.
+pub const ROUTE_TYPE_BLACKHOLE: u8 = 6;
+
+/// Maximum number of routes in the routing table.
+pub const FIB4_MAX_ROUTES: usize = 256;
+
+// ---------------------------------------------------------------------------
+// Neighbor (ARP) table
+// ---------------------------------------------------------------------------
+
+/// Neighbor entry state: ARP resolution in progress.
+pub const NEIGH_STATE_INCOMPLETE: u8 = 0;
+/// Neighbor entry state: MAC address resolved and active.
+pub const NEIGH_STATE_ACTIVE: u8 = 1;
+/// Maximum entries in the neighbor table.
+pub const NEIGH_TABLE_MAX: usize = 256;
+
+// ---------------------------------------------------------------------------
+// eBPF / XDP program constants
+// ---------------------------------------------------------------------------
+
+/// Maximum eBPF instructions in a generated XDP program.
+pub const BPF_MAX_INSNS: usize = 512;
+/// XDP action: pass packet to kernel networking stack.
+pub const XDP_PASS: u32 = 2;
+/// XDP action: redirect packet to AF_XDP socket via XSKMAP.
+pub const XDP_REDIRECT: u32 = 4;
+/// eBPF helper function ID: bpf_redirect_map.
+pub const BPF_FUNC_REDIRECT_MAP: u32 = 0x33;
+/// Maximum UDP ports in the XDP filter program.
+pub const XDP_MAX_FILTER_PORTS: usize = 32;
