@@ -48,6 +48,12 @@ pub struct BootstrapResult {
     pub feature_init: FeatureInitStats,
     /// Snapshot slot number.
     pub slot: u64,
+    /// Bank hash computed after initialization.
+    pub computed_bank_hash: [u8; 32],
+    /// Expected bank hash from the snapshot manifest.
+    pub expected_bank_hash: [u8; 32],
+    /// Whether the computed bank hash matches the snapshot manifest.
+    pub bank_hash_verified: bool,
 }
 
 /// Statistics from initializing features after snapshot restore.
@@ -114,7 +120,8 @@ impl From<BankForksError> for BootstrapError {
 /// 5. Initializes the sysvar cache (clock, epoch schedule, rent)
 /// 6. Initializes feature set from on-chain feature gate accounts
 /// 7. Seeds the transaction cache from the status cache
-/// 8. Wraps in `BankForks` as the root bank
+/// 8. Verifies the computed bank hash against the snapshot manifest
+/// 9. Wraps in `BankForks` as the root bank
 ///
 /// The caller is responsible for running the `SnapshotRestorer` first
 /// to populate the `AccountDatabase` and produce the `RestoreResult`.
@@ -159,7 +166,12 @@ pub fn bootstrap_from_snapshot(
         0
     };
 
-    // Step 8: Wrap in BankForks.
+    // Step 8: Verify bank hash against snapshot manifest.
+    let computed_bank_hash = bank.hash();
+    let expected_bank_hash = bank_state.hash;
+    let bank_hash_verified = computed_bank_hash == expected_bank_hash;
+
+    // Step 9: Wrap in BankForks.
     let bank_forks = BankForks::new_from_snapshot(bank)?;
 
     Ok(BootstrapResult {
@@ -172,6 +184,9 @@ pub fn bootstrap_from_snapshot(
         stake_history_entries,
         feature_init,
         slot: restore_result.slot,
+        computed_bank_hash,
+        expected_bank_hash,
+        bank_hash_verified,
     })
 }
 
@@ -1296,6 +1311,97 @@ mod tests {
         let fs = child_fs.read().unwrap();
         assert!(fs.is_active(&feat));
         assert_eq!(fs.activated_slot(&feat), Some(42));
+    }
+
+    // ── bank hash verification tests ─────────────────────────────────
+
+    #[test]
+    fn bootstrap_returns_bank_hash_fields() {
+        let db = Arc::new(AccountDatabase::new());
+        let result = make_restore_result(1000);
+        let leader_schedule = make_leader_schedule();
+
+        let bootstrap = bootstrap_from_snapshot(db, &result, leader_schedule).unwrap();
+        // Expected hash from our test fixture is [0x11; 32].
+        assert_eq!(bootstrap.expected_bank_hash, [0x11; 32]);
+        // Computed hash will differ since our lthash is computed from empty DB.
+        assert_ne!(bootstrap.computed_bank_hash, [0u8; 32]);
+    }
+
+    #[test]
+    fn bootstrap_bank_hash_mismatch_reported() {
+        let db = Arc::new(AccountDatabase::new());
+        let result = make_restore_result(1000);
+        let leader_schedule = make_leader_schedule();
+
+        let bootstrap = bootstrap_from_snapshot(db, &result, leader_schedule).unwrap();
+        // With an empty DB and a non-matching fixture hash, verification should fail.
+        assert!(!bootstrap.bank_hash_verified);
+        assert_ne!(bootstrap.computed_bank_hash, bootstrap.expected_bank_hash);
+    }
+
+    #[test]
+    fn bootstrap_bank_hash_matches_when_expected_matches_computed() {
+        let db = Arc::new(AccountDatabase::new());
+        let mut result = make_restore_result(1000);
+        let leader_schedule = make_leader_schedule();
+
+        // First bootstrap to get the actual computed hash.
+        let first = bootstrap_from_snapshot(db.clone(), &result, leader_schedule.clone()).unwrap();
+        let computed = first.computed_bank_hash;
+
+        // Set the expected hash to match the computed one.
+        result.bank_state.as_mut().unwrap().hash = computed;
+
+        let second =
+            bootstrap_from_snapshot(Arc::new(AccountDatabase::new()), &result, leader_schedule)
+                .unwrap();
+        assert!(second.bank_hash_verified);
+        assert_eq!(second.computed_bank_hash, second.expected_bank_hash);
+    }
+
+    #[test]
+    fn bootstrap_bank_hash_deterministic_across_runs() {
+        let result = make_restore_result(1000);
+
+        let db1 = Arc::new(AccountDatabase::new());
+        let db2 = Arc::new(AccountDatabase::new());
+        let ls1 = make_leader_schedule();
+        let ls2 = make_leader_schedule();
+
+        let b1 = bootstrap_from_snapshot(db1, &result, ls1).unwrap();
+        let b2 = bootstrap_from_snapshot(db2, &result, ls2).unwrap();
+        assert_eq!(b1.computed_bank_hash, b2.computed_bank_hash);
+    }
+
+    #[test]
+    fn bootstrap_bank_hash_changes_with_different_accounts() {
+        let result = make_restore_result(1000);
+
+        let db1 = Arc::new(AccountDatabase::new());
+        let db2 = Arc::new(AccountDatabase::new());
+
+        // Add an account to db2 but not db1.
+        let pubkey = Pubkey::new_unique();
+        db2.store_published_account(
+            pubkey,
+            Account {
+                data: vec![1, 2, 3].into(),
+                meta: paradencer_storage::AccountMeta {
+                    lamports: 1_000,
+                    owner: Pubkey::new([0x11; 32]),
+                    executable: false,
+                    rent_epoch: 0,
+                },
+            },
+        );
+
+        let ls1 = make_leader_schedule();
+        let ls2 = make_leader_schedule();
+
+        let b1 = bootstrap_from_snapshot(db1, &result, ls1).unwrap();
+        let b2 = bootstrap_from_snapshot(db2, &result, ls2).unwrap();
+        assert_ne!(b1.computed_bank_hash, b2.computed_bank_hash);
     }
 
     // ── genesis bootstrap tests ───────────────────────────────────────
