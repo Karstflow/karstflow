@@ -27,6 +27,8 @@ pub struct BootstrapResult {
     pub transactions_seeded: usize,
     /// Stake initialization statistics.
     pub stake_init: StakeInitStats,
+    /// Number of accounts included in the lattice hash computation.
+    pub lthash_accounts: usize,
     /// Snapshot slot number.
     pub slot: u64,
 }
@@ -76,9 +78,10 @@ impl From<BankForksError> for BootstrapError {
 ///
 /// This function performs the complete initialization sequence:
 /// 1. Constructs a `Bank` from the snapshot bank state
-/// 2. Initializes stake tracker from restored accounts
-/// 3. Seeds the transaction cache from the status cache
-/// 4. Wraps in `BankForks` as the root bank
+/// 2. Computes the cumulative lattice hash from all restored accounts
+/// 3. Initializes stake tracker from restored accounts
+/// 4. Seeds the transaction cache from the status cache
+/// 5. Wraps in `BankForks` as the root bank
 ///
 /// The caller is responsible for running the `SnapshotRestorer` first
 /// to populate the `AccountDatabase` and produce the `RestoreResult`.
@@ -95,11 +98,14 @@ pub fn bootstrap_from_snapshot(
     // Step 1: Create Bank from snapshot state.
     let mut bank = Bank::new_from_snapshot(accounts.clone(), bank_state, leader_schedule);
 
-    // Step 2: Initialize stake tracker from restored stake accounts.
+    // Step 2: Compute cumulative lattice hash from all restored accounts.
+    let lthash_accounts = bank.initialize_lthash_from_accounts();
+
+    // Step 3: Initialize stake tracker from restored stake accounts.
     let (tracker, stake_init) = initialize_stakes(&accounts, bank_state.epoch);
     bank.set_stake_tracker(Arc::new(RwLock::new(tracker)));
 
-    // Step 3: Seed transaction cache from status cache.
+    // Step 4: Seed transaction cache from status cache.
     let transactions_seeded = if let Some(status_cache) = &restore_result.status_cache {
         let seed_entries = status_cache.entries.iter().map(convert_status_cache_entry);
         bank.seed_transaction_cache(seed_entries)
@@ -107,7 +113,7 @@ pub fn bootstrap_from_snapshot(
         0
     };
 
-    // Step 4: Wrap in BankForks.
+    // Step 5: Wrap in BankForks.
     let bank_forks = BankForks::new_from_snapshot(bank)?;
 
     Ok(BootstrapResult {
@@ -116,6 +122,7 @@ pub fn bootstrap_from_snapshot(
         total_lamports: restore_result.total_lamports,
         transactions_seeded,
         stake_init,
+        lthash_accounts,
         slot: restore_result.slot,
     })
 }
@@ -570,5 +577,163 @@ mod tests {
         let child_tracker = child.stake_tracker().unwrap();
         let tracker = child_tracker.read().unwrap();
         assert_eq!(tracker.total_stake_for_voter(&voter), 5_000_000);
+    }
+
+    // ── lattice hash initialization tests ──────────────────────────────
+
+    #[test]
+    fn bootstrap_lthash_zero_with_no_accounts() {
+        let db = Arc::new(AccountDatabase::new());
+        let result = make_restore_result(1000);
+        let leader_schedule = make_leader_schedule();
+
+        let bootstrap = bootstrap_from_snapshot(db, &result, leader_schedule).unwrap();
+        assert_eq!(bootstrap.lthash_accounts, 0);
+
+        // Bank hash should still be computable (though based on zero lthash).
+        let bank = bootstrap.bank_forks.working_bank();
+        let hash = bank.hash();
+        assert_ne!(hash, [0u8; 32]); // Non-zero due to parent_hash and blockhash.
+    }
+
+    #[test]
+    fn bootstrap_lthash_includes_restored_accounts() {
+        let db = Arc::new(AccountDatabase::new());
+
+        // Insert some non-stake accounts.
+        let system_program = Pubkey::new([0u8; 32]);
+        for i in 0u8..5 {
+            let pubkey = Pubkey::new_unique();
+            let account = Account {
+                data: vec![i; 100].into(),
+                meta: paradencer_storage::AccountMeta {
+                    lamports: 1_000_000 + i as u64,
+                    owner: system_program,
+                    executable: false,
+                    rent_epoch: 0,
+                },
+            };
+            db.store_published_account(pubkey, account);
+        }
+
+        let result = make_restore_result(1000);
+        let leader_schedule = make_leader_schedule();
+
+        let bootstrap = bootstrap_from_snapshot(db, &result, leader_schedule).unwrap();
+        assert_eq!(bootstrap.lthash_accounts, 5);
+    }
+
+    #[test]
+    fn bootstrap_lthash_deterministic() {
+        // Same accounts in same DB should produce same bank hash.
+        let make_db = || {
+            let db = Arc::new(AccountDatabase::new());
+            let pubkey = Pubkey::new([0x42; 32]);
+            let account = Account {
+                data: vec![1, 2, 3].into(),
+                meta: paradencer_storage::AccountMeta {
+                    lamports: 5_000_000,
+                    owner: Pubkey::new([0x11; 32]),
+                    executable: false,
+                    rent_epoch: 0,
+                },
+            };
+            db.store_published_account(pubkey, account);
+            db
+        };
+
+        let result = make_restore_result(1000);
+        let ls1 = make_leader_schedule();
+        let ls2 = make_leader_schedule();
+
+        let b1 = bootstrap_from_snapshot(make_db(), &result, ls1).unwrap();
+        let b2 = bootstrap_from_snapshot(make_db(), &result, ls2).unwrap();
+
+        let hash1 = b1.bank_forks.working_bank().hash();
+        let hash2 = b2.bank_forks.working_bank().hash();
+        assert_eq!(hash1, hash2);
+    }
+
+    #[test]
+    fn bootstrap_lthash_different_accounts_different_hash() {
+        let result = make_restore_result(1000);
+
+        // DB with one account.
+        let db1 = Arc::new(AccountDatabase::new());
+        let pubkey = Pubkey::new([0x42; 32]);
+        db1.store_published_account(
+            pubkey,
+            Account {
+                data: vec![1].into(),
+                meta: paradencer_storage::AccountMeta {
+                    lamports: 1_000,
+                    owner: Pubkey::new([0x11; 32]),
+                    executable: false,
+                    rent_epoch: 0,
+                },
+            },
+        );
+
+        // DB with different account data.
+        let db2 = Arc::new(AccountDatabase::new());
+        db2.store_published_account(
+            pubkey,
+            Account {
+                data: vec![2].into(),
+                meta: paradencer_storage::AccountMeta {
+                    lamports: 1_000,
+                    owner: Pubkey::new([0x11; 32]),
+                    executable: false,
+                    rent_epoch: 0,
+                },
+            },
+        );
+
+        let ls1 = make_leader_schedule();
+        let ls2 = make_leader_schedule();
+
+        let b1 = bootstrap_from_snapshot(db1, &result, ls1).unwrap();
+        let b2 = bootstrap_from_snapshot(db2, &result, ls2).unwrap();
+
+        let hash1 = b1.bank_forks.working_bank().hash();
+        let hash2 = b2.bank_forks.working_bank().hash();
+        assert_ne!(hash1, hash2);
+    }
+
+    #[test]
+    fn bootstrap_lthash_skips_zero_lamport_accounts() {
+        let db = Arc::new(AccountDatabase::new());
+
+        // Zero-lamport account should not contribute to lthash.
+        let pubkey = Pubkey::new_unique();
+        let account = Account {
+            data: vec![1, 2, 3].into(),
+            meta: paradencer_storage::AccountMeta {
+                lamports: 0,
+                owner: Pubkey::new([0x11; 32]),
+                executable: false,
+                rent_epoch: 0,
+            },
+        };
+        db.store_published_account(pubkey, account);
+
+        // Non-zero account.
+        let pubkey2 = Pubkey::new_unique();
+        let account2 = Account {
+            data: vec![4, 5, 6].into(),
+            meta: paradencer_storage::AccountMeta {
+                lamports: 1_000,
+                owner: Pubkey::new([0x11; 32]),
+                executable: false,
+                rent_epoch: 0,
+            },
+        };
+        db.store_published_account(pubkey2, account2);
+
+        let result = make_restore_result(1000);
+        let leader_schedule = make_leader_schedule();
+
+        let bootstrap = bootstrap_from_snapshot(db, &result, leader_schedule).unwrap();
+        assert_eq!(bootstrap.lthash_accounts, 1); // Only non-zero lamport counts.
     }
 }

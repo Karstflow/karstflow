@@ -503,6 +503,37 @@ impl Bank {
         accumulator.add(&new_hash);
     }
 
+    /// Compute and set the cumulative lthash from all published accounts.
+    ///
+    /// Used during snapshot bootstrap to initialize the bank's lattice hash
+    /// from the full set of restored accounts. This must be called after all
+    /// accounts have been loaded into the database but before any new
+    /// transactions are processed, so the bank hash chain continues correctly.
+    ///
+    /// Returns the number of accounts contributing to the hash (non-zero lamports).
+    pub fn initialize_lthash_from_accounts(&self) -> usize {
+        let all_accounts = self.accounts.get_all_published_accounts();
+        let mut accumulator = LatticeHashValue::zero();
+        let mut count = 0;
+
+        for (pubkey, account) in &all_accounts {
+            let h = lthash::hash_account(
+                &pubkey.to_bytes(),
+                &account.meta.owner.to_bytes(),
+                account.meta.lamports,
+                account.meta.executable,
+                account.data.as_ref(),
+            );
+            if !h.is_zero() {
+                accumulator.add(&h);
+                count += 1;
+            }
+        }
+
+        *self.lthash.write().unwrap() = accumulator;
+        count
+    }
+
     /// Increment the slot's signature count.
     pub fn add_signatures(&self, count: u64) {
         self.signature_count.fetch_add(count, Ordering::Relaxed);
