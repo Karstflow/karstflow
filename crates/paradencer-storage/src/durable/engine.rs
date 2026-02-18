@@ -97,6 +97,24 @@ impl StorageEngine {
         compact_below_slot(self.store.as_ref(), min_slot)
     }
 
+    /// Full compaction: remove old slot data and reclaim disk space.
+    ///
+    /// Deletes slot-keyed records below `min_slot`, then rewrites CF files
+    /// that have accumulated significant dead space from overwrites/deletes.
+    pub fn compact_and_reclaim(&self, min_slot: u64) -> Result<CompactionStats, StorageError> {
+        crate::durable::compact_below_slot_and_reclaim(&self.store, min_slot)
+    }
+
+    /// Compact a specific column family by rewriting only live records.
+    pub fn compact_cf(&self, cf: &str) -> Result<crate::durable::CfCompactionStats, StorageError> {
+        self.store.compact_cf(cf)
+    }
+
+    /// Total dead bytes across all column families.
+    pub fn total_dead_bytes(&self) -> u64 {
+        self.store.total_dead_bytes()
+    }
+
     /// Flush all pending writes to disk.
     pub fn flush(&self) -> Result<(), StorageError> {
         self.store.flush()

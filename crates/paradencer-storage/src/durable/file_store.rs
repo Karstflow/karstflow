@@ -403,10 +403,176 @@ impl FileDurableStore {
             .sum()
     }
 
+    /// Compact a single column family by rewriting only live records.
+    ///
+    /// Writes all live records to a new temporary file, then atomically
+    /// renames it over the original. Reclaims all dead space from
+    /// overwrites and deletes. Returns the number of bytes reclaimed.
+    pub fn compact_cf(&self, cf: &str) -> Result<CfCompactionStats, StorageError> {
+        let mutex = self.cf(cf)?;
+        let mut state = mutex.lock().unwrap();
+
+        let original_size = state.file_end;
+        let _original_dead = state.dead_bytes;
+
+        if state.index.is_empty() && original_size <= CF_FILE_HEADER_SIZE as u64 {
+            // Nothing to compact.
+            return Ok(CfCompactionStats {
+                records_rewritten: 0,
+                bytes_before: original_size,
+                bytes_after: original_size,
+                bytes_reclaimed: 0,
+            });
+        }
+
+        if state.dead_bytes == 0 {
+            // No dead space — skip compaction.
+            return Ok(CfCompactionStats {
+                records_rewritten: state.index.len() as u64,
+                bytes_before: original_size,
+                bytes_after: original_size,
+                bytes_reclaimed: 0,
+            });
+        }
+
+        // Write live records to a temp file.
+        let cf_path = self.data_dir.join(format!("{cf}.dat"));
+        let tmp_path = self.data_dir.join(format!("{cf}.dat.compact"));
+
+        let tmp_file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .open(&tmp_path)
+            .map_err(|e| StorageError::DurableStoreError {
+                details: format!("create compaction temp {}: {}", tmp_path.display(), e),
+            })?;
+
+        // Write file header.
+        write_file_header(&tmp_file)?;
+        let mut write_offset = CF_FILE_HEADER_SIZE as u64;
+        let mut new_index = HashMap::with_capacity(state.index.len());
+        let mut records_written = 0u64;
+
+        // Collect entries sorted by key for deterministic output.
+        let mut entries: Vec<_> = state.index.iter().collect();
+        entries.sort_by(|a, b| a.0.cmp(b.0));
+
+        for (key, loc) in entries {
+            // Read the original value from the old file.
+            let value = Self::read_value_at(&state.file, loc)?;
+
+            // Compute CRC and build record buffer.
+            let key_len = key.len() as u32;
+            let value_len = value.len() as u32;
+            let crc =
+                compute_record_crc_parts(RECORD_STATUS_ACTIVE, key_len, value_len, key, &value);
+
+            let record_size = RECORD_HEADER_SIZE + key.len() + value.len();
+            let mut buf = Vec::with_capacity(record_size);
+            buf.extend_from_slice(&crc.to_le_bytes());
+            buf.push(RECORD_STATUS_ACTIVE);
+            buf.extend_from_slice(&key_len.to_le_bytes());
+            buf.extend_from_slice(&value_len.to_le_bytes());
+            buf.extend_from_slice(key);
+            buf.extend_from_slice(&value);
+
+            write_at_checked(&tmp_file, &buf, write_offset)?;
+
+            new_index.insert(
+                key.clone(),
+                RecordLoc {
+                    offset: write_offset,
+                    key_len,
+                    value_len,
+                },
+            );
+
+            write_offset += record_size as u64;
+            records_written += 1;
+        }
+
+        // Fsync the temp file before rename.
+        tmp_file
+            .sync_all()
+            .map_err(|e| StorageError::DurableStoreError {
+                details: format!("fsync compacted file: {e}"),
+            })?;
+
+        // Atomic rename: tmp → original.
+        fs::rename(&tmp_path, &cf_path).map_err(|e| StorageError::DurableStoreError {
+            details: format!(
+                "rename {} → {}: {}",
+                tmp_path.display(),
+                cf_path.display(),
+                e
+            ),
+        })?;
+
+        // Reopen the file handle (the old handle points to the deleted inode).
+        let new_file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&cf_path)
+            .map_err(|e| StorageError::DurableStoreError {
+                details: format!("reopen compacted {}: {}", cf_path.display(), e),
+            })?;
+
+        // Update state in place.
+        state.file = new_file;
+        state.index = new_index;
+        state.file_end = write_offset;
+        state.dead_bytes = 0;
+
+        let bytes_reclaimed = original_size.saturating_sub(write_offset);
+
+        Ok(CfCompactionStats {
+            records_rewritten: records_written,
+            bytes_before: original_size,
+            bytes_after: write_offset,
+            bytes_reclaimed,
+        })
+    }
+
+    /// Compact all column families that exceed the dead space ratio threshold.
+    pub fn compact_all(
+        &self,
+        dead_ratio_threshold: f64,
+    ) -> Result<Vec<(String, CfCompactionStats)>, StorageError> {
+        let cf_names: Vec<String> = self.families.keys().cloned().collect();
+        let mut results = Vec::new();
+
+        for cf_name in cf_names {
+            let ratio = self.dead_ratio(&cf_name)?;
+            if ratio >= dead_ratio_threshold {
+                let stats = self.compact_cf(&cf_name)?;
+                if stats.bytes_reclaimed > 0 {
+                    results.push((cf_name, stats));
+                }
+            }
+        }
+
+        Ok(results)
+    }
+
     /// Wrap in Arc for shared ownership.
     pub fn into_arc(self) -> std::sync::Arc<Self> {
         std::sync::Arc::new(self)
     }
+}
+
+/// Statistics from compacting a single column family.
+#[derive(Debug, Clone, Default)]
+pub struct CfCompactionStats {
+    /// Number of live records rewritten.
+    pub records_rewritten: u64,
+    /// File size before compaction.
+    pub bytes_before: u64,
+    /// File size after compaction.
+    pub bytes_after: u64,
+    /// Bytes reclaimed (before - after).
+    pub bytes_reclaimed: u64,
 }
 
 impl DurableStore for FileDurableStore {
