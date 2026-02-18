@@ -1,12 +1,13 @@
 /// Persistent key-value storage backend.
 ///
-/// Provides a trait-based abstraction over embedded databases (sled, etc.)
-/// for persisting account state, blockstore data, and metadata across restarts.
+/// Custom file-backed implementation with per-CF append-only log files
+/// and in-memory hash index. No external database dependencies.
+pub mod account_encoding;
 mod batch;
-mod sled_store;
+mod file_store;
 
 pub use batch::{WriteBatch, WriteOp};
-pub use sled_store::SledDurableStore;
+pub use file_store::FileDurableStore;
 
 use crate::StorageError;
 

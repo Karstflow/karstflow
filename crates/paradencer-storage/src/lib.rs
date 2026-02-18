@@ -24,7 +24,7 @@ pub use blockstore::{
     ShredInsertResult, SlotMeta, SlotStatus,
 };
 pub use catalog::SnapshotCatalog;
-pub use durable::{DurableStore, ScanEntry, SledDurableStore, WriteBatch, WriteOp};
+pub use durable::{DurableStore, FileDurableStore, ScanEntry, WriteBatch, WriteOp};
 pub use errors::StorageError;
 pub use genesis::{
     ClusterType, FeeRateGovernor, GenesisAccount, GenesisConfig, GenesisEpochSchedule,
