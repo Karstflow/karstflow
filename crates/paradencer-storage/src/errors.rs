@@ -110,4 +110,13 @@ pub enum StorageError {
 
     #[error("Snapshot verification failed: {details}")]
     SnapshotVerificationFailed { details: String },
+
+    #[error("Durable store error: {details}")]
+    DurableStoreError { details: String },
+
+    #[error("Unknown column family: {name}")]
+    UnknownColumnFamily { name: String },
+
+    #[error("Write batch too large: {size} exceeds maximum {max}")]
+    WriteBatchTooLarge { size: usize, max: usize },
 }

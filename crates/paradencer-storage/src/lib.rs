@@ -1,6 +1,7 @@
 mod accounts;
 pub mod blockstore;
 mod catalog;
+pub mod durable;
 mod errors;
 pub mod genesis;
 mod hot_state;
@@ -23,6 +24,7 @@ pub use blockstore::{
     ShredInsertResult, SlotMeta, SlotStatus,
 };
 pub use catalog::SnapshotCatalog;
+pub use durable::{DurableStore, ScanEntry, SledDurableStore, WriteBatch, WriteOp};
 pub use errors::StorageError;
 pub use genesis::{
     ClusterType, FeeRateGovernor, GenesisAccount, GenesisConfig, GenesisEpochSchedule,
