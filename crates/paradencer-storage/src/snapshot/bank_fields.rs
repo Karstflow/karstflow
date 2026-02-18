@@ -158,6 +158,79 @@ pub struct StakeHistoryRecord {
 }
 
 // ---------------------------------------------------------------------------
+// Binary writer
+// ---------------------------------------------------------------------------
+
+/// Low-level bincode binary writer for Solana snapshot data.
+///
+/// Writes fields in the exact layout expected by Solana validators.
+/// Bincode 1.x uses fixed-size little-endian encoding with u64 lengths.
+#[allow(dead_code)]
+pub(crate) struct BincodeWriter {
+    buf: Vec<u8>,
+}
+
+#[allow(dead_code)]
+impl BincodeWriter {
+    pub fn new() -> Self {
+        Self { buf: Vec::new() }
+    }
+
+    pub fn with_capacity(cap: usize) -> Self {
+        Self {
+            buf: Vec::with_capacity(cap),
+        }
+    }
+
+    pub fn write_u8(&mut self, v: u8) {
+        self.buf.push(v);
+    }
+
+    pub fn write_u64(&mut self, v: u64) {
+        self.buf.extend_from_slice(&v.to_le_bytes());
+    }
+
+    pub fn write_i64(&mut self, v: i64) {
+        self.buf.extend_from_slice(&v.to_le_bytes());
+    }
+
+    pub fn write_u128(&mut self, v: u128) {
+        self.buf.extend_from_slice(&v.to_le_bytes());
+    }
+
+    pub fn write_f64(&mut self, v: f64) {
+        self.buf.extend_from_slice(&v.to_le_bytes());
+    }
+
+    pub fn write_bool(&mut self, v: bool) {
+        self.buf.push(if v { 1 } else { 0 });
+    }
+
+    pub fn write_hash(&mut self, h: &[u8; 32]) {
+        self.buf.extend_from_slice(h);
+    }
+
+    pub fn write_option_u64(&mut self, v: Option<u64>) {
+        match v {
+            None => self.write_u8(0),
+            Some(val) => {
+                self.write_u8(1);
+                self.write_u64(val);
+            }
+        }
+    }
+
+    pub fn write_byte_vec(&mut self, data: &[u8]) {
+        self.write_u64(data.len() as u64);
+        self.buf.extend_from_slice(data);
+    }
+
+    pub fn into_bytes(self) -> Vec<u8> {
+        self.buf
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Binary reader
 // ---------------------------------------------------------------------------
 
@@ -666,70 +739,200 @@ pub fn parse_bank_state(data: &[u8]) -> Result<SnapshotBankState, StorageError> 
 }
 
 // ---------------------------------------------------------------------------
+// Serializer
+// ---------------------------------------------------------------------------
+
+/// Serialize bank state to raw bincode manifest bytes.
+///
+/// This writes the `DeserializableVersionedBank` structure that Solana
+/// stores in the snapshot archive at `snapshots/<slot>/<slot>`.
+///
+/// The output is compatible with `parse_bank_state()` and with any
+/// Solana validator that reads snapshot manifests.
+///
+/// Note: the ancestors field is written as empty since it's reconstructed
+/// by the validator on load. Vote accounts and stake delegations are also
+/// omitted from the stakes section — only stake history and epoch are
+/// preserved. The trailing AccountsDbFields and ExtraFields are NOT
+/// written by this function.
+#[allow(dead_code)]
+pub fn serialize_bank_state(state: &SnapshotBankState) -> Vec<u8> {
+    let mut w = BincodeWriter::with_capacity(4096);
+
+    // 1. BlockhashQueue
+    write_blockhash_queue(&mut w, state);
+
+    // 2. Ancestors: write as empty HashMap<u64, usize>
+    w.write_u64(0);
+
+    // 3. hash, parent_hash
+    w.write_hash(&state.hash);
+    w.write_hash(&state.parent_hash);
+
+    // 4. parent_slot
+    w.write_u64(state.parent_slot);
+
+    // 5. hard_forks
+    w.write_u64(state.hard_forks.len() as u64);
+    for &(slot, count) in &state.hard_forks {
+        w.write_u64(slot);
+        w.write_u64(count);
+    }
+
+    // 6-10. Scalar counters
+    w.write_u64(state.transaction_count);
+    w.write_u64(state.tick_height);
+    w.write_u64(state.signature_count);
+    w.write_u64(state.capitalization);
+    w.write_u64(state.max_tick_height);
+
+    // 11. hashes_per_tick: Option<u64>
+    w.write_option_u64(state.hashes_per_tick);
+
+    // 12-14. Timing
+    w.write_u64(state.ticks_per_slot);
+    w.write_u128(state.ns_per_slot);
+    w.write_i64(state.genesis_creation_time);
+
+    // 15-16. Rates
+    w.write_f64(state.slots_per_year);
+    w.write_u64(state.accounts_data_len);
+
+    // 17-19. Slot identification
+    w.write_u64(state.slot);
+    w.write_u64(state.epoch);
+    w.write_u64(state.block_height);
+
+    // 20-21. Collector
+    w.write_hash(&state.collector_id);
+    w.write_u64(state.collector_fees);
+
+    // 22. FeeCalculator (deprecated) — write target_lamports as placeholder
+    w.write_u64(state.fee_rate_governor.target_lamports_per_signature);
+
+    // 23. FeeRateGovernor (lamports_per_signature is serde-skipped)
+    write_fee_rate_governor(&mut w, &state.fee_rate_governor);
+
+    // 24. collected_rent
+    w.write_u64(state.collected_rent);
+
+    // 25. RentCollector
+    write_rent_collector(&mut w, &state.rent, &state.epoch_schedule);
+
+    // 26. EpochSchedule
+    write_epoch_schedule(&mut w, &state.epoch_schedule);
+
+    // 27. Inflation
+    write_inflation(&mut w, &state.inflation);
+
+    // 28. Stakes<Delegation> — write stake history but empty vote/delegation maps
+    write_stakes_summary(&mut w, &state.stake_summary);
+
+    // 29. UnusedAccounts — 3 empty collections
+    w.write_u64(0); // HashSet<Pubkey>
+    w.write_u64(0); // HashSet<Pubkey>
+    w.write_u64(0); // HashMap<Pubkey, u64>
+
+    // 30. unused_epoch_stakes: empty HashMap<u64, ()>
+    w.write_u64(0);
+
+    // 31. is_delta
+    w.write_bool(state.is_delta);
+
+    w.into_bytes()
+}
+
+fn write_blockhash_queue(w: &mut BincodeWriter, state: &SnapshotBankState) {
+    // last_hash_index
+    w.write_u64(state.last_blockhash_index);
+
+    // last_hash: Option<Hash>
+    match &state.last_blockhash {
+        None => w.write_u8(0),
+        Some(hash) => {
+            w.write_u8(1);
+            w.write_hash(hash);
+        }
+    }
+
+    // hashes: HashMap<Hash, HashInfo>
+    w.write_u64(state.recent_blockhashes.len() as u64);
+    for bh in &state.recent_blockhashes {
+        w.write_hash(&bh.hash);
+        w.write_u64(bh.lamports_per_signature);
+        w.write_u64(bh.hash_index);
+        w.write_u64(bh.timestamp);
+    }
+
+    // max_age
+    w.write_u64(state.max_blockhash_age);
+}
+
+fn write_fee_rate_governor(w: &mut BincodeWriter, frg: &FeeRateConfig) {
+    w.write_u64(frg.target_lamports_per_signature);
+    w.write_u64(frg.target_signatures_per_slot);
+    w.write_u64(frg.min_lamports_per_signature);
+    w.write_u64(frg.max_lamports_per_signature);
+    w.write_u8(frg.burn_percent);
+}
+
+fn write_epoch_schedule(w: &mut BincodeWriter, es: &EpochScheduleConfig) {
+    w.write_u64(es.slots_per_epoch);
+    w.write_u64(es.leader_schedule_slot_offset);
+    w.write_bool(es.warmup);
+    w.write_u64(es.first_normal_epoch);
+    w.write_u64(es.first_normal_slot);
+}
+
+fn write_rent_collector(w: &mut BincodeWriter, rent: &RentConfig, es: &EpochScheduleConfig) {
+    // RentCollector: { epoch, epoch_schedule, slots_per_year, rent }
+    w.write_u64(rent.collector_epoch);
+    write_epoch_schedule(w, es); // inner epoch_schedule
+    w.write_f64(rent.collector_slots_per_year);
+    // Rent
+    w.write_u64(rent.lamports_per_byte_year);
+    w.write_f64(rent.exemption_threshold);
+    w.write_u8(rent.burn_percent);
+}
+
+fn write_inflation(w: &mut BincodeWriter, inf: &InflationConfig) {
+    w.write_f64(inf.initial);
+    w.write_f64(inf.terminal);
+    w.write_f64(inf.taper);
+    w.write_f64(inf.foundation);
+    w.write_f64(inf.foundation_term);
+}
+
+fn write_stakes_summary(w: &mut BincodeWriter, ss: &StakeSummary) {
+    // vote_accounts: empty HashMap<Pubkey, (u64, VoteAccount)>
+    w.write_u64(0);
+
+    // stake_delegations: empty HashMap<Pubkey, Delegation>
+    w.write_u64(0);
+
+    // unused: u64
+    w.write_u64(0);
+
+    // epoch: u64
+    w.write_u64(ss.stakes_epoch);
+
+    // stake_history: Vec<(u64, StakeHistoryEntry)>
+    w.write_u64(ss.stake_history.len() as u64);
+    for entry in &ss.stake_history {
+        w.write_u64(entry.epoch);
+        w.write_u64(entry.effective);
+        w.write_u64(entry.activating);
+        w.write_u64(entry.deactivating);
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// Helper to build bincode binary data for testing.
-    struct BincodeWriter {
-        buf: Vec<u8>,
-    }
-
-    impl BincodeWriter {
-        fn new() -> Self {
-            Self { buf: Vec::new() }
-        }
-
-        fn write_u8(&mut self, v: u8) {
-            self.buf.push(v);
-        }
-
-        fn write_u64(&mut self, v: u64) {
-            self.buf.extend_from_slice(&v.to_le_bytes());
-        }
-
-        fn write_i64(&mut self, v: i64) {
-            self.buf.extend_from_slice(&v.to_le_bytes());
-        }
-
-        fn write_u128(&mut self, v: u128) {
-            self.buf.extend_from_slice(&v.to_le_bytes());
-        }
-
-        fn write_f64(&mut self, v: f64) {
-            self.buf.extend_from_slice(&v.to_le_bytes());
-        }
-
-        fn write_bool(&mut self, v: bool) {
-            self.buf.push(if v { 1 } else { 0 });
-        }
-
-        fn write_hash(&mut self, h: &[u8; 32]) {
-            self.buf.extend_from_slice(h);
-        }
-
-        fn write_option_u64(&mut self, v: Option<u64>) {
-            match v {
-                None => self.write_u8(0),
-                Some(val) => {
-                    self.write_u8(1);
-                    self.write_u64(val);
-                }
-            }
-        }
-
-        fn write_byte_vec(&mut self, data: &[u8]) {
-            self.write_u64(data.len() as u64);
-            self.buf.extend_from_slice(data);
-        }
-
-        fn into_bytes(self) -> Vec<u8> {
-            self.buf
-        }
-    }
 
     /// Build a minimal complete DeserializableVersionedBank binary stream.
     fn build_minimal_manifest(
@@ -1406,5 +1609,318 @@ mod tests {
 
         assert_eq!(state.stake_summary.stake_history_entries, 5);
         assert_eq!(state.stake_summary.stakes_epoch, 10);
+    }
+
+    // -------------------------------------------------------------------
+    // Serializer roundtrip tests
+    // -------------------------------------------------------------------
+
+    /// Build a `SnapshotBankState` with realistic field values for testing.
+    fn build_test_bank_state() -> SnapshotBankState {
+        SnapshotBankState {
+            recent_blockhashes: vec![
+                RecentBlockhash {
+                    hash: [0xAA; 32],
+                    lamports_per_signature: 5000,
+                    hash_index: 42,
+                    timestamp: 1_000_000,
+                },
+                RecentBlockhash {
+                    hash: [0xBB; 32],
+                    lamports_per_signature: 5000,
+                    hash_index: 43,
+                    timestamp: 1_000_001,
+                },
+            ],
+            last_blockhash: Some([0xBB; 32]),
+            max_blockhash_age: 300,
+            last_blockhash_index: 43,
+            slot: 1000,
+            parent_slot: 999,
+            block_height: 900,
+            epoch: 2,
+            hash: [0x11; 32],
+            parent_hash: [0x22; 32],
+            transaction_count: 100_000,
+            tick_height: 64_000,
+            max_tick_height: 64_064,
+            signature_count: 50_000,
+            capitalization: 500_000_000_000,
+            accounts_data_len: 1_000_000_000,
+            hashes_per_tick: Some(12500),
+            ticks_per_slot: 64,
+            ns_per_slot: 400_000_000,
+            genesis_creation_time: 1_700_000_000,
+            slots_per_year: 78_892_314.0,
+            collector_id: [0x33; 32],
+            collector_fees: 1000,
+            fee_rate_governor: FeeRateConfig {
+                target_lamports_per_signature: 10_000,
+                target_signatures_per_slot: 20_000,
+                min_lamports_per_signature: 5_000,
+                max_lamports_per_signature: 100_000,
+                burn_percent: 50,
+            },
+            rent: RentConfig {
+                lamports_per_byte_year: 3_480,
+                exemption_threshold: 2.0,
+                burn_percent: 50,
+                collector_epoch: 2,
+                collector_slots_per_year: 78_892_314.0,
+            },
+            collected_rent: 500,
+            epoch_schedule: EpochScheduleConfig {
+                slots_per_epoch: 432_000,
+                leader_schedule_slot_offset: 432_000,
+                warmup: false,
+                first_normal_epoch: 0,
+                first_normal_slot: 0,
+            },
+            inflation: InflationConfig {
+                initial: 0.08,
+                terminal: 0.015,
+                taper: 0.15,
+                foundation: 0.05,
+                foundation_term: 7.0,
+            },
+            hard_forks: vec![(100, 1), (200, 2)],
+            ancestor_count: 0, // ancestors are always empty in serialized form
+            stake_summary: StakeSummary {
+                vote_account_count: 0,
+                stake_delegation_count: 0,
+                stakes_epoch: 2,
+                total_delegated_stake: 0,
+                stake_history_entries: 3,
+                stake_history: vec![
+                    StakeHistoryRecord {
+                        epoch: 0,
+                        effective: 1000,
+                        activating: 100,
+                        deactivating: 50,
+                    },
+                    StakeHistoryRecord {
+                        epoch: 1,
+                        effective: 2000,
+                        activating: 200,
+                        deactivating: 100,
+                    },
+                    StakeHistoryRecord {
+                        epoch: 2,
+                        effective: 3000,
+                        activating: 300,
+                        deactivating: 150,
+                    },
+                ],
+            },
+            is_delta: true,
+        }
+    }
+
+    #[test]
+    fn serialize_then_parse_roundtrip() {
+        let state = build_test_bank_state();
+        let data = serialize_bank_state(&state);
+        let parsed = parse_bank_state(&data).expect("roundtrip parse");
+
+        // Slot identification
+        assert_eq!(parsed.slot, state.slot);
+        assert_eq!(parsed.parent_slot, state.parent_slot);
+        assert_eq!(parsed.block_height, state.block_height);
+        assert_eq!(parsed.epoch, state.epoch);
+        assert_eq!(parsed.hash, state.hash);
+        assert_eq!(parsed.parent_hash, state.parent_hash);
+
+        // Counters
+        assert_eq!(parsed.transaction_count, state.transaction_count);
+        assert_eq!(parsed.tick_height, state.tick_height);
+        assert_eq!(parsed.max_tick_height, state.max_tick_height);
+        assert_eq!(parsed.signature_count, state.signature_count);
+        assert_eq!(parsed.capitalization, state.capitalization);
+        assert_eq!(parsed.accounts_data_len, state.accounts_data_len);
+
+        // Timing
+        assert_eq!(parsed.hashes_per_tick, state.hashes_per_tick);
+        assert_eq!(parsed.ticks_per_slot, state.ticks_per_slot);
+        assert_eq!(parsed.ns_per_slot, state.ns_per_slot);
+        assert_eq!(parsed.genesis_creation_time, state.genesis_creation_time);
+        assert_eq!(parsed.slots_per_year, state.slots_per_year);
+
+        // Collector
+        assert_eq!(parsed.collector_id, state.collector_id);
+        assert_eq!(parsed.collector_fees, state.collector_fees);
+
+        // Fee rate governor
+        assert_eq!(
+            parsed.fee_rate_governor.target_lamports_per_signature,
+            state.fee_rate_governor.target_lamports_per_signature
+        );
+        assert_eq!(
+            parsed.fee_rate_governor.target_signatures_per_slot,
+            state.fee_rate_governor.target_signatures_per_slot
+        );
+        assert_eq!(
+            parsed.fee_rate_governor.min_lamports_per_signature,
+            state.fee_rate_governor.min_lamports_per_signature
+        );
+        assert_eq!(
+            parsed.fee_rate_governor.max_lamports_per_signature,
+            state.fee_rate_governor.max_lamports_per_signature
+        );
+        assert_eq!(
+            parsed.fee_rate_governor.burn_percent,
+            state.fee_rate_governor.burn_percent
+        );
+
+        // Rent
+        assert_eq!(
+            parsed.rent.lamports_per_byte_year,
+            state.rent.lamports_per_byte_year
+        );
+        assert_eq!(
+            parsed.rent.exemption_threshold,
+            state.rent.exemption_threshold
+        );
+        assert_eq!(parsed.rent.burn_percent, state.rent.burn_percent);
+        assert_eq!(parsed.rent.collector_epoch, state.rent.collector_epoch);
+        assert_eq!(
+            parsed.rent.collector_slots_per_year,
+            state.rent.collector_slots_per_year
+        );
+        assert_eq!(parsed.collected_rent, state.collected_rent);
+
+        // Epoch schedule
+        assert_eq!(
+            parsed.epoch_schedule.slots_per_epoch,
+            state.epoch_schedule.slots_per_epoch
+        );
+        assert_eq!(parsed.epoch_schedule.warmup, state.epoch_schedule.warmup);
+        assert_eq!(
+            parsed.epoch_schedule.first_normal_epoch,
+            state.epoch_schedule.first_normal_epoch
+        );
+
+        // Inflation
+        assert_eq!(parsed.inflation.initial, state.inflation.initial);
+        assert_eq!(parsed.inflation.terminal, state.inflation.terminal);
+        assert_eq!(parsed.inflation.taper, state.inflation.taper);
+        assert_eq!(parsed.inflation.foundation, state.inflation.foundation);
+        assert_eq!(
+            parsed.inflation.foundation_term,
+            state.inflation.foundation_term
+        );
+
+        // Hard forks
+        assert_eq!(parsed.hard_forks, state.hard_forks);
+
+        // Stakes (vote/delegation empty, but epoch and history preserved)
+        assert_eq!(
+            parsed.stake_summary.stakes_epoch,
+            state.stake_summary.stakes_epoch
+        );
+        assert_eq!(
+            parsed.stake_summary.stake_history.len(),
+            state.stake_summary.stake_history.len()
+        );
+        for (p, s) in parsed
+            .stake_summary
+            .stake_history
+            .iter()
+            .zip(state.stake_summary.stake_history.iter())
+        {
+            assert_eq!(p.epoch, s.epoch);
+            assert_eq!(p.effective, s.effective);
+            assert_eq!(p.activating, s.activating);
+            assert_eq!(p.deactivating, s.deactivating);
+        }
+
+        // Flags
+        assert_eq!(parsed.is_delta, state.is_delta);
+        // Ancestors are always 0 in serialized form.
+        assert_eq!(parsed.ancestor_count, 0);
+    }
+
+    #[test]
+    fn serialize_roundtrip_none_hashes_per_tick() {
+        let mut state = build_test_bank_state();
+        state.hashes_per_tick = None;
+
+        let data = serialize_bank_state(&state);
+        let parsed = parse_bank_state(&data).expect("roundtrip parse");
+        assert_eq!(parsed.hashes_per_tick, None);
+    }
+
+    #[test]
+    fn serialize_roundtrip_no_last_blockhash() {
+        let mut state = build_test_bank_state();
+        state.last_blockhash = None;
+        state.recent_blockhashes.clear();
+        state.last_blockhash_index = 0;
+
+        let data = serialize_bank_state(&state);
+        let parsed = parse_bank_state(&data).expect("roundtrip parse");
+        assert_eq!(parsed.last_blockhash, None);
+        assert_eq!(parsed.recent_blockhashes.len(), 0);
+    }
+
+    #[test]
+    fn serialize_roundtrip_empty_hard_forks() {
+        let mut state = build_test_bank_state();
+        state.hard_forks.clear();
+
+        let data = serialize_bank_state(&state);
+        let parsed = parse_bank_state(&data).expect("roundtrip parse");
+        assert_eq!(parsed.hard_forks.len(), 0);
+    }
+
+    #[test]
+    fn serialize_roundtrip_empty_stake_history() {
+        let mut state = build_test_bank_state();
+        state.stake_summary.stake_history.clear();
+        state.stake_summary.stake_history_entries = 0;
+
+        let data = serialize_bank_state(&state);
+        let parsed = parse_bank_state(&data).expect("roundtrip parse");
+        assert_eq!(parsed.stake_summary.stake_history.len(), 0);
+    }
+
+    #[test]
+    fn serialize_roundtrip_is_not_delta() {
+        let mut state = build_test_bank_state();
+        state.is_delta = false;
+
+        let data = serialize_bank_state(&state);
+        let parsed = parse_bank_state(&data).expect("roundtrip parse");
+        assert!(!parsed.is_delta);
+    }
+
+    #[test]
+    fn serialize_produces_nonzero_bytes() {
+        let state = build_test_bank_state();
+        let data = serialize_bank_state(&state);
+        assert!(data.len() > 100, "serialized data should be substantial");
+    }
+
+    #[test]
+    fn serialize_roundtrip_many_blockhashes() {
+        let mut state = build_test_bank_state();
+        state.recent_blockhashes.clear();
+        for i in 0..300u64 {
+            let mut hash = [0u8; 32];
+            hash[..8].copy_from_slice(&i.to_le_bytes());
+            state.recent_blockhashes.push(RecentBlockhash {
+                hash,
+                lamports_per_signature: 5000,
+                hash_index: i,
+                timestamp: 1_000_000 + i,
+            });
+        }
+        state.last_blockhash_index = 299;
+
+        let data = serialize_bank_state(&state);
+        let parsed = parse_bank_state(&data).expect("roundtrip parse");
+        assert_eq!(parsed.recent_blockhashes.len(), 300);
+        // Parser sorts by hash_index, so order should match.
+        assert_eq!(parsed.recent_blockhashes[0].hash_index, 0);
+        assert_eq!(parsed.recent_blockhashes[299].hash_index, 299);
     }
 }

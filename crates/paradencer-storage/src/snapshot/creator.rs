@@ -1,4 +1,5 @@
 use super::append_vec::{account_to_append_vec, serialize_append_vec};
+use super::bank_fields::{serialize_bank_state, SnapshotBankState};
 use super::metadata::{CompressionType, SnapshotConfig, SnapshotManifest, SnapshotMetadata};
 use super::solana_archive::SnapshotArchiveBuilder;
 use crate::accounts::{Account, AccountDatabase, Pubkey};
@@ -282,8 +283,11 @@ impl SnapshotCreator {
     ///
     /// Produces an archive that can be consumed by any Solana validator:
     /// - `version` — protocol version string
-    /// - `snapshots/<slot>/<slot>` — manifest (empty placeholder)
+    /// - `snapshots/<slot>/<slot>` — bank state manifest (bincode-encoded)
     /// - `accounts/<slot>.<id>` — accounts in AppendVec binary format
+    ///
+    /// If `bank_state` is provided, it is serialized as the manifest.
+    /// Otherwise an empty manifest placeholder is used.
     ///
     /// Accounts are split into chunks of `max_accounts_per_vec` to keep
     /// individual AppendVec files at manageable sizes.
@@ -293,6 +297,19 @@ impl SnapshotCreator {
         slot: u64,
         output_dir: &Path,
         max_accounts_per_vec: usize,
+    ) -> Result<SolanaArchiveStats, StorageError> {
+        self.create_solana_archive_with_state(db, slot, output_dir, max_accounts_per_vec, None)
+    }
+
+    /// Create a Solana-compatible snapshot archive with an explicit bank state manifest.
+    #[allow(dead_code)]
+    pub fn create_solana_archive_with_state(
+        &self,
+        db: &AccountDatabase,
+        slot: u64,
+        output_dir: &Path,
+        max_accounts_per_vec: usize,
+        bank_state: Option<&SnapshotBankState>,
     ) -> Result<SolanaArchiveStats, StorageError> {
         let accounts = self.collect_all_accounts(db)?;
         let total_accounts = accounts.len();
@@ -311,9 +328,12 @@ impl SnapshotCreator {
         let mut builder = SnapshotArchiveBuilder::new();
         builder.set_version("1.18.26");
 
-        // Empty manifest placeholder — a real implementation would serialize
-        // the full bank state here.
-        builder.set_manifest(slot, Vec::new());
+        // Serialize bank state into the manifest if provided.
+        let manifest_data = match bank_state {
+            Some(state) => serialize_bank_state(state),
+            None => Vec::new(),
+        };
+        builder.set_manifest(slot, manifest_data);
 
         // Split accounts into AppendVec chunks.
         let chunk_size = max_accounts_per_vec.max(1);

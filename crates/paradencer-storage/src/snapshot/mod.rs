@@ -16,6 +16,8 @@ pub use append_vec::{
     account_to_append_vec, serialize_append_vec, serialize_append_vec_record, AppendVecAccount,
     AppendVecError, AppendVecIter,
 };
+#[allow(unused_imports)]
+pub use bank_fields::serialize_bank_state;
 pub use bank_fields::{
     EpochScheduleConfig, FeeRateConfig, InflationConfig, RecentBlockhash, RentConfig,
     SnapshotBankState, StakeHistoryRecord, StakeSummary,
