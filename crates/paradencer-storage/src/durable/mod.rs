@@ -4,10 +4,14 @@
 /// and in-memory hash index. No external database dependencies.
 pub mod account_encoding;
 mod batch;
+mod compaction;
+mod engine;
 mod file_store;
 pub mod recovery;
 
 pub use batch::{WriteBatch, WriteOp};
+pub use compaction::{compact_below_slot, CompactionStats};
+pub use engine::{FullRecoveryStats, StorageEngine};
 pub use file_store::FileDurableStore;
 pub use recovery::{recover_accounts, RecoveryStats};
 

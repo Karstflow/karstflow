@@ -25,7 +25,8 @@ pub use blockstore::{
 };
 pub use catalog::SnapshotCatalog;
 pub use durable::{
-    recover_accounts, DurableStore, FileDurableStore, RecoveryStats, ScanEntry, WriteBatch, WriteOp,
+    compact_below_slot, recover_accounts, CompactionStats, DurableStore, FileDurableStore,
+    FullRecoveryStats, RecoveryStats, ScanEntry, StorageEngine, WriteBatch, WriteOp,
 };
 pub use errors::StorageError;
 pub use genesis::{
