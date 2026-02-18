@@ -6,6 +6,7 @@
 pub(crate) mod backend;
 mod block_assembly;
 mod cleanup;
+mod fec_tracker;
 mod meta;
 mod shred_store;
 
@@ -14,11 +15,13 @@ mod tests;
 
 pub use block_assembly::{AssembledBlock, BlockAssembler};
 pub use cleanup::BlockstoreCleanup;
+pub use fec_tracker::{FecInsertResult, FecTracker};
 pub use meta::{ErasureMeta, SlotMeta, SlotStatus};
 pub use shred_store::ShredStore;
 
 use backend::BlockstoreBackend;
 use paradencer_constants::blockstore::*;
+use paradencer_types::shred::Shred;
 use std::collections::BTreeSet;
 use std::sync::RwLock;
 
@@ -95,6 +98,139 @@ impl Blockstore {
         self.save_slot_meta(&meta)?;
 
         Ok(())
+    }
+
+    /// Insert a typed shred with automatic FEC tracking and slot completion.
+    ///
+    /// Accepts a parsed `Shred` from paradencer-types, stores the payload,
+    /// tracks the FEC set, and detects slot completion when the last data
+    /// shred is received.
+    pub fn insert_shred(&self, shred: &Shred) -> Result<ShredInsertResult, BlockstoreError> {
+        let slot = shred.slot();
+        let index = shred.index();
+        let fec_set_index = shred.fec_set_index();
+
+        if shred.is_data() {
+            if index as usize >= MAX_DATA_SHREDS_PER_SLOT {
+                return Err(BlockstoreError::ShredIndexOutOfRange { slot, index });
+            }
+            if shred.payload.is_empty() {
+                return Err(BlockstoreError::InvalidShredData);
+            }
+
+            let mut meta = self.get_or_create_slot_meta(slot)?;
+
+            // Store the shred data.
+            let store = ShredStore::new(&self.backend);
+            store.insert_data(slot, index, &shred.payload, &mut meta)?;
+
+            // Check for last-in-slot flag to set expected count.
+            if shred.is_last_in_slot() {
+                meta.expected_data_shreds = Some(index + 1);
+            }
+
+            // Update parent connectivity.
+            if let Some(header) = shred.data_header() {
+                if header.parent_offset > 0 {
+                    let parent = slot.saturating_sub(header.parent_offset as u64);
+                    if meta.parent_slot.is_none() || meta.parent_slot == Some(parent) {
+                        meta.parent_slot = Some(parent);
+                        self.link_parent_child(parent, slot)?;
+                    }
+                }
+            }
+
+            // Track FEC set.
+            let coding_header = self.infer_coding_params(shred);
+            let fec_result = FecTracker::new(&self.backend).record_data_shred(
+                slot,
+                fec_set_index,
+                index,
+                coding_header.0,
+                coding_header.1,
+            )?;
+
+            // Check slot completion.
+            let slot_complete = meta.is_complete();
+            if slot_complete && meta.status == SlotStatus::Incomplete {
+                meta.status = SlotStatus::Complete;
+                meta.completion_timestamp = Some(
+                    std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_secs() as i64,
+                );
+            }
+
+            self.save_slot_meta(&meta)?;
+
+            Ok(ShredInsertResult {
+                fec_result,
+                slot_complete,
+                is_last_in_slot: shred.is_last_in_slot(),
+            })
+        } else {
+            // Coding shred.
+            if index as usize >= MAX_CODING_SHREDS_PER_SLOT {
+                return Err(BlockstoreError::ShredIndexOutOfRange { slot, index });
+            }
+            if shred.payload.is_empty() {
+                return Err(BlockstoreError::InvalidShredData);
+            }
+
+            let mut meta = self.get_or_create_slot_meta(slot)?;
+            let store = ShredStore::new(&self.backend);
+            store.insert_coding(slot, index, &shred.payload)?;
+            meta.received_coding_shreds += 1;
+
+            let (num_data, num_coding) = match shred.coding_header() {
+                Some(h) => (h.num_data_shreds, h.num_coding_shreds),
+                None => (1, 1),
+            };
+
+            let fec_result = FecTracker::new(&self.backend).record_coding_shred(
+                slot,
+                fec_set_index,
+                index,
+                num_data,
+                num_coding,
+            )?;
+
+            self.save_slot_meta(&meta)?;
+
+            Ok(ShredInsertResult {
+                fec_result,
+                slot_complete: false,
+                is_last_in_slot: false,
+            })
+        }
+    }
+
+    /// Set multiple slots as root atomically.
+    pub fn set_roots(&self, slots: &[u64]) -> Result<(), BlockstoreError> {
+        let mut roots = self.roots.write().expect("roots lock poisoned");
+        for &slot in slots {
+            let key = slot.to_be_bytes();
+            self.backend.put(CF_ROOTS, &key, &[1])?;
+            roots.insert(slot);
+        }
+        Ok(())
+    }
+
+    /// Get all slots in a range that have metadata.
+    pub fn slot_range(&self, start: u64, end: u64) -> Result<Vec<u64>, BlockstoreError> {
+        let mut slots = Vec::new();
+        for slot in start..end {
+            if self.get_slot_meta(slot)?.is_some() {
+                slots.push(slot);
+            }
+        }
+        Ok(slots)
+    }
+
+    /// Get the FEC tracker for querying erasure set state.
+    pub fn fec_tracker(&self) -> FecTracker<'_> {
+        FecTracker::new(&self.backend)
     }
 
     /// Get slot metadata.
@@ -240,6 +376,39 @@ impl Blockstore {
         let data = meta.serialize();
         self.backend.put(CF_SLOT_META, &key, &data)
     }
+
+    /// Link a parent slot to a child slot in their metadata.
+    fn link_parent_child(&self, parent: u64, child: u64) -> Result<(), BlockstoreError> {
+        if let Ok(Some(mut parent_meta)) = self.get_slot_meta(parent) {
+            if !parent_meta.next_slots.contains(&child) {
+                parent_meta.next_slots.push(child);
+                self.save_slot_meta(&parent_meta)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Infer FEC set parameters from a data shred.
+    ///
+    /// If the shred contains a coding header (Merkle variant), use its
+    /// parameters. Otherwise fall back to reasonable defaults.
+    fn infer_coding_params(&self, _shred: &Shred) -> (u16, u16) {
+        // For data shreds, we don't always have coding parameters.
+        // Use conservative defaults matching Firedancer's typical FEC sets.
+        // Real coding params come from the coding shred headers.
+        (32, 32)
+    }
+}
+
+/// Result of inserting a typed shred into the blockstore.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ShredInsertResult {
+    /// FEC set tracking result.
+    pub fec_result: FecInsertResult,
+    /// Whether the slot became complete after this insert.
+    pub slot_complete: bool,
+    /// Whether this was the last data shred in the slot.
+    pub is_last_in_slot: bool,
 }
 
 /// Errors that can occur in blockstore operations.

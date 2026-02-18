@@ -19,7 +19,8 @@ pub use accounts::{
     PUBKEY_BYTES, XID_BYTES,
 };
 pub use blockstore::{
-    AssembledBlock, Blockstore, BlockstoreError, ErasureMeta, SlotMeta, SlotStatus,
+    AssembledBlock, Blockstore, BlockstoreError, ErasureMeta, FecInsertResult, FecTracker,
+    ShredInsertResult, SlotMeta, SlotStatus,
 };
 pub use catalog::SnapshotCatalog;
 pub use errors::StorageError;

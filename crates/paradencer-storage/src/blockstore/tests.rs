@@ -1,5 +1,9 @@
 use super::*;
 use paradencer_constants::blockstore::*;
+use paradencer_types::shred::{
+    CodingShredHeader, DataShredHeader, Shred, ShredCommonHeader, ShredVariant, SHRED_LAST_IN_SLOT,
+    SIGNATURE_SIZE,
+};
 
 fn make_shred_data(index: u32) -> Vec<u8> {
     let mut data = vec![0xDE, 0xAD];
@@ -310,4 +314,161 @@ fn nonexistent_slot_meta_returns_none() {
 fn nonexistent_data_shred_returns_none() {
     let bs = Blockstore::in_memory();
     assert!(bs.get_data_shred(999, 0).unwrap().is_none());
+}
+
+// ---------------------------------------------------------------------------
+// Typed shred insertion and FEC tracking tests
+// ---------------------------------------------------------------------------
+
+fn make_data_shred(slot: u64, index: u32, last_in_slot: bool, parent_offset: u16) -> Shred {
+    let flags = if last_in_slot { SHRED_LAST_IN_SLOT } else { 0 };
+    Shred::new(
+        ShredCommonHeader {
+            signature: [0u8; SIGNATURE_SIZE],
+            variant: 0x05,
+            slot,
+            index,
+            version: 1,
+            fec_set_index: 0,
+        },
+        ShredVariant::LegacyData(DataShredHeader {
+            parent_offset,
+            flags,
+            size: 100,
+        }),
+        vec![0xAA; 100],
+    )
+}
+
+fn make_coding_shred(
+    slot: u64,
+    index: u32,
+    fec_set_index: u32,
+    num_data: u16,
+    num_coding: u16,
+) -> Shred {
+    Shred::new(
+        ShredCommonHeader {
+            signature: [0u8; SIGNATURE_SIZE],
+            variant: 0x0A,
+            slot,
+            index,
+            version: 1,
+            fec_set_index,
+        },
+        ShredVariant::LegacyCoding(CodingShredHeader {
+            num_data_shreds: num_data,
+            num_coding_shreds: num_coding,
+            position: 0,
+        }),
+        vec![0xCC; 100],
+    )
+}
+
+#[test]
+fn insert_typed_data_shred() {
+    let bs = Blockstore::in_memory();
+    let shred = make_data_shred(100, 0, false, 1);
+    let result = bs.insert_shred(&shred).unwrap();
+
+    assert!(!result.slot_complete);
+    assert!(!result.is_last_in_slot);
+
+    // Verify the shred was stored.
+    let data = bs.get_data_shred(100, 0).unwrap();
+    assert!(data.is_some());
+    assert_eq!(data.unwrap().len(), 100);
+}
+
+#[test]
+fn insert_last_data_shred_completes_slot() {
+    let bs = Blockstore::in_memory();
+
+    // Insert shred 0 (not last).
+    let s0 = make_data_shred(10, 0, false, 1);
+    let r0 = bs.insert_shred(&s0).unwrap();
+    assert!(!r0.slot_complete);
+
+    // Insert shred 1 (last in slot: expected = 2, received = 2).
+    let s1 = make_data_shred(10, 1, true, 1);
+    let r1 = bs.insert_shred(&s1).unwrap();
+    assert!(r1.slot_complete);
+    assert!(r1.is_last_in_slot);
+
+    let meta = bs.get_slot_meta(10).unwrap().unwrap();
+    assert_eq!(meta.expected_data_shreds, Some(2));
+    assert_eq!(meta.status, SlotStatus::Complete);
+    assert!(meta.completion_timestamp.is_some());
+}
+
+#[test]
+fn insert_typed_coding_shred() {
+    let bs = Blockstore::in_memory();
+    let shred = make_coding_shred(50, 0, 0, 4, 2);
+    let result = bs.insert_shred(&shred).unwrap();
+
+    assert!(!result.slot_complete);
+    assert_eq!(result.fec_result, FecInsertResult::Incomplete);
+}
+
+#[test]
+fn parent_slot_set_from_shred_header() {
+    let bs = Blockstore::in_memory();
+    let shred = make_data_shred(100, 0, false, 1);
+    bs.insert_shred(&shred).unwrap();
+
+    let meta = bs.get_slot_meta(100).unwrap().unwrap();
+    assert_eq!(meta.parent_slot, Some(99));
+}
+
+#[test]
+fn parent_child_linkage() {
+    let bs = Blockstore::in_memory();
+
+    // Insert a shred for parent slot first so its meta exists.
+    let parent_shred = make_data_shred(99, 0, false, 1);
+    bs.insert_shred(&parent_shred).unwrap();
+
+    // Insert child slot shred with parent_offset = 1.
+    let child_shred = make_data_shred(100, 0, false, 1);
+    bs.insert_shred(&child_shred).unwrap();
+
+    let parent_meta = bs.get_slot_meta(99).unwrap().unwrap();
+    assert!(parent_meta.next_slots.contains(&100));
+}
+
+#[test]
+fn fec_tracker_integration() {
+    let bs = Blockstore::in_memory();
+
+    // Query FEC state through blockstore.
+    let shred = make_data_shred(10, 0, false, 1);
+    bs.insert_shred(&shred).unwrap();
+
+    let tracker = bs.fec_tracker();
+    let meta = tracker.get_erasure_meta(10, 0).unwrap();
+    assert!(meta.is_some());
+}
+
+#[test]
+fn set_roots_batch() {
+    let bs = Blockstore::in_memory();
+    bs.set_roots(&[10, 20, 30]).unwrap();
+
+    assert!(bs.is_root(10));
+    assert!(bs.is_root(20));
+    assert!(bs.is_root(30));
+    assert!(!bs.is_root(15));
+    assert_eq!(bs.latest_root(), Some(30));
+}
+
+#[test]
+fn slot_range_query() {
+    let bs = Blockstore::in_memory();
+    for slot in [5, 7, 10, 15] {
+        bs.insert_data_shred(slot, 0, &[1]).unwrap();
+    }
+
+    let range = bs.slot_range(5, 12).unwrap();
+    assert_eq!(range, vec![5, 7, 10]);
 }
