@@ -1,8 +1,11 @@
-//! End-to-end snapshot bootstrap pipeline.
+//! Bootstrap pipelines for validator initialization.
 //!
-//! Combines the snapshot restore result with Bank initialization,
-//! transaction cache seeding, and BankForks creation into a single
-//! orchestrated flow.
+//! Provides two bootstrap paths:
+//! - **Snapshot bootstrap**: Restores from a Solana snapshot archive (for joining
+//!   an existing network). Combines the snapshot restore result with Bank
+//!   initialization, transaction cache seeding, and BankForks creation.
+//! - **Genesis bootstrap**: Creates the initial state from a genesis configuration
+//!   (for starting a new network or local development cluster).
 
 use crate::bank::Bank;
 use crate::bank_forks::{BankForks, BankForksError};
@@ -10,6 +13,7 @@ use crate::clock::Clock;
 use crate::epoch_schedule::EpochScheduleConfig;
 use crate::features::known_features;
 use crate::features::FeatureSet;
+use crate::inflation::Inflation;
 use crate::rent::Rent;
 use crate::stake::{deserialize_stake_state, StakeState};
 use crate::stake_history::{StakeHistory, StakeHistoryEntry};
@@ -18,7 +22,9 @@ use crate::transaction_cache::SeedEntry;
 use crate::{EpochSchedule, LeaderSchedule, StakeTracker};
 use paradencer_constants::block_limits::MESSAGE_HASH_PREFIX_BYTES;
 use paradencer_ids::{FEATURE_PROGRAM_ID, STAKE_PROGRAM_ID};
-use paradencer_storage::{AccountDatabase, RestoreResult, SnapshotBankState, StatusCacheEntry};
+use paradencer_storage::{
+    AccountDatabase, GenesisConfig, RestoreResult, SnapshotBankState, StatusCacheEntry,
+};
 use std::sync::{Arc, RwLock};
 
 /// Result of a successful snapshot bootstrap.
@@ -167,6 +173,126 @@ pub fn bootstrap_from_snapshot(
         feature_init,
         slot: restore_result.slot,
     })
+}
+
+/// Result of a successful genesis bootstrap.
+#[derive(Debug)]
+pub struct GenesisBootstrapResult {
+    /// Initialized BankForks with the genesis bank as root.
+    pub bank_forks: BankForks,
+    /// Number of accounts loaded from the genesis configuration.
+    pub accounts_loaded: usize,
+    /// Total lamports across all genesis accounts.
+    pub total_lamports: u64,
+    /// Stake initialization statistics.
+    pub stake_init: StakeInitStats,
+    /// Number of accounts included in the lattice hash computation.
+    pub lthash_accounts: usize,
+    /// Feature set initialization statistics.
+    pub feature_init: FeatureInitStats,
+}
+
+/// Bootstrap a validator from a genesis configuration.
+///
+/// This function performs the complete initialization sequence for a new network:
+/// 1. Loads all genesis accounts into the account database
+/// 2. Constructs a `Bank` at slot 0 with genesis economic parameters
+/// 3. Computes the cumulative lattice hash from all loaded accounts
+/// 4. Initializes stake tracker from any delegated stake accounts
+/// 5. Initializes empty stake history (genesis has no prior epochs)
+/// 6. Initializes the sysvar cache (clock at slot 0, epoch schedule, rent)
+/// 7. Initializes feature set from on-chain feature gate accounts
+/// 8. Wraps in `BankForks` as the root bank
+pub fn bootstrap_from_genesis(
+    genesis: &GenesisConfig,
+    leader_schedule: Arc<LeaderSchedule>,
+) -> GenesisBootstrapResult {
+    let accounts = Arc::new(AccountDatabase::new());
+
+    // Step 1: Load all genesis accounts into the database.
+    let runtime_accounts = genesis.to_accounts();
+    let mut total_lamports: u64 = 0;
+    for (pubkey, account) in &runtime_accounts {
+        total_lamports = total_lamports.saturating_add(account.meta.lamports);
+        accounts.store_published_account(*pubkey, account.clone());
+    }
+    let accounts_loaded = runtime_accounts.len();
+
+    // Step 2: Create Bank at slot 0 with genesis economic configuration.
+    let epoch_schedule_config = EpochScheduleConfig {
+        slots_per_epoch: genesis.epoch_schedule.slots_per_epoch,
+        leader_schedule_slot_offset: genesis.epoch_schedule.leader_schedule_slot_offset,
+        warmup: genesis.epoch_schedule.warmup,
+        first_normal_epoch: genesis.epoch_schedule.first_normal_epoch,
+        first_normal_slot: genesis.epoch_schedule.first_normal_slot,
+    };
+    let epoch_schedule = Arc::new(EpochSchedule::new(epoch_schedule_config));
+
+    let rent = Rent {
+        lamports_per_byte_year: genesis.rent.lamports_per_byte_year,
+        exemption_threshold: genesis.rent.exemption_threshold,
+        burn_percent: genesis.rent.burn_percent,
+    };
+    let inflation = Inflation {
+        initial_rate: genesis.inflation.initial_rate,
+        terminal_rate: genesis.inflation.terminal_rate,
+        tapering_rate: genesis.inflation.tapering_rate,
+        foundation_portion: genesis.inflation.foundation_portion,
+        foundation_duration_years: genesis.inflation.foundation_duration_years,
+    };
+
+    let mut bank = Bank::new_genesis_with_config(
+        accounts.clone(),
+        epoch_schedule,
+        leader_schedule,
+        total_lamports,
+        rent,
+        inflation,
+    );
+
+    // Step 3: Compute cumulative lattice hash from all loaded accounts.
+    let lthash_accounts = bank.initialize_lthash_from_accounts();
+
+    // Step 4: Initialize stake tracker from genesis stake accounts.
+    let (tracker, stake_init) = initialize_stakes(&accounts, 0);
+    bank.set_stake_tracker(Arc::new(RwLock::new(tracker)));
+
+    // Step 5: Initialize empty stake history (no prior epochs at genesis).
+    bank.set_stake_history(Arc::new(RwLock::new(StakeHistory::new())));
+
+    // Step 6: Initialize sysvar cache with genesis parameters.
+    let clock = Clock {
+        slot: 0,
+        epoch_start_timestamp: genesis.creation_time,
+        epoch: 0,
+        leader_schedule_epoch: 1,
+        unix_timestamp: genesis.creation_time,
+    };
+    let sysvar_epoch_schedule = EpochSchedule::new(EpochScheduleConfig {
+        slots_per_epoch: genesis.epoch_schedule.slots_per_epoch,
+        leader_schedule_slot_offset: genesis.epoch_schedule.leader_schedule_slot_offset,
+        warmup: genesis.epoch_schedule.warmup,
+        first_normal_epoch: genesis.epoch_schedule.first_normal_epoch,
+        first_normal_slot: genesis.epoch_schedule.first_normal_slot,
+    });
+    let sysvar_cache = SysvarCache::new(clock, sysvar_epoch_schedule, rent);
+    bank.set_sysvar_cache(Arc::new(sysvar_cache));
+
+    // Step 7: Initialize feature set from feature-program-owned accounts.
+    let (feature_set, feature_init) = initialize_features(&accounts);
+    bank.set_feature_set(Arc::new(RwLock::new(feature_set)));
+
+    // Step 8: Wrap in BankForks (genesis bank is Processing, use standard constructor).
+    let bank_forks = BankForks::new(bank);
+
+    GenesisBootstrapResult {
+        bank_forks,
+        accounts_loaded,
+        total_lamports,
+        stake_init,
+        lthash_accounts,
+        feature_init,
+    }
 }
 
 /// Scan the account database for stake program accounts and build a StakeTracker.
@@ -1170,5 +1296,263 @@ mod tests {
         let fs = child_fs.read().unwrap();
         assert!(fs.is_active(&feat));
         assert_eq!(fs.activated_slot(&feat), Some(42));
+    }
+
+    // ── genesis bootstrap tests ───────────────────────────────────────
+
+    fn make_genesis_config() -> GenesisConfig {
+        GenesisConfig::default_development()
+    }
+
+    fn make_genesis_account(pubkey: Pubkey, lamports: u64) -> (Pubkey, GenesisAccount) {
+        (
+            pubkey,
+            GenesisAccount {
+                lamports,
+                data: vec![],
+                owner: Pubkey::new([0u8; 32]),
+                executable: false,
+                rent_epoch: 0,
+            },
+        )
+    }
+
+    use paradencer_storage::GenesisAccount;
+
+    #[test]
+    fn genesis_bootstrap_creates_bank_forks() {
+        let genesis = make_genesis_config();
+        let leader_schedule = make_leader_schedule();
+
+        let result = bootstrap_from_genesis(&genesis, leader_schedule);
+        assert_eq!(result.accounts_loaded, 0);
+        assert_eq!(result.total_lamports, 0);
+        assert_eq!(result.bank_forks.root_slot(), 0);
+    }
+
+    #[test]
+    fn genesis_bootstrap_loads_accounts() {
+        let mut genesis = make_genesis_config();
+        genesis.accounts = vec![
+            make_genesis_account(Pubkey::new_unique(), 1_000_000),
+            make_genesis_account(Pubkey::new_unique(), 2_000_000),
+            make_genesis_account(Pubkey::new_unique(), 3_000_000),
+        ];
+
+        let leader_schedule = make_leader_schedule();
+        let result = bootstrap_from_genesis(&genesis, leader_schedule);
+        assert_eq!(result.accounts_loaded, 3);
+        assert_eq!(result.total_lamports, 6_000_000);
+    }
+
+    #[test]
+    fn genesis_bootstrap_bank_at_slot_zero() {
+        let genesis = make_genesis_config();
+        let leader_schedule = make_leader_schedule();
+
+        let result = bootstrap_from_genesis(&genesis, leader_schedule);
+        let bank = result.bank_forks.working_bank();
+        assert_eq!(bank.slot(), 0);
+        assert_eq!(bank.epoch(), 0);
+        assert!(bank.parent_slot().is_none());
+    }
+
+    #[test]
+    fn genesis_bootstrap_sets_capitalization() {
+        let mut genesis = make_genesis_config();
+        genesis.accounts = vec![
+            make_genesis_account(Pubkey::new_unique(), 500_000_000),
+            make_genesis_account(Pubkey::new_unique(), 500_000_000),
+        ];
+
+        let leader_schedule = make_leader_schedule();
+        let result = bootstrap_from_genesis(&genesis, leader_schedule);
+        let bank = result.bank_forks.working_bank();
+        assert_eq!(bank.capitalization(), 1_000_000_000);
+    }
+
+    #[test]
+    fn genesis_bootstrap_computes_lthash() {
+        let mut genesis = make_genesis_config();
+        genesis.accounts = vec![
+            make_genesis_account(Pubkey::new_unique(), 1_000_000),
+            make_genesis_account(Pubkey::new_unique(), 2_000_000),
+        ];
+
+        let leader_schedule = make_leader_schedule();
+        let result = bootstrap_from_genesis(&genesis, leader_schedule);
+        assert_eq!(result.lthash_accounts, 2);
+
+        // Bank hash should be non-zero (lthash contributes).
+        let bank = result.bank_forks.working_bank();
+        let hash = bank.hash();
+        assert_ne!(hash, [0u8; 32]);
+    }
+
+    #[test]
+    fn genesis_bootstrap_lthash_deterministic() {
+        let mut genesis = make_genesis_config();
+        let pk = Pubkey::new([0x42; 32]);
+        genesis.accounts = vec![(
+            pk,
+            GenesisAccount {
+                lamports: 5_000_000,
+                data: vec![1, 2, 3],
+                owner: Pubkey::new([0x11; 32]),
+                executable: false,
+                rent_epoch: 0,
+            },
+        )];
+
+        let ls1 = make_leader_schedule();
+        let ls2 = make_leader_schedule();
+
+        let r1 = bootstrap_from_genesis(&genesis, ls1);
+        let r2 = bootstrap_from_genesis(&genesis, ls2);
+
+        let hash1 = r1.bank_forks.working_bank().hash();
+        let hash2 = r2.bank_forks.working_bank().hash();
+        assert_eq!(hash1, hash2);
+    }
+
+    #[test]
+    fn genesis_bootstrap_initializes_sysvar_cache() {
+        let mut genesis = make_genesis_config();
+        genesis.creation_time = 1_700_000_000;
+
+        let leader_schedule = make_leader_schedule();
+        let result = bootstrap_from_genesis(&genesis, leader_schedule);
+        let bank = result.bank_forks.working_bank();
+
+        let cache = bank.sysvar_cache().unwrap();
+        let clock = cache.clock();
+        assert_eq!(clock.slot, 0);
+        assert_eq!(clock.epoch, 0);
+        assert_eq!(clock.unix_timestamp, 1_700_000_000);
+        assert_eq!(clock.leader_schedule_epoch, 1);
+    }
+
+    #[test]
+    fn genesis_bootstrap_initializes_stake_tracker_empty() {
+        let genesis = make_genesis_config();
+        let leader_schedule = make_leader_schedule();
+
+        let result = bootstrap_from_genesis(&genesis, leader_schedule);
+        assert_eq!(result.stake_init.delegations_loaded, 0);
+
+        let bank = result.bank_forks.working_bank();
+        assert!(bank.stake_tracker().is_some());
+        assert!(bank.stake_history().is_some());
+
+        // Stake history should be empty at genesis.
+        let history = bank.stake_history().unwrap();
+        assert_eq!(history.read().unwrap().len(), 0);
+    }
+
+    #[test]
+    fn genesis_bootstrap_with_stake_accounts() {
+        let mut genesis = make_genesis_config();
+        let voter = Pubkey::new_unique();
+
+        // Create a delegated stake account in genesis.
+        let meta = Meta::new(
+            2_282_880,
+            Authorized::new(Pubkey::new_unique(), Pubkey::new_unique()),
+            Lockup::default(),
+        );
+        let delegation = Delegation::new(voter, 5_000_000, 0);
+        let stake = StakeAccount::new(delegation, 0);
+        let state = StakeState::Delegated(meta, stake, Default::default());
+        let stake_data = serialize_stake_state(&state);
+        let stake_pubkey = Pubkey::new_unique();
+
+        genesis.accounts.push((
+            stake_pubkey,
+            GenesisAccount {
+                lamports: 5_000_000 + 2_282_880,
+                data: stake_data,
+                owner: STAKE_PROGRAM_ID,
+                executable: false,
+                rent_epoch: 0,
+            },
+        ));
+
+        let leader_schedule = make_leader_schedule();
+        let result = bootstrap_from_genesis(&genesis, leader_schedule);
+        assert_eq!(result.stake_init.stake_accounts_scanned, 1);
+        assert_eq!(result.stake_init.delegations_loaded, 1);
+        assert_eq!(result.stake_init.total_delegated_lamports, 5_000_000);
+    }
+
+    #[test]
+    fn genesis_bootstrap_with_feature_accounts() {
+        use crate::features::known_features;
+
+        let mut genesis = make_genesis_config();
+        let known = known_features::all_known_features();
+        let feat = known[0].feature_id;
+
+        // Add an activated feature account to genesis.
+        genesis.accounts.push((
+            feat,
+            GenesisAccount {
+                lamports: 1,
+                data: make_activated_feature_data(0),
+                owner: FEATURE_PROGRAM_ID,
+                executable: false,
+                rent_epoch: 0,
+            },
+        ));
+
+        let leader_schedule = make_leader_schedule();
+        let result = bootstrap_from_genesis(&genesis, leader_schedule);
+        assert_eq!(result.feature_init.features_activated, 1);
+
+        let bank = result.bank_forks.working_bank();
+        let fs_lock = bank.feature_set().unwrap();
+        let fs = fs_lock.read().unwrap();
+        assert!(fs.is_active(&feat));
+    }
+
+    #[test]
+    fn genesis_bootstrap_allows_child_creation() {
+        let mut genesis = make_genesis_config();
+        genesis.accounts = vec![make_genesis_account(Pubkey::new_unique(), 1_000_000)];
+
+        let leader_schedule = make_leader_schedule();
+        let result = bootstrap_from_genesis(&genesis, leader_schedule.clone());
+        let root_bank = result.bank_forks.working_bank();
+
+        let child = Bank::new_from_parent(&root_bank, 1, leader_schedule);
+        assert_eq!(child.slot(), 1);
+        assert_eq!(child.parent_slot(), Some(0));
+    }
+
+    #[test]
+    fn genesis_bootstrap_uses_economic_config() {
+        let mut genesis = make_genesis_config();
+        genesis.rent.lamports_per_byte_year = 9999;
+        genesis.rent.exemption_threshold = 3.5;
+
+        let leader_schedule = make_leader_schedule();
+        let result = bootstrap_from_genesis(&genesis, leader_schedule);
+        let bank = result.bank_forks.working_bank();
+
+        let cache = bank.sysvar_cache().unwrap();
+        let rent = cache.rent();
+        assert_eq!(rent.lamports_per_byte_year, 9999);
+        assert!((rent.exemption_threshold - 3.5).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn genesis_bootstrap_includes_rewards_pool() {
+        let mut genesis = make_genesis_config();
+        genesis.accounts = vec![make_genesis_account(Pubkey::new_unique(), 1_000_000)];
+        genesis.rewards_pool_accounts = vec![make_genesis_account(Pubkey::new_unique(), 500_000)];
+
+        let leader_schedule = make_leader_schedule();
+        let result = bootstrap_from_genesis(&genesis, leader_schedule);
+        assert_eq!(result.accounts_loaded, 2);
+        assert_eq!(result.total_lamports, 1_500_000);
     }
 }
