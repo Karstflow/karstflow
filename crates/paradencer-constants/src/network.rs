@@ -204,8 +204,37 @@ pub const QUIC_INITIAL_RTT_US: u64 = 200_000;
 // QUIC ACK generator
 // ---------------------------------------------------------------------------
 
-/// Capacity of the ACK range ring buffer per connection.
+/// Capacity of the ACK range ring buffer per connection (power of 2).
 pub const QUIC_ACK_QUEUE_CAPACITY: usize = 64;
+
+/// ACK coalescing result: no action taken (duplicate or invalid).
+pub const QUIC_ACK_NOOP: u8 = 0;
+/// ACK coalescing result: new ACK range created.
+pub const QUIC_ACK_NEW: u8 = 1;
+/// ACK coalescing result: merged into existing ACK range.
+pub const QUIC_ACK_MERGED: u8 = 2;
+/// ACK coalescing result: ring buffer full (excessive reordering).
+pub const QUIC_ACK_OVERFLOW: u8 = 3;
+
+// ---------------------------------------------------------------------------
+// QUIC service scheduler
+// ---------------------------------------------------------------------------
+
+/// Service type: process ASAP (doubly-linked list).
+pub const SVC_TYPE_INSTANT: u8 = 0;
+/// Service type: process at scheduled time (priority queue).
+pub const SVC_TYPE_DYNAMIC: u8 = 1;
+/// Number of service types.
+pub const SVC_TYPE_COUNT: usize = 2;
+/// Sentinel index for empty doubly-linked list slot.
+pub const SVC_DLIST_SENTINEL: u32 = u32::MAX;
+
+// ---------------------------------------------------------------------------
+// QUIC stream pool
+// ---------------------------------------------------------------------------
+
+/// Default per-stream TX buffer size (4 KiB).
+pub const STREAM_TX_BUF_DEFAULT: usize = 4096;
 
 // ---------------------------------------------------------------------------
 // QUIC send errors
