@@ -1,6 +1,7 @@
 use super::{EpochSchedule, Inflation, LeaderSchedule, Rent};
 use crate::blockhash_queue::{BlockhashInfo, BlockhashQueue};
 use crate::epoch_processing::{AccountDatabaseVoteReader, EpochProcessor};
+use crate::epoch_schedule::EpochScheduleConfig;
 use crate::features::{process_feature_activations, FeatureSet};
 use crate::reward_application::RewardApplicator;
 use crate::rewards_distribution::RewardsDistributor;
@@ -11,7 +12,7 @@ use crate::StakeTracker;
 use paradencer_constants::economics::{FEE_BURN_PERCENT, LAMPORTS_PER_SIGNATURE};
 use paradencer_constants::ledger::{GENESIS_EPOCH, GENESIS_SLOT, TICKS_PER_SLOT};
 use paradencer_crypto::lthash::{self, LatticeHashValue};
-use paradencer_storage::{Account, AccountDatabase, Pubkey};
+use paradencer_storage::{Account, AccountDatabase, Pubkey, SnapshotBankState};
 use std::sync::atomic::{AtomicU64, AtomicU8, Ordering};
 use std::sync::{Arc, RwLock};
 
@@ -167,6 +168,106 @@ impl Bank {
             feature_set: None,
             rewards_distributor: RwLock::new(None),
         }
+    }
+
+    /// Initialize a bank from a restored Solana snapshot.
+    ///
+    /// Reconstructs all bank state from the parsed snapshot manifest:
+    /// slot, epoch, blockhash queue, economic configuration, and counters.
+    /// The bank is created in `Frozen` status since the snapshot represents
+    /// a completed slot.
+    ///
+    /// The leader schedule must be computed externally from the restored
+    /// stake accounts and passed in.
+    pub fn new_from_snapshot(
+        accounts: Arc<AccountDatabase>,
+        bank_state: &SnapshotBankState,
+        leader_schedule: Arc<LeaderSchedule>,
+    ) -> Self {
+        // Convert epoch schedule from snapshot format.
+        let epoch_schedule_config = EpochScheduleConfig {
+            slots_per_epoch: bank_state.epoch_schedule.slots_per_epoch,
+            leader_schedule_slot_offset: bank_state.epoch_schedule.leader_schedule_slot_offset,
+            warmup: bank_state.epoch_schedule.warmup,
+            first_normal_epoch: bank_state.epoch_schedule.first_normal_epoch,
+            first_normal_slot: bank_state.epoch_schedule.first_normal_slot,
+        };
+        let epoch_schedule = Arc::new(EpochSchedule::new(epoch_schedule_config));
+
+        // Convert economic configuration.
+        let rent = Rent {
+            lamports_per_byte_year: bank_state.rent.lamports_per_byte_year,
+            exemption_threshold: bank_state.rent.exemption_threshold,
+            burn_percent: bank_state.rent.burn_percent,
+        };
+        let inflation = Inflation {
+            initial_rate: bank_state.inflation.initial,
+            terminal_rate: bank_state.inflation.terminal,
+            tapering_rate: bank_state.inflation.taper,
+            foundation_portion: bank_state.inflation.foundation,
+            foundation_duration_years: bank_state.inflation.foundation_term,
+        };
+
+        // Build blockhash queue from snapshot's recent blockhashes.
+        let blockhash_queue = Self::build_blockhash_queue(bank_state);
+
+        // Compute slot index within the epoch.
+        let (_, slot_index) = epoch_schedule.get_epoch_and_slot_index(bank_state.slot);
+
+        Self {
+            slot: bank_state.slot,
+            parent_slot: Some(bank_state.parent_slot),
+            parent_hash: bank_state.parent_hash,
+            status: AtomicU8::new(BankStatus::Frozen.to_u8()),
+            tick_height: AtomicU64::new(bank_state.tick_height),
+            max_tick_height: bank_state.max_tick_height,
+            epoch: bank_state.epoch,
+            slot_index,
+            epoch_schedule,
+            leader_schedule,
+            accounts,
+            transaction_count: AtomicU64::new(bank_state.transaction_count),
+            execution_fees: AtomicU64::new(0),
+            priority_fees: AtomicU64::new(0),
+            capitalization: AtomicU64::new(bank_state.capitalization),
+            rent,
+            inflation,
+            sysvars: None,
+            lthash: RwLock::new(LatticeHashValue::zero()),
+            signature_count: AtomicU64::new(bank_state.signature_count),
+            last_blockhash: RwLock::new(bank_state.last_blockhash.unwrap_or([0u8; 32])),
+            blockhash_queue: RwLock::new(blockhash_queue),
+            transaction_cache: Arc::new(TransactionCache::new()),
+            cost_tracker: Arc::new(crate::cost_tracker::CostTracker::new()),
+            next_leader_schedule: RwLock::new(None),
+            stake_tracker: None,
+            stake_history: None,
+            feature_set: None,
+            rewards_distributor: RwLock::new(None),
+        }
+    }
+
+    /// Build a BlockhashQueue from snapshot's recent blockhash entries.
+    ///
+    /// The entries are pre-sorted by hash_index in the snapshot parser,
+    /// so we register them in ascending order to preserve the correct
+    /// age ordering (oldest first, newest last).
+    fn build_blockhash_queue(bank_state: &SnapshotBankState) -> BlockhashQueue {
+        let max_age = bank_state.max_blockhash_age as usize;
+        let mut queue = BlockhashQueue::new(max_age);
+
+        for bh in &bank_state.recent_blockhashes {
+            let info = BlockhashInfo::new(
+                Pubkey::from(bh.hash),
+                bh.lamports_per_signature,
+                // Use the hash_index as a proxy for slot ordering.
+                // The actual slot isn't stored in the blockhash queue.
+                bh.hash_index,
+            );
+            queue.register_hash(info);
+        }
+
+        queue
     }
 
     pub fn new_from_parent(parent: &Bank, slot: u64, leader_schedule: Arc<LeaderSchedule>) -> Self {
@@ -2277,5 +2378,300 @@ mod tests {
         assert_eq!(ctx.slots_per_epoch, SLOTS_PER_EPOCH);
         assert!(ctx.exemption_threshold > 0.0);
         assert!(ctx.lamports_per_byte_year > 0);
+    }
+
+    // -----------------------------------------------------------------------
+    // Snapshot bootstrap tests
+    // -----------------------------------------------------------------------
+
+    fn make_test_bank_state(slot: u64, epoch: u64, capitalization: u64) -> SnapshotBankState {
+        use paradencer_storage::{
+            EpochScheduleConfig as SnapEpochSchedule, FeeRateConfig, InflationConfig,
+            RecentBlockhash, RentConfig, StakeSummary,
+        };
+
+        // A completed slot has tick_height == max_tick_height.
+        let ticks_per_slot = 64u64;
+        let tick_height = slot * ticks_per_slot + ticks_per_slot;
+        let max_tick_height = tick_height;
+
+        SnapshotBankState {
+            recent_blockhashes: vec![
+                RecentBlockhash {
+                    hash: [0xAA; 32],
+                    lamports_per_signature: 5000,
+                    hash_index: 100,
+                    timestamp: 1_000_000,
+                },
+                RecentBlockhash {
+                    hash: [0xBB; 32],
+                    lamports_per_signature: 5000,
+                    hash_index: 101,
+                    timestamp: 1_000_001,
+                },
+                RecentBlockhash {
+                    hash: [0xCC; 32],
+                    lamports_per_signature: 5000,
+                    hash_index: 102,
+                    timestamp: 1_000_002,
+                },
+            ],
+            last_blockhash: Some([0xCC; 32]),
+            max_blockhash_age: 300,
+            last_blockhash_index: 102,
+            slot,
+            parent_slot: slot.saturating_sub(1),
+            block_height: slot,
+            epoch,
+            hash: [0x11; 32],
+            parent_hash: [0x22; 32],
+            transaction_count: 100_000,
+            tick_height,
+            max_tick_height,
+            signature_count: 50_000,
+            capitalization,
+            accounts_data_len: 1_000_000_000,
+            hashes_per_tick: Some(12500),
+            ticks_per_slot: 64,
+            ns_per_slot: 400_000_000,
+            genesis_creation_time: 1_700_000_000,
+            slots_per_year: 78_892_314.0,
+            collector_id: [0x33; 32],
+            collector_fees: 1000,
+            fee_rate_governor: FeeRateConfig {
+                target_lamports_per_signature: 10_000,
+                target_signatures_per_slot: 20_000,
+                min_lamports_per_signature: 5_000,
+                max_lamports_per_signature: 100_000,
+                burn_percent: 50,
+            },
+            rent: RentConfig {
+                lamports_per_byte_year: 3_480,
+                exemption_threshold: 2.0,
+                burn_percent: 50,
+                collector_epoch: epoch,
+                collector_slots_per_year: 78_892_314.0,
+            },
+            collected_rent: 500,
+            epoch_schedule: SnapEpochSchedule {
+                slots_per_epoch: 432_000,
+                leader_schedule_slot_offset: 432_000,
+                warmup: false,
+                first_normal_epoch: 0,
+                first_normal_slot: 0,
+            },
+            inflation: InflationConfig {
+                initial: 0.08,
+                terminal: 0.015,
+                taper: 0.15,
+                foundation: 0.05,
+                foundation_term: 7.0,
+            },
+            hard_forks: vec![],
+            ancestor_count: 0,
+            stake_summary: StakeSummary::default(),
+            is_delta: true,
+        }
+    }
+
+    #[test]
+    fn snapshot_bank_initializes_slot_and_epoch() {
+        let accounts = Arc::new(AccountDatabase::new());
+        let state = make_test_bank_state(1000, 2, 500_000_000_000);
+        let leader_schedule = create_test_leader_schedule(2);
+
+        let bank = Bank::new_from_snapshot(accounts, &state, leader_schedule);
+
+        assert_eq!(bank.slot(), 1000);
+        assert_eq!(bank.epoch(), 2);
+        assert_eq!(bank.parent_slot(), Some(999));
+        assert_eq!(bank.parent_hash(), [0x22; 32]);
+    }
+
+    #[test]
+    fn snapshot_bank_is_frozen() {
+        let accounts = Arc::new(AccountDatabase::new());
+        let state = make_test_bank_state(500, 1, 1_000_000);
+        let leader_schedule = create_test_leader_schedule(1);
+
+        let bank = Bank::new_from_snapshot(accounts, &state, leader_schedule);
+
+        assert_eq!(bank.status(), BankStatus::Frozen);
+        assert!(bank.is_frozen());
+    }
+
+    #[test]
+    fn snapshot_bank_restores_capitalization() {
+        let accounts = Arc::new(AccountDatabase::new());
+        let state = make_test_bank_state(1000, 2, 500_000_000_000);
+        let leader_schedule = create_test_leader_schedule(2);
+
+        let bank = Bank::new_from_snapshot(accounts, &state, leader_schedule);
+
+        assert_eq!(bank.capitalization(), 500_000_000_000);
+    }
+
+    #[test]
+    fn snapshot_bank_restores_tick_height() {
+        let accounts = Arc::new(AccountDatabase::new());
+        let state = make_test_bank_state(1000, 2, 1_000_000);
+        let leader_schedule = create_test_leader_schedule(2);
+
+        let bank = Bank::new_from_snapshot(accounts, &state, leader_schedule);
+
+        // Snapshot slot is complete: tick_height == max_tick_height.
+        let expected_ticks = 1000 * 64 + 64;
+        assert_eq!(bank.tick_height(), expected_ticks);
+        assert_eq!(bank.max_tick_height(), expected_ticks);
+        assert!(bank.is_complete());
+    }
+
+    #[test]
+    fn snapshot_bank_restores_transaction_count() {
+        let accounts = Arc::new(AccountDatabase::new());
+        let state = make_test_bank_state(1000, 2, 1_000_000);
+        let leader_schedule = create_test_leader_schedule(2);
+
+        let bank = Bank::new_from_snapshot(accounts, &state, leader_schedule);
+
+        assert_eq!(bank.transaction_count(), 100_000);
+        assert_eq!(bank.signature_count(), 50_000);
+    }
+
+    #[test]
+    fn snapshot_bank_restores_rent_config() {
+        let accounts = Arc::new(AccountDatabase::new());
+        let state = make_test_bank_state(1000, 2, 1_000_000);
+        let leader_schedule = create_test_leader_schedule(2);
+
+        let bank = Bank::new_from_snapshot(accounts, &state, leader_schedule);
+
+        assert_eq!(bank.rent().lamports_per_byte_year, 3_480);
+        assert_eq!(bank.rent().exemption_threshold, 2.0);
+        assert_eq!(bank.rent().burn_percent, 50);
+    }
+
+    #[test]
+    fn snapshot_bank_restores_inflation() {
+        let accounts = Arc::new(AccountDatabase::new());
+        let state = make_test_bank_state(1000, 2, 1_000_000);
+        let leader_schedule = create_test_leader_schedule(2);
+
+        let bank = Bank::new_from_snapshot(accounts, &state, leader_schedule);
+
+        assert!((bank.inflation().initial_rate - 0.08).abs() < f64::EPSILON);
+        assert!((bank.inflation().terminal_rate - 0.015).abs() < f64::EPSILON);
+        assert!((bank.inflation().tapering_rate - 0.15).abs() < f64::EPSILON);
+        assert!((bank.inflation().foundation_portion - 0.05).abs() < f64::EPSILON);
+        assert!((bank.inflation().foundation_duration_years - 7.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn snapshot_bank_restores_blockhash_queue() {
+        let accounts = Arc::new(AccountDatabase::new());
+        let state = make_test_bank_state(1000, 2, 1_000_000);
+        let leader_schedule = create_test_leader_schedule(2);
+
+        let bank = Bank::new_from_snapshot(accounts, &state, leader_schedule);
+
+        // All 3 blockhashes from snapshot should be in the queue
+        let queue = bank.blockhash_queue().read().unwrap();
+        assert_eq!(queue.len(), 3);
+
+        // All should be valid
+        assert!(bank.is_blockhash_valid(&[0xAA; 32]));
+        assert!(bank.is_blockhash_valid(&[0xBB; 32]));
+        assert!(bank.is_blockhash_valid(&[0xCC; 32]));
+
+        // Last blockhash should be 0xCC
+        let last = queue.last_blockhash().unwrap();
+        assert_eq!(last.to_bytes(), [0xCC; 32]);
+    }
+
+    #[test]
+    fn snapshot_bank_restores_last_blockhash() {
+        let accounts = Arc::new(AccountDatabase::new());
+        let state = make_test_bank_state(1000, 2, 1_000_000);
+        let leader_schedule = create_test_leader_schedule(2);
+
+        let bank = Bank::new_from_snapshot(accounts, &state, leader_schedule);
+
+        // Bank hash uses the last_blockhash field
+        let hash_with_cc = bank.hash();
+
+        // Verify it's non-zero (the blockhash is [0xCC; 32])
+        assert!(hash_with_cc.iter().any(|&b| b != 0));
+    }
+
+    #[test]
+    fn snapshot_bank_epoch_schedule_matches() {
+        let accounts = Arc::new(AccountDatabase::new());
+        let state = make_test_bank_state(432_001, 1, 1_000_000);
+        let leader_schedule = create_test_leader_schedule(1);
+
+        let bank = Bank::new_from_snapshot(accounts, &state, leader_schedule);
+
+        // Slot 432_001 in epoch schedule with 432K slots_per_epoch = epoch 1, slot_index 1
+        assert_eq!(bank.epoch(), 1);
+        assert_eq!(bank.slot_index(), 1);
+    }
+
+    #[test]
+    fn snapshot_bank_child_inherits_state() {
+        let accounts = Arc::new(AccountDatabase::new());
+        // Use slot 864_100 which is in epoch 2 (432K slots_per_epoch).
+        let snap_slot = 864_100;
+        let state = make_test_bank_state(snap_slot, 2, 500_000_000_000);
+        let leader_schedule = create_test_leader_schedule(2);
+
+        let bank = Bank::new_from_snapshot(accounts, &state, leader_schedule.clone());
+
+        // Create a child bank from the snapshot bank.
+        let child_slot = snap_slot + 1;
+        let child = Bank::new_from_parent(&bank, child_slot, leader_schedule);
+
+        assert_eq!(child.slot(), child_slot);
+        assert_eq!(child.parent_slot(), Some(snap_slot));
+        assert_eq!(child.epoch(), 2);
+        assert_eq!(child.capitalization(), 500_000_000_000);
+
+        // Child inherits the blockhash queue.
+        assert!(child.is_blockhash_valid(&[0xAA; 32]));
+        assert!(child.is_blockhash_valid(&[0xBB; 32]));
+        assert!(child.is_blockhash_valid(&[0xCC; 32]));
+
+        // Child is in Processing status.
+        assert_eq!(child.status(), BankStatus::Processing);
+        assert!(!child.is_frozen());
+    }
+
+    #[test]
+    fn snapshot_bank_with_empty_blockhash_queue() {
+        let accounts = Arc::new(AccountDatabase::new());
+        let mut state = make_test_bank_state(100, 0, 1_000_000);
+        state.recent_blockhashes.clear();
+        state.last_blockhash = None;
+        let leader_schedule = create_test_leader_schedule(0);
+
+        let bank = Bank::new_from_snapshot(accounts, &state, leader_schedule);
+
+        assert!(bank.blockhash_queue().read().unwrap().is_empty());
+    }
+
+    #[test]
+    fn snapshot_bank_shares_account_database() {
+        let accounts = Arc::new(AccountDatabase::new());
+        let pk = Pubkey::new_unique();
+        accounts.store_published_account(pk, Account::new(5000, vec![1, 2, 3], Pubkey::default()));
+
+        let state = make_test_bank_state(1000, 2, 1_000_000);
+        let leader_schedule = create_test_leader_schedule(2);
+
+        let bank = Bank::new_from_snapshot(accounts.clone(), &state, leader_schedule);
+
+        // Bank should see accounts from the shared database
+        let acct = bank.accounts().get_published_account(&pk).unwrap();
+        assert_eq!(acct.meta.lamports, 5000);
+        assert_eq!(acct.data.as_slice(), &[1, 2, 3]);
     }
 }
