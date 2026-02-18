@@ -289,10 +289,7 @@ impl PackScheduler {
         }
 
         // Acquire locks for the microblock.
-        let all_locks: Vec<AccountLock> = transactions
-            .iter()
-            .flat_map(build_lock_set)
-            .collect();
+        let all_locks: Vec<AccountLock> = transactions.iter().flat_map(build_lock_set).collect();
         self.conflict_detector.acquire(microblock_id, all_locks);
 
         // Update block-level accumulators.
