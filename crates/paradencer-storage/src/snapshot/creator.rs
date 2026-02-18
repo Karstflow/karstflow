@@ -312,6 +312,74 @@ impl SnapshotCreator {
         bank_state: Option<&SnapshotBankState>,
     ) -> Result<SolanaArchiveStats, StorageError> {
         let accounts = self.collect_all_accounts(db)?;
+        self.build_solana_archive(
+            accounts,
+            slot,
+            None,
+            output_dir,
+            max_accounts_per_vec,
+            bank_state,
+        )
+    }
+
+    /// Create an incremental Solana-compatible snapshot archive using dirty-set tracking.
+    ///
+    /// Only includes accounts modified since `base_slot`. The archive filename
+    /// encodes both the incremental slot and the base slot for identification.
+    /// Dirty slots through `snapshot_slot` are drained after creation.
+    #[allow(dead_code)]
+    pub fn create_incremental_solana_archive(
+        &self,
+        db: &AccountDatabase,
+        snapshot_slot: u64,
+        base_slot: u64,
+        output_dir: &Path,
+        max_accounts_per_vec: usize,
+        bank_state: Option<&SnapshotBankState>,
+    ) -> Result<(SolanaArchiveStats, IncrementalStats), StorageError> {
+        let dirty_pubkeys = db.drain_dirty_slots_through(snapshot_slot);
+        let dirty_count = dirty_pubkeys.len();
+
+        let mut delta_accounts = HashMap::with_capacity(dirty_count);
+        for pubkey in &dirty_pubkeys {
+            if let Some(account) = db.get_published_account(pubkey) {
+                delta_accounts.insert(*pubkey, account);
+            }
+        }
+
+        let accounts_included = delta_accounts.len();
+        let archive_stats = self.build_solana_archive(
+            delta_accounts,
+            snapshot_slot,
+            Some(base_slot),
+            output_dir,
+            max_accounts_per_vec,
+            bank_state,
+        )?;
+
+        let incr_stats = IncrementalStats {
+            dirty_pubkeys_tracked: dirty_count,
+            accounts_included,
+            base_slot,
+            snapshot_slot,
+        };
+
+        Ok((archive_stats, incr_stats))
+    }
+
+    /// Internal: build a Solana-compatible tar.zst archive from a set of accounts.
+    ///
+    /// Used by both full and incremental archive creation. When `base_slot` is
+    /// `Some`, the filename includes both snapshot and base slot.
+    fn build_solana_archive(
+        &self,
+        accounts: HashMap<Pubkey, Account>,
+        slot: u64,
+        base_slot: Option<u64>,
+        output_dir: &Path,
+        max_accounts_per_vec: usize,
+        bank_state: Option<&SnapshotBankState>,
+    ) -> Result<SolanaArchiveStats, StorageError> {
         let total_accounts = accounts.len();
         let total_lamports: u64 = accounts.values().map(|a| a.meta.lamports).sum();
 
@@ -328,7 +396,6 @@ impl SnapshotCreator {
         let mut builder = SnapshotArchiveBuilder::new();
         builder.set_version("1.18.26");
 
-        // Serialize bank state into the manifest if provided.
         let manifest_data = match bank_state {
             Some(state) => serialize_bank_state(state),
             None => Vec::new(),
@@ -355,7 +422,13 @@ impl SnapshotCreator {
             details: format!("Failed to create output directory: {e}"),
         })?;
 
-        let filename = format!("snapshot-{slot}-{}.tar.zst", hex_hash(&compressed));
+        let hash_suffix = hex_hash(&compressed);
+        let filename = match base_slot {
+            Some(base) => {
+                format!("incremental-snapshot-{base}-{slot}-{hash_suffix}.tar.zst")
+            }
+            None => format!("snapshot-{slot}-{hash_suffix}.tar.zst"),
+        };
         let archive_path = output_dir.join(&filename);
         std::fs::write(&archive_path, &compressed).map_err(|e| {
             StorageError::AccountDatabaseError {
@@ -864,5 +937,200 @@ mod tests {
         let account = db2.get_published_account(&pk).unwrap();
         assert_eq!(account.data.as_slice(), &big_data);
         assert_eq!(account.meta.lamports, 42);
+    }
+
+    // -------------------------------------------------------------------
+    // Incremental Solana archive tests
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn incremental_solana_archive_captures_delta() {
+        let db = AccountDatabase::new();
+        let config = SnapshotConfig::new();
+        let creator = SnapshotCreator::new(config);
+        let dir = tempfile::tempdir().unwrap();
+
+        // Initial state at slot 100.
+        let pk1 = Pubkey::new_unique();
+        let pk2 = Pubkey::new_unique();
+        let owner = Pubkey::new([10u8; 32]);
+        db.store_published_account_at_slot(pk1, Account::new(1_000, vec![1], owner), 100);
+        db.store_published_account_at_slot(pk2, Account::new(2_000, vec![2], owner), 100);
+
+        // Drain dirty set to simulate "full snapshot taken at slot 100".
+        db.drain_dirty_slots_through(100);
+
+        // Modify pk1 and add pk3 at slot 200.
+        let pk3 = Pubkey::new_unique();
+        db.store_published_account_at_slot(pk1, Account::new(5_000, vec![1, 2, 3], owner), 200);
+        db.store_published_account_at_slot(pk3, Account::new(3_000, vec![3], owner), 200);
+
+        let (stats, incr) = creator
+            .create_incremental_solana_archive(&db, 200, 100, dir.path(), 1000, None)
+            .unwrap();
+
+        assert_eq!(incr.dirty_pubkeys_tracked, 2);
+        assert_eq!(incr.accounts_included, 2);
+        assert_eq!(incr.base_slot, 100);
+        assert_eq!(incr.snapshot_slot, 200);
+        assert_eq!(stats.total_accounts, 2);
+        assert_eq!(stats.total_lamports, 8_000); // 5000 + 3000
+        assert!(stats.archive_path.exists());
+        // Filename should include "incremental-snapshot".
+        let filename = stats.archive_path.file_name().unwrap().to_str().unwrap();
+        assert!(filename.starts_with("incremental-snapshot-100-200-"));
+    }
+
+    #[test]
+    fn incremental_solana_archive_roundtrip() {
+        use crate::snapshot::restore::SnapshotRestorer;
+
+        let db = AccountDatabase::new();
+        let config = SnapshotConfig::new();
+        let creator = SnapshotCreator::new(config);
+        let dir = tempfile::tempdir().unwrap();
+
+        let pk1 = Pubkey::new_unique();
+        let pk2 = Pubkey::new_unique();
+        let owner = Pubkey::new([10u8; 32]);
+        db.store_published_account_at_slot(pk1, Account::new(1_000, vec![1], owner), 100);
+        db.store_published_account_at_slot(pk2, Account::new(2_000, vec![2], owner), 100);
+        db.drain_dirty_slots_through(100);
+
+        // Modify pk1 at slot 200.
+        db.store_published_account_at_slot(pk1, Account::new(9_999, vec![0xAA, 0xBB], owner), 200);
+
+        let (stats, _) = creator
+            .create_incremental_solana_archive(&db, 200, 100, dir.path(), 1000, None)
+            .unwrap();
+
+        // Restore the incremental archive into a fresh DB.
+        let db2 = AccountDatabase::new();
+        let restorer = SnapshotRestorer::new();
+        let archive_data = std::fs::read(&stats.archive_path).unwrap();
+        let result = restorer.restore_bytes(&archive_data, &db2).unwrap();
+
+        assert_eq!(result.accounts_loaded, 1); // only pk1 was modified
+        let a1 = db2.get_published_account(&pk1).unwrap();
+        assert_eq!(a1.meta.lamports, 9_999);
+        assert_eq!(a1.data.as_slice(), &[0xAA, 0xBB]);
+    }
+
+    #[test]
+    fn incremental_solana_archive_drains_dirty_set() {
+        let db = AccountDatabase::new();
+        let config = SnapshotConfig::new();
+        let creator = SnapshotCreator::new(config);
+        let dir = tempfile::tempdir().unwrap();
+
+        let pk = Pubkey::new_unique();
+        db.store_published_account_at_slot(pk, Account::new(100, vec![], Pubkey::zeroed()), 50);
+        assert_eq!(db.dirty_account_count(), 1);
+
+        creator
+            .create_incremental_solana_archive(&db, 50, 0, dir.path(), 1000, None)
+            .unwrap();
+
+        assert_eq!(db.dirty_account_count(), 0);
+    }
+
+    #[test]
+    fn incremental_solana_archive_empty_delta() {
+        let db = AccountDatabase::new();
+        let config = SnapshotConfig::new();
+        let creator = SnapshotCreator::new(config);
+        let dir = tempfile::tempdir().unwrap();
+
+        let (stats, incr) = creator
+            .create_incremental_solana_archive(&db, 100, 50, dir.path(), 1000, None)
+            .unwrap();
+
+        assert_eq!(incr.dirty_pubkeys_tracked, 0);
+        assert_eq!(incr.accounts_included, 0);
+        assert_eq!(stats.total_accounts, 0);
+        assert!(stats.archive_path.exists());
+    }
+
+    #[test]
+    fn incremental_solana_archive_preserves_unmodified_dirty_slots() {
+        let db = AccountDatabase::new();
+        let config = SnapshotConfig::new();
+        let creator = SnapshotCreator::new(config);
+        let dir = tempfile::tempdir().unwrap();
+
+        let pk1 = Pubkey::new_unique();
+        let pk2 = Pubkey::new_unique();
+        db.store_published_account_at_slot(pk1, Account::new(100, vec![], Pubkey::zeroed()), 10);
+        db.store_published_account_at_slot(pk2, Account::new(200, vec![], Pubkey::zeroed()), 30);
+
+        // Only drain through slot 20 — pk2 (slot 30) should survive.
+        let (_, incr) = creator
+            .create_incremental_solana_archive(&db, 20, 0, dir.path(), 1000, None)
+            .unwrap();
+
+        assert_eq!(incr.dirty_pubkeys_tracked, 1); // only pk1
+        assert_eq!(db.dirty_account_count(), 1); // pk2 survives
+    }
+
+    #[test]
+    fn full_then_incremental_solana_archive_workflow() {
+        use crate::snapshot::restore::SnapshotRestorer;
+
+        let db = AccountDatabase::new();
+        let config = SnapshotConfig::new();
+        let creator = SnapshotCreator::new(config);
+        let dir = tempfile::tempdir().unwrap();
+
+        // Initial state.
+        let pk1 = Pubkey::new_unique();
+        let pk2 = Pubkey::new_unique();
+        let owner = Pubkey::new([10u8; 32]);
+        db.store_published_account_at_slot(pk1, Account::new(1_000, vec![1], owner), 100);
+        db.store_published_account_at_slot(pk2, Account::new(2_000, vec![2], owner), 100);
+
+        // Full archive at slot 100.
+        let full_stats = creator
+            .create_solana_archive(&db, 100, dir.path(), 1000)
+            .unwrap();
+        assert_eq!(full_stats.total_accounts, 2);
+
+        // Drain dirty set (simulates: full snapshot completed).
+        db.drain_dirty_slots_through(100);
+
+        // Modifications at slot 200.
+        db.store_published_account_at_slot(pk1, Account::new(5_000, vec![1, 2, 3], owner), 200);
+        let pk3 = Pubkey::new_unique();
+        db.store_published_account_at_slot(pk3, Account::new(3_000, vec![3], owner), 200);
+
+        // Incremental archive at slot 200.
+        let (incr_stats, _) = creator
+            .create_incremental_solana_archive(&db, 200, 100, dir.path(), 1000, None)
+            .unwrap();
+        assert_eq!(incr_stats.total_accounts, 2); // pk1 modified + pk3 new
+
+        // Restore full → then apply incremental → verify final state.
+        let restore_db = AccountDatabase::new();
+        let restorer = SnapshotRestorer::new();
+
+        let full_data = std::fs::read(&full_stats.archive_path).unwrap();
+        restorer.restore_bytes(&full_data, &restore_db).unwrap();
+
+        let incr_data = std::fs::read(&incr_stats.archive_path).unwrap();
+        restorer.restore_bytes(&incr_data, &restore_db).unwrap();
+
+        // pk1: should be updated to 5000.
+        let a1 = restore_db.get_published_account(&pk1).unwrap();
+        assert_eq!(a1.meta.lamports, 5_000);
+        assert_eq!(a1.data.as_slice(), &[1, 2, 3]);
+
+        // pk2: unchanged from full snapshot.
+        let a2 = restore_db.get_published_account(&pk2).unwrap();
+        assert_eq!(a2.meta.lamports, 2_000);
+        assert_eq!(a2.data.as_slice(), &[2]);
+
+        // pk3: new account from incremental.
+        let a3 = restore_db.get_published_account(&pk3).unwrap();
+        assert_eq!(a3.meta.lamports, 3_000);
+        assert_eq!(a3.data.as_slice(), &[3]);
     }
 }
