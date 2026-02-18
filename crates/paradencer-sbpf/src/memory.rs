@@ -6,7 +6,7 @@
 /// a distinct 4 GB range identified by the high nibble of the address.
 use paradencer_constants::vm::{
     MAX_CALL_DEPTH, REGION_HEAP_BASE, REGION_INDEX_MASK, REGION_INPUT_BASE, REGION_OFFSET_MASK,
-    REGION_PROGRAM_BASE, REGION_STACK_BASE, STACK_FRAME_SIZE,
+    REGION_PROGRAM_BASE, REGION_STACK_BASE, STACK_FRAME_SIZE, STACK_GUARD_SIZE,
 };
 
 // ---------------------------------------------------------------------------
@@ -202,21 +202,38 @@ impl MemoryMap {
     }
 
     /// Push a new stack frame, returning the new frame pointer.
-    pub fn push_frame(&mut self) -> Result<u64, MemoryError> {
-        if self.frame_index + 1 >= MAX_CALL_DEPTH {
+    ///
+    /// When `dynamic_frames` is false (V0), each call consumes
+    /// `STACK_FRAME_SIZE + STACK_GUARD_SIZE` bytes (frame + guard zone).
+    /// When `dynamic_frames` is true (V1+), frames are contiguous with
+    /// no guard zone, consuming only `STACK_FRAME_SIZE` bytes.
+    pub fn push_frame(&mut self, dynamic_frames: bool) -> Result<u64, MemoryError> {
+        let advance = if dynamic_frames {
+            1
+        } else {
+            // V0: frame + guard zone = 2 frame slots
+            2
+        };
+        if self.frame_index + advance >= self.max_frames() {
             return Err(MemoryError::StackOverflow);
         }
-        self.frame_index += 1;
+        self.frame_index += advance;
         Ok(self.frame_pointer())
     }
 
     /// Pop the current stack frame, returning the restored frame pointer.
-    pub fn pop_frame(&mut self) -> Result<u64, MemoryError> {
-        if self.frame_index == 0 {
+    pub fn pop_frame(&mut self, dynamic_frames: bool) -> Result<u64, MemoryError> {
+        let retreat = if dynamic_frames { 1 } else { 2 };
+        if self.frame_index < retreat {
             return Err(MemoryError::StackUnderflow);
         }
-        self.frame_index -= 1;
+        self.frame_index -= retreat;
         Ok(self.frame_pointer())
+    }
+
+    /// Maximum number of frame slots based on total stack size.
+    fn max_frames(&self) -> usize {
+        self.stack.len() / STACK_FRAME_SIZE
     }
 
     /// Current frame depth (0 = initial frame).
@@ -512,37 +529,67 @@ mod tests {
     }
 
     #[test]
-    fn push_pop_frames() {
+    fn push_pop_frames_dynamic() {
+        // V1+ dynamic frames: 1 frame slot per push
         let mut map = MemoryMap::new(&[], 256 * 1024, 1024, vec![]);
         assert_eq!(map.frame_depth(), 0);
 
-        let fp1 = map.push_frame().unwrap();
+        let fp1 = map.push_frame(true).unwrap();
         assert_eq!(map.frame_depth(), 1);
         assert_eq!(fp1, REGION_STACK_BASE + 2 * STACK_FRAME_SIZE as u64);
 
-        let fp2 = map.push_frame().unwrap();
+        let fp2 = map.push_frame(true).unwrap();
         assert_eq!(map.frame_depth(), 2);
         assert_eq!(fp2, REGION_STACK_BASE + 3 * STACK_FRAME_SIZE as u64);
 
-        let fp_after_pop = map.pop_frame().unwrap();
+        let fp_after_pop = map.pop_frame(true).unwrap();
         assert_eq!(map.frame_depth(), 1);
         assert_eq!(fp_after_pop, fp1);
     }
 
     #[test]
-    fn stack_overflow() {
+    fn push_pop_frames_v0_with_guard() {
+        // V0 fixed frames: 2 frame slots per push (frame + guard)
+        let mut map = MemoryMap::new(&[], 256 * 1024, 1024, vec![]);
+        assert_eq!(map.frame_depth(), 0);
+
+        let fp1 = map.push_frame(false).unwrap();
+        assert_eq!(map.frame_depth(), 2); // Advanced by 2
+        assert_eq!(fp1, REGION_STACK_BASE + 3 * STACK_FRAME_SIZE as u64);
+
+        let fp_after_pop = map.pop_frame(false).unwrap();
+        assert_eq!(map.frame_depth(), 0);
+        assert_eq!(fp_after_pop, REGION_STACK_BASE + STACK_FRAME_SIZE as u64);
+    }
+
+    #[test]
+    fn stack_overflow_dynamic() {
         let mut map = MemoryMap::new(&[], MAX_CALL_DEPTH * STACK_FRAME_SIZE, 1024, vec![]);
         for _ in 0..MAX_CALL_DEPTH - 1 {
-            map.push_frame().unwrap();
+            map.push_frame(true).unwrap();
         }
-        let result = map.push_frame();
+        let result = map.push_frame(true);
+        assert!(matches!(result, Err(MemoryError::StackOverflow)));
+    }
+
+    #[test]
+    fn stack_overflow_v0() {
+        // V0 uses 2 slots per push, so half the call depth
+        let total_frames = MAX_CALL_DEPTH;
+        let mut map = MemoryMap::new(&[], total_frames * STACK_FRAME_SIZE, 1024, vec![]);
+        // Each push consumes 2 frame slots; we can do (total_frames - 1) / 2 pushes
+        let max_pushes = (total_frames - 1) / 2;
+        for _ in 0..max_pushes {
+            map.push_frame(false).unwrap();
+        }
+        let result = map.push_frame(false);
         assert!(matches!(result, Err(MemoryError::StackOverflow)));
     }
 
     #[test]
     fn stack_underflow() {
         let mut map = make_map();
-        let result = map.pop_frame();
+        let result = map.pop_frame(true);
         assert!(matches!(result, Err(MemoryError::StackUnderflow)));
     }
 

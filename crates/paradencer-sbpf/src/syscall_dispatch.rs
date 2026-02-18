@@ -2533,6 +2533,7 @@ mod tests {
             heap_position: REGION_HEAP_BASE,
             sysvar_snapshot: snapshot,
             cpi_depth: 0,
+            sbpf_version: crate::elf_loader::SbpfVersion::V0,
         }
     }
 

@@ -3,7 +3,7 @@
 /// Implements the fetch-decode-execute loop for sBPF programs.
 /// Supports all ALU32/ALU64 operations, conditional/unconditional jumps,
 /// memory load/store, LDDW, function calls, and syscall dispatch.
-use crate::elf_loader::LoadedProgram;
+use crate::elf_loader::{LoadedProgram, SbpfVersion};
 use crate::instruction::Opcode;
 use crate::memory::{MemoryError, MemoryMap};
 use crate::sysvar_snapshot::SysvarSnapshot;
@@ -66,6 +66,8 @@ pub struct VmState {
     pub sysvar_snapshot: SysvarSnapshot,
     /// CPI invocation depth (separate from function call stack).
     pub cpi_depth: usize,
+    /// sBPF version determining available features and instruction semantics.
+    pub sbpf_version: SbpfVersion,
 }
 
 /// A saved function call frame.
@@ -190,6 +192,8 @@ pub fn execute(
         return Err(VmError::PcOutOfBounds { pc: 0, len: 0 });
     }
 
+    let sbpf_version = program.sbpf_version;
+
     let mut vm = VmState {
         registers: [0u64; REGISTER_COUNT],
         pc: program.entry_point,
@@ -202,6 +206,7 @@ pub fn execute(
         heap_position: paradencer_constants::vm::REGION_HEAP_BASE,
         sysvar_snapshot,
         cpi_depth: 0,
+        sbpf_version,
     };
 
     // Set initial frame pointer (r10)
@@ -276,6 +281,13 @@ pub fn execute(
                 vm.registers[dst] = vm.registers[dst].wrapping_shr(imm as u32);
             }
             Opcode::Neg64 => {
+                // NEG disabled in SBPF V2+
+                if sbpf_version.neg_disabled() {
+                    return Err(VmError::InvalidInstruction {
+                        pc: vm.pc,
+                        opcode: insn.opcode,
+                    });
+                }
                 vm.registers[dst] = (-(vm.registers[dst] as i64)) as u64;
             }
             Opcode::Mod64Imm => {
@@ -375,6 +387,12 @@ pub fn execute(
                 vm.registers[dst] = (vm.registers[dst] as u32).wrapping_shr(imm as u32) as u64;
             }
             Opcode::Neg32 => {
+                if sbpf_version.neg_disabled() {
+                    return Err(VmError::InvalidInstruction {
+                        pc: vm.pc,
+                        opcode: insn.opcode,
+                    });
+                }
                 vm.registers[dst] = (-(vm.registers[dst] as i32)) as u32 as u64;
             }
             Opcode::Mod32Imm => {
@@ -458,6 +476,13 @@ pub fn execute(
             // Byte-order conversion
             // =================================================================
             Opcode::Le => {
+                // LE instruction disabled in SBPF V2+
+                if sbpf_version.le_disabled() {
+                    return Err(VmError::InvalidInstruction {
+                        pc: vm.pc,
+                        opcode: insn.opcode,
+                    });
+                }
                 // Already little-endian on LE hosts; truncate to width
                 vm.registers[dst] = match imm {
                     16 => vm.registers[dst] & 0xFFFF,
@@ -479,6 +504,13 @@ pub fn execute(
             // LDDW (load 64-bit immediate, consumes two instruction slots)
             // =================================================================
             Opcode::Lddw => {
+                // LDDW disabled in SBPF V2+
+                if sbpf_version.lddw_disabled() {
+                    return Err(VmError::InvalidInstruction {
+                        pc: vm.pc,
+                        opcode: insn.opcode,
+                    });
+                }
                 let lo = imm as u32 as u64;
                 // Read the high 32 bits from the next instruction slot
                 if vm.pc + 1 >= instructions.len() {
@@ -931,10 +963,11 @@ pub fn execute(
 
                     vm.call_stack.push(frame);
 
-                    // Advance stack frame
+                    // Advance stack frame.
+                    // V0 uses fixed stack with guard zones; V1+ uses dynamic frames.
                     let new_fp = vm
                         .memory
-                        .push_frame()
+                        .push_frame(sbpf_version.has_dynamic_stack_frames())
                         .map_err(|_| VmError::CallDepthExceeded { pc: vm.pc })?;
                     vm.registers[10] = new_fp;
 
@@ -972,7 +1005,9 @@ pub fn execute(
                 }
                 vm.registers[10] = frame.frame_pointer;
 
-                vm.memory.pop_frame().map_err(|_| VmError::StackUnderflow)?;
+                vm.memory
+                    .pop_frame(sbpf_version.has_dynamic_stack_frames())
+                    .map_err(|_| VmError::StackUnderflow)?;
 
                 vm.pc = frame.return_pc;
                 continue;
@@ -1336,5 +1371,145 @@ mod tests {
         ])
         .unwrap();
         assert_eq!(result.return_value as i64, -64); // Sign-extended
+    }
+
+    // --- Version-aware execution tests ---
+
+    fn run_program_v2(insns: &[Instruction]) -> Result<VmResult, VmError> {
+        let bytes = make_program_bytes(insns);
+        let mut program = load_raw(&bytes).unwrap();
+        program.sbpf_version = SbpfVersion::V2;
+        let memory = MemoryMap::new(&[], TOTAL_STACK_SIZE, DEFAULT_HEAP_SIZE, vec![]);
+        execute(
+            &program,
+            memory,
+            10_000,
+            &NoSyscalls,
+            SysvarSnapshot::default(),
+        )
+    }
+
+    #[test]
+    fn v0_lddw_succeeds() {
+        // V0: LDDW is allowed
+        let result = run_program(&[
+            Instruction::new(Opcode::Lddw as u8, 0, 0, 0, 42),
+            Instruction::new(0, 0, 0, 0, 0),
+            Instruction::new(Opcode::Exit as u8, 0, 0, 0, 0),
+        ])
+        .unwrap();
+        assert_eq!(result.return_value, 42);
+    }
+
+    #[test]
+    fn v2_lddw_rejected() {
+        // V2: LDDW should be rejected
+        let result = run_program_v2(&[
+            Instruction::new(Opcode::Lddw as u8, 0, 0, 0, 42),
+            Instruction::new(0, 0, 0, 0, 0),
+            Instruction::new(Opcode::Exit as u8, 0, 0, 0, 0),
+        ]);
+        assert!(matches!(result, Err(VmError::InvalidInstruction { .. })));
+    }
+
+    #[test]
+    fn v0_le_succeeds() {
+        let result = run_program(&[
+            Instruction::new(Opcode::Mov64Imm as u8, 0, 0, 0, 0x0100),
+            Instruction::new(Opcode::Le as u8, 0, 0, 0, 16),
+            Instruction::new(Opcode::Exit as u8, 0, 0, 0, 0),
+        ])
+        .unwrap();
+        assert_eq!(result.return_value, 0x0100);
+    }
+
+    #[test]
+    fn v2_le_rejected() {
+        let result = run_program_v2(&[
+            Instruction::new(Opcode::Mov64Imm as u8, 0, 0, 0, 0x0100),
+            Instruction::new(Opcode::Le as u8, 0, 0, 0, 16),
+            Instruction::new(Opcode::Exit as u8, 0, 0, 0, 0),
+        ]);
+        assert!(matches!(result, Err(VmError::InvalidInstruction { .. })));
+    }
+
+    #[test]
+    fn v0_neg64_succeeds() {
+        let result = run_program(&[
+            Instruction::new(Opcode::Mov64Imm as u8, 0, 0, 0, 42),
+            Instruction::new(Opcode::Neg64 as u8, 0, 0, 0, 0),
+            Instruction::new(Opcode::Exit as u8, 0, 0, 0, 0),
+        ])
+        .unwrap();
+        assert_eq!(result.return_value as i64, -42);
+    }
+
+    #[test]
+    fn v2_neg64_rejected() {
+        let result = run_program_v2(&[
+            Instruction::new(Opcode::Mov64Imm as u8, 0, 0, 0, 42),
+            Instruction::new(Opcode::Neg64 as u8, 0, 0, 0, 0),
+            Instruction::new(Opcode::Exit as u8, 0, 0, 0, 0),
+        ]);
+        assert!(matches!(result, Err(VmError::InvalidInstruction { .. })));
+    }
+
+    #[test]
+    fn v2_neg32_rejected() {
+        let result = run_program_v2(&[
+            Instruction::new(Opcode::Mov32Imm as u8, 0, 0, 0, 42),
+            Instruction::new(Opcode::Neg32 as u8, 0, 0, 0, 0),
+            Instruction::new(Opcode::Exit as u8, 0, 0, 0, 0),
+        ]);
+        assert!(matches!(result, Err(VmError::InvalidInstruction { .. })));
+    }
+
+    #[test]
+    fn version_propagated_to_vm_state() {
+        // Verify version is accessible from VmState during execution
+        let bytes = make_program_bytes(&[
+            Instruction::new(Opcode::Mov64Imm as u8, 0, 0, 0, 0),
+            Instruction::new(Opcode::Exit as u8, 0, 0, 0, 0),
+        ]);
+        let mut program = load_raw(&bytes).unwrap();
+        program.sbpf_version = SbpfVersion::V3;
+        let memory = MemoryMap::new(&[], TOTAL_STACK_SIZE, DEFAULT_HEAP_SIZE, vec![]);
+        let result = execute(
+            &program,
+            memory,
+            10_000,
+            &NoSyscalls,
+            SysvarSnapshot::default(),
+        )
+        .unwrap();
+        assert_eq!(result.return_value, 0);
+    }
+
+    #[test]
+    fn sbpf_version_feature_flags() {
+        // Verify feature flag methods
+        assert!(!SbpfVersion::V0.has_dynamic_stack_frames());
+        assert!(SbpfVersion::V1.has_dynamic_stack_frames());
+        assert!(SbpfVersion::V2.has_dynamic_stack_frames());
+        assert!(SbpfVersion::V3.has_dynamic_stack_frames());
+
+        assert!(!SbpfVersion::V0.lddw_disabled());
+        assert!(!SbpfVersion::V1.lddw_disabled());
+        assert!(SbpfVersion::V2.lddw_disabled());
+        assert!(SbpfVersion::V3.lddw_disabled());
+
+        assert!(!SbpfVersion::V0.neg_disabled());
+        assert!(!SbpfVersion::V1.neg_disabled());
+        assert!(SbpfVersion::V2.neg_disabled());
+        assert!(SbpfVersion::V3.neg_disabled());
+
+        assert!(!SbpfVersion::V0.le_disabled());
+        assert!(!SbpfVersion::V1.le_disabled());
+        assert!(SbpfVersion::V2.le_disabled());
+        assert!(SbpfVersion::V3.le_disabled());
+
+        assert!(!SbpfVersion::V0.has_static_syscalls());
+        assert!(!SbpfVersion::V2.has_static_syscalls());
+        assert!(SbpfVersion::V3.has_static_syscalls());
     }
 }

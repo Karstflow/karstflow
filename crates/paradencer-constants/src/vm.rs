@@ -282,8 +282,12 @@ pub const SBPF_VERSION_V0: u32 = 0;
 pub const SBPF_VERSION_V1: u32 = 1;
 /// SBPF version 2 (SIMD-0173/0174, stricter validation).
 pub const SBPF_VERSION_V2: u32 = 2;
-/// SBPF version 3 (latest).
+/// SBPF version 3 (static syscalls, stricter ELF headers).
 pub const SBPF_VERSION_V3: u32 = 3;
+
+/// Guard zone size between stack frames in V0 (equal to one frame size).
+/// V0 uses 2x STACK_FRAME_SIZE per call (frame + guard), V1+ is contiguous.
+pub const STACK_GUARD_SIZE: usize = STACK_FRAME_SIZE;
 
 // ---------------------------------------------------------------------------
 // Account serialization

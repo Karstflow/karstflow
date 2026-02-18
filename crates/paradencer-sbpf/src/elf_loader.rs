@@ -37,6 +37,36 @@ impl SbpfVersion {
             _ => Self::V0,
         }
     }
+
+    /// V1+ enables dynamic stack frames (SIMD-0166) — no guard zones.
+    pub fn has_dynamic_stack_frames(self) -> bool {
+        !matches!(self, Self::V0)
+    }
+
+    /// V2+ disables the LDDW instruction (SIMD-0173).
+    pub fn lddw_disabled(self) -> bool {
+        matches!(self, Self::V2 | Self::V3)
+    }
+
+    /// V2+ disables the LE byte-swap instruction (SIMD-0173).
+    pub fn le_disabled(self) -> bool {
+        matches!(self, Self::V2 | Self::V3)
+    }
+
+    /// V2+ disables the NEG instruction (SIMD-0174).
+    pub fn neg_disabled(self) -> bool {
+        matches!(self, Self::V2 | Self::V3)
+    }
+
+    /// V3+ uses static syscall resolution.
+    pub fn has_static_syscalls(self) -> bool {
+        matches!(self, Self::V3)
+    }
+
+    /// V2+ uses src register for CALLX instead of immediate (SIMD-0173).
+    pub fn callx_uses_src_register(self) -> bool {
+        matches!(self, Self::V2 | Self::V3)
+    }
 }
 
 // ---------------------------------------------------------------------------

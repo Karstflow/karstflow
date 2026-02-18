@@ -3,7 +3,7 @@
 /// Verifies that a program is well-formed before execution:
 /// valid opcodes, register indices, jump targets, LDDW pairing,
 /// call targets, and termination.
-use crate::elf_loader::LoadedProgram;
+use crate::elf_loader::{LoadedProgram, SbpfVersion};
 use crate::instruction::Opcode;
 use paradencer_constants::vm::{MAX_DST_REGISTER, MAX_SRC_REGISTER};
 use std::collections::HashSet;
@@ -128,6 +128,17 @@ pub fn validate(
         }
 
         let op = opcode.unwrap();
+        let version = program.sbpf_version;
+
+        // Version-specific opcode restrictions
+        if is_opcode_disabled_for_version(op, version) {
+            errors.push(ValidationError::InvalidOpcode {
+                pc: i,
+                opcode: insn.opcode,
+            });
+            i += 1;
+            continue;
+        }
 
         // Validate LDDW pairing
         if op.is_lddw() {
@@ -216,6 +227,19 @@ fn validate_registers(
             register: insn.src,
             field: "source",
         });
+    }
+}
+
+/// Check if an opcode is disabled for the given SBPF version.
+fn is_opcode_disabled_for_version(op: Opcode, version: SbpfVersion) -> bool {
+    match op {
+        // LDDW disabled in V2+
+        Opcode::Lddw if version.lddw_disabled() => true,
+        // LE (little-endian swap) disabled in V2+
+        Opcode::Le if version.le_disabled() => true,
+        // NEG disabled in V2+
+        Opcode::Neg64 | Opcode::Neg32 if version.neg_disabled() => true,
+        _ => false,
     }
 }
 
