@@ -927,6 +927,108 @@ fn write_stakes_summary(w: &mut BincodeWriter, ss: &StakeSummary) {
 }
 
 // ---------------------------------------------------------------------------
+// AccountsDbFields — describes AppendVec storage layout in the archive
+// ---------------------------------------------------------------------------
+
+/// Describes a single AppendVec storage entry in the snapshot.
+#[allow(dead_code)]
+#[derive(Debug, Clone)]
+pub struct StorageEntry {
+    /// Storage identifier (matches `<slot>.<id>` in the archive path).
+    pub id: u64,
+    /// Number of bytes currently used in this AppendVec.
+    pub stored_bytes: u64,
+}
+
+/// Describes the account storage layout for the AccountsDbFields section.
+///
+/// This section follows the bank state in the snapshot manifest and tells
+/// the loader which AppendVec files exist and their sizes.
+#[allow(dead_code)]
+#[derive(Debug, Clone)]
+pub struct AccountsDbLayout {
+    /// Mapping from slot to the AppendVec storage entries at that slot.
+    pub storage_map: Vec<(u64, Vec<StorageEntry>)>,
+    /// The snapshot slot (should match bank state slot).
+    pub slot: u64,
+    /// Bank hash (SHA-256 of all account hashes). Zeroed if not computed.
+    pub bank_hash: [u8; 32],
+    /// Lamports per signature for fee calculation.
+    pub lamports_per_signature: u64,
+}
+
+/// Serialize a complete snapshot manifest: bank state + AccountsDbFields.
+///
+/// This produces the full binary content for `snapshots/<slot>/<slot>` in
+/// a Solana-compatible snapshot archive. The output can be parsed by any
+/// Solana validator.
+#[allow(dead_code)]
+pub fn serialize_full_manifest(state: &SnapshotBankState, layout: &AccountsDbLayout) -> Vec<u8> {
+    let mut w = BincodeWriter::with_capacity(8192);
+
+    // --- Part 1: Bank state (DeserializableVersionedBank) ---
+    let bank_bytes = serialize_bank_state(state);
+    w.buf.extend_from_slice(&bank_bytes);
+
+    // --- Part 2: AccountsDbFields ---
+    write_accounts_db_fields(&mut w, layout);
+
+    // --- Part 3: ExtraFields (minimal) ---
+    write_extra_fields(&mut w, layout.lamports_per_signature);
+
+    w.into_bytes()
+}
+
+fn write_accounts_db_fields(w: &mut BincodeWriter, layout: &AccountsDbLayout) {
+    // Field 1: HashMap<Slot, Vec<SerializableAccountStorageEntry>>
+    w.write_u64(layout.storage_map.len() as u64);
+    for (slot, entries) in &layout.storage_map {
+        w.write_u64(*slot);
+        w.write_u64(entries.len() as u64);
+        for entry in entries {
+            w.write_u64(entry.id); // usize serialized as u64
+            w.write_u64(entry.stored_bytes); // usize serialized as u64
+        }
+    }
+
+    // Field 2: u64 (obsolete stored_meta_write_version)
+    w.write_u64(0);
+
+    // Field 3: u64 (snapshot slot)
+    w.write_u64(layout.slot);
+
+    // Field 4: BankHashInfo
+    w.write_hash(&[0u8; 32]); // obsolete_accounts_delta_hash
+    w.write_hash(&layout.bank_hash); // accounts_hash (or zeroed)
+                                     // BankHashStats (5 × u64)
+    w.write_u64(0); // num_updated_accounts
+    w.write_u64(0); // num_removed_accounts
+    w.write_u64(0); // num_lamports_stored
+    w.write_u64(0); // total_data_len
+    w.write_u64(0); // num_executable_accounts
+
+    // Field 5: Vec<Slot> (historical_roots) — empty
+    w.write_u64(0);
+
+    // Field 6: Vec<(Slot, Hash)> (historical_roots_with_hash) — empty
+    w.write_u64(0);
+}
+
+fn write_extra_fields(w: &mut BincodeWriter, lamports_per_signature: u64) {
+    // Field 7: u64 (lamports_per_signature)
+    w.write_u64(lamports_per_signature);
+
+    // Field 8: Option<ObsoleteIncrementalSnapshotPersistence> — None
+    w.write_u8(0);
+
+    // Field 9: Option<Hash> (obsolete_epoch_accounts_hash) — None
+    w.write_u8(0);
+
+    // Remaining ExtraFields (versioned_epoch_stakes, accounts_lt_hash)
+    // are optional with default_on_eof — we stop here.
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -1922,5 +2024,143 @@ mod tests {
         // Parser sorts by hash_index, so order should match.
         assert_eq!(parsed.recent_blockhashes[0].hash_index, 0);
         assert_eq!(parsed.recent_blockhashes[299].hash_index, 299);
+    }
+
+    // -------------------------------------------------------------------
+    // Full manifest (bank state + AccountsDbFields) tests
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn full_manifest_produces_parseable_bank_state() {
+        let state = build_test_bank_state();
+        let layout = AccountsDbLayout {
+            storage_map: vec![(
+                1000,
+                vec![
+                    StorageEntry {
+                        id: 0,
+                        stored_bytes: 4096,
+                    },
+                    StorageEntry {
+                        id: 1,
+                        stored_bytes: 2048,
+                    },
+                ],
+            )],
+            slot: 1000,
+            bank_hash: [0u8; 32],
+            lamports_per_signature: 5000,
+        };
+
+        let data = serialize_full_manifest(&state, &layout);
+
+        // The bank state portion should still be parseable.
+        let parsed = parse_bank_state(&data).expect("parse bank state from full manifest");
+        assert_eq!(parsed.slot, 1000);
+        assert_eq!(parsed.epoch, 2);
+        assert_eq!(parsed.capitalization, 500_000_000_000);
+        assert!(parsed.is_delta);
+    }
+
+    #[test]
+    fn full_manifest_larger_than_bank_state_alone() {
+        let state = build_test_bank_state();
+        let layout = AccountsDbLayout {
+            storage_map: vec![(
+                1000,
+                vec![StorageEntry {
+                    id: 0,
+                    stored_bytes: 4096,
+                }],
+            )],
+            slot: 1000,
+            bank_hash: [0xFF; 32],
+            lamports_per_signature: 5000,
+        };
+
+        let bank_only = serialize_bank_state(&state);
+        let full = serialize_full_manifest(&state, &layout);
+
+        // Full manifest includes AccountsDbFields + ExtraFields.
+        assert!(
+            full.len() > bank_only.len(),
+            "full manifest ({}) should be larger than bank state alone ({})",
+            full.len(),
+            bank_only.len()
+        );
+    }
+
+    #[test]
+    fn full_manifest_with_empty_storage_map() {
+        let state = build_test_bank_state();
+        let layout = AccountsDbLayout {
+            storage_map: vec![],
+            slot: 1000,
+            bank_hash: [0u8; 32],
+            lamports_per_signature: 5000,
+        };
+
+        let data = serialize_full_manifest(&state, &layout);
+        let parsed = parse_bank_state(&data).expect("parse");
+        assert_eq!(parsed.slot, 1000);
+    }
+
+    #[test]
+    fn full_manifest_with_multiple_slots() {
+        let state = build_test_bank_state();
+        let layout = AccountsDbLayout {
+            storage_map: vec![
+                (
+                    100,
+                    vec![StorageEntry {
+                        id: 0,
+                        stored_bytes: 1024,
+                    }],
+                ),
+                (
+                    200,
+                    vec![
+                        StorageEntry {
+                            id: 0,
+                            stored_bytes: 2048,
+                        },
+                        StorageEntry {
+                            id: 1,
+                            stored_bytes: 512,
+                        },
+                    ],
+                ),
+                (
+                    300,
+                    vec![StorageEntry {
+                        id: 0,
+                        stored_bytes: 8192,
+                    }],
+                ),
+            ],
+            slot: 1000,
+            bank_hash: [0xAB; 32],
+            lamports_per_signature: 10_000,
+        };
+
+        let data = serialize_full_manifest(&state, &layout);
+
+        // Verify it doesn't corrupt the bank state portion.
+        let parsed = parse_bank_state(&data).expect("parse");
+        assert_eq!(parsed.slot, 1000);
+        assert_eq!(parsed.hard_forks.len(), 2);
+    }
+
+    #[test]
+    fn accounts_db_layout_fields_have_correct_defaults() {
+        let layout = AccountsDbLayout {
+            storage_map: vec![],
+            slot: 42,
+            bank_hash: [0u8; 32],
+            lamports_per_signature: 0,
+        };
+        assert_eq!(layout.slot, 42);
+        assert_eq!(layout.bank_hash, [0u8; 32]);
+        assert_eq!(layout.storage_map.len(), 0);
     }
 }

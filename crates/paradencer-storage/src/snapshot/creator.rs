@@ -1,5 +1,7 @@
 use super::append_vec::{account_to_append_vec, serialize_append_vec};
-use super::bank_fields::{serialize_bank_state, SnapshotBankState};
+use super::bank_fields::{
+    serialize_full_manifest, AccountsDbLayout, SnapshotBankState, StorageEntry,
+};
 use super::metadata::{CompressionType, SnapshotConfig, SnapshotManifest, SnapshotMetadata};
 use super::solana_archive::SnapshotArchiveBuilder;
 use crate::accounts::{Account, AccountDatabase, Pubkey};
@@ -392,24 +394,43 @@ impl SnapshotCreator {
             .map(|(pk, acc)| account_to_append_vec(pk, acc))
             .collect();
 
+        // Split accounts into AppendVec chunks and track their sizes.
+        let chunk_size = max_accounts_per_vec.max(1);
+        let mut vec_count = 0u64;
+        let mut storage_entries = Vec::new();
+
         // Build the archive.
         let mut builder = SnapshotArchiveBuilder::new();
         builder.set_version("1.18.26");
 
-        let manifest_data = match bank_state {
-            Some(state) => serialize_bank_state(state),
-            None => Vec::new(),
-        };
-        builder.set_manifest(slot, manifest_data);
-
-        // Split accounts into AppendVec chunks.
-        let chunk_size = max_accounts_per_vec.max(1);
-        let mut vec_count = 0u64;
         for chunk in av_accounts.chunks(chunk_size) {
             let data = serialize_append_vec(chunk);
+            storage_entries.push(StorageEntry {
+                id: vec_count,
+                stored_bytes: data.len() as u64,
+            });
             builder.add_account_vec(slot, vec_count, data);
             vec_count += 1;
         }
+
+        // Build the manifest: bank state + AccountsDbFields.
+        let manifest_data = match bank_state {
+            Some(state) => {
+                let layout = AccountsDbLayout {
+                    storage_map: if storage_entries.is_empty() {
+                        vec![]
+                    } else {
+                        vec![(slot, storage_entries)]
+                    },
+                    slot,
+                    bank_hash: [0u8; 32],
+                    lamports_per_signature: state.fee_rate_governor.target_lamports_per_signature,
+                };
+                serialize_full_manifest(state, &layout)
+            }
+            None => Vec::new(),
+        };
+        builder.set_manifest(slot, manifest_data);
 
         // Compress and write.
         let compressed = builder
