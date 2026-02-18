@@ -207,7 +207,7 @@ impl SnapshotLoader {
 
     fn load_accounts(
         &self,
-        _db: &AccountDatabase,
+        db: &AccountDatabase,
         snapshot_data: &SnapshotData,
     ) -> Result<HashMap<Pubkey, Account>, StorageError> {
         let total_accounts = snapshot_data.accounts.len() as u64;
@@ -216,8 +216,9 @@ impl SnapshotLoader {
 
         let accounts = self.deserialize_accounts(&snapshot_data.accounts)?;
 
-        // In a real implementation, we would need to write these accounts to the database
-        // Since AccountDatabase doesn't have a direct bulk insert method, we'll return the map
+        // Insert all accounts into the database at the snapshot slot.
+        db.bulk_insert_published_accounts_at_slot(accounts.clone(), snapshot_data.slot)?;
+
         Ok(accounts)
     }
 
@@ -292,6 +293,36 @@ impl SnapshotLoader {
             metadata,
         })
     }
+
+    /// Apply an incremental snapshot directly to AccountDatabase.
+    ///
+    /// Delta accounts override existing accounts in the database. Accounts
+    /// not present in the increment remain unchanged. This avoids the
+    /// intermediate HashMap step when the caller already has a live database.
+    pub fn apply_incremental_to_db(
+        &self,
+        db: &AccountDatabase,
+        snapshot_path: &Path,
+        manifest_path: &Path,
+    ) -> Result<LoadedSnapshot, StorageError> {
+        let (delta_accounts, metadata) = self.load_snapshot_to_map(snapshot_path, manifest_path)?;
+
+        if !metadata.is_incremental() {
+            return Err(StorageError::AccountDatabaseError {
+                details: "Snapshot is not incremental".to_string(),
+            });
+        }
+
+        let delta_count = delta_accounts.len() as u64;
+        db.bulk_insert_published_accounts_at_slot(delta_accounts, metadata.slot)?;
+
+        Ok(LoadedSnapshot {
+            slot: metadata.slot,
+            total_accounts: delta_count,
+            total_lamports: 0, // Caller can query db for accurate total.
+            metadata,
+        })
+    }
 }
 
 impl Default for SnapshotLoader {
@@ -311,6 +342,9 @@ pub struct LoadedSnapshot {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::accounts::primitives::{AccountData, AccountMeta};
+    use crate::snapshot::creator::SnapshotCreator;
+    use crate::snapshot::metadata::SnapshotConfig;
 
     #[test]
     fn test_progress_tracking() {
@@ -373,5 +407,302 @@ mod tests {
 
         let accounts = result.unwrap();
         assert_eq!(accounts.len(), 1);
+    }
+
+    // -------------------------------------------------------------------
+    // Roundtrip tests: create snapshot → load snapshot → verify
+    // -------------------------------------------------------------------
+
+    fn make_account(lamports: u64, data: Vec<u8>, owner: Pubkey) -> Account {
+        Account {
+            meta: AccountMeta {
+                lamports,
+                owner,
+                executable: false,
+                rent_epoch: 0,
+            },
+            data: AccountData::new(data),
+        }
+    }
+
+    #[test]
+    fn load_snapshot_inserts_into_database() {
+        let db = AccountDatabase::new();
+        let config = SnapshotConfig::new();
+        let creator = SnapshotCreator::new(config);
+        let dir = tempfile::tempdir().unwrap();
+
+        // Store accounts and create a full snapshot.
+        let pk1 = Pubkey::new_unique();
+        let pk2 = Pubkey::new_unique();
+        let owner = Pubkey::new([10u8; 32]);
+        db.store_published_account(pk1, make_account(1_000, vec![1, 2], owner));
+        db.store_published_account(pk2, make_account(2_000, vec![3, 4, 5], owner));
+
+        let manifest = creator.create_full_snapshot(&db, 100, dir.path()).unwrap();
+
+        // Load into a fresh database.
+        let db2 = AccountDatabase::new();
+        let loader = SnapshotLoader::new();
+        let snapshot_path = dir.path().join("full-100.snapshot");
+        let manifest_path = dir.path().join("full-100.snapshot.manifest");
+        let result = loader
+            .load_snapshot(&snapshot_path, &manifest_path, &db2)
+            .unwrap();
+
+        assert_eq!(result.slot, 100);
+        assert_eq!(result.total_accounts, 2);
+
+        // Verify accounts exist in the new database.
+        let a1 = db2.get_published_account(&pk1).unwrap();
+        assert_eq!(a1.meta.lamports, 1_000);
+        assert_eq!(a1.data.as_slice(), &[1, 2]);
+
+        let a2 = db2.get_published_account(&pk2).unwrap();
+        assert_eq!(a2.meta.lamports, 2_000);
+        assert_eq!(a2.data.as_slice(), &[3, 4, 5]);
+
+        // Owner index should be populated.
+        assert_eq!(db2.get_account_count(), 2);
+        let _ = manifest;
+    }
+
+    #[test]
+    fn apply_incremental_to_db_merges_delta() {
+        let db = AccountDatabase::new();
+        let config = SnapshotConfig::new();
+        let creator = SnapshotCreator::new(config);
+        let dir = tempfile::tempdir().unwrap();
+
+        // Base state: two accounts at slot 100.
+        let pk1 = Pubkey::new_unique();
+        let pk2 = Pubkey::new_unique();
+        let owner = Pubkey::new([10u8; 32]);
+        db.store_published_account_at_slot(pk1, make_account(1_000, vec![1], owner), 100);
+        db.store_published_account_at_slot(pk2, make_account(2_000, vec![2], owner), 100);
+
+        // Create full snapshot and drain dirty set.
+        creator.create_full_snapshot(&db, 100, dir.path()).unwrap();
+        db.drain_dirty_slots_through(100);
+
+        // Modify pk1 and add pk3 at slot 200.
+        let pk3 = Pubkey::new_unique();
+        db.store_published_account_at_slot(pk1, make_account(5_000, vec![1, 2, 3], owner), 200);
+        db.store_published_account_at_slot(pk3, make_account(3_000, vec![3], owner), 200);
+
+        // Create incremental snapshot via dirty-set.
+        let (_, stats) = creator
+            .create_incremental_from_dirty_set(&db, 200, 100, dir.path())
+            .unwrap();
+        assert_eq!(stats.accounts_included, 2);
+
+        // Load full snapshot into fresh database, then apply incremental.
+        let db2 = AccountDatabase::new();
+        let loader = SnapshotLoader::new();
+
+        let full_snap = dir.path().join("full-100.snapshot");
+        let full_manifest = dir.path().join("full-100.snapshot.manifest");
+        loader
+            .load_snapshot(&full_snap, &full_manifest, &db2)
+            .unwrap();
+
+        // Verify base state.
+        assert_eq!(
+            db2.get_published_account(&pk1).unwrap().meta.lamports,
+            1_000
+        );
+        assert!(db2.get_published_account(&pk3).is_none());
+
+        // Apply incremental.
+        let incr_snap = dir.path().join("incremental-200.snapshot");
+        let incr_manifest = dir.path().join("incremental-200.snapshot.manifest");
+        let incr_result = loader
+            .apply_incremental_to_db(&db2, &incr_snap, &incr_manifest)
+            .unwrap();
+
+        assert_eq!(incr_result.slot, 200);
+        assert_eq!(incr_result.total_accounts, 2);
+
+        // pk1 updated, pk2 unchanged, pk3 new.
+        assert_eq!(
+            db2.get_published_account(&pk1).unwrap().meta.lamports,
+            5_000
+        );
+        assert_eq!(
+            db2.get_published_account(&pk1).unwrap().data.as_slice(),
+            &[1, 2, 3]
+        );
+        assert_eq!(
+            db2.get_published_account(&pk2).unwrap().meta.lamports,
+            2_000
+        );
+        assert_eq!(
+            db2.get_published_account(&pk3).unwrap().meta.lamports,
+            3_000
+        );
+
+        assert_eq!(db2.get_account_count(), 3);
+    }
+
+    #[test]
+    fn apply_incremental_to_db_rejects_full_snapshot() {
+        let db = AccountDatabase::new();
+        let config = SnapshotConfig::new();
+        let creator = SnapshotCreator::new(config);
+        let dir = tempfile::tempdir().unwrap();
+
+        // Create a full snapshot (not incremental).
+        creator.create_full_snapshot(&db, 50, dir.path()).unwrap();
+
+        let loader = SnapshotLoader::new();
+        let snap = dir.path().join("full-50.snapshot");
+        let manifest = dir.path().join("full-50.snapshot.manifest");
+        let result = loader.apply_incremental_to_db(&db, &snap, &manifest);
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn full_roundtrip_preserves_account_data() {
+        let db = AccountDatabase::new();
+        let config = SnapshotConfig::new();
+        let creator = SnapshotCreator::new(config);
+        let dir = tempfile::tempdir().unwrap();
+
+        // Store accounts with varied data.
+        let mut pubkeys = Vec::new();
+        for i in 0..20u8 {
+            let pk = Pubkey::new_unique();
+            let account = make_account(
+                (i as u64 + 1) * 100,
+                vec![i; (i as usize + 1) * 10],
+                Pubkey::new([i + 1; 32]),
+            );
+            db.store_published_account(pk, account);
+            pubkeys.push(pk);
+        }
+
+        creator.create_full_snapshot(&db, 500, dir.path()).unwrap();
+
+        // Load into fresh database.
+        let db2 = AccountDatabase::new();
+        let loader = SnapshotLoader::new();
+        let snap = dir.path().join("full-500.snapshot");
+        let manifest = dir.path().join("full-500.snapshot.manifest");
+        loader.load_snapshot(&snap, &manifest, &db2).unwrap();
+
+        // Every account should match exactly.
+        for pk in &pubkeys {
+            let original = db.get_published_account(pk).unwrap();
+            let restored = db2.get_published_account(pk).unwrap();
+            assert_eq!(original, restored, "Account mismatch for pubkey {:?}", pk);
+        }
+
+        assert_eq!(db2.get_account_count(), 20);
+        assert_eq!(db2.get_total_lamports(), db.get_total_lamports());
+    }
+
+    #[test]
+    fn incremental_roundtrip_with_multiple_deltas() {
+        let db = AccountDatabase::new();
+        let config = SnapshotConfig::new();
+        let creator = SnapshotCreator::new(config);
+        let dir = tempfile::tempdir().unwrap();
+        let owner = Pubkey::new([10u8; 32]);
+
+        // Initial state at slot 100.
+        let pk1 = Pubkey::new_unique();
+        let pk2 = Pubkey::new_unique();
+        db.store_published_account_at_slot(pk1, make_account(100, vec![1], owner), 100);
+        db.store_published_account_at_slot(pk2, make_account(200, vec![2], owner), 100);
+
+        creator.create_full_snapshot(&db, 100, dir.path()).unwrap();
+        db.drain_dirty_slots_through(100);
+
+        // Delta 1: modify pk1 at slot 150.
+        db.store_published_account_at_slot(pk1, make_account(150, vec![1, 5], owner), 150);
+
+        // Delta 2: add pk3 at slot 200.
+        let pk3 = Pubkey::new_unique();
+        db.store_published_account_at_slot(pk3, make_account(300, vec![3], owner), 200);
+
+        let (_, stats) = creator
+            .create_incremental_from_dirty_set(&db, 200, 100, dir.path())
+            .unwrap();
+        assert_eq!(stats.dirty_pubkeys_tracked, 2);
+
+        // Restore: full + incremental into fresh db.
+        let db2 = AccountDatabase::new();
+        let loader = SnapshotLoader::new();
+
+        loader
+            .load_snapshot(
+                &dir.path().join("full-100.snapshot"),
+                &dir.path().join("full-100.snapshot.manifest"),
+                &db2,
+            )
+            .unwrap();
+
+        loader
+            .apply_incremental_to_db(
+                &db2,
+                &dir.path().join("incremental-200.snapshot"),
+                &dir.path().join("incremental-200.snapshot.manifest"),
+            )
+            .unwrap();
+
+        // Verify final state matches original db.
+        for pk in [pk1, pk2, pk3] {
+            let original = db.get_published_account(&pk).unwrap();
+            let restored = db2.get_published_account(&pk).unwrap();
+            assert_eq!(original, restored);
+        }
+    }
+
+    #[test]
+    fn load_snapshot_sets_correct_slot_on_loaded_result() {
+        let db = AccountDatabase::new();
+        let config = SnapshotConfig::new();
+        let creator = SnapshotCreator::new(config);
+        let dir = tempfile::tempdir().unwrap();
+
+        let pk = Pubkey::new_unique();
+        db.store_published_account(pk, make_account(42, vec![], Pubkey::zeroed()));
+        creator.create_full_snapshot(&db, 777, dir.path()).unwrap();
+
+        let loader = SnapshotLoader::new();
+        let result = loader
+            .load_snapshot(
+                &dir.path().join("full-777.snapshot"),
+                &dir.path().join("full-777.snapshot.manifest"),
+                &AccountDatabase::new(),
+            )
+            .unwrap();
+
+        assert_eq!(result.slot, 777);
+        assert_eq!(result.metadata.slot, 777);
+    }
+
+    #[test]
+    fn empty_snapshot_roundtrip() {
+        let db = AccountDatabase::new();
+        let config = SnapshotConfig::new();
+        let creator = SnapshotCreator::new(config);
+        let dir = tempfile::tempdir().unwrap();
+
+        creator.create_full_snapshot(&db, 0, dir.path()).unwrap();
+
+        let db2 = AccountDatabase::new();
+        let loader = SnapshotLoader::new();
+        let result = loader
+            .load_snapshot(
+                &dir.path().join("full-0.snapshot"),
+                &dir.path().join("full-0.snapshot.manifest"),
+                &db2,
+            )
+            .unwrap();
+
+        assert_eq!(result.total_accounts, 0);
+        assert_eq!(db2.get_account_count(), 0);
     }
 }
