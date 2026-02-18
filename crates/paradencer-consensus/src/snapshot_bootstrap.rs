@@ -6,13 +6,17 @@
 
 use crate::bank::Bank;
 use crate::bank_forks::{BankForks, BankForksError};
+use crate::clock::Clock;
+use crate::epoch_schedule::EpochScheduleConfig;
+use crate::rent::Rent;
 use crate::stake::{deserialize_stake_state, StakeState};
 use crate::stake_history::{StakeHistory, StakeHistoryEntry};
+use crate::sysvars::SysvarCache;
 use crate::transaction_cache::SeedEntry;
-use crate::{LeaderSchedule, StakeTracker};
+use crate::{EpochSchedule, LeaderSchedule, StakeTracker};
 use paradencer_constants::block_limits::MESSAGE_HASH_PREFIX_BYTES;
 use paradencer_ids::STAKE_PROGRAM_ID;
-use paradencer_storage::{AccountDatabase, RestoreResult, StatusCacheEntry};
+use paradencer_storage::{AccountDatabase, RestoreResult, SnapshotBankState, StatusCacheEntry};
 use std::sync::{Arc, RwLock};
 
 /// Result of a successful snapshot bootstrap.
@@ -84,8 +88,9 @@ impl From<BankForksError> for BootstrapError {
 /// 2. Computes the cumulative lattice hash from all restored accounts
 /// 3. Initializes stake tracker from restored accounts
 /// 4. Loads stake history from the snapshot for warmup/cooldown
-/// 5. Seeds the transaction cache from the status cache
-/// 6. Wraps in `BankForks` as the root bank
+/// 5. Initializes the sysvar cache (clock, epoch schedule, rent)
+/// 6. Seeds the transaction cache from the status cache
+/// 7. Wraps in `BankForks` as the root bank
 ///
 /// The caller is responsible for running the `SnapshotRestorer` first
 /// to populate the `AccountDatabase` and produce the `RestoreResult`.
@@ -114,7 +119,11 @@ pub fn bootstrap_from_snapshot(
     let stake_history_entries = stake_history.len();
     bank.set_stake_history(Arc::new(RwLock::new(stake_history)));
 
-    // Step 5: Seed transaction cache from status cache.
+    // Step 5: Initialize sysvar cache from snapshot state.
+    let sysvar_cache = initialize_sysvar_cache(bank_state);
+    bank.set_sysvar_cache(Arc::new(sysvar_cache));
+
+    // Step 6: Seed transaction cache from status cache.
     let transactions_seeded = if let Some(status_cache) = &restore_result.status_cache {
         let seed_entries = status_cache.entries.iter().map(convert_status_cache_entry);
         bank.seed_transaction_cache(seed_entries)
@@ -122,7 +131,7 @@ pub fn bootstrap_from_snapshot(
         0
     };
 
-    // Step 6: Wrap in BankForks.
+    // Step 7: Wrap in BankForks.
     let bank_forks = BankForks::new_from_snapshot(bank)?;
 
     Ok(BootstrapResult {
@@ -167,6 +176,36 @@ fn initialize_stakes(accounts: &AccountDatabase, epoch: u64) -> (StakeTracker, S
 
     stats.vote_accounts_with_stake = tracker.stake_by_vote_account().len();
     (tracker, stats)
+}
+
+/// Initialize the sysvar cache from snapshot bank state.
+///
+/// Creates a SysvarCache populated with clock, epoch schedule, and rent
+/// values derived from the snapshot manifest.
+fn initialize_sysvar_cache(bank_state: &SnapshotBankState) -> SysvarCache {
+    let clock = Clock {
+        slot: bank_state.slot,
+        epoch_start_timestamp: bank_state.genesis_creation_time,
+        epoch: bank_state.epoch,
+        leader_schedule_epoch: bank_state.epoch.saturating_add(1),
+        unix_timestamp: bank_state.genesis_creation_time,
+    };
+
+    let epoch_schedule = EpochSchedule::new(EpochScheduleConfig {
+        slots_per_epoch: bank_state.epoch_schedule.slots_per_epoch,
+        leader_schedule_slot_offset: bank_state.epoch_schedule.leader_schedule_slot_offset,
+        warmup: bank_state.epoch_schedule.warmup,
+        first_normal_epoch: bank_state.epoch_schedule.first_normal_epoch,
+        first_normal_slot: bank_state.epoch_schedule.first_normal_slot,
+    });
+
+    let rent = Rent {
+        lamports_per_byte_year: bank_state.rent.lamports_per_byte_year,
+        exemption_threshold: bank_state.rent.exemption_threshold,
+        burn_percent: bank_state.rent.burn_percent,
+    };
+
+    SysvarCache::new(clock, epoch_schedule, rent)
 }
 
 /// Build stake history from snapshot's parsed stake summary.
@@ -871,5 +910,54 @@ mod tests {
         let history = child_history.read().unwrap();
         assert_eq!(history.len(), 1);
         assert!(history.get(10).is_some());
+    }
+
+    // ── sysvar cache initialization tests ──────────────────────────────
+
+    #[test]
+    fn bootstrap_initializes_sysvar_cache() {
+        let db = Arc::new(AccountDatabase::new());
+        let result = make_restore_result(1000);
+        let leader_schedule = make_leader_schedule();
+
+        let bootstrap = bootstrap_from_snapshot(db, &result, leader_schedule).unwrap();
+        let bank = bootstrap.bank_forks.working_bank();
+
+        // Sysvar cache should be attached.
+        assert!(bank.sysvar_cache().is_some());
+
+        let cache = bank.sysvar_cache().unwrap();
+        let clock = cache.clock();
+        assert_eq!(clock.slot, 1000);
+        assert_eq!(clock.epoch, 0);
+    }
+
+    #[test]
+    fn bootstrap_sysvar_cache_has_correct_epoch_schedule() {
+        let db = Arc::new(AccountDatabase::new());
+        let result = make_restore_result(1000);
+        let leader_schedule = make_leader_schedule();
+
+        let bootstrap = bootstrap_from_snapshot(db, &result, leader_schedule).unwrap();
+        let bank = bootstrap.bank_forks.working_bank();
+        let cache = bank.sysvar_cache().unwrap();
+
+        let epoch_schedule = cache.epoch_schedule();
+        assert_eq!(epoch_schedule.config().slots_per_epoch, 432_000);
+    }
+
+    #[test]
+    fn bootstrap_sysvar_cache_has_correct_rent() {
+        let db = Arc::new(AccountDatabase::new());
+        let result = make_restore_result(1000);
+        let leader_schedule = make_leader_schedule();
+
+        let bootstrap = bootstrap_from_snapshot(db, &result, leader_schedule).unwrap();
+        let bank = bootstrap.bank_forks.working_bank();
+        let cache = bank.sysvar_cache().unwrap();
+
+        let rent = cache.rent();
+        assert_eq!(rent.lamports_per_byte_year, 3_480);
+        assert!((rent.exemption_threshold - 2.0).abs() < f64::EPSILON);
     }
 }
