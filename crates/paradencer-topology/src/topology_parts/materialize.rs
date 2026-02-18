@@ -163,6 +163,9 @@ pub fn materialize_services(
                     },
                 )))
             }
+            // Network and QUIC tiles run dedicated poll loops outside
+            // the Service-based runtime. They are launched separately.
+            StageKind::NetworkTile | StageKind::QuicTile => {}
         }
     }
 

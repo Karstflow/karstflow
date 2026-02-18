@@ -73,6 +73,8 @@ pub enum StageKind {
     ShredSanitizer,
     BlockBuilder,
     Telemetry,
+    NetworkTile,
+    QuicTile,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -81,6 +83,7 @@ pub enum LinkKind {
     PacketStream,
     ShredStream,
     TransactionStream,
+    QuicStream,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

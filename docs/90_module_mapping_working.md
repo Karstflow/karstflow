@@ -90,9 +90,9 @@ Native Firedancer total: ~623,600 lines C+H (excluding discoh/Frankendancer).
 | `disco/gui` | 11,757 | N/A (skip for now) | Web dashboard |
 | `disco/metrics` | 7,956 | `paradencer-observability` | Metrics/telemetry |
 | `disco/bundle` | 5,566 | **not started** | MEV/bundle support |
-| `disco/net` | 5,161 | `paradencer-ingress` | Network tile |
+| `disco/net` | 5,161 | `paradencer-net/tile/net_tile` + `paradencer-config/network` | Network tile with transport backend, config integration |
 | `disco/topo` | 3,186 | `paradencer-topology` | Topology wiring |
-| `disco/quic` | 2,172 | `paradencer-ingress/quic` | QUIC tile wrapper |
+| `disco/quic` | 2,172 | `paradencer-net/tile/quic_tile` | QUIC tile with engine service, TPU reassembly |
 | `disco/verify+dedup` | 2,543 | `paradencer-ingress` | Sig verify + dedup |
 | `disco/store` | 1,210 | `paradencer-storage/blockstore` | Block store tile |
 | `disco/*` (other) | ~9,200 | `paradencer-stages` + config | keyguard, events, etc. |
@@ -105,11 +105,17 @@ Native Firedancer total: ~623,600 lines C+H (excluding discoh/Frankendancer).
 | `discof/poh` | 1,631 | `paradencer-stages/block_producer/poh` | Proof of History |
 | `discof/tower` | 1,578 | `paradencer-consensus/tower` | Tower tile |
 | `discof/*` (other) | ~11,600 | various | reasm, genesis, txsend, etc. |
-| `waltz/quic` | 24,957 | `paradencer-net/quic` (custom) + quinn | QUIC protocol — custom impl in progress |
+| `waltz/quic` | 24,957 | `paradencer-net/quic` (custom) | QUIC v1 engine: varint, headers, frames, connections, streams, ACK, service queue, retry, crypto |
 | `waltz/h2+http` | 14,177 | hyper crate | HTTP |
-| `waltz/tls` | 5,666 | `paradencer-net/tls` (custom) | TLS 1.3 — HKDF, AEAD, X25519, handshake types done |
+| `waltz/tls` | 5,666 | `paradencer-net/tls` (custom) | TLS 1.3: HKDF, AES-128-GCM AEAD, X25519 key exchange, handshake state machine |
 | `waltz/grpc` | 2,353 | tonic crate (planned) | gRPC |
-| `waltz/*` (other) | 9,148 | `paradencer-net` (packet, wire, socket, io) | IP, UDP, XDP — packet/wire/socket done |
+| `waltz/aio` | ~1,200 | `paradencer-net/io` | I/O abstraction: IoHandle (fn-pointer + ctx), PacketSender/Receiver traits |
+| `waltz/ip` | ~2,000 | `paradencer-net/routing` | FIB4 routing: dual-path IPv4 lookup (HashMap /32 + sorted prefix array) |
+| `waltz/neigh` | ~1,500 | `paradencer-net/neighbor` | ARP neighbor table: open-addressing hashmap, probe suppression |
+| `waltz/xdp+xsk` | ~3,500 | `paradencer-net/xdp` | AF_XDP: UMEM frame allocator, SPSC rings, socket abstraction, eBPF program generator |
+| `waltz/*` (other) | ~1,000 | `paradencer-net` (packet, wire, socket) | Ethernet/IPv4/UDP wire types, PacketBuffer/Batch, UDP sendmmsg/recvmmsg |
+| `disco/net` | ~2,500 | `paradencer-net/tile/net_tile` | Network tile: packet demux, routing, transport backend (UDP/XDP) |
+| `disco/quic` | ~1,800 | `paradencer-net/tile/quic_tile` | QUIC tile: engine service, TPU transaction reassembly |
 | `funk/` | 3,762 | `paradencer-storage/accounts` | KV store |
 | `vinyl/` | 17,301 | **not started** | Persistent storage |
 | `tango/` | 8,650 | `paradencer-mesh` (218 lines) | IPC — major gap |

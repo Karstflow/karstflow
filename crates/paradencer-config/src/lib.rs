@@ -1,6 +1,7 @@
 mod errors;
 mod ingress;
 mod metrics;
+pub mod network;
 mod parts;
 mod profile_loader;
 mod profile_schema;
@@ -12,11 +13,13 @@ mod storage;
 mod topology;
 
 pub use crate::errors::{ConfigError, Result};
+use crate::network::NetworkConfig;
 use crate::parts::{
     build_ingress_policy, build_mainnet_readiness_policy, build_metrics_http_bind,
-    build_metrics_output_format, build_metrics_output_target, build_rpc_bind, build_rpc_enabled,
-    build_rpc_full_api, build_rpc_private, build_runtime_spec, build_storage_runtime_policy,
-    build_topology_spec, load_node_profile_from_env, validate_rpc_preflight,
+    build_metrics_output_format, build_metrics_output_target, build_network_config, build_rpc_bind,
+    build_rpc_enabled, build_rpc_full_api, build_rpc_private, build_runtime_spec,
+    build_storage_runtime_policy, build_topology_spec, load_node_profile_from_env,
+    validate_rpc_preflight,
 };
 use crate::profile_loader::load_node_profile_from_file;
 use crate::profile_types::NodeProfileToml;
@@ -66,6 +69,7 @@ pub struct NodeConfig {
     pub rpc_full_api: bool,
     pub storage_runtime_policy: StorageRuntimePolicy,
     pub mainnet_readiness_policy: MainnetReadinessPolicy,
+    pub network_config: NetworkConfig,
 }
 
 #[derive(Debug, Clone)]
@@ -156,6 +160,7 @@ impl NodeConfig {
             rpc_full_api: build_rpc_full_api(profile)?,
             storage_runtime_policy: build_storage_runtime_policy(profile)?,
             mainnet_readiness_policy: build_mainnet_readiness_policy(profile)?,
+            network_config: build_network_config(profile.and_then(|p| p.network.as_ref())),
         })
     }
 

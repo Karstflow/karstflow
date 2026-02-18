@@ -6,6 +6,7 @@ pub use crate::metrics::parse_metrics_output_format;
 pub use crate::metrics::{
     build_metrics_http_bind, build_metrics_output_format, build_metrics_output_target,
 };
+pub use crate::network::build_network_config;
 #[cfg(test)]
 pub use crate::parse_cluster_mode;
 pub use crate::profile_loader::load_node_profile_from_env;

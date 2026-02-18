@@ -1,5 +1,6 @@
 use crate::ingress::IngressPolicyToml;
 use crate::metrics::MetricsProfileToml;
+use crate::network::NetworkProfileToml;
 use crate::readiness::MainnetReadinessProfileToml;
 use crate::rpc::RpcProfileToml;
 use crate::runtime::RuntimeProfileToml;
@@ -17,4 +18,5 @@ pub struct NodeProfileToml {
     pub rpc: Option<RpcProfileToml>,
     pub storage: Option<StorageProfileToml>,
     pub readiness: Option<MainnetReadinessProfileToml>,
+    pub network: Option<NetworkProfileToml>,
 }
