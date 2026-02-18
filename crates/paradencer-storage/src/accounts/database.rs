@@ -8,7 +8,7 @@ use crate::StorageError;
 use ahash::AHasher;
 use dashmap::DashMap;
 use paradencer_constants::durable_store::{ACCOUNTS_HASH_FANOUT, CF_ACCOUNTS};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
 use std::sync::{Arc, RwLock};
 
@@ -29,6 +29,8 @@ pub struct AccountDatabase {
     fork_tree: Arc<RwLock<ForkTree>>,
     owner_index: Arc<OwnerIndex>,
     durable_store: Option<Arc<dyn DurableStore>>,
+    /// Tracks which pubkeys were modified at each slot (for incremental snapshots).
+    dirty_set: Arc<RwLock<HashMap<u64, HashSet<Pubkey>>>>,
 }
 
 impl AccountDatabase {
@@ -40,6 +42,7 @@ impl AccountDatabase {
             fork_tree: Arc::new(RwLock::new(ForkTree::new())),
             owner_index: Arc::new(OwnerIndex::new()),
             durable_store: None,
+            dirty_set: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 
@@ -51,6 +54,7 @@ impl AccountDatabase {
             fork_tree: Arc::new(RwLock::new(ForkTree::new())),
             owner_index: Arc::new(OwnerIndex::new()),
             durable_store: None,
+            dirty_set: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 
@@ -68,7 +72,19 @@ impl AccountDatabase {
             fork_tree: Arc::new(RwLock::new(ForkTree::new())),
             owner_index: Arc::new(OwnerIndex::new()),
             durable_store: Some(store),
+            dirty_set: Arc::new(RwLock::new(HashMap::new())),
         }
+    }
+
+    /// Record a pubkey as modified at the given slot.
+    #[inline]
+    fn mark_dirty(&self, pubkey: Pubkey, slot: u64) {
+        self.dirty_set
+            .write()
+            .unwrap()
+            .entry(slot)
+            .or_default()
+            .insert(pubkey);
     }
 
     /// Persist a single account to the durable store (if configured).
@@ -216,6 +232,15 @@ impl AccountDatabase {
     /// for the same key. All competing branches (siblings and their
     /// descendants) are cancelled.
     pub fn publish_transaction(&self, xid: TransactionId) -> Result<(), StorageError> {
+        self.publish_transaction_at_slot(xid, 0)
+    }
+
+    /// Publish a transaction into published state, recording dirty pubkeys at the given slot.
+    pub fn publish_transaction_at_slot(
+        &self,
+        xid: TransactionId,
+        slot: u64,
+    ) -> Result<(), StorageError> {
         if xid.is_root() {
             return Err(StorageError::CannotPublishRoot);
         }
@@ -273,6 +298,15 @@ impl AccountDatabase {
                 let encoded = encode_account(account);
                 // Silently drop if batch is full — extremely unlikely with 10k limit.
                 let _ = b.put(CF_ACCOUNTS, pubkey.as_bytes(), &encoded);
+            }
+        }
+
+        // Mark all published pubkeys as dirty at this slot.
+        {
+            let mut dirty = self.dirty_set.write().unwrap();
+            let set = dirty.entry(slot).or_default();
+            for pubkey in published_updates.keys() {
+                set.insert(*pubkey);
             }
         }
 
@@ -388,6 +422,7 @@ impl AccountDatabase {
             old_lamports,
         );
         self.persist_account(&pubkey, &account);
+        self.mark_dirty(pubkey, slot);
     }
 
     pub fn count_records(&self) -> usize {
@@ -452,6 +487,15 @@ impl AccountDatabase {
             }
         }
 
+        // Mark all inserted pubkeys as dirty at this slot.
+        {
+            let mut dirty = self.dirty_set.write().unwrap();
+            let set = dirty.entry(slot).or_default();
+            for pubkey in accounts.keys() {
+                set.insert(*pubkey);
+            }
+        }
+
         // Flush batch to durable store.
         if let (Some(b), Some(ref store)) = (batch, &self.durable_store) {
             if !b.is_empty() {
@@ -469,6 +513,55 @@ impl AccountDatabase {
         self.account_cache.clear();
         *self.fork_tree.write().unwrap() = ForkTree::new();
         self.owner_index.clear();
+        self.dirty_set.write().unwrap().clear();
+    }
+
+    /// Get the set of pubkeys modified at a specific slot.
+    pub fn dirty_accounts_at_slot(&self, slot: u64) -> HashSet<Pubkey> {
+        self.dirty_set
+            .read()
+            .unwrap()
+            .get(&slot)
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    /// Get the total number of dirty pubkeys across all tracked slots.
+    pub fn dirty_account_count(&self) -> usize {
+        self.dirty_set
+            .read()
+            .unwrap()
+            .values()
+            .map(|set| set.len())
+            .sum()
+    }
+
+    /// Drain dirty pubkeys for slots up to and including `max_slot`.
+    ///
+    /// Returns the union of all pubkeys from drained slots and removes
+    /// those slots from tracking. Used after an incremental snapshot
+    /// captures the delta.
+    pub fn drain_dirty_slots_through(&self, max_slot: u64) -> HashSet<Pubkey> {
+        let mut dirty = self.dirty_set.write().unwrap();
+        let mut result = HashSet::new();
+        let slots_to_drain: Vec<u64> = dirty.keys().filter(|&&s| s <= max_slot).copied().collect();
+        for slot in slots_to_drain {
+            if let Some(set) = dirty.remove(&slot) {
+                result.extend(set);
+            }
+        }
+        result
+    }
+
+    /// Get the range of slots with dirty tracking data.
+    pub fn dirty_slot_range(&self) -> Option<(u64, u64)> {
+        let dirty = self.dirty_set.read().unwrap();
+        if dirty.is_empty() {
+            return None;
+        }
+        let min = *dirty.keys().min().unwrap();
+        let max = *dirty.keys().max().unwrap();
+        Some((min, max))
     }
 
     pub fn get_account_count(&self) -> usize {
@@ -670,6 +763,7 @@ impl Clone for AccountDatabase {
             fork_tree: Arc::clone(&self.fork_tree),
             owner_index: Arc::clone(&self.owner_index),
             durable_store: self.durable_store.clone(),
+            dirty_set: Arc::clone(&self.dirty_set),
         }
     }
 }
@@ -1158,5 +1252,186 @@ mod tests {
         let (hash_fwd, _) = db_fwd.compute_accounts_hash();
         let (hash_rev, _) = db_rev.compute_accounts_hash();
         assert_eq!(hash_fwd, hash_rev);
+    }
+
+    // ── dirty set tracking tests ──────────────────────────────────────
+
+    #[test]
+    fn dirty_set_empty_by_default() {
+        let db = AccountDatabase::new();
+        assert_eq!(db.dirty_account_count(), 0);
+        assert!(db.dirty_slot_range().is_none());
+        assert!(db.dirty_accounts_at_slot(0).is_empty());
+    }
+
+    #[test]
+    fn store_published_marks_dirty() {
+        let db = AccountDatabase::new();
+        let pk = Pubkey::new_unique();
+        let acct = Account::new(1000, vec![], Pubkey::from([1u8; 32]));
+        db.store_published_account_at_slot(pk, acct, 42);
+
+        assert_eq!(db.dirty_account_count(), 1);
+        assert_eq!(db.dirty_slot_range(), Some((42, 42)));
+        assert!(db.dirty_accounts_at_slot(42).contains(&pk));
+        assert!(db.dirty_accounts_at_slot(0).is_empty());
+    }
+
+    #[test]
+    fn store_published_no_slot_marks_at_zero() {
+        let db = AccountDatabase::new();
+        let pk = Pubkey::new_unique();
+        let acct = Account::new(1000, vec![], Pubkey::from([1u8; 32]));
+        db.store_published_account(pk, acct);
+
+        assert_eq!(db.dirty_account_count(), 1);
+        assert!(db.dirty_accounts_at_slot(0).contains(&pk));
+    }
+
+    #[test]
+    fn bulk_insert_marks_all_dirty() {
+        let db = AccountDatabase::new();
+        let mut accounts = HashMap::new();
+        let pk1 = Pubkey::new_unique();
+        let pk2 = Pubkey::new_unique();
+        let pk3 = Pubkey::new_unique();
+        accounts.insert(pk1, Account::new(100, vec![], Pubkey::from([1u8; 32])));
+        accounts.insert(pk2, Account::new(200, vec![], Pubkey::from([2u8; 32])));
+        accounts.insert(pk3, Account::new(300, vec![], Pubkey::from([3u8; 32])));
+
+        db.bulk_insert_published_accounts_at_slot(accounts, 10)
+            .unwrap();
+
+        assert_eq!(db.dirty_account_count(), 3);
+        let dirty = db.dirty_accounts_at_slot(10);
+        assert!(dirty.contains(&pk1));
+        assert!(dirty.contains(&pk2));
+        assert!(dirty.contains(&pk3));
+    }
+
+    #[test]
+    fn publish_transaction_marks_dirty() {
+        let db = AccountDatabase::new();
+        let root = TransactionId::root();
+        let xid = TransactionId::new([0x42; 16]);
+        db.prepare_transaction(root, xid).unwrap();
+
+        let pk = Pubkey::new_unique();
+        let acct = Account::new(5000, vec![], Pubkey::from([0xAA; 32]));
+        db.write_account(xid, pk, acct).unwrap();
+
+        db.publish_transaction_at_slot(xid, 77).unwrap();
+
+        assert_eq!(db.dirty_account_count(), 1);
+        assert!(db.dirty_accounts_at_slot(77).contains(&pk));
+    }
+
+    #[test]
+    fn dirty_set_tracks_multiple_slots() {
+        let db = AccountDatabase::new();
+        let pk1 = Pubkey::new_unique();
+        let pk2 = Pubkey::new_unique();
+
+        db.store_published_account_at_slot(
+            pk1,
+            Account::new(100, vec![], Pubkey::from([1u8; 32])),
+            10,
+        );
+        db.store_published_account_at_slot(
+            pk2,
+            Account::new(200, vec![], Pubkey::from([2u8; 32])),
+            20,
+        );
+
+        assert_eq!(db.dirty_account_count(), 2);
+        assert_eq!(db.dirty_slot_range(), Some((10, 20)));
+        assert_eq!(db.dirty_accounts_at_slot(10).len(), 1);
+        assert_eq!(db.dirty_accounts_at_slot(20).len(), 1);
+    }
+
+    #[test]
+    fn dirty_set_deduplicates_same_pubkey_same_slot() {
+        let db = AccountDatabase::new();
+        let pk = Pubkey::new_unique();
+
+        db.store_published_account_at_slot(
+            pk,
+            Account::new(100, vec![], Pubkey::from([1u8; 32])),
+            5,
+        );
+        db.store_published_account_at_slot(
+            pk,
+            Account::new(200, vec![], Pubkey::from([1u8; 32])),
+            5,
+        );
+
+        // Same pubkey at same slot should be counted once.
+        assert_eq!(db.dirty_account_count(), 1);
+        assert_eq!(db.dirty_accounts_at_slot(5).len(), 1);
+    }
+
+    #[test]
+    fn drain_dirty_slots_removes_tracked_data() {
+        let db = AccountDatabase::new();
+        let pk1 = Pubkey::new_unique();
+        let pk2 = Pubkey::new_unique();
+        let pk3 = Pubkey::new_unique();
+
+        db.store_published_account_at_slot(
+            pk1,
+            Account::new(100, vec![], Pubkey::from([1u8; 32])),
+            10,
+        );
+        db.store_published_account_at_slot(
+            pk2,
+            Account::new(200, vec![], Pubkey::from([2u8; 32])),
+            20,
+        );
+        db.store_published_account_at_slot(
+            pk3,
+            Account::new(300, vec![], Pubkey::from([3u8; 32])),
+            30,
+        );
+
+        // Drain through slot 20 — should get pk1 and pk2.
+        let drained = db.drain_dirty_slots_through(20);
+        assert_eq!(drained.len(), 2);
+        assert!(drained.contains(&pk1));
+        assert!(drained.contains(&pk2));
+
+        // Only slot 30 should remain.
+        assert_eq!(db.dirty_account_count(), 1);
+        assert_eq!(db.dirty_slot_range(), Some((30, 30)));
+    }
+
+    #[test]
+    fn drain_all_dirty_slots() {
+        let db = AccountDatabase::new();
+        let pk = Pubkey::new_unique();
+        db.store_published_account_at_slot(
+            pk,
+            Account::new(100, vec![], Pubkey::from([1u8; 32])),
+            5,
+        );
+
+        let drained = db.drain_dirty_slots_through(u64::MAX);
+        assert_eq!(drained.len(), 1);
+        assert_eq!(db.dirty_account_count(), 0);
+        assert!(db.dirty_slot_range().is_none());
+    }
+
+    #[test]
+    fn clear_all_accounts_clears_dirty_set() {
+        let db = AccountDatabase::new();
+        let pk = Pubkey::new_unique();
+        db.store_published_account_at_slot(
+            pk,
+            Account::new(100, vec![], Pubkey::from([1u8; 32])),
+            5,
+        );
+        assert_eq!(db.dirty_account_count(), 1);
+
+        db.clear_all_accounts();
+        assert_eq!(db.dirty_account_count(), 0);
     }
 }
