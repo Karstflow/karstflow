@@ -38,9 +38,9 @@ pub use shred_window::{
 };
 pub use snapshot::{
     AppendVecAccount, AppendVecError, AppendVecIter, CompressionType, LoadProgress,
-    LoadProgressInfo, LoadedSnapshot, SerializedAccount, SnapshotArchive, SnapshotArchiveEntry,
-    SnapshotConfig, SnapshotCreator, SnapshotData, SnapshotLoader, SnapshotManifest,
-    SnapshotMetadata, SnapshotProgress, SnapshotProgressInfo,
+    LoadProgressInfo, LoadedSnapshot, RestoreResult, SerializedAccount, SnapshotArchive,
+    SnapshotArchiveEntry, SnapshotConfig, SnapshotCreator, SnapshotData, SnapshotLoader,
+    SnapshotManifest, SnapshotMetadata, SnapshotProgress, SnapshotProgressInfo, SnapshotRestorer,
 };
 pub use types::{CommittedFragmentRecord, SnapshotImage};
 
