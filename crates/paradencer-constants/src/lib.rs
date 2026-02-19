@@ -453,6 +453,7 @@ pub mod durable_store;
 pub mod gossip;
 pub mod loader_v4;
 pub mod network;
+pub mod repair;
 pub mod syscalls;
 pub mod sysvars;
 pub mod vm;
