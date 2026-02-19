@@ -25,9 +25,12 @@ mod exec_stage;
 mod execution_adapter;
 #[cfg(test)]
 mod integration_tests;
+mod leader_pipeline;
 mod metrics_reporter;
 pub mod pack_stage;
+mod replay_service;
 mod replay_stage;
+mod resolv_service;
 mod resolv_stage;
 mod shred_assembler;
 mod shred_filter;
@@ -37,6 +40,7 @@ mod stats;
 mod testsuite;
 mod tx_filter;
 mod types;
+mod verify_service;
 mod verify_stage;
 
 pub use block_assembler::BlockAssembler;
@@ -73,10 +77,13 @@ pub use exec_stage::{
     ExecConfig, ExecStage, ExecStats, ExecStatsSnapshot, ExecutionEngine, MicroblockExecResult,
     MockExecutionEngine, TransactionExecResult,
 };
+pub use leader_pipeline::{LeaderPipeline, PipelineStepResult, SbpfExecutionEngine};
 pub use pack_stage::{
     AccountLock, ConflictDetector, LockKind, Microblock, PackConfig, PackLimits, PackOutcome,
     PackScheduler, PackStats, PackStatsSnapshot, PackedTransaction, TransactionQueue,
 };
+pub use replay_service::{ReplayService, ReplayServiceConfig};
+pub use resolv_service::{ResolvService, ResolvServiceStats};
 pub use resolv_stage::{
     Blockhash, ResolvConfig, ResolvOutcome, ResolvStage, ResolvStats, ResolvStatsSnapshot,
     ResolvedTransaction,
@@ -85,6 +92,7 @@ pub use shred_network::{
     NetworkShred, RetransmitDecision, ShredInsertOutcome, ShredNetworkConfig, ShredNetworkStage,
     ShredNetworkStats, ShredNetworkStatsSnapshot, ShredSource,
 };
+pub use verify_service::{VerifyService, VerifyServiceStats};
 pub use verify_stage::{
     TransactionSource, UnverifiedTransaction, VerifiedTransaction, VerifyConfig, VerifyOutcome,
     VerifyStage, VerifyStats, VerifyStatsSnapshot,

@@ -163,6 +163,15 @@ pub fn materialize_services(
                     },
                 )))
             }
+            // Signature verification and blockhash resolution stages
+            // process transactions before they reach the pack scheduler.
+            // They are configured during node bootstrap with the
+            // appropriate channel endpoints.
+            StageKind::SignatureVerifier | StageKind::BlockhashResolver => {}
+            // Replay engine processes assembled blocks through consensus.
+            // Requires consensus infrastructure (BankForks, Tower, etc.)
+            // which is configured separately during node bootstrap.
+            StageKind::ReplayEngine => {}
             // Network and QUIC tiles run dedicated poll loops outside
             // the Service-based runtime. They are launched separately.
             StageKind::NetworkTile | StageKind::QuicTile => {}

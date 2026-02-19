@@ -70,8 +70,11 @@ pub struct RuntimeSpec {
 pub enum StageKind {
     IngressGateway,
     TransactionSanitizer,
+    SignatureVerifier,
+    BlockhashResolver,
     ShredSanitizer,
     BlockBuilder,
+    ReplayEngine,
     Telemetry,
     NetworkTile,
     QuicTile,
@@ -83,6 +86,8 @@ pub enum LinkKind {
     PacketStream,
     ShredStream,
     TransactionStream,
+    VerifiedStream,
+    BlockStream,
     QuicStream,
 }
 

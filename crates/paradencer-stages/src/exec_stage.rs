@@ -232,18 +232,27 @@ impl ExecStage {
     }
 }
 
-/// Compute a Merkle-like entry hash over the transaction results.
-/// Uses blake3 for fast hashing over the concatenation of payloads.
+/// Compute entry mixin hash for PoH integration.
+///
+/// The mixin hash is SHA-256 over the concatenation of all transaction
+/// signatures in the microblock. This matches the Solana entry hash
+/// convention where entries are identified by their signature set.
+///
+/// For transactions without a recognizable signature (too short payload),
+/// the first 64 bytes of the payload are used as a stand-in.
 fn compute_entry_hash(results: &[TransactionExecResult]) -> [u8; 32] {
-    use blake3::Hasher;
+    use sha2::{Digest, Sha256};
 
-    let mut hasher = Hasher::new();
+    let mut hasher = Sha256::new();
     for result in results {
-        hasher.update(&result.payload);
-        hasher.update(&[result.success as u8]);
-        hasher.update(&result.compute_units_consumed.to_le_bytes());
+        // Transaction signature is the first 64 bytes of the payload.
+        if result.payload.len() >= 64 {
+            hasher.update(&result.payload[..64]);
+        } else {
+            hasher.update(&result.payload);
+        }
     }
-    *hasher.finalize().as_bytes()
+    hasher.finalize().into()
 }
 
 #[cfg(test)]

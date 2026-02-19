@@ -28,6 +28,8 @@ pub(crate) fn find_link_capacity(
                 LinkKind::PacketStream => "packet_stream",
                 LinkKind::ShredStream => "shred_stream",
                 LinkKind::TransactionStream => "transaction_stream",
+                LinkKind::VerifiedStream => "verified_stream",
+                LinkKind::BlockStream => "block_stream",
                 LinkKind::QuicStream => "quic_stream",
             },
         });
@@ -57,7 +59,11 @@ fn ensure_required_stage_kinds(topology_spec: &TopologySpec) -> Result<()> {
                     StageKind::ShredSanitizer => "shred_sanitizer",
                     StageKind::BlockBuilder => "block_builder",
                     StageKind::Telemetry => "telemetry",
-                    StageKind::NetworkTile | StageKind::QuicTile => unreachable!(),
+                    StageKind::SignatureVerifier
+                    | StageKind::BlockhashResolver
+                    | StageKind::ReplayEngine
+                    | StageKind::NetworkTile
+                    | StageKind::QuicTile => unreachable!(),
                 },
             });
         }

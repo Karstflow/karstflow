@@ -54,6 +54,9 @@ mod shredder;
 mod tests;
 
 pub use entry_creator::{EntryCreator, EntryCreatorConfig};
-pub use poh::{PohEntry, PohRecord, PohService, MAX_TRANSACTIONS_PER_ENTRY};
+pub use poh::{
+    Entry, MicroblockEntry, PohEntry, PohRecord, PohService, PohState, SlotComplete, TickEntry,
+    MAX_TRANSACTIONS_PER_ENTRY,
+};
 pub use service::{BlockProducer, BlockProducerConfig, BlockProducerError, BlockProducerResult};
 pub use shredder::{EntryShredder, ShredderConfig, ShredderError};
