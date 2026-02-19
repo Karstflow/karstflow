@@ -1,16 +1,16 @@
 # Paradencer Development State
 
-Last update: 2026-02-19
+Last update: 2026-02-20
 
 Primary residual tracker:
 - `docs/04_module_residual_matrix.md` (module-by-module remaining work and priorities)
 - `docs/04_module_residual_matrix.md` -> `Firedancer Logic Weight And Migration Table` (weight-based parity tracking table)
 
 ## Rough Migration Progress
-- Paradencer total lines: **160,000** (20 crates, 3,088 tests)
+- Paradencer total lines: **185,000** (20 crates, 3,482 tests)
 - Firedancer total lines (native only, no Frankendancer): **~623,600** (C+H across 13 subsystems)
 - Paradencer framework completion: **~100%**
-- Firedancer logic parity (estimated): **~63%** (weighted by functional importance)
+- Firedancer logic parity (estimated): **~65%** (weighted by functional importance)
 - Confidence level:
   - framework completion: high
   - firedancer parity: medium-high (measured via deep line-by-line subsystem comparison 2026-02-17)
@@ -23,7 +23,7 @@ Primary residual tracker:
   - VM + Syscalls: ~85% (interpreter, CPI/crypto/PDA/curve/hash syscalls, SBPF versions, memory model, abort/panic, BLS12-381 stubs)
   - Types: ~55% (core types done, many inline, not all generated types)
   - Crypto: ~50% (ed25519 batch, blake3, sha256, keccak, secp, bn254, reed-solomon, lthash; missing BLS)
-  - Network Stack: ~35% (custom paradencer-net: packet types, I/O traits, UDP socket, TLS crypto, QUIC key derivation; plus quinn ingress, gossip/repair basic)
+  - Network Stack: ~40% (custom paradencer-net: CRDS 14-type data model with multi-index table, FNV bloom filters, weighted peer sampling, gossip push/pull/prune with protocol-correct expiration, packet types, I/O traits, UDP socket, TLS 1.3, QUIC engine, repair, turbine broadcast)
   - Tile Pipeline: ~32% (replay stage, block production, shred assembly, PoH 6-state machine with dynamic hashing; pack/net/metrics gaps)
   - Storage: ~67% (MVCC accounts, blockstore, snapshots, DurableStore persistent backend, StorageEngine facade, snapshot manifest parser + serializer, status cache parser, disk persistence + recovery, blockstore persistence, compaction, full snapshot bootstrap: lthash/stakes/history/sysvars/features/txcache, genesis bootstrap, bank hash verification, SHA-256 accounts hash, incremental dirty-set tracking, incremental snapshot creation, snapshot loader DB integration, AppendVec writer, Solana-compatible archive builder + creator with full roundtrip, bank state manifest serializer, AccountsDbFields serializer, incremental Solana-compatible archives, snapshot scheduler)
   - App/Config/IPC: ~25% (config done, control plane basic, no tango/shared-memory IPC)
@@ -38,6 +38,7 @@ Primary residual tracker:
   - updated 2026-02-19: Tile Pipeline 30%→32% (PoH 6-state machine, dynamic hashes_per_tick, low-power mode, bank/slot coordination)
   - updated 2026-02-19: Runtime Core 75%→78% (verified Bank→sBPF VM end-to-end pipeline: SbpfExecutionAdapter, TransactionProcessor routing to 14 builtins + BytecodeVm, BlockProcessor execution, 63 pipeline tests)
   - updated 2026-02-19: Consensus 70%→73% (multi-threshold optimistic confirmation pipeline: 4 levels — propagated 1/3, duplicate confirmed 52%, optimistically confirmed 2/3, super confirmed 4/5; notification events, auto-promotion, VoteProcessor→CommitmentTracker integration)
+  - updated 2026-02-20: Network 35%→40% (CRDS data model: 14 value types, multi-index CrdsTable, FNV-1a bloom filters, PullRequestMask partitioning, weighted peer sampler, gossip protocol constants, ClusterInfo→CrdsTable integration, pull request bloom filter protocol, 60+ CRDS tests), overall 63%→65%
 
 ## Firedancer Module Comparison (deep analysis 2026-02-17, updated 2026-02-18)
 
@@ -51,12 +52,12 @@ Primary residual tracker:
 | **Consensus** (tower, fork, equivocation, confirmation) | ~7,900 | ~8,200 | **73%** | High |
 | **Types** (bincode serialization) | ~10,100 | ~3,000 | **55%** | High |
 | **Crypto** (ed25519, blake3, bn254...) | ~30,000 | ~5,000 | **50%** | Medium |
-| **Storage** (accdb, funk, vinyl, snapshots) | ~25,500 | ~16,300 | **60%** | Critical |
+| **Storage** (accdb, funk, vinyl, snapshots) | ~25,500 | ~21,100 | **67%** | Critical |
 | **Tile Pipeline** (replay, pack, shred) | ~125,600 | ~44,300 | **40%** | Critical |
-| **Network Stack** (QUIC, TLS, HTTP) | ~56,300 | ~14,000 | **35%** | High |
+| **Network Stack** (QUIC, TLS, gossip, CRDS) | ~56,300 | ~24,900 | **40%** | High |
 | **App/Config/IPC** (config, tango, util) | ~145,000 | ~9,500 | **25%** | Medium |
 
-**Weighted overall estimate: ~62%** (by importance for working validator)
+**Weighted overall estimate: ~65%** (by importance for working validator)
 
 ### Firedancer Module Breakdown (native only, excluding discoh)
 
@@ -66,7 +67,7 @@ Primary residual tracker:
 | **flamenco** | 114,117 | 18.3% | Runtime, VM, types, accounts, programs | consensus + sbpf + types | **~70%** |
 | **util** | 105,836 | 17.0% | Utilities, data structures, allocators | Rust stdlib + crates | **~25%** |
 | **disco** | 69,950 | 11.2% | Shared tile infrastructure (pack, shred, net) | stages + ingress | **~30%** |
-| **waltz** | 56,301 | 9.0% | Network stack (QUIC, TLS, HTTP, gRPC) | paradencer-net + quinn/hyper | **~35%** |
+| **waltz** | 56,301 | 9.0% | Network stack (QUIC, TLS, HTTP, gRPC) | paradencer-net + quinn/hyper | **~40%** |
 | **discof** | 55,608 | 8.9% | Native tiles (replay, restore, repair, PoH) | stages + storage | **~25%** |
 | **app** | 30,457 | 4.9% | CLI, config, orchestration | config + control + node | **~35%** |
 | **vinyl** | 17,301 | 2.8% | Persistent storage | DurableStore + FileDurableStore | **~40%** |
