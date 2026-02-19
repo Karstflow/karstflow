@@ -1456,6 +1456,7 @@ dependencies = [
  "p256",
  "paradencer-constants",
  "rand",
+ "rand_core",
  "rayon",
  "reed-solomon-erasure",
  "serde",

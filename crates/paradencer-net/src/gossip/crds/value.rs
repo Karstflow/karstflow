@@ -272,6 +272,116 @@ impl CrdsValue {
         hash
     }
 
+    /// Produce the bytes covered by the signature.
+    ///
+    /// This is the canonical serialization: `value_type | origin | wallclock | sub_index | data-specific fields`.
+    /// The signature field itself is excluded.
+    pub fn signable_bytes(&self) -> Vec<u8> {
+        let mut buf = Vec::with_capacity(128);
+        buf.push(self.data.value_type());
+        buf.extend_from_slice(&self.origin);
+        buf.extend_from_slice(&self.wallclock_nanos.to_le_bytes());
+        buf.extend_from_slice(&self.data.sub_index().to_le_bytes());
+
+        match &self.data {
+            CrdsValueData::ContactInfo(ci) | CrdsValueData::LegacyContactInfo(ci) => {
+                buf.extend_from_slice(&ci.instance_creation_nanos.to_le_bytes());
+                buf.extend_from_slice(&ci.shred_version.to_le_bytes());
+                for socket in &ci.sockets {
+                    match socket {
+                        Some(addr) => {
+                            buf.push(1);
+                            match addr {
+                                std::net::SocketAddr::V4(v4) => {
+                                    buf.extend_from_slice(&v4.ip().octets());
+                                    buf.extend_from_slice(&v4.port().to_le_bytes());
+                                }
+                                std::net::SocketAddr::V6(v6) => {
+                                    buf.extend_from_slice(&v6.ip().octets());
+                                    buf.extend_from_slice(&v6.port().to_le_bytes());
+                                }
+                            }
+                        }
+                        None => buf.push(0),
+                    }
+                }
+            }
+            CrdsValueData::NodeInstance(ni) => {
+                buf.extend_from_slice(&ni.token.to_le_bytes());
+            }
+            CrdsValueData::Vote(v) => {
+                buf.push(v.index);
+                buf.extend_from_slice(&v.slot.to_le_bytes());
+                buf.extend_from_slice(&v.hash);
+                buf.extend_from_slice(&v.transaction_bytes);
+            }
+            CrdsValueData::LowestSlot(ls) => {
+                buf.extend_from_slice(&ls.slot.to_le_bytes());
+            }
+            CrdsValueData::EpochSlots(es) => {
+                buf.push(es.index);
+                buf.extend_from_slice(&es.slots);
+            }
+            CrdsValueData::LegacySnapshotHashes(sh) => {
+                for (slot, hash) in &sh.hashes {
+                    buf.extend_from_slice(&slot.to_le_bytes());
+                    buf.extend_from_slice(hash);
+                }
+            }
+            CrdsValueData::IncrementalSnapshotHashes(ish) => {
+                buf.extend_from_slice(&ish.base.0.to_le_bytes());
+                buf.extend_from_slice(&ish.base.1);
+                for (slot, hash) in &ish.hashes {
+                    buf.extend_from_slice(&slot.to_le_bytes());
+                    buf.extend_from_slice(hash);
+                }
+            }
+            CrdsValueData::DuplicateShred(ds) => {
+                buf.extend_from_slice(&ds.index.to_le_bytes());
+                buf.extend_from_slice(&ds.proof_bytes);
+            }
+            CrdsValueData::RestartLastVotedForkSlots(r) => {
+                buf.extend_from_slice(&r.last_voted_slot.to_le_bytes());
+                buf.extend_from_slice(&r.last_voted_hash);
+                buf.extend_from_slice(&r.shred_version.to_le_bytes());
+                buf.extend_from_slice(&r.slots);
+            }
+            CrdsValueData::RestartHeaviestFork(r) => {
+                buf.extend_from_slice(&r.slot.to_le_bytes());
+                buf.extend_from_slice(&r.hash);
+                buf.extend_from_slice(&r.observed_stake.to_le_bytes());
+            }
+            CrdsValueData::Version(v) | CrdsValueData::LegacyVersion(v) => {
+                buf.extend_from_slice(&v.client.to_le_bytes());
+                buf.extend_from_slice(&v.major.to_le_bytes());
+                buf.extend_from_slice(&v.minor.to_le_bytes());
+                buf.extend_from_slice(&v.patch.to_le_bytes());
+                buf.extend_from_slice(&v.commit.to_le_bytes());
+                buf.extend_from_slice(&v.feature_set.to_le_bytes());
+            }
+            CrdsValueData::AccountHashes => {}
+        }
+
+        buf
+    }
+
+    /// Sign this value using an Ed25519 secret key (32-byte seed).
+    pub fn sign(&mut self, secret_key: &[u8; 32]) {
+        let msg = self.signable_bytes();
+        // sign_message only fails on invalid key, which can't happen with a 32-byte seed
+        self.signature = paradencer_crypto::sign_message(secret_key, &msg)
+            .expect("Ed25519 signing should never fail with a valid key");
+    }
+
+    /// Verify this value's Ed25519 signature against its origin public key.
+    pub fn verify_signature(&self) -> bool {
+        let msg = self.signable_bytes();
+        matches!(
+            paradencer_crypto::verify_signature(&self.origin, &msg, &self.signature),
+            Ok(paradencer_crypto::VerificationResult::Success)
+        )
+    }
+
     /// Compare wallclock with another value for the same key.
     /// Returns true if this value should override the other.
     pub fn overrides(&self, other: &Self) -> bool {
@@ -480,5 +590,64 @@ mod tests {
         let v1 = make_contact_info_value(origin, 1000);
         let v2 = make_contact_info_value(origin, 2000);
         assert_ne!(v1.compute_hash(), v2.compute_hash());
+    }
+
+    #[test]
+    fn test_sign_and_verify() {
+        let (secret, pubkey) = paradencer_crypto::generate_keypair();
+        let mut value = make_contact_info_value(pubkey, 1000);
+
+        // Unsigned value should not verify (zero signature)
+        assert!(!value.verify_signature());
+
+        // Sign and verify
+        value.sign(&secret);
+        assert!(value.verify_signature());
+    }
+
+    #[test]
+    fn test_sign_verify_wrong_key() {
+        let (secret, pubkey) = paradencer_crypto::generate_keypair();
+        let (_other_secret, other_pubkey) = paradencer_crypto::generate_keypair();
+
+        let mut value = make_contact_info_value(pubkey, 1000);
+        value.sign(&secret);
+        assert!(value.verify_signature());
+
+        // Change origin to different key — verification should fail
+        value.origin = other_pubkey;
+        assert!(!value.verify_signature());
+    }
+
+    #[test]
+    fn test_sign_verify_vote() {
+        let (secret, pubkey) = paradencer_crypto::generate_keypair();
+        let mut value = make_vote_value(pubkey, 3, 5000);
+
+        value.sign(&secret);
+        assert!(value.verify_signature());
+
+        // Tamper with data — verification should fail
+        if let CrdsValueData::Vote(ref mut v) = value.data {
+            v.slot = 999;
+        }
+        assert!(!value.verify_signature());
+    }
+
+    #[test]
+    fn test_signable_bytes_deterministic() {
+        let origin = [1u8; 32];
+        let value = make_contact_info_value(origin, 1000);
+        let b1 = value.signable_bytes();
+        let b2 = value.signable_bytes();
+        assert_eq!(b1, b2);
+    }
+
+    #[test]
+    fn test_signable_bytes_different_for_different_values() {
+        let origin = [1u8; 32];
+        let v1 = make_contact_info_value(origin, 1000);
+        let v2 = make_contact_info_value(origin, 2000);
+        assert_ne!(v1.signable_bytes(), v2.signable_bytes());
     }
 }

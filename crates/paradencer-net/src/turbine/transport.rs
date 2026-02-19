@@ -30,35 +30,38 @@ impl ShredTransport for NullTransport {
     }
 }
 
+/// Counting transport for tests — tracks how many sends occurred.
+#[cfg(test)]
+pub(crate) struct CountingTransport {
+    pub send_count: std::sync::Arc<std::sync::atomic::AtomicU64>,
+    pub byte_count: std::sync::Arc<std::sync::atomic::AtomicU64>,
+}
+
+#[cfg(test)]
+impl CountingTransport {
+    pub fn new() -> Self {
+        Self {
+            send_count: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            byte_count: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
+        }
+    }
+}
+
+#[cfg(test)]
+impl ShredTransport for CountingTransport {
+    fn send_to(&self, data: &[u8], _addr: SocketAddr) -> Result<(), TransportError> {
+        self.send_count
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        self.byte_count
+            .fetch_add(data.len() as u64, std::sync::atomic::Ordering::Relaxed);
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::atomic::{AtomicU64, Ordering};
-    use std::sync::Arc;
-
-    /// Counting transport for tests — tracks how many sends occurred.
-    pub struct CountingTransport {
-        pub send_count: Arc<AtomicU64>,
-        pub byte_count: Arc<AtomicU64>,
-    }
-
-    impl CountingTransport {
-        pub fn new() -> Self {
-            Self {
-                send_count: Arc::new(AtomicU64::new(0)),
-                byte_count: Arc::new(AtomicU64::new(0)),
-            }
-        }
-    }
-
-    impl ShredTransport for CountingTransport {
-        fn send_to(&self, data: &[u8], _addr: SocketAddr) -> Result<(), TransportError> {
-            self.send_count.fetch_add(1, Ordering::Relaxed);
-            self.byte_count
-                .fetch_add(data.len() as u64, Ordering::Relaxed);
-            Ok(())
-        }
-    }
+    use std::sync::atomic::Ordering;
 
     #[test]
     fn test_null_transport() {

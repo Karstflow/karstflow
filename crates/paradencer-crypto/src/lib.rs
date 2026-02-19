@@ -49,7 +49,10 @@ mod errors;
 pub use errors::{CryptoError, CryptoResult};
 
 // Re-export commonly used types
-pub use ed25519_batch::{verify_signature, verify_signatures_parallel};
+pub use ed25519_batch::{
+    generate_keypair, public_key_from_secret, sign_message, verify_signature,
+    verify_signatures_parallel,
+};
 pub use ed25519_batch::{BatchVerifier, SignatureSet, VerificationResult};
 pub use lthash::LatticeHashValue;
 pub use reed_solomon::{FecError, FecReconstructor, FecResult, ReconstructedSet};

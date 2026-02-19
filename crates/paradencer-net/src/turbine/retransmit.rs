@@ -1,4 +1,5 @@
 use crate::gossip::NodeId;
+use crate::repair::{RepairMessage, RepairRequest};
 use crate::turbine::transport::ShredTransport;
 use crate::turbine::{RetransmitStats, TurbineConfig, TurbineTree};
 use crate::IngressError;
@@ -6,7 +7,7 @@ use crossbeam_channel::{Receiver, Sender};
 use paradencer_types::shred::Shred;
 use parking_lot::RwLock;
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tracing::{debug, error, info, warn};
@@ -119,6 +120,9 @@ pub struct RetransmitService {
 
     /// Shred cache for fulfilling retransmit requests
     pub shred_cache: ShredCache,
+
+    /// Monotonic nonce counter for repair requests
+    nonce_counter: AtomicU64,
 }
 
 impl RetransmitService {
@@ -146,6 +150,7 @@ impl RetransmitService {
             recent_retransmits: Arc::new(RwLock::new(HashMap::new())),
             pending_requests: Arc::new(RwLock::new(HashMap::new())),
             shred_cache: Arc::new(RwLock::new(HashMap::new())),
+            nonce_counter: AtomicU64::new(0),
         }
     }
 
@@ -335,13 +340,62 @@ impl RetransmitService {
         }
     }
 
-    /// Send a retransmit request to peers
+    /// Send a retransmit request to peers.
+    ///
+    /// For each target peer, resolves the peer's repair address from
+    /// the turbine tree and sends a serialized repair request via the
+    /// transport layer.
     fn send_retransmit_request(&self, request: &RetransmitRequest) {
+        let tree_guard = self.tree.read();
+        let Some(ref current_tree) = *tree_guard else {
+            debug!("No turbine tree available, cannot send retransmit request");
+            return;
+        };
+
+        let nonce = self.nonce_counter.fetch_add(1, Ordering::Relaxed);
+        let repair_request = RepairRequest::Shred {
+            requester: self.node_id,
+            slot: request.slot,
+            index: request.index,
+            nonce,
+        };
+
+        let message = RepairMessage::Request(repair_request);
+        let encoded = match message.encode() {
+            Ok(bytes) => bytes,
+            Err(e) => {
+                error!("Failed to encode repair request: {}", e);
+                return;
+            }
+        };
+
+        let mut sent = 0u32;
+        for peer_id in &request.target_peers {
+            let addr = match current_tree.get_node(peer_id) {
+                Some(node) => node.contact_info.repair_addr,
+                None => {
+                    debug!("Peer {} not in turbine tree, skipping", peer_id);
+                    continue;
+                }
+            };
+
+            if let Err(e) = self.transport.send_to(&encoded, addr) {
+                warn!(
+                    "Failed to send retransmit request to peer {}: {}",
+                    peer_id, e
+                );
+            } else {
+                sent += 1;
+            }
+        }
+
         debug!(
-            "Requesting retransmit for slot {} index {} from {} peers",
+            "Sent retransmit request for slot {} index {} to {}/{} peers (nonce={})",
             request.slot,
             request.index,
-            request.target_peers.len()
+            sent,
+            request.target_peers.len(),
+            nonce,
         );
     }
 
@@ -392,10 +446,14 @@ impl Drop for RetransmitService {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::turbine::transport::NullTransport;
+    use crate::gossip::{ContactInfo, ValidatorInfo};
+    use crate::turbine::transport::{CountingTransport, NullTransport};
+    use crate::turbine::TurbineTreeBuilder;
     use paradencer_types::shred::{
         DataShredHeader, Shred, ShredCommonHeader, ShredVariant, SIGNATURE_SIZE,
     };
+    use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+    use std::sync::atomic::Ordering;
 
     fn create_node_id(byte: u8) -> NodeId {
         NodeId::new([byte; 32])
@@ -486,5 +544,95 @@ mod tests {
         let cleared = service.clear_cache_before_slot(101);
         assert_eq!(cleared, 1);
         assert!(service.get_cached_shred(100, 5).is_none());
+    }
+
+    fn create_contact_info(node_id: NodeId, port: u16) -> ContactInfo {
+        let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), port);
+        ContactInfo::new(node_id, addr, addr, addr, addr, 1)
+    }
+
+    #[test]
+    fn test_send_retransmit_request_sends_to_peers() {
+        let counting = CountingTransport::new();
+        let send_count = counting.send_count.clone();
+        let byte_count = counting.byte_count.clone();
+
+        let root_id = create_node_id(0);
+        let transport: Arc<dyn ShredTransport> = Arc::new(counting);
+        let config = TurbineConfig::default();
+        let stats = RetransmitStats::new(Arc::new(crate::turbine::TurbineStats::new()));
+
+        let service = RetransmitService::new(root_id, transport, config.clone(), stats);
+
+        // Build a tree with 3 peers
+        let peer1 = create_node_id(1);
+        let peer2 = create_node_id(2);
+        let peer3 = create_node_id(3);
+
+        let validators = vec![
+            ValidatorInfo::new(create_contact_info(peer1, 9001), 1000),
+            ValidatorInfo::new(create_contact_info(peer2, 9002), 1000),
+            ValidatorInfo::new(create_contact_info(peer3, 9003), 1000),
+        ];
+
+        let builder = TurbineTreeBuilder::new(config);
+        let tree = builder.build(root_id, create_contact_info(root_id, 9000), validators, 100);
+        service.update_tree(tree);
+
+        // Send retransmit request to 2 of the 3 peers
+        let request = RetransmitRequest::new(100, 5, vec![peer1, peer2]);
+        service.send_retransmit_request(&request);
+
+        assert_eq!(send_count.load(Ordering::Relaxed), 2);
+        assert!(byte_count.load(Ordering::Relaxed) > 0);
+    }
+
+    #[test]
+    fn test_send_retransmit_request_skips_unknown_peers() {
+        let counting = CountingTransport::new();
+        let send_count = counting.send_count.clone();
+
+        let root_id = create_node_id(0);
+        let transport: Arc<dyn ShredTransport> = Arc::new(counting);
+        let config = TurbineConfig::default();
+        let stats = RetransmitStats::new(Arc::new(crate::turbine::TurbineStats::new()));
+
+        let service = RetransmitService::new(root_id, transport, config.clone(), stats);
+
+        // Build a tree with only 1 peer
+        let peer1 = create_node_id(1);
+        let unknown = create_node_id(99);
+
+        let validators = vec![ValidatorInfo::new(create_contact_info(peer1, 9001), 1000)];
+
+        let builder = TurbineTreeBuilder::new(config);
+        let tree = builder.build(root_id, create_contact_info(root_id, 9000), validators, 100);
+        service.update_tree(tree);
+
+        // Request from known + unknown peer
+        let request = RetransmitRequest::new(100, 5, vec![peer1, unknown]);
+        service.send_retransmit_request(&request);
+
+        // Only the known peer should receive the request
+        assert_eq!(send_count.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn test_send_retransmit_request_no_tree() {
+        let counting = CountingTransport::new();
+        let send_count = counting.send_count.clone();
+
+        let root_id = create_node_id(0);
+        let transport: Arc<dyn ShredTransport> = Arc::new(counting);
+        let config = TurbineConfig::default();
+        let stats = RetransmitStats::new(Arc::new(crate::turbine::TurbineStats::new()));
+
+        let service = RetransmitService::new(root_id, transport, config, stats);
+
+        // No tree set — should silently return
+        let request = RetransmitRequest::new(100, 5, vec![create_node_id(1)]);
+        service.send_retransmit_request(&request);
+
+        assert_eq!(send_count.load(Ordering::Relaxed), 0);
     }
 }

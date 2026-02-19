@@ -27,7 +27,7 @@
 //! ```
 
 use crate::{CryptoError, CryptoResult, MAX_BATCH_SIZE, PUBKEY_SIZE, SIGNATURE_SIZE};
-use ed25519_dalek::{Signature, Verifier, VerifyingKey};
+use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 /// Result of signature verification
@@ -330,6 +330,45 @@ impl Default for BatchVerifier {
     fn default() -> Self {
         Self::new()
     }
+}
+
+/// Generate a new Ed25519 keypair.
+///
+/// Returns `(secret_key, public_key)` where secret_key is 32 bytes
+/// (the seed) and public_key is 32 bytes.
+pub fn generate_keypair() -> ([u8; 32], [u8; PUBKEY_SIZE]) {
+    use rand_core::OsRng;
+    let signing_key = SigningKey::generate(&mut OsRng);
+    let verifying_key = signing_key.verifying_key();
+
+    let mut secret = [0u8; 32];
+    secret.copy_from_slice(signing_key.as_bytes());
+
+    let mut pubkey = [0u8; PUBKEY_SIZE];
+    pubkey.copy_from_slice(verifying_key.as_bytes());
+
+    (secret, pubkey)
+}
+
+/// Sign a message using an Ed25519 secret key (32-byte seed).
+///
+/// Returns the 64-byte signature.
+pub fn sign_message(secret_key: &[u8; 32], message: &[u8]) -> CryptoResult<[u8; SIGNATURE_SIZE]> {
+    let signing_key = SigningKey::from_bytes(secret_key);
+    let signature = signing_key.sign(message);
+
+    let mut sig_bytes = [0u8; SIGNATURE_SIZE];
+    sig_bytes.copy_from_slice(&signature.to_bytes());
+    Ok(sig_bytes)
+}
+
+/// Derive the public key from an Ed25519 secret key (32-byte seed).
+pub fn public_key_from_secret(secret_key: &[u8; 32]) -> [u8; PUBKEY_SIZE] {
+    let signing_key = SigningKey::from_bytes(secret_key);
+    let verifying_key = signing_key.verifying_key();
+    let mut pubkey = [0u8; PUBKEY_SIZE];
+    pubkey.copy_from_slice(verifying_key.as_bytes());
+    pubkey
 }
 
 /// Verify a single Ed25519 signature

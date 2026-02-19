@@ -135,7 +135,7 @@ impl ContactInfo {
         CrdsValue {
             origin: self.node_id.0,
             wallclock_nanos,
-            signature: [0u8; 64], // TODO: sign when crypto is integrated
+            signature: [0u8; 64], // signed by ClusterInfo::sign_value() or signed_self_value()
             data: CrdsValueData::ContactInfo(CrdsContactInfo {
                 pubkey: self.node_id.0,
                 shred_version: self.shred_version,
@@ -215,6 +215,9 @@ pub struct ClusterInfo {
     self_contact_info: Arc<RwLock<ContactInfo>>,
     table: Arc<RwLock<CrdsTable>>,
     max_nodes: usize,
+    /// Ed25519 secret key (32-byte seed) for signing our own CRDS values.
+    /// None when running without signing (e.g. tests that don't need it).
+    signing_key: Option<[u8; 32]>,
 }
 
 impl ClusterInfo {
@@ -230,6 +233,25 @@ impl ClusterInfo {
             self_contact_info: Arc::new(RwLock::new(contact_info)),
             table: Arc::new(RwLock::new(table)),
             max_nodes,
+            signing_key: None,
+        }
+    }
+
+    /// Create a ClusterInfo with an Ed25519 signing key for CRDS value signatures.
+    pub fn with_signing_key(
+        node_id: NodeId,
+        contact_info: ContactInfo,
+        _prune_timeout: Duration,
+        max_nodes: usize,
+        signing_key: [u8; 32],
+    ) -> Self {
+        let table = CrdsTable::with_limits(max_nodes, gossip::MAX_PURGED_ENTRIES);
+        Self {
+            node_id,
+            self_contact_info: Arc::new(RwLock::new(contact_info)),
+            table: Arc::new(RwLock::new(table)),
+            max_nodes,
+            signing_key: Some(signing_key),
         }
     }
 
@@ -248,6 +270,21 @@ impl ClusterInfo {
         let mut info = self.self_contact_info.write();
         update_fn(&mut info);
         info.increment_version();
+    }
+
+    /// Sign a CRDS value with our keypair (if available).
+    fn sign_value(&self, value: &mut CrdsValue) {
+        if let Some(ref key) = self.signing_key {
+            value.sign(key);
+        }
+    }
+
+    /// Create a signed CRDS value from our own contact info.
+    pub fn signed_self_value(&self) -> CrdsValue {
+        let info = self.self_contact_info.read();
+        let mut value = info.to_crds_value();
+        self.sign_value(&mut value);
+        value
     }
 
     /// Insert or update contact info using the CrdsTable.
@@ -620,6 +657,35 @@ mod tests {
         assert_eq!(roundtrip.tpu_quic_addr, quic);
         assert_eq!(roundtrip.repair_addr, repair);
         assert_eq!(roundtrip.shred_version, 42);
+    }
+
+    #[test]
+    fn test_signed_self_value() {
+        let (secret, pubkey) = paradencer_crypto::generate_keypair();
+        let node_id = NodeId(pubkey);
+        let info = create_test_contact_info(node_id, 8000);
+        let cluster = ClusterInfo::with_signing_key(
+            node_id,
+            info,
+            Duration::from_secs(30),
+            MAX_CLUSTER_SIZE,
+            secret,
+        );
+
+        let signed = cluster.signed_self_value();
+        assert_eq!(signed.origin, pubkey);
+        assert!(signed.verify_signature());
+    }
+
+    #[test]
+    fn test_signed_self_value_no_key() {
+        let node_id = NodeId::new([0u8; 32]);
+        let info = create_test_contact_info(node_id, 8000);
+        let cluster = ClusterInfo::new(node_id, info, Duration::from_secs(30), MAX_CLUSTER_SIZE);
+
+        let value = cluster.signed_self_value();
+        // Without a signing key, signature should be zeros (unverifiable)
+        assert_eq!(value.signature, [0u8; 64]);
     }
 
     #[test]
