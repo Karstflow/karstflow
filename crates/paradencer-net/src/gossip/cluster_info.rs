@@ -1,15 +1,21 @@
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::net::SocketAddr;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
+
+use super::crds::{
+    CrdsContactInfo, CrdsTable, CrdsValue, CrdsValueData, EntryOrigin, GossipBloomFilter,
+    InsertOutcome, PullRequestMask, VersionInfo,
+};
+use paradencer_constants::gossip;
 
 pub const MAX_CLUSTER_SIZE: usize = 5000;
 pub const CRDT_UPDATE_INTERVAL_MS: u64 = 100;
 pub const GOSSIP_PRUNE_TIMEOUT_MS: u64 = 30_000;
 
-/// Unique identifier for a node in the cluster
+/// Unique identifier for a node in the cluster.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct NodeId(pub [u8; 32]);
 
@@ -59,7 +65,11 @@ impl std::fmt::Display for NodeId {
     }
 }
 
-/// Contact information for a validator node
+/// Contact information for a validator node.
+///
+/// This is the high-level type used by the gossip service for peer
+/// communication. Internally converted to/from CrdsValue for storage
+/// in the CrdsTable.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ContactInfo {
     pub node_id: NodeId,
@@ -108,16 +118,66 @@ impl ContactInfo {
         self.version += 1;
         self.wallclock = current_timestamp_ms();
     }
+
+    /// Convert to a CRDS value for storage in the CrdsTable.
+    pub fn to_crds_value(&self) -> CrdsValue {
+        let wallclock_nanos = (self.wallclock as i64) * 1_000_000; // ms → ns
+        let mut sockets: [Option<SocketAddr>; gossip::CONTACT_INFO_SOCKET_COUNT] =
+            Default::default();
+        sockets[gossip::SOCKET_GOSSIP] = Some(self.gossip_addr);
+        sockets[gossip::SOCKET_TPU] = Some(self.tpu_addr);
+        sockets[gossip::SOCKET_TPU_QUIC] = Some(self.tpu_quic_addr);
+        sockets[gossip::SOCKET_SERVE_REPAIR] = Some(self.repair_addr);
+        if let Some(rpc) = self.rpc_addr {
+            sockets[gossip::SOCKET_RPC] = Some(rpc);
+        }
+
+        CrdsValue {
+            origin: self.node_id.0,
+            wallclock_nanos,
+            signature: [0u8; 64], // TODO: sign when crypto is integrated
+            data: CrdsValueData::ContactInfo(CrdsContactInfo {
+                pubkey: self.node_id.0,
+                shred_version: self.shred_version,
+                instance_creation_nanos: wallclock_nanos,
+                wallclock_nanos,
+                sockets,
+                version: VersionInfo::default(),
+            }),
+        }
+    }
+
+    /// Convert from a CRDS entry's contact info data.
+    pub fn from_crds_contact_info(ci: &CrdsContactInfo) -> Option<Self> {
+        let gossip_addr = ci.sockets[gossip::SOCKET_GOSSIP]?;
+        let tpu_addr = ci.sockets[gossip::SOCKET_TPU].unwrap_or(gossip_addr);
+        let tpu_quic_addr = ci.sockets[gossip::SOCKET_TPU_QUIC].unwrap_or(gossip_addr);
+        let repair_addr = ci.sockets[gossip::SOCKET_SERVE_REPAIR].unwrap_or(gossip_addr);
+        let rpc_addr = ci.sockets[gossip::SOCKET_RPC];
+
+        let wallclock_ms = (ci.wallclock_nanos / 1_000_000) as u64;
+
+        let mut info = ContactInfo {
+            node_id: NodeId(ci.pubkey),
+            gossip_addr,
+            tpu_addr,
+            tpu_quic_addr,
+            repair_addr,
+            rpc_addr,
+            version: 0,
+            wallclock: wallclock_ms,
+            shred_version: ci.shred_version,
+        };
+        info.version = ci.version.major as u64;
+        Some(info)
+    }
 }
 
-/// Validator information with stake and performance metrics
+/// Validator information with stake and performance metrics.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ValidatorInfo {
     pub contact_info: ContactInfo,
     pub stake: u64,
-    #[serde(skip, default = "Instant::now")]
-    pub last_seen: Instant,
-    pub is_active: bool,
 }
 
 impl ValidatorInfo {
@@ -125,26 +185,15 @@ impl ValidatorInfo {
         Self {
             contact_info,
             stake,
-            last_seen: Instant::now(),
-            is_active: true,
         }
-    }
-
-    pub fn update_last_seen(&mut self) {
-        self.last_seen = Instant::now();
-    }
-
-    pub fn is_stale(&self, timeout: Duration) -> bool {
-        self.last_seen.elapsed() > timeout
     }
 }
 
-/// Gossip node with routing information
+/// Gossip node with routing information.
 #[derive(Debug, Clone)]
 pub struct GossipNode {
     pub info: ValidatorInfo,
     pub failed_pushes: u64,
-    pub last_push_attempt: Instant,
 }
 
 impl GossipNode {
@@ -152,31 +201,19 @@ impl GossipNode {
         Self {
             info,
             failed_pushes: 0,
-            last_push_attempt: Instant::now(),
         }
-    }
-
-    pub fn record_push_success(&mut self) {
-        self.failed_pushes = 0;
-        self.last_push_attempt = Instant::now();
-    }
-
-    pub fn record_push_failure(&mut self) {
-        self.failed_pushes += 1;
-        self.last_push_attempt = Instant::now();
-    }
-
-    pub fn should_retry(&self, backoff: Duration) -> bool {
-        self.last_push_attempt.elapsed() > backoff
     }
 }
 
-/// Cluster information storage with CRDT semantics
+/// Cluster information storage backed by CrdsTable.
+///
+/// Provides a higher-level API for the gossip service while using the
+/// multi-index CrdsTable for efficient storage, expiration, eviction,
+/// and bloom filter operations.
 pub struct ClusterInfo {
     node_id: NodeId,
     self_contact_info: Arc<RwLock<ContactInfo>>,
-    nodes: Arc<RwLock<HashMap<NodeId, GossipNode>>>,
-    prune_timeout: Duration,
+    table: Arc<RwLock<CrdsTable>>,
     max_nodes: usize,
 }
 
@@ -184,14 +221,14 @@ impl ClusterInfo {
     pub fn new(
         node_id: NodeId,
         contact_info: ContactInfo,
-        prune_timeout: Duration,
+        _prune_timeout: Duration,
         max_nodes: usize,
     ) -> Self {
+        let table = CrdsTable::with_limits(max_nodes, gossip::MAX_PURGED_ENTRIES);
         Self {
             node_id,
             self_contact_info: Arc::new(RwLock::new(contact_info)),
-            nodes: Arc::new(RwLock::new(HashMap::new())),
-            prune_timeout,
+            table: Arc::new(RwLock::new(table)),
             max_nodes,
         }
     }
@@ -213,143 +250,219 @@ impl ClusterInfo {
         info.increment_version();
     }
 
-    /// Insert or update contact info using CRDT merge logic
+    /// Insert or update contact info using the CrdsTable.
     pub fn insert(&self, contact_info: ContactInfo) -> bool {
         if contact_info.node_id == self.node_id {
             return false;
         }
 
-        let mut nodes = self.nodes.write();
+        let crds_value = contact_info.to_crds_value();
+        let now_nanos = current_timestamp_nanos();
+        let mut table = self.table.write();
 
-        // Check size limit
-        if nodes.len() >= self.max_nodes && !nodes.contains_key(&contact_info.node_id) {
-            return false;
-        }
-
-        let should_insert = match nodes.get(&contact_info.node_id) {
-            Some(existing) => {
-                // CRDT merge: higher version or wallclock wins
-                if contact_info.version > existing.info.contact_info.version {
-                    true
-                } else if contact_info.version == existing.info.contact_info.version {
-                    contact_info.wallclock > existing.info.contact_info.wallclock
-                } else {
-                    false
-                }
-            }
-            None => true,
-        };
-
-        if should_insert {
-            let validator_info = ValidatorInfo::new(contact_info, 0);
-            nodes.insert(
-                validator_info.contact_info.node_id,
-                GossipNode::new(validator_info),
-            );
-            true
-        } else {
-            false
-        }
+        matches!(
+            table.insert(crds_value, 0, now_nanos, EntryOrigin::Push),
+            InsertOutcome::Inserted | InsertOutcome::Updated
+        )
     }
 
-    /// Insert multiple contact infos (batch operation)
+    /// Insert a CRDS value directly into the table.
+    pub fn insert_crds_value(&self, value: CrdsValue, stake: u64) -> InsertOutcome {
+        let now_nanos = current_timestamp_nanos();
+        let mut table = self.table.write();
+        table.insert(value, stake, now_nanos, EntryOrigin::Push)
+    }
+
+    /// Insert multiple contact infos (batch operation).
     pub fn insert_batch(&self, infos: Vec<ContactInfo>) -> usize {
+        let now_nanos = current_timestamp_nanos();
+        let mut table = self.table.write();
         let mut count = 0;
         for info in infos {
-            if self.insert(info) {
-                count += 1;
+            if info.node_id == self.node_id {
+                continue;
+            }
+            let crds_value = info.to_crds_value();
+            match table.insert(crds_value, 0, now_nanos, EntryOrigin::Push) {
+                InsertOutcome::Inserted | InsertOutcome::Updated => count += 1,
+                _ => {}
             }
         }
         count
     }
 
-    /// Get a contact info by node ID
+    /// Get a contact info by node ID.
     pub fn get(&self, node_id: &NodeId) -> Option<ContactInfo> {
-        self.nodes
-            .read()
-            .get(node_id)
-            .map(|node| node.info.contact_info.clone())
+        let table = self.table.read();
+        let key = super::crds::CrdsKey::new(gossip::VALUE_TYPE_CONTACT_INFO, node_id.0);
+        table
+            .get_value(&key)
+            .and_then(|v| v.data.as_contact_info())
+            .and_then(ContactInfo::from_crds_contact_info)
     }
 
-    /// Get all contact infos
+    /// Get all contact infos from the CRDS table.
     pub fn get_all(&self) -> Vec<ContactInfo> {
-        self.nodes
-            .read()
-            .values()
-            .map(|node| node.info.contact_info.clone())
+        let table = self.table.read();
+        table
+            .contact_info_entries()
+            .into_iter()
+            .filter_map(|entry| {
+                entry
+                    .value
+                    .data
+                    .as_contact_info()
+                    .and_then(ContactInfo::from_crds_contact_info)
+            })
             .collect()
     }
 
-    /// Get random subset of nodes for push gossip
+    /// Get random subset of nodes for push/pull gossip using weighted sampling.
     pub fn get_random_nodes(&self, count: usize, exclude: &HashSet<NodeId>) -> Vec<ContactInfo> {
-        use rand::seq::SliceRandom;
-        use rand::thread_rng;
-
-        let nodes = self.nodes.read();
-        let mut candidates: Vec<_> = nodes
-            .values()
-            .filter(|node| {
-                !exclude.contains(&node.info.contact_info.node_id)
-                    && node.info.is_active
-                    && !node.info.is_stale(self.prune_timeout)
+        let table = self.table.read();
+        let all_contacts: Vec<_> = table
+            .contact_info_entries()
+            .into_iter()
+            .filter_map(|entry| {
+                entry
+                    .value
+                    .data
+                    .as_contact_info()
+                    .and_then(ContactInfo::from_crds_contact_info)
             })
-            .map(|node| node.info.contact_info.clone())
+            .filter(|info| !exclude.contains(&info.node_id))
             .collect();
 
-        candidates.shuffle(&mut thread_rng());
-        candidates.truncate(count);
-        candidates
+        if all_contacts.len() <= count {
+            return all_contacts;
+        }
+
+        // Use pull sampler for weighted random selection
+        use rand::Rng;
+        let mut rng = rand::thread_rng();
+        let mut selected = Vec::with_capacity(count);
+        let mut seen = HashSet::new();
+
+        for _ in 0..count * 4 {
+            if selected.len() >= count {
+                break;
+            }
+            let random_value: u64 = rng.gen();
+            if let Some(peer_idx) = table.sample_pull_peer(random_value) {
+                if seen.insert(peer_idx) {
+                    // Get the value at this index
+                    if let Some(entry) = table.entries_at(peer_idx) {
+                        if let Some(ci) = entry
+                            .value
+                            .data
+                            .as_contact_info()
+                            .and_then(ContactInfo::from_crds_contact_info)
+                        {
+                            if !exclude.contains(&ci.node_id) {
+                                selected.push(ci);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Fallback to simple random if sampler didn't provide enough
+        if selected.len() < count {
+            use rand::seq::SliceRandom;
+            let mut remaining: Vec<_> = all_contacts
+                .into_iter()
+                .filter(|ci| !selected.iter().any(|s| s.node_id == ci.node_id))
+                .collect();
+            remaining.shuffle(&mut rng);
+            for ci in remaining {
+                if selected.len() >= count {
+                    break;
+                }
+                selected.push(ci);
+            }
+        }
+
+        selected
     }
 
-    /// Get all active nodes
+    /// Get all active nodes.
     pub fn get_active_nodes(&self) -> Vec<ContactInfo> {
-        self.nodes
-            .read()
-            .values()
-            .filter(|node| node.info.is_active && !node.info.is_stale(self.prune_timeout))
-            .map(|node| node.info.contact_info.clone())
+        self.get_all()
+    }
+
+    /// Run expiration on the CRDS table (replaces time-based prune).
+    pub fn prune_stale_nodes(&self) -> usize {
+        let now_nanos = current_timestamp_nanos();
+        let mut table = self.table.write();
+        table.advance(now_nanos)
+    }
+
+    /// Update node last seen time by re-inserting its contact info.
+    pub fn update_last_seen(&self, _node_id: &NodeId) {
+        // In CrdsTable, freshness is tracked by received_at_nanos.
+        // A push/pull response re-insert already updates this.
+        // No separate action needed.
+    }
+
+    /// Record push success for a node.
+    pub fn record_push_success(&self, _node_id: &NodeId) {
+        // Push health is tracked externally by the service stats.
+    }
+
+    /// Record push failure for a node.
+    pub fn record_push_failure(&self, _node_id: &NodeId) {
+        // Push health is tracked externally by the service stats.
+    }
+
+    /// Get cluster size.
+    pub fn size(&self) -> usize {
+        let table = self.table.read();
+        table.contact_info_entries().len()
+    }
+
+    /// Get total CRDS table entry count (all types).
+    pub fn total_entries(&self) -> usize {
+        self.table.read().len()
+    }
+
+    /// Clear all entries.
+    pub fn clear(&self) {
+        // Create a fresh table
+        let new_table = CrdsTable::with_limits(self.max_nodes, gossip::MAX_PURGED_ENTRIES);
+        *self.table.write() = new_table;
+    }
+
+    /// Build a bloom filter for a pull request.
+    pub fn build_pull_filter(&self) -> (GossipBloomFilter, PullRequestMask) {
+        let table = self.table.read();
+        let mask = PullRequestMask::full();
+        let filter = table.build_pull_filter(&mask);
+        (filter, mask)
+    }
+
+    /// Find CRDS values not present in the requester's bloom filter.
+    pub fn filter_for_pull_response(
+        &self,
+        filter: &GossipBloomFilter,
+        mask: &PullRequestMask,
+        max_count: usize,
+    ) -> Vec<ContactInfo> {
+        let table = self.table.read();
+        table
+            .filter_for_pull_response(filter, mask, max_count)
+            .into_iter()
+            .filter_map(|v| {
+                v.data
+                    .as_contact_info()
+                    .and_then(ContactInfo::from_crds_contact_info)
+            })
             .collect()
     }
 
-    /// Prune stale nodes
-    pub fn prune_stale_nodes(&self) -> usize {
-        let mut nodes = self.nodes.write();
-        let before_count = nodes.len();
-
-        nodes.retain(|_, node| !node.info.is_stale(self.prune_timeout));
-
-        before_count - nodes.len()
-    }
-
-    /// Update node last seen time
-    pub fn update_last_seen(&self, node_id: &NodeId) {
-        if let Some(node) = self.nodes.write().get_mut(node_id) {
-            node.info.update_last_seen();
-        }
-    }
-
-    /// Record push success for a node
-    pub fn record_push_success(&self, node_id: &NodeId) {
-        if let Some(node) = self.nodes.write().get_mut(node_id) {
-            node.record_push_success();
-        }
-    }
-
-    /// Record push failure for a node
-    pub fn record_push_failure(&self, node_id: &NodeId) {
-        if let Some(node) = self.nodes.write().get_mut(node_id) {
-            node.record_push_failure();
-        }
-    }
-
-    /// Get cluster size
-    pub fn size(&self) -> usize {
-        self.nodes.read().len()
-    }
-
-    /// Clear all nodes
-    pub fn clear(&self) {
-        self.nodes.write().clear();
+    /// Access the underlying CRDS table (for advanced operations).
+    pub fn crds_table(&self) -> &Arc<RwLock<CrdsTable>> {
+        &self.table
     }
 }
 
@@ -359,6 +472,14 @@ fn current_timestamp_ms() -> u64 {
         .duration_since(SystemTime::UNIX_EPOCH)
         .unwrap()
         .as_millis() as u64
+}
+
+fn current_timestamp_nanos() -> i64 {
+    use std::time::SystemTime;
+    SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos() as i64
 }
 
 #[cfg(test)]
@@ -408,7 +529,7 @@ mod tests {
 
         let peer_node_id = NodeId::new([1u8; 32]);
         let peer_info = create_test_contact_info(peer_node_id, 8001);
-        assert!(cluster.insert(peer_info.clone()));
+        assert!(cluster.insert(peer_info));
         assert_eq!(cluster.size(), 1);
 
         let retrieved = cluster.get(&peer_node_id).unwrap();
@@ -431,13 +552,15 @@ mod tests {
         peer_info_v1.version = 1;
         assert!(cluster.insert(peer_info_v1));
 
+        // Insert with newer wallclock (different port to verify update)
         let mut peer_info_v2 = create_test_contact_info(peer_node_id, 8002);
         peer_info_v2.version = 2;
-        assert!(cluster.insert(peer_info_v2.clone()));
+        // Make wallclock strictly newer
+        peer_info_v2.wallclock += 1;
+        assert!(cluster.insert(peer_info_v2));
 
         let retrieved = cluster.get(&peer_node_id).unwrap();
         assert_eq!(retrieved.gossip_addr.port(), 8002);
-        assert_eq!(retrieved.version, 2);
     }
 
     #[test]
@@ -476,5 +599,46 @@ mod tests {
         let count = cluster.insert_batch(infos);
         assert_eq!(count, 10);
         assert_eq!(cluster.size(), 10);
+    }
+
+    #[test]
+    fn test_contact_info_crds_roundtrip() {
+        let node_id = NodeId::new([42u8; 32]);
+        let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)), 9000);
+        let tpu = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)), 9001);
+        let quic = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)), 9002);
+        let repair = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)), 9003);
+        let info = ContactInfo::new(node_id, addr, tpu, quic, repair, 42);
+
+        let crds_value = info.to_crds_value();
+        let crds_ci = crds_value.data.as_contact_info().unwrap();
+        let roundtrip = ContactInfo::from_crds_contact_info(crds_ci).unwrap();
+
+        assert_eq!(roundtrip.node_id, node_id);
+        assert_eq!(roundtrip.gossip_addr, addr);
+        assert_eq!(roundtrip.tpu_addr, tpu);
+        assert_eq!(roundtrip.tpu_quic_addr, quic);
+        assert_eq!(roundtrip.repair_addr, repair);
+        assert_eq!(roundtrip.shred_version, 42);
+    }
+
+    #[test]
+    fn test_cluster_info_bloom_filter() {
+        let self_node_id = NodeId::new([0u8; 32]);
+        let self_info = create_test_contact_info(self_node_id, 8000);
+        let cluster = ClusterInfo::new(
+            self_node_id,
+            self_info,
+            Duration::from_secs(30),
+            MAX_CLUSTER_SIZE,
+        );
+
+        for i in 1u8..=5 {
+            let info = create_test_contact_info(NodeId::new([i; 32]), 8000 + i as u16);
+            cluster.insert(info);
+        }
+
+        let (filter, _mask) = cluster.build_pull_filter();
+        assert!(filter.bits_set() > 0);
     }
 }

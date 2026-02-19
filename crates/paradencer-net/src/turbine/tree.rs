@@ -232,7 +232,7 @@ impl TurbineTreeBuilder {
         // Filter out root and inactive validators
         let mut active_validators: Vec<_> = validators
             .into_iter()
-            .filter(|v| v.contact_info.node_id != root && v.is_active)
+            .filter(|v| v.contact_info.node_id != root)
             .collect();
 
         if active_validators.is_empty() {

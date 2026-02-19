@@ -1,11 +1,12 @@
 use super::*;
 use crate::gossip::cluster_info::{ContactInfo, NodeId};
+use crate::gossip::crds::{GossipBloomFilter, PullRequestMask};
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use serde::{Deserialize, Serialize};
 
 pub const GOSSIP_PROTOCOL_VERSION: u16 = 1;
 
-/// Gossip protocol version for compatibility checking
+/// Gossip protocol version for compatibility checking.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GossipVersion(pub u16);
 
@@ -19,7 +20,7 @@ impl GossipVersion {
     }
 }
 
-/// Type of gossip message
+/// Type of gossip message.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum GossipMessageType {
     Push = 1,
@@ -46,7 +47,7 @@ impl GossipMessageType {
     }
 }
 
-/// Push gossip message for broadcasting updates
+/// Push gossip message for broadcasting updates.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GossipPushMessage {
     pub sender: NodeId,
@@ -68,16 +69,19 @@ impl GossipPushMessage {
     }
 }
 
-/// Pull request for requesting updates from peers
+/// Pull request for requesting updates from peers.
+///
+/// Uses the CRDS bloom filter with mask-based partitioning for efficient
+/// deduplication across large tables.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GossipPullRequest {
     pub sender: NodeId,
-    pub filter: BloomFilter,
+    pub filter: PullRequestFilter,
     pub wallclock: u64,
 }
 
 impl GossipPullRequest {
-    pub fn new(sender: NodeId, filter: BloomFilter) -> Self {
+    pub fn new(sender: NodeId, filter: PullRequestFilter) -> Self {
         Self {
             sender,
             filter,
@@ -86,7 +90,62 @@ impl GossipPullRequest {
     }
 }
 
-/// Pull response containing requested updates
+/// Combined bloom filter + mask for pull requests.
+///
+/// The bloom filter contains hashes of all CRDS entries the sender
+/// already has. The mask partitions the hash space so that each pull
+/// request only covers a portion of the table.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PullRequestFilter {
+    /// Serialized bloom filter bits.
+    pub bloom_bits: Vec<u64>,
+    /// Number of bits in the bloom filter.
+    pub bloom_num_bits: u64,
+    /// Hash function seeds.
+    pub bloom_keys: Vec<u64>,
+    /// Partition mask value.
+    pub mask: u64,
+    /// Number of significant mask bits.
+    pub mask_bits: u32,
+}
+
+impl PullRequestFilter {
+    /// Create from a GossipBloomFilter and PullRequestMask.
+    pub fn from_bloom_and_mask(filter: &GossipBloomFilter, mask: &PullRequestMask) -> Self {
+        Self {
+            bloom_bits: filter.bits().to_vec(),
+            bloom_num_bits: filter.total_bits(),
+            bloom_keys: filter.keys().to_vec(),
+            mask: mask.mask,
+            mask_bits: mask.mask_bits,
+        }
+    }
+
+    /// Reconstruct the PullRequestMask.
+    pub fn to_mask(&self) -> PullRequestMask {
+        PullRequestMask {
+            mask: self.mask,
+            mask_bits: self.mask_bits,
+        }
+    }
+
+    /// Reconstruct the GossipBloomFilter.
+    pub fn to_bloom_filter(&self) -> GossipBloomFilter {
+        GossipBloomFilter::from_parts(
+            self.bloom_bits.clone(),
+            self.bloom_num_bits,
+            self.bloom_keys.clone(),
+        )
+    }
+
+    /// Check if a node's hash is likely contained in this filter.
+    pub fn contains_hash(&self, hash: &[u8; 32]) -> bool {
+        let filter = self.to_bloom_filter();
+        filter.contains(hash)
+    }
+}
+
+/// Pull response containing requested updates.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GossipPullResponse {
     pub sender: NodeId,
@@ -104,7 +163,7 @@ impl GossipPullResponse {
     }
 }
 
-/// Main gossip message envelope
+/// Main gossip message envelope.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum GossipMessage {
     Push(GossipPushMessage),
@@ -135,7 +194,7 @@ impl GossipMessage {
         }
     }
 
-    /// Encode message to bytes with version prefix
+    /// Encode message to bytes with version prefix.
     pub fn encode(&self) -> Result<Bytes, IngressError> {
         let serialized = bincode::serialize(self).map_err(|e| IngressError::Serialization {
             detail: format!("failed to serialize gossip message: {}", e),
@@ -149,7 +208,7 @@ impl GossipMessage {
         Ok(buf.freeze())
     }
 
-    /// Decode message from bytes with version check
+    /// Decode message from bytes with version check.
     pub fn decode(mut bytes: Bytes) -> Result<Self, IngressError> {
         if bytes.remaining() < 4 {
             return Err(IngressError::Deserialization {
@@ -178,69 +237,6 @@ impl GossipMessage {
         bincode::deserialize(&message_bytes).map_err(|e| IngressError::Deserialization {
             detail: format!("failed to deserialize gossip message: {}", e),
         })
-    }
-}
-
-/// Simple bloom filter for pull requests
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct BloomFilter {
-    bits: Vec<u64>,
-    num_hashes: u32,
-    num_bits: u64,
-}
-
-impl BloomFilter {
-    pub fn new(expected_items: usize, false_positive_rate: f64) -> Self {
-        let num_bits = Self::optimal_num_bits(expected_items, false_positive_rate);
-        let num_hashes = Self::optimal_num_hashes(num_bits, expected_items);
-
-        Self {
-            bits: vec![0u64; (num_bits / 64 + 1) as usize],
-            num_hashes,
-            num_bits,
-        }
-    }
-
-    fn optimal_num_bits(items: usize, fp_rate: f64) -> u64 {
-        let m = -(items as f64 * fp_rate.ln()) / (2.0_f64.ln().powi(2));
-        m.ceil() as u64
-    }
-
-    fn optimal_num_hashes(num_bits: u64, items: usize) -> u32 {
-        let k = (num_bits as f64 / items as f64) * 2.0_f64.ln();
-        k.ceil() as u32
-    }
-
-    pub fn insert(&mut self, item: &NodeId) {
-        for i in 0..self.num_hashes {
-            let hash = self.hash(item, i);
-            let bit_index = (hash % self.num_bits) as usize;
-            let word_index = bit_index / 64;
-            let bit_offset = bit_index % 64;
-            self.bits[word_index] |= 1u64 << bit_offset;
-        }
-    }
-
-    pub fn contains(&self, item: &NodeId) -> bool {
-        for i in 0..self.num_hashes {
-            let hash = self.hash(item, i);
-            let bit_index = (hash % self.num_bits) as usize;
-            let word_index = bit_index / 64;
-            let bit_offset = bit_index % 64;
-            if (self.bits[word_index] & (1u64 << bit_offset)) == 0 {
-                return false;
-            }
-        }
-        true
-    }
-
-    fn hash(&self, item: &NodeId, seed: u32) -> u64 {
-        use sha2::{Digest, Sha256};
-        let mut hasher = Sha256::new();
-        hasher.update(item.as_bytes());
-        hasher.update(seed.to_le_bytes());
-        let result = hasher.finalize();
-        u64::from_le_bytes(result[..8].try_into().unwrap())
     }
 }
 
@@ -314,30 +310,16 @@ mod tests {
     }
 
     #[test]
-    fn test_bloom_filter_basic() {
-        let mut filter = BloomFilter::new(100, 0.01);
-        let node_id = NodeId::new([1u8; 32]);
+    fn test_pull_request_filter_roundtrip() {
+        let bloom = GossipBloomFilter::new(100);
+        let mask = PullRequestMask::full();
 
-        assert!(!filter.contains(&node_id));
-        filter.insert(&node_id);
-        assert!(filter.contains(&node_id));
-    }
+        let filter = PullRequestFilter::from_bloom_and_mask(&bloom, &mask);
+        let restored_mask = filter.to_mask();
+        let restored_bloom = filter.to_bloom_filter();
 
-    #[test]
-    fn test_bloom_filter_multiple_items() {
-        let mut filter = BloomFilter::new(1000, 0.01);
-
-        let items: Vec<_> = (0..100).map(|i| NodeId::new([i as u8; 32])).collect();
-
-        for item in &items {
-            filter.insert(item);
-        }
-
-        for item in &items {
-            assert!(filter.contains(item));
-        }
-
-        let non_inserted = NodeId::new([200u8; 32]);
-        assert!(!filter.contains(&non_inserted));
+        assert_eq!(restored_mask.mask, mask.mask);
+        assert_eq!(restored_mask.mask_bits, mask.mask_bits);
+        assert_eq!(restored_bloom.total_bits(), bloom.total_bits());
     }
 }

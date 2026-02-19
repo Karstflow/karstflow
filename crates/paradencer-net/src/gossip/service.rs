@@ -1,7 +1,7 @@
 use super::*;
 use crate::gossip::cluster_info::{ClusterInfo, ContactInfo, NodeId};
 use crate::gossip::protocol::{
-    BloomFilter, GossipMessage, GossipPullRequest, GossipPullResponse, GossipPushMessage,
+    GossipMessage, GossipPullRequest, GossipPullResponse, GossipPushMessage, PullRequestFilter,
 };
 use std::collections::HashSet;
 use std::net::SocketAddr;
@@ -12,14 +12,9 @@ use tokio::net::UdpSocket;
 use tokio::sync::broadcast;
 use tokio::time::{interval, sleep};
 
-const GOSSIP_PUSH_FANOUT: usize = 6;
-const GOSSIP_PULL_FANOUT: usize = 3;
-const GOSSIP_PUSH_INTERVAL_MS: u64 = 100;
-const GOSSIP_PULL_INTERVAL_MS: u64 = 5000;
-const GOSSIP_PRUNE_INTERVAL_MS: u64 = 10000;
-const GOSSIP_MAX_PACKET_SIZE: usize = 1232;
+use paradencer_constants::gossip as gossip_const;
 
-/// Configuration for gossip service
+/// Configuration for gossip service.
 #[derive(Debug, Clone)]
 pub struct GossipConfig {
     pub bind_addr: SocketAddr,
@@ -36,18 +31,18 @@ impl Default for GossipConfig {
     fn default() -> Self {
         Self {
             bind_addr: "0.0.0.0:8001".parse().unwrap(),
-            push_fanout: GOSSIP_PUSH_FANOUT,
-            pull_fanout: GOSSIP_PULL_FANOUT,
-            push_interval: Duration::from_millis(GOSSIP_PUSH_INTERVAL_MS),
-            pull_interval: Duration::from_millis(GOSSIP_PULL_INTERVAL_MS),
-            prune_interval: Duration::from_millis(GOSSIP_PRUNE_INTERVAL_MS),
+            push_fanout: gossip_const::PUSH_FANOUT,
+            pull_fanout: gossip_const::PULL_FANOUT,
+            push_interval: Duration::from_millis(gossip_const::PUSH_INTERVAL_MS),
+            pull_interval: Duration::from_millis(gossip_const::PULL_INTERVAL_MS),
+            prune_interval: Duration::from_millis(gossip_const::PRUNE_INTERVAL_MS),
             prune_timeout: Duration::from_secs(30),
             max_cluster_size: 5000,
         }
     }
 }
 
-/// Statistics for gossip service
+/// Statistics for gossip service.
 #[derive(Debug, Clone)]
 pub struct GossipServiceStats {
     pub push_messages_sent: Arc<AtomicU64>,
@@ -93,7 +88,10 @@ impl Default for GossipServiceStats {
     }
 }
 
-/// Gossip service for cluster communication
+/// Maximum packet size for gossip messages.
+const GOSSIP_MAX_PACKET_SIZE: usize = gossip_const::GOSSIP_MTU;
+
+/// Gossip service for cluster communication.
 pub struct GossipService {
     cluster_info: Arc<ClusterInfo>,
     config: GossipConfig,
@@ -144,7 +142,7 @@ impl GossipService {
         })
     }
 
-    /// Start the gossip service
+    /// Start the gossip service.
     pub async fn start(&mut self) -> GossipResult<()> {
         let (shutdown_tx, _shutdown_rx) = broadcast::channel(1);
         self.shutdown_tx = Some(shutdown_tx);
@@ -191,7 +189,7 @@ impl GossipService {
             .await;
         });
 
-        // Spawn prune task
+        // Spawn prune/expire task
         let prune_cluster_info = Arc::clone(&self.cluster_info);
         let prune_stats = self.stats.clone();
         let prune_config = self.config.clone();
@@ -209,14 +207,14 @@ impl GossipService {
         Ok(())
     }
 
-    /// Stop the gossip service
+    /// Stop the gossip service.
     pub async fn stop(&mut self) {
         if let Some(tx) = self.shutdown_tx.take() {
             let _ = tx.send(());
         }
     }
 
-    /// Receive loop for incoming gossip messages
+    /// Receive loop for incoming gossip messages.
     async fn receive_loop(
         socket: Arc<UdpSocket>,
         cluster_info: Arc<ClusterInfo>,
@@ -247,7 +245,7 @@ impl GossipService {
         }
     }
 
-    /// Handle incoming gossip message
+    /// Handle incoming gossip message.
     async fn handle_message(
         message: GossipMessage,
         src_addr: SocketAddr,
@@ -262,16 +260,18 @@ impl GossipService {
                 stats
                     .nodes_discovered
                     .fetch_add(count as u64, Ordering::Relaxed);
-                cluster_info.update_last_seen(&push_msg.sender);
             }
             GossipMessage::Pull(pull_req) => {
                 stats.pull_requests_received.fetch_add(1, Ordering::Relaxed);
 
-                let contact_infos: Vec<_> = cluster_info
-                    .get_all()
-                    .into_iter()
-                    .filter(|info| !pull_req.filter.contains(&info.node_id))
-                    .collect();
+                // Use the bloom filter from the pull request to find missing entries
+                let bloom = pull_req.filter.to_bloom_filter();
+                let mask = pull_req.filter.to_mask();
+                let contact_infos = cluster_info.filter_for_pull_response(
+                    &bloom,
+                    &mask,
+                    gossip_const::MAX_VALUES_PER_MESSAGE,
+                );
 
                 let response = GossipMessage::PullResponse(GossipPullResponse::new(
                     cluster_info.node_id(),
@@ -294,7 +294,6 @@ impl GossipService {
                 stats
                     .nodes_discovered
                     .fetch_add(count as u64, Ordering::Relaxed);
-                cluster_info.update_last_seen(&pull_resp.sender);
             }
             GossipMessage::Ping { sender, nonce } => {
                 let pong = GossipMessage::Pong {
@@ -316,7 +315,7 @@ impl GossipService {
         }
     }
 
-    /// Push gossip loop
+    /// Push gossip loop.
     async fn push_loop(
         socket: Arc<UdpSocket>,
         cluster_info: Arc<ClusterInfo>,
@@ -348,7 +347,7 @@ impl GossipService {
         let all_infos = cluster_info.get_all();
 
         let mut contact_infos = Vec::with_capacity(all_infos.len() + 1);
-        contact_infos.push(self_info.clone());
+        contact_infos.push(self_info);
         contact_infos.extend(all_infos);
 
         let mut exclude = HashSet::new();
@@ -373,18 +372,16 @@ impl GossipService {
                         stats
                             .bytes_sent
                             .fetch_add(encoded.len() as u64, Ordering::Relaxed);
-                        cluster_info.record_push_success(&target.node_id);
                     }
                     Err(_) => {
                         stats.send_errors.fetch_add(1, Ordering::Relaxed);
-                        cluster_info.record_push_failure(&target.node_id);
                     }
                 }
             }
         }
     }
 
-    /// Pull gossip loop
+    /// Pull gossip loop.
     async fn pull_loop(
         socket: Arc<UdpSocket>,
         cluster_info: Arc<ClusterInfo>,
@@ -421,10 +418,9 @@ impl GossipService {
             return;
         }
 
-        let mut filter = BloomFilter::new(config.max_cluster_size, 0.01);
-        for info in cluster_info.get_all() {
-            filter.insert(&info.node_id);
-        }
+        // Build a CRDS bloom filter covering all entries we already have
+        let (bloom, mask) = cluster_info.build_pull_filter();
+        let filter = PullRequestFilter::from_bloom_and_mask(&bloom, &mask);
 
         let message = GossipMessage::Pull(GossipPullRequest::new(cluster_info.node_id(), filter));
 
@@ -445,7 +441,7 @@ impl GossipService {
         }
     }
 
-    /// Prune loop for removing stale nodes
+    /// Prune/expire loop for removing stale entries from the CRDS table.
     async fn prune_loop(
         cluster_info: Arc<ClusterInfo>,
         stats: GossipServiceStats,
@@ -457,8 +453,8 @@ impl GossipService {
         loop {
             tokio::select! {
                 _ = ticker.tick() => {
-                    let pruned = cluster_info.prune_stale_nodes();
-                    stats.nodes_pruned.fetch_add(pruned as u64, Ordering::Relaxed);
+                    let expired = cluster_info.prune_stale_nodes();
+                    stats.nodes_pruned.fetch_add(expired as u64, Ordering::Relaxed);
                 }
                 _ = shutdown_rx.recv() => {
                     break;

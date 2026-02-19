@@ -1,4 +1,5 @@
 mod cluster_info;
+pub mod crds;
 mod protocol;
 mod service;
 
@@ -9,9 +10,13 @@ pub use cluster_info::{
     ClusterInfo, ContactInfo, GossipNode, NodeId, ValidatorInfo, CRDT_UPDATE_INTERVAL_MS,
     GOSSIP_PRUNE_TIMEOUT_MS, MAX_CLUSTER_SIZE,
 };
+pub use crds::{
+    CrdsContactInfo, CrdsEntry, CrdsKey, CrdsTable, CrdsValue, CrdsValueData, GossipBloomFilter,
+    InsertOutcome, WeightedPeerSampler,
+};
 pub use protocol::{
     GossipMessage, GossipMessageType, GossipPullRequest, GossipPullResponse, GossipPushMessage,
-    GossipVersion, GOSSIP_PROTOCOL_VERSION,
+    GossipVersion, PullRequestFilter, GOSSIP_PROTOCOL_VERSION,
 };
 pub use service::{GossipConfig, GossipService, GossipServiceStats};
 
