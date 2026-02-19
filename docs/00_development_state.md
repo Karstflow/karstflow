@@ -1,6 +1,6 @@
 # Paradencer Development State
 
-Last update: 2026-02-18
+Last update: 2026-02-19
 
 Primary residual tracker:
 - `docs/04_module_residual_matrix.md` (module-by-module remaining work and priorities)
@@ -20,7 +20,7 @@ Primary residual tracker:
   - Rewards & Stakes: ~80% (inflation, partitioned distribution, 18 stake handlers)
   - Runtime Core: ~75% (bank, executor, epoch processing, cost tracker, tx cache)
   - Consensus: ~70% (tower BFT, GHOST fork choice, equivocation detection, commitment)
-  - VM + Syscalls: ~80% (interpreter, CPI/crypto/PDA syscalls, SBPF versions, memory model)
+  - VM + Syscalls: ~85% (interpreter, CPI/crypto/PDA/curve/hash syscalls, SBPF versions, memory model, abort/panic, BLS12-381 stubs)
   - Types: ~55% (core types done, many inline, not all generated types)
   - Crypto: ~50% (ed25519 batch, blake3, sha256, keccak, secp, bn254, reed-solomon, lthash; missing BLS)
   - Network Stack: ~35% (custom paradencer-net: packet types, I/O traits, UDP socket, TLS crypto, QUIC key derivation; plus quinn ingress, gossip/repair basic)
@@ -34,6 +34,7 @@ Primary residual tracker:
   - updated 2026-02-18: storage 50%→60% (cycles 15-19), overall 60%→62%
   - updated 2026-02-18: storage 64%→67% (cycles 25-27: manifest serializer, incremental Solana archives, AccountsDbFields), overall 63%→64%
   - updated 2026-02-18: network 30%→35% (net cycles 0-5: paradencer-net crate, packets, I/O, UDP socket, TLS crypto, QUIC key derivation, 91 tests)
+  - updated 2026-02-19: VM+Syscalls 80%→85% (4 missing syscalls: abort, panic, BLS12-381 decompress/pairing), storage metrics + auto-compaction
 
 ## Firedancer Module Comparison (deep analysis 2026-02-17, updated 2026-02-18)
 
@@ -43,7 +44,7 @@ Primary residual tracker:
 | **Builtin Programs** (12+, 96+ instructions) | ~16,100 | ~20,000 | **82%** | High |
 | **Rewards & Stakes** (inflation, distribution) | ~2,500 | ~5,000 | **80%** | High |
 | **Runtime Core** (bank, executor, epoch) | ~8,400 | ~15,000 | **75%** | Critical |
-| **VM + Syscalls** (interp, CPI, crypto) | ~7,900 | ~10,000 | **80%** | High |
+| **VM + Syscalls** (interp, CPI, crypto) | ~7,900 | ~10,300 | **85%** | High |
 | **Consensus** (tower, fork, equivocation) | ~7,900 | ~8,000 | **70%** | High |
 | **Types** (bincode serialization) | ~10,100 | ~3,000 | **55%** | High |
 | **Crypto** (ed25519, blake3, bn254...) | ~30,000 | ~5,000 | **50%** | Medium |
