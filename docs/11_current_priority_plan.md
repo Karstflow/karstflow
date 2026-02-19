@@ -6,25 +6,7 @@ Last updated: 2026-02-19
 
 Tasks ordered by priority (highest first). Each task improves Firedancer logic parity.
 
-### Priority 1: Status Cache Error Preservation (#24)
-**Status**: Pending
-**Impact**: Runtime correctness — ensures transaction error codes are preserved and nonce transactions are properly filtered
-**Scope**: paradencer-consensus status_cache module
-**Details**:
-- Current status cache parser is lossy — doesn't preserve error codes from slot history
-- Missing nonce transaction filtering (Firedancer excludes nonce txns from cache)
-- Fix: Store `TransactionStatusMeta` with error codes, add nonce account detection
-
-### Priority 2: PoH Enhancement (#25)
-**Status**: Pending
-**Impact**: Consensus correctness — PoH must match Firedancer's hashes_per_tick behavior
-**Scope**: paradencer-consensus poh module
-**Details**:
-- Add feature-gated hashes_per_tick (Firedancer supports dynamic hashing rates)
-- Add missing PoH states for tile integration readiness
-- Currently ~75% complete, needs tile-aware state machine transitions
-
-### Priority 3: Bank → sBPF VM Integration (#26)
+### Priority 1: Bank → sBPF VM Integration (#26)
 **Status**: Pending
 **Impact**: Critical for end-to-end transaction execution
 **Scope**: paradencer-consensus bank + paradencer-sbpf integration
@@ -33,7 +15,7 @@ Tasks ordered by priority (highest first). Each task improves Firedancer logic p
 - Need: execution context construction, account loading, VM invocation, state commit
 - This is the critical path for a working validator
 
-### Priority 4: Optimistic Confirmation Pipeline (#27)
+### Priority 2: Optimistic Confirmation Pipeline (#27)
 **Status**: Pending
 **Impact**: Required for consensus participation
 **Scope**: paradencer-consensus
@@ -45,6 +27,8 @@ Tasks ordered by priority (highest first). Each task improves Firedancer logic p
 
 | Task | Date | Commit |
 |------|------|--------|
+| PoH 6-state machine + dynamic hashing | 2026-02-19 | 1dd0070 |
+| Status cache analysis (matches Firedancer) | 2026-02-19 | — |
 | Missing VM syscalls (abort, panic, BLS12-381) | 2026-02-19 | 78234a9 |
 | Storage metrics + auto-compaction | 2026-02-19 | ff3647b |
 | LRU read cache | 2026-02-19 | 413b53c |

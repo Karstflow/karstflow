@@ -24,7 +24,7 @@ Primary residual tracker:
   - Types: ~55% (core types done, many inline, not all generated types)
   - Crypto: ~50% (ed25519 batch, blake3, sha256, keccak, secp, bn254, reed-solomon, lthash; missing BLS)
   - Network Stack: ~35% (custom paradencer-net: packet types, I/O traits, UDP socket, TLS crypto, QUIC key derivation; plus quinn ingress, gossip/repair basic)
-  - Tile Pipeline: ~30% (replay stage, block production, shred assembly; pack/net/metrics gaps)
+  - Tile Pipeline: ~32% (replay stage, block production, shred assembly, PoH 6-state machine with dynamic hashing; pack/net/metrics gaps)
   - Storage: ~67% (MVCC accounts, blockstore, snapshots, DurableStore persistent backend, StorageEngine facade, snapshot manifest parser + serializer, status cache parser, disk persistence + recovery, blockstore persistence, compaction, full snapshot bootstrap: lthash/stakes/history/sysvars/features/txcache, genesis bootstrap, bank hash verification, SHA-256 accounts hash, incremental dirty-set tracking, incremental snapshot creation, snapshot loader DB integration, AppendVec writer, Solana-compatible archive builder + creator with full roundtrip, bank state manifest serializer, AccountsDbFields serializer, incremental Solana-compatible archives, snapshot scheduler)
   - App/Config/IPC: ~25% (config done, control plane basic, no tango/shared-memory IPC)
 - Update policy:
@@ -35,6 +35,7 @@ Primary residual tracker:
   - updated 2026-02-18: storage 64%→67% (cycles 25-27: manifest serializer, incremental Solana archives, AccountsDbFields), overall 63%→64%
   - updated 2026-02-18: network 30%→35% (net cycles 0-5: paradencer-net crate, packets, I/O, UDP socket, TLS crypto, QUIC key derivation, 91 tests)
   - updated 2026-02-19: VM+Syscalls 80%→85% (4 missing syscalls: abort, panic, BLS12-381 decompress/pairing), storage metrics + auto-compaction
+  - updated 2026-02-19: Tile Pipeline 30%→32% (PoH 6-state machine, dynamic hashes_per_tick, low-power mode, bank/slot coordination)
 
 ## Firedancer Module Comparison (deep analysis 2026-02-17, updated 2026-02-18)
 
