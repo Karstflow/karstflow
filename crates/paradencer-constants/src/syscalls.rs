@@ -155,3 +155,23 @@ pub const CURVE_ID_RISTRETTO255: u64 = 1;
 pub const CURVE_OP_ADD: u64 = 0;
 pub const CURVE_OP_SUB: u64 = 1;
 pub const CURVE_OP_MUL: u64 = 2;
+
+// BLS12-381 curve IDs for sol_curve_decompress and sol_curve_pairing_map
+pub const CURVE_ID_BLS12_381_G1: u64 = 4;
+pub const CURVE_ID_BLS12_381_G2: u64 = 6;
+/// Bit flag for little-endian byte order on BLS12-381 operations.
+pub const BLS12_381_LITTLE_ENDIAN_FLAG: u64 = 0x80;
+
+// BLS12-381 point sizes
+pub const BLS12_381_G1_POINT_SIZE: usize = 96;
+pub const BLS12_381_G2_POINT_SIZE: usize = 192;
+pub const BLS12_381_GT_ELEMENT_SIZE: usize = 576;
+
+// BLS12-381 compute costs
+pub const BLS12_381_G1_DECOMPRESS_COST: u64 = 1_000;
+pub const BLS12_381_G2_DECOMPRESS_COST: u64 = 2_500;
+pub const BLS12_381_PAIRING_BASE_COST: u64 = 75_000;
+pub const BLS12_381_PAIRING_PER_PAIR_COST: u64 = 45_000;
+
+// Panic syscall cost (per byte of message)
+pub const PANIC_PER_BYTE_COST: u64 = 1;

@@ -27,3 +27,6 @@ pub const FEATURE_GET_SYSVAR_SYSCALL: &str = "get_sysvar_syscall_enabled";
 
 /// Feature: enable the sol_get_epoch_stake syscall.
 pub const FEATURE_ENABLE_GET_EPOCH_STAKE: &str = "enable_get_epoch_stake_syscall";
+
+/// Feature: enable the BLS12-381 curve syscalls (decompress, pairing).
+pub const FEATURE_ENABLE_BLS12_381_SYSCALL: &str = "enable_bls12_381_syscall";

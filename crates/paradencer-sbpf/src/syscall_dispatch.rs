@@ -178,6 +178,14 @@ impl RuntimeSyscallDispatch {
         // Poseidon hash
         dispatch.register_by_name("sol_poseidon", Box::new(SolPoseidonHandler));
 
+        // VM termination
+        dispatch.register_by_name("abort", Box::new(AbortHandler));
+        dispatch.register_by_name("sol_panic_", Box::new(SolPanicHandler));
+
+        // BLS12-381 curve operations
+        dispatch.register_by_name("sol_curve_decompress", Box::new(SolCurveDecompressHandler));
+        dispatch.register_by_name("sol_curve_pairing_map", Box::new(SolCurvePairingMapHandler));
+
         dispatch
     }
 
@@ -196,8 +204,8 @@ impl RuntimeSyscallDispatch {
     pub fn with_features(active_features: &std::collections::HashSet<&str>) -> Self {
         use paradencer_constants::features::{
             FEATURE_ENABLE_ALT_BN128_COMPRESSION, FEATURE_ENABLE_ALT_BN128_SYSCALL,
-            FEATURE_ENABLE_GET_EPOCH_STAKE, FEATURE_ENABLE_POSEIDON_SYSCALL,
-            FEATURE_GET_SYSVAR_SYSCALL,
+            FEATURE_ENABLE_BLS12_381_SYSCALL, FEATURE_ENABLE_GET_EPOCH_STAKE,
+            FEATURE_ENABLE_POSEIDON_SYSCALL, FEATURE_GET_SYSVAR_SYSCALL,
         };
 
         let mut dispatch = Self::new();
@@ -261,6 +269,8 @@ impl RuntimeSyscallDispatch {
             "sol_curve_multiscalar_mul",
             Box::new(SolCurveMultiscalarMulHandler),
         );
+        dispatch.register_by_name("abort", Box::new(AbortHandler));
+        dispatch.register_by_name("sol_panic_", Box::new(SolPanicHandler));
 
         // Feature-gated: ALT-BN128 group operations
         if active_features.contains(FEATURE_ENABLE_ALT_BN128_SYSCALL) {
@@ -291,6 +301,12 @@ impl RuntimeSyscallDispatch {
         // Feature-gated: Epoch stake query
         if active_features.contains(FEATURE_ENABLE_GET_EPOCH_STAKE) {
             dispatch.register_by_name("sol_get_epoch_stake", Box::new(SolGetEpochStakeHandler));
+        }
+
+        // Feature-gated: BLS12-381 curve operations
+        if active_features.contains(FEATURE_ENABLE_BLS12_381_SYSCALL) {
+            dispatch.register_by_name("sol_curve_decompress", Box::new(SolCurveDecompressHandler));
+            dispatch.register_by_name("sol_curve_pairing_map", Box::new(SolCurvePairingMapHandler));
         }
 
         dispatch
@@ -2324,6 +2340,138 @@ impl SyscallHandler for SolInvokeHandler {
 }
 
 // ---------------------------------------------------------------------------
+// abort / sol_panic_ — VM termination syscalls
+// ---------------------------------------------------------------------------
+
+/// abort: Immediately fail the transaction with no compute cost.
+struct AbortHandler;
+
+impl SyscallHandler for AbortHandler {
+    fn call(
+        &self,
+        _vm: &mut VmState,
+        _r1: u64,
+        _r2: u64,
+        _r3: u64,
+        _r4: u64,
+        _r5: u64,
+    ) -> Result<u64, VmError> {
+        Err(VmError::SyscallError("abort".to_string()))
+    }
+}
+
+/// sol_panic_: Log a panic message and fail the transaction.
+///
+/// r1 = pointer to message, r2 = message length, r3 = line, r4 = column.
+/// Compute cost: proportional to message length.
+struct SolPanicHandler;
+
+impl SyscallHandler for SolPanicHandler {
+    fn call(
+        &self,
+        vm: &mut VmState,
+        r1: u64,
+        r2: u64,
+        _r3: u64,
+        _r4: u64,
+        _r5: u64,
+    ) -> Result<u64, VmError> {
+        let msg_len = r2 as usize;
+
+        // Deduct compute proportional to message length.
+        deduct_compute(vm, msg_len as u64 * syscalls::PANIC_PER_BYTE_COST)?;
+
+        // Read and validate the message string from VM memory.
+        let msg_bytes = vm
+            .memory
+            .read_slice(r1, msg_len)
+            .map_err(|e| VmError::MemoryError(e.to_string()))?;
+
+        // Validate UTF-8 — invalid strings produce an error.
+        let msg = std::str::from_utf8(&msg_bytes)
+            .map_err(|_| VmError::SyscallError("panic: invalid UTF-8 string".to_string()))?;
+
+        vm.logs.push(format!("Program panic: {}", msg));
+        Err(VmError::SyscallError(format!("panic: {}", msg)))
+    }
+}
+
+// ---------------------------------------------------------------------------
+// BLS12-381 syscalls (feature-gated, stub until crypto support is added)
+// ---------------------------------------------------------------------------
+
+/// sol_curve_decompress: Decompress BLS12-381 curve points (G1/G2).
+///
+/// Feature-gated by `enable_bls12_381_syscall`. Currently returns 1
+/// (unsupported) since the BLS12-381 crypto primitives are not yet
+/// implemented. The handler deducts compute units correctly.
+struct SolCurveDecompressHandler;
+
+impl SyscallHandler for SolCurveDecompressHandler {
+    fn call(
+        &self,
+        vm: &mut VmState,
+        r1: u64,  // curve_id
+        _r2: u64, // point_addr
+        _r3: u64, // result_addr
+        _r4: u64,
+        _r5: u64,
+    ) -> Result<u64, VmError> {
+        let base_id = r1 & !syscalls::BLS12_381_LITTLE_ENDIAN_FLAG;
+
+        let cost = match base_id {
+            syscalls::CURVE_ID_BLS12_381_G1 => syscalls::BLS12_381_G1_DECOMPRESS_COST,
+            syscalls::CURVE_ID_BLS12_381_G2 => syscalls::BLS12_381_G2_DECOMPRESS_COST,
+            _ => return Ok(1), // Invalid curve_id
+        };
+        deduct_compute(vm, cost)?;
+
+        // BLS12-381 crypto not yet implemented — return soft error.
+        // TODO: Implement when paradencer-crypto adds BLS12-381 support.
+        Ok(1)
+    }
+}
+
+/// sol_curve_pairing_map: Compute BLS12-381 multi-pairing.
+///
+/// Feature-gated by `enable_bls12_381_syscall`. Currently returns 1
+/// (unsupported) since the BLS12-381 crypto primitives are not yet
+/// implemented. The handler deducts compute units correctly.
+struct SolCurvePairingMapHandler;
+
+impl SyscallHandler for SolCurvePairingMapHandler {
+    fn call(
+        &self,
+        vm: &mut VmState,
+        r1: u64,  // curve_id
+        r2: u64,  // num_pairs
+        _r3: u64, // g1_points_addr
+        _r4: u64, // g2_points_addr
+        _r5: u64, // result_addr
+    ) -> Result<u64, VmError> {
+        let base_id = r1 & !syscalls::BLS12_381_LITTLE_ENDIAN_FLAG;
+
+        if base_id != syscalls::CURVE_ID_BLS12_381_G1 {
+            return Ok(1); // Invalid curve_id
+        }
+
+        let num_pairs = r2;
+        if num_pairs == 0 {
+            return Ok(1);
+        }
+
+        // Cost: base + incremental per additional pair.
+        let cost = syscalls::BLS12_381_PAIRING_BASE_COST
+            + num_pairs.saturating_sub(1) * syscalls::BLS12_381_PAIRING_PER_PAIR_COST;
+        deduct_compute(vm, cost)?;
+
+        // BLS12-381 crypto not yet implemented — return soft error.
+        // TODO: Implement when paradencer-crypto adds BLS12-381 support.
+        Ok(1)
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Helper
 // ---------------------------------------------------------------------------
 
@@ -3246,6 +3394,7 @@ mod tests {
             FEATURE_ENABLE_POSEIDON_SYSCALL,
             FEATURE_GET_SYSVAR_SYSCALL,
             FEATURE_ENABLE_GET_EPOCH_STAKE,
+            FEATURE_ENABLE_BLS12_381_SYSCALL,
         ]
         .into_iter()
         .collect();
@@ -3259,10 +3408,14 @@ mod tests {
         assert!(ids.contains(&murmur3_hash("sol_poseidon")));
         assert!(ids.contains(&murmur3_hash("sol_get_sysvar")));
         assert!(ids.contains(&murmur3_hash("sol_get_epoch_stake")));
+        assert!(ids.contains(&murmur3_hash("sol_curve_decompress")));
+        assert!(ids.contains(&murmur3_hash("sol_curve_pairing_map")));
 
         // Always-available syscalls still present
         assert!(ids.contains(&murmur3_hash("sol_log_")));
         assert!(ids.contains(&murmur3_hash("sol_sha256")));
+        assert!(ids.contains(&murmur3_hash("abort")));
+        assert!(ids.contains(&murmur3_hash("sol_panic_")));
     }
 
     #[test]
@@ -3277,12 +3430,16 @@ mod tests {
         assert!(!ids.contains(&murmur3_hash("sol_poseidon")));
         assert!(!ids.contains(&murmur3_hash("sol_get_sysvar")));
         assert!(!ids.contains(&murmur3_hash("sol_get_epoch_stake")));
+        assert!(!ids.contains(&murmur3_hash("sol_curve_decompress")));
+        assert!(!ids.contains(&murmur3_hash("sol_curve_pairing_map")));
 
         // Always-available syscalls still present
         assert!(ids.contains(&murmur3_hash("sol_log_")));
         assert!(ids.contains(&murmur3_hash("sol_sha256")));
         assert!(ids.contains(&murmur3_hash("sol_memcpy_")));
         assert!(ids.contains(&murmur3_hash("sol_get_clock_sysvar")));
+        assert!(ids.contains(&murmur3_hash("abort")));
+        assert!(ids.contains(&murmur3_hash("sol_panic_")));
     }
 
     #[test]
@@ -3300,10 +3457,12 @@ mod tests {
         assert!(ids.contains(&murmur3_hash("sol_poseidon")));
         assert!(ids.contains(&murmur3_hash("sol_get_sysvar")));
 
-        // ALT-BN128 and epoch_stake should NOT be present
+        // ALT-BN128, epoch_stake, and BLS12-381 should NOT be present
         assert!(!ids.contains(&murmur3_hash("sol_alt_bn128_group_op")));
         assert!(!ids.contains(&murmur3_hash("sol_alt_bn128_compression")));
         assert!(!ids.contains(&murmur3_hash("sol_get_epoch_stake")));
+        assert!(!ids.contains(&murmur3_hash("sol_curve_decompress")));
+        assert!(!ids.contains(&murmur3_hash("sol_curve_pairing_map")));
     }
 
     #[test]
@@ -3315,6 +3474,7 @@ mod tests {
             FEATURE_ENABLE_POSEIDON_SYSCALL,
             FEATURE_GET_SYSVAR_SYSCALL,
             FEATURE_ENABLE_GET_EPOCH_STAKE,
+            FEATURE_ENABLE_BLS12_381_SYSCALL,
         ]
         .into_iter()
         .collect();
@@ -3324,5 +3484,94 @@ mod tests {
 
         // Both should have the same syscall set
         assert_eq!(gated.registered_ids(), standard.registered_ids());
+    }
+
+    fn make_test_vm(compute_budget: u64) -> VmState {
+        VmState {
+            registers: [0u64; 11],
+            pc: 0,
+            instruction_count: 0,
+            memory: MemoryMap::new(&[], TOTAL_STACK_SIZE, DEFAULT_HEAP_SIZE, vec![]),
+            call_stack: Vec::new(),
+            compute_meter: compute_budget,
+            logs: Vec::new(),
+            return_data: None,
+            heap_position: REGION_HEAP_BASE,
+            sysvar_snapshot: crate::sysvar_snapshot::SysvarSnapshot::default(),
+            cpi_depth: 0,
+            sbpf_version: crate::elf_loader::SbpfVersion::V0,
+        }
+    }
+
+    #[test]
+    fn abort_handler_returns_error() {
+        let handler = AbortHandler;
+        let mut vm = make_test_vm(10_000);
+
+        let result = handler.call(&mut vm, 0, 0, 0, 0, 0);
+        assert!(result.is_err());
+        match result {
+            Err(VmError::SyscallError(msg)) => assert_eq!(msg, "abort"),
+            other => panic!("expected SyscallError(\"abort\"), got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn sol_panic_handler_logs_and_fails() {
+        let handler = SolPanicHandler;
+        let mut vm = make_test_vm(10_000);
+
+        // Write "oops" to heap region
+        let msg = b"oops";
+        let heap_addr = REGION_HEAP_BASE;
+        vm.memory.write_slice(heap_addr, msg).unwrap();
+
+        let result = handler.call(&mut vm, heap_addr, msg.len() as u64, 0, 0, 0);
+        assert!(result.is_err());
+        match result {
+            Err(VmError::SyscallError(msg)) => assert_eq!(msg, "panic: oops"),
+            other => panic!("expected SyscallError(\"panic: oops\"), got {:?}", other),
+        }
+        assert_eq!(vm.logs.len(), 1);
+        assert!(vm.logs[0].contains("oops"));
+    }
+
+    #[test]
+    fn sol_curve_decompress_deducts_compute() {
+        let handler = SolCurveDecompressHandler;
+        let mut vm = make_test_vm(10_000);
+
+        // G1 decompress — should deduct BLS12_381_G1_DECOMPRESS_COST
+        let result = handler.call(&mut vm, syscalls::CURVE_ID_BLS12_381_G1, 0, 0, 0, 0);
+        assert_eq!(result.unwrap(), 1); // stub returns 1
+        assert_eq!(
+            vm.compute_meter,
+            10_000 - syscalls::BLS12_381_G1_DECOMPRESS_COST
+        );
+
+        // Invalid curve_id — should not deduct compute
+        let before = vm.compute_meter;
+        let result = handler.call(&mut vm, 99, 0, 0, 0, 0);
+        assert_eq!(result.unwrap(), 1);
+        assert_eq!(vm.compute_meter, before); // no change
+    }
+
+    #[test]
+    fn sol_curve_pairing_map_deducts_compute() {
+        let handler = SolCurvePairingMapHandler;
+        let mut vm = make_test_vm(200_000);
+
+        // 2 pairs — base + 1 * per_pair
+        let result = handler.call(&mut vm, syscalls::CURVE_ID_BLS12_381_G1, 2, 0, 0, 0);
+        assert_eq!(result.unwrap(), 1);
+        let expected_cost =
+            syscalls::BLS12_381_PAIRING_BASE_COST + syscalls::BLS12_381_PAIRING_PER_PAIR_COST;
+        assert_eq!(vm.compute_meter, 200_000 - expected_cost);
+
+        // 0 pairs — early return, no compute deduction
+        let before = vm.compute_meter;
+        let result = handler.call(&mut vm, syscalls::CURVE_ID_BLS12_381_G1, 0, 0, 0, 0);
+        assert_eq!(result.unwrap(), 1);
+        assert_eq!(vm.compute_meter, before);
     }
 }
