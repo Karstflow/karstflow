@@ -9,7 +9,7 @@ pub use topology_parts::{materialize_services, MaterializedTopology};
 #[cfg(test)]
 mod tests {
     use super::{load_topology_from_file, materialize_services, plan_default_topology};
-    use paradencer_ingress::IngressPolicy;
+    use paradencer_net::IngressPolicy;
     use paradencer_stages::{MetricsOutputFormat, MetricsOutputTarget, StorageRuntimePolicy};
     use std::fs;
     use std::time::{SystemTime, UNIX_EPOCH};

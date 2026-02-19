@@ -8,7 +8,7 @@ use crate::profile_schema::INGRESS_POLICY_SCHEMA_VERSION;
 use crate::profile_types::NodeProfileToml;
 use crate::{ConfigError, Result};
 use env::apply_env_overrides;
-use paradencer_ingress::IngressPolicy;
+use paradencer_net::IngressPolicy;
 use profile::{apply_profile, load_ingress_policy_from_file};
 use std::path::PathBuf;
 

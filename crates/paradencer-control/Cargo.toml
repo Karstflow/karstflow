@@ -9,7 +9,7 @@ authors.workspace = true
 thiserror.workspace = true
 paradencer-config = { path = "../paradencer-config" }
 paradencer-core = { path = "../paradencer-core" }
-paradencer-ingress = { path = "../paradencer-ingress" }
+paradencer-net = { path = "../paradencer-net" }
 paradencer-runtime = { path = "../paradencer-runtime" }
 paradencer-stages = { path = "../paradencer-stages" }
 paradencer-topology = { path = "../paradencer-topology" }

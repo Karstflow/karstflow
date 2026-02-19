@@ -11,7 +11,7 @@ serde.workspace = true
 serde_json.workspace = true
 bincode.workspace = true
 paradencer-consensus = { path = "../paradencer-consensus" }
-paradencer-ingress = { path = "../paradencer-ingress" }
+paradencer-net = { path = "../paradencer-net" }
 paradencer-execution = { path = "../paradencer-execution" }
 paradencer-storage = { path = "../paradencer-storage" }
 paradencer-runtime = { path = "../paradencer-runtime" }

@@ -1,6 +1,6 @@
 use crate::InboundPacket;
-use paradencer_ingress::{IngressMode, IngressPolicy};
 use paradencer_mesh::{OutPort, SendError};
+use paradencer_net::{IngressMode, IngressPolicy};
 use paradencer_runtime::{RuntimeError, RuntimeResult, Service, ServiceContext};
 use std::net::UdpSocket;
 use std::time::Duration;
@@ -65,9 +65,8 @@ impl EdgeIntake {
         }
     }
 
-    fn should_route_to_shred_path(&self, source: paradencer_ingress::IngressSource) -> bool {
-        !self.outgoing_shred_packets.is_empty()
-            && source == paradencer_ingress::IngressSource::Gossip
+    fn should_route_to_shred_path(&self, source: paradencer_net::IngressSource) -> bool {
+        !self.outgoing_shred_packets.is_empty() && source == paradencer_net::IngressSource::Gossip
     }
 
     fn try_send_to_route_set(

@@ -24,7 +24,7 @@ use crate::parts::{
 use crate::profile_loader::load_node_profile_from_file;
 use crate::profile_types::NodeProfileToml;
 use paradencer_core::{RuntimeSpec, TopologySpec};
-use paradencer_ingress::{IngressMode, IngressPolicy};
+use paradencer_net::{IngressMode, IngressPolicy};
 use paradencer_stages::{
     MetricsOutputFormat, MetricsOutputTarget, StorageRuntimePolicy, StorageStartupPolicy,
 };

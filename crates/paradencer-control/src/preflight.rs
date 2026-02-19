@@ -1,6 +1,6 @@
 use crate::errors::{ControlPlaneError, Result};
 use paradencer_config::{ClusterMode, NodeConfig};
-use paradencer_ingress::IngressMode;
+use paradencer_net::IngressMode;
 use paradencer_runtime::{
     probe_service_lifecycle, RuntimeError, Service, ServiceProbeOptions, ServiceProbeReport,
 };

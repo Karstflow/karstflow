@@ -1,8 +1,8 @@
 use crate::{InboundPacket, ShredFilterStats};
-use paradencer_ingress::{
+use paradencer_mesh::{InPort, ReceiveError};
+use paradencer_net::{
     DedupDecision, IngressPolicy, ShredDecodeOutcome, ShredDecoder, SignatureDeduplicator,
 };
-use paradencer_mesh::{InPort, ReceiveError};
 use paradencer_runtime::{RuntimeError, RuntimeResult, Service, ServiceContext};
 use std::sync::Arc;
 use std::time::Duration;

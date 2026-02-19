@@ -12,7 +12,7 @@ impl TxFilter {
             Err(SendError::QueueFull(_)) => {
                 if self.pending_egress_transactions.len() >= self.egress_retry_buffer_capacity {
                     self.ingress_filter_stats.increment_drop_reason(
-                        paradencer_ingress::DropReason::DownstreamBackpressure,
+                        paradencer_net::DropReason::DownstreamBackpressure,
                         transaction.source,
                     );
                     return Ok(());
@@ -46,7 +46,7 @@ impl TxFilter {
                     pending.wait_ticks = pending.wait_ticks.saturating_add(1);
                     if pending.wait_ticks >= self.egress_retry_max_wait_ticks {
                         self.ingress_filter_stats.increment_drop_reason(
-                            paradencer_ingress::DropReason::DownstreamBackpressure,
+                            paradencer_net::DropReason::DownstreamBackpressure,
                             pending.transaction.source,
                         );
                     } else {

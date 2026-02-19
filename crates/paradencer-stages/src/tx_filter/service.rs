@@ -1,6 +1,6 @@
 use super::TxFilter;
-use paradencer_ingress::{DecodeOutcome, DedupDecision};
 use paradencer_mesh::ReceiveError;
+use paradencer_net::{DecodeOutcome, DedupDecision};
 use paradencer_runtime::{RuntimeError, RuntimeResult, Service, ServiceContext};
 use std::time::Duration;
 
@@ -42,7 +42,7 @@ impl Service for TxFilter {
                     burst_refill_ticks,
                 ) {
                     self.ingress_filter_stats.increment_drop_reason(
-                        paradencer_ingress::DropReason::SourceRateLimited,
+                        paradencer_net::DropReason::SourceRateLimited,
                         transaction.source,
                     );
                     return Ok(());
@@ -61,7 +61,7 @@ impl Service for TxFilter {
                     cost_budget_window_ticks,
                 ) {
                     self.ingress_filter_stats.increment_drop_reason(
-                        paradencer_ingress::DropReason::SourceCostBudgetExceeded,
+                        paradencer_net::DropReason::SourceCostBudgetExceeded,
                         transaction.source,
                     );
                     return Ok(());

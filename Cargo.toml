@@ -3,7 +3,6 @@ members = [
   "crates/paradencer-core",
   "crates/paradencer-runtime",
   "crates/paradencer-mesh",
-  "crates/paradencer-ingress",
   "crates/paradencer-execution",
   "crates/paradencer-storage",
   "crates/paradencer-constants",
@@ -70,11 +69,6 @@ rand_chacha = "0.3"
 tracing = "0.1"
 parking_lot = "0.12"
 dashmap = "6.1"
-
-# QUIC/Network
-quinn = "0.11"
-rustls = "0.23"
-rcgen = "0.13"
 
 # Internal crates
 paradencer-constants = { path = "crates/paradencer-constants" }

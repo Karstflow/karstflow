@@ -1,5 +1,5 @@
 use crate::stats::IngressFilterMetrics;
-use paradencer_ingress::{DropReason, IngressSource};
+use paradencer_net::{DropReason, IngressSource};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 #[derive(Default)]

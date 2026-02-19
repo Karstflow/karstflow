@@ -1,5 +1,5 @@
 use crate::stats::ShredFilterMetrics;
-use paradencer_ingress::DropReason;
+use paradencer_net::DropReason;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 #[derive(Default)]

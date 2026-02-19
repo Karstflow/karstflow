@@ -8,7 +8,7 @@ use crate::{
 };
 use paradencer_config::NodeConfig;
 use paradencer_core::{ExecutionMode, LinkKind, PinnedCorePolicy, StageKind};
-use paradencer_ingress::IngressMode;
+use paradencer_net::IngressMode;
 use paradencer_observability::spawn_metrics_http_bridge;
 use paradencer_rpc::{metrics_file_provider, spawn_rpc_http_server};
 use paradencer_runtime::{build_pinned_affinity_plan, run_services, Service, ServiceProbeReport};

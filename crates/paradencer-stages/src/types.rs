@@ -1,5 +1,5 @@
 use paradencer_execution::{AccountStateApplyPolicy, ProgramCacheApplyPolicy, RetryPolicy};
-use paradencer_ingress::{InboundFrame, PreparedShred, PreparedTransaction};
+use paradencer_net::{InboundFrame, PreparedShred, PreparedTransaction};
 use std::net::SocketAddr;
 use std::path::PathBuf;
 

@@ -12,6 +12,6 @@ serde.workspace = true
 serde_json.workspace = true
 paradencer-core = { path = "../paradencer-core" }
 paradencer-execution = { path = "../paradencer-execution" }
-paradencer-ingress = { path = "../paradencer-ingress" }
+paradencer-net = { path = "../paradencer-net" }
 paradencer-stages = { path = "../paradencer-stages" }
 paradencer-storage = { path = "../paradencer-storage" }

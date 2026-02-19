@@ -8,8 +8,8 @@ use crate::{
     StorageStartupPolicy, TxFilter,
 };
 use paradencer_execution::RetryPolicy;
-use paradencer_ingress::{IngressMode, IngressPolicy, IngressSource};
 use paradencer_mesh::bounded_link;
+use paradencer_net::{IngressMode, IngressPolicy, IngressSource};
 use paradencer_runtime::{Service, ServiceContext, ShutdownSwitch};
 use paradencer_storage::{CommittedFragmentRecord, HotStateStore, SnapshotCatalog};
 use std::fs;

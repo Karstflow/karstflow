@@ -1,6 +1,6 @@
 use super::types::IngressPolicyToml;
 use crate::{ConfigError, Result};
-use paradencer_ingress::{IngressMode, IngressPolicy};
+use paradencer_net::{IngressMode, IngressPolicy};
 use std::fs;
 use std::path::Path;
 

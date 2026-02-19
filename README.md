@@ -4,13 +4,13 @@
 
 Paradencer is a ground-up Rust rewrite of [Firedancer](https://github.com/firedancer-io/firedancer) — Jump Crypto's high-performance Solana validator. The goal is to preserve Firedancer's architecture, logic, and performance characteristics while leveraging Rust's safety guarantees, type system, and ecosystem.
 
-**155K+ lines of Rust | 2,990 tests | 19 crates | ~63% Firedancer logic parity**
+**172K+ lines of Rust | 3,420 tests | 19 crates | ~63% Firedancer logic parity**
 
 ## Design Philosophy
 
 - **Firedancer-native**: Rewriting Firedancer's native validator (not Frankendancer/Agave hybrid)
 - **Performance first**: Atomic operations, batch processing, zero-copy where possible, parallel execution
-- **Clean architecture**: 19-crate modular workspace with clear separation of concerns
+- **Clean architecture**: Modular workspace with clear separation of concerns
 - **Idiomatic Rust**: Not a line-by-line port — logic adapted to Rust's strengths (channels, iterators, Result types, traits)
 - **No Agave dependency**: Full native implementation, no runtime dependency on Solana/Agave repos
 
@@ -27,7 +27,7 @@ paradencer-types          (core types: Pubkey, Account, Hash, Shred)
   |
   +-- paradencer-crypto   (Ed25519 batch, Blake3, SHA-256, Reed-Solomon FEC, LtHash)
   |
-  +-- paradencer-ingress  (QUIC transport, Turbine, Gossip, Repair, Shred processing)
+  +-- paradencer-net      (Custom QUIC/TLS/XDP, Turbine, Gossip, Repair, Ingress filter)
   |
   +-- paradencer-stages   (Replay stage, Block production, PoH service)
   |
@@ -46,7 +46,7 @@ paradencer-types          (core types: Pubkey, Account, Hash, Shred)
 | `paradencer-stages` | 380 | Replay stage with fork choice, block production with PoH service |
 | `paradencer-rpc` | 374 | 40+ JSON-RPC methods, WebSocket subscriptions, transaction simulation |
 | `paradencer-crypto` | 145 | Ed25519 batch verification, Blake3/SHA-256 hashing, Reed-Solomon FEC, LtHash |
-| `paradencer-ingress` | 144 | QUIC transport, Turbine block propagation, Gossip membership, Repair protocol |
+| `paradencer-net` | 475 | Custom QUIC/TLS/XDP, Turbine block propagation, Gossip, Repair, Ingress filter |
 | `paradencer-types` | 52 | Core types: Account, Pubkey, Hash, Shred structures |
 | `paradencer-constants` | — | Protocol constants: fees, timing, compute limits, program IDs |
 | `paradencer-ids` | — | Well-known program addresses |
@@ -76,7 +76,7 @@ Estimated at **~63%** weighted by functional importance for a working validator.
 | Types | 55% | Core types done, many inline serialization types pending |
 | Crypto | 50% | Ed25519 batch, Blake3, SHA-256, Keccak, Secp256k1, BN254, Reed-Solomon, LtHash |
 | Tile Pipeline | 30% | Replay stage, block production, shred assembly; pack/net/metrics gaps |
-| Network Stack | 30% | QUIC via quinn, gossip/repair basic, protocol behavior partial |
+| Network Stack | 35% | Custom QUIC/TLS/XDP engine, gossip/repair/turbine, ingress filter pipeline |
 | App/Config/IPC | 25% | Config done, control plane basic; no tango/shared-memory IPC |
 
 See `docs/00_development_state.md` and `docs/04_module_residual_matrix.md` for detailed tracking.
@@ -169,7 +169,7 @@ paradencer/
 │   ├── paradencer-crypto/         # Cryptography (Ed25519, FEC, Hashing)
 │   ├── paradencer-sbpf/           # VM + Builtin programs
 │   ├── paradencer-storage/        # Storage (Accounts, Shreds, Snapshots)
-│   ├── paradencer-ingress/        # Network (QUIC, Turbine, Gossip, Repair)
+│   ├── paradencer-net/            # Network (Custom QUIC/TLS/XDP, Turbine, Gossip, Repair)
 │   ├── paradencer-rpc/            # RPC server (JSON-RPC, WebSocket)
 │   ├── paradencer-stages/         # Pipeline (Replay, Block Production)
 │   ├── paradencer-execution/      # Transaction execution

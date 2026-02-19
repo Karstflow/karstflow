@@ -2,10 +2,10 @@ mod egress;
 mod service;
 
 use crate::{InboundPacket, IngressFilterStats, SanitizedTransaction};
-use paradencer_ingress::{
+use paradencer_mesh::{InPort, OutPort};
+use paradencer_net::{
     IngressPolicy, PacketDecoder, SignatureDeduplicator, SourceCostBudgetLimiter, SourceRateLimiter,
 };
-use paradencer_mesh::{InPort, OutPort};
 use std::collections::VecDeque;
 use std::sync::Arc;
 

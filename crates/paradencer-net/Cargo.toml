@@ -9,6 +9,7 @@ description = "High-performance networking stack for Paradencer validator"
 [dependencies]
 paradencer-constants = { workspace = true }
 paradencer-crypto = { path = "../paradencer-crypto" }
+paradencer-types = { path = "../paradencer-types" }
 
 # Low-level system interfaces
 libc = "0.2"
@@ -21,6 +22,19 @@ aes-gcm = "0.10"
 x25519-dalek = { version = "2.0", features = ["static_secrets"] }
 ed25519-dalek = { workspace = true }
 
+# Serialization (gossip/repair protocol)
+serde = { workspace = true }
+bincode = { workspace = true }
+bs58 = { workspace = true }
+bytes = { workspace = true }
+
+# Concurrency
+parking_lot = { workspace = true }
+crossbeam-channel = { workspace = true }
+
+# Async runtime (for gossip/repair service loops)
+tokio = { workspace = true, features = ["net", "sync", "time"] }
+
 # Utilities
 thiserror = { workspace = true }
 tracing = { workspace = true }
@@ -28,6 +42,7 @@ rand = { workspace = true }
 
 [dev-dependencies]
 hex = "0.4"
+tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
 
 [features]
 default = []

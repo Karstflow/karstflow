@@ -1,5 +1,5 @@
 use crate::{ConfigError, Result};
-use paradencer_ingress::{IngressMode, IngressPolicy};
+use paradencer_net::{IngressMode, IngressPolicy};
 
 pub(super) fn apply_env_overrides(ingress_policy: &mut IngressPolicy) -> Result<()> {
     if let Ok(value) = std::env::var("PARADENCER_INGRESS_MODE") {
