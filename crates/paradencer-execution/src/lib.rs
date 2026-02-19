@@ -2,6 +2,7 @@ mod bridge;
 mod engine;
 mod errors;
 mod numeric;
+mod svm_backend;
 mod types;
 
 pub use bridge::{ExecutionBridge, ExecutionStateController};
@@ -17,6 +18,7 @@ pub use engine::{
     RuntimeStateWriteIntent, StorageBackedRuntimeAdapter, SyntheticRuntimeAdapter,
 };
 pub use errors::ExecutionError;
+pub use svm_backend::SbpfBackend;
 pub use types::{
     ExecutionBatch, ExecutionFailureClass, ExecutionOutcome, ForkChoiceDirective,
     LeaderGateDirective, LeaderGateState, ReplayBoundaryState, RetryDirective, RetryPolicy,

@@ -8,4 +8,10 @@ authors.workspace = true
 [dependencies]
 thiserror.workspace = true
 paradencer-storage = { path = "../paradencer-storage" }
+paradencer-consensus = { path = "../paradencer-consensus" }
+paradencer-sbpf = { path = "../paradencer-sbpf" }
+paradencer-types = { path = "../paradencer-types" }
 dashmap = "6.1"
+
+[dev-dependencies]
+paradencer-ids = { path = "../paradencer-ids" }

@@ -2,24 +2,24 @@
 
 > High-performance Solana validator implementation in Rust
 
-Paradencer is a ground-up Rust rewrite of [Firedancer](https://github.com/firedancer-io/firedancer) — Jump Crypto's high-performance Solana validator. The goal is to preserve Firedancer's architecture, logic, and performance characteristics while leveraging Rust's safety guarantees, type system, and ecosystem.
+Paradencer is a ground-up Solana validator built for maximum throughput and minimal latency. It features a custom network stack, pre-allocated data structures, zero-copy I/O patterns, and a modular tile-based architecture designed for predictable performance at scale.
 
-**172K+ lines of Rust | 3,420 tests | 19 crates | ~63% Firedancer logic parity**
+**185K+ lines of Rust | 3,480+ tests | 20 crates**
 
-## Design Philosophy
+## Design Principles
 
-- **Firedancer-native**: Rewriting Firedancer's native validator (not Frankendancer/Agave hybrid)
-- **Performance first**: Atomic operations, batch processing, zero-copy where possible, parallel execution
-- **Clean architecture**: Modular workspace with clear separation of concerns
-- **Idiomatic Rust**: Not a line-by-line port — logic adapted to Rust's strengths (channels, iterators, Result types, traits)
-- **No Agave dependency**: Full native implementation, no runtime dependency on Solana/Agave repos
+- **Performance first**: Pre-allocated pools, batch processing, zero-copy where possible, segment-based compute metering
+- **Native implementation**: No runtime dependency on existing Solana validator codebases
+- **Clean architecture**: 20-crate workspace with strict dependency hierarchy and single-responsibility modules
+- **Idiomatic Rust**: Leverages Rust's type system, ownership model, traits, and ecosystem for safety and correctness
+- **Tile-based execution**: Pinned-core service model for deterministic scheduling and cache locality
 
 ## Architecture
 
 ```
 paradencer-types          (core types: Pubkey, Account, Hash, Shred)
   |
-  +-- paradencer-sbpf     (VM + builtin programs: System, Vote, Stake, Token...)
+  +-- paradencer-sbpf     (sBPF VM + 14 builtin programs)
   |
   +-- paradencer-storage  (MVCC accounts, blockstore, snapshots, persistent backend)
   |     |
@@ -27,85 +27,84 @@ paradencer-types          (core types: Pubkey, Account, Hash, Shred)
   |
   +-- paradencer-crypto   (Ed25519 batch, Blake3, SHA-256, Reed-Solomon FEC, LtHash)
   |
-  +-- paradencer-net      (Custom QUIC/TLS/XDP, Turbine, Gossip, Repair, Ingress filter)
+  +-- paradencer-net      (Custom QUIC/TLS, Gossip CRDS, Turbine, Repair, XDP)
   |
-  +-- paradencer-stages   (Replay stage, Block production, PoH service)
+  +-- paradencer-execution (SVM adapter, batch orchestration, retry logic)
+  |
+  +-- paradencer-stages   (Replay, Block production, PoH, Pack, Shred assembly)
   |
   +-- paradencer-rpc      (JSON-RPC 2.0 server, WebSocket subscriptions)
   |
-  +-- paradencer-node     (Main validator orchestration)
+  +-- paradencer-node     (Validator orchestration and entry point)
 ```
 
 ### Crate Overview
 
 | Crate | Tests | Purpose |
 |-------|-------|---------|
-| `paradencer-consensus` | 717 | Tower BFT, fork choice, leader schedule, epoch schedule, stake tracking, Bank, economics |
-| `paradencer-sbpf` | 585 | Transaction processor, SBPF VM, 7 builtin programs (System/Vote/Stake/Token/Token-2022/Memo/ATA) |
-| `paradencer-storage` | 383 | MVCC account database, blockstore, snapshot pipeline, persistent storage backend |
-| `paradencer-stages` | 380 | Replay stage with fork choice, block production with PoH service |
-| `paradencer-rpc` | 374 | 40+ JSON-RPC methods, WebSocket subscriptions, transaction simulation |
-| `paradencer-crypto` | 145 | Ed25519 batch verification, Blake3/SHA-256 hashing, Reed-Solomon FEC, LtHash |
-| `paradencer-net` | 475 | Custom QUIC/TLS/XDP, Turbine block propagation, Gossip, Repair, Ingress filter |
-| `paradencer-types` | 52 | Core types: Account, Pubkey, Hash, Shred structures |
-| `paradencer-constants` | — | Protocol constants: fees, timing, compute limits, program IDs |
-| `paradencer-ids` | — | Well-known program addresses |
-| `paradencer-config` | — | TOML configuration management |
-| `paradencer-mesh` | — | Inter-component communication channels |
-| `paradencer-topology` | — | Service topology and orchestration |
-| `paradencer-execution` | — | Batch execution orchestration and retry logic |
-| `paradencer-observability` | — | Metrics and monitoring |
-| `paradencer-control` | — | Control plane and admin API |
-| `paradencer-node` | — | Main validator node entry point |
-| `paradencer-runtime` | — | Runtime utilities |
-| `paradencer-core` | — | Core utilities |
+| `paradencer-consensus` | 763 | Tower BFT, GHOST fork choice, leader schedule, epoch processing, Bank lifecycle, multi-threshold confirmation |
+| `paradencer-sbpf` | 600 | sBPF interpreter, 14 builtin programs, ELF loader, CPI, syscalls, transaction processor |
+| `paradencer-net` | 529 | Custom QUIC engine, TLS 1.3, gossip with 14-type CRDS, turbine broadcast, repair, XDP |
+| `paradencer-storage` | 444 | MVCC account database, blockstore, full snapshot pipeline, persistent storage, compaction |
+| `paradencer-stages` | 387 | Replay with fork tracking, block production, PoH state machine, pack scheduler |
+| `paradencer-rpc` | 330 | 60+ JSON-RPC methods, 9 WebSocket subscription types, transaction simulation |
+| `paradencer-crypto` | 111 | Ed25519 batch verification, Blake3/SHA-256/Keccak, secp256k1/r1, BN254, Reed-Solomon FEC, LtHash |
+| `paradencer-config` | 87 | TOML configuration with env override, live-mode preflight checks |
+| `paradencer-execution` | 72 | SVM backend adapter, batch execution orchestration, retry policies |
+| `paradencer-types` | 60 | Core types: Account, Pubkey, Hash, Transaction, Shred, compact-u16 codec |
+| `paradencer-control` | 37 | Control plane: startup checks, preflight validation, diagnostics |
+| `paradencer-runtime` | 14 | Execution substrate: tokio/pinned modes, CPU affinity, lifecycle |
+| `paradencer-topology` | 9 | Service topology planning and materialization |
+| `paradencer-constants` | -- | Protocol constants: fees, timing, compute limits, program parameters |
+| `paradencer-ids` | -- | Well-known program and sysvar addresses |
+| `paradencer-mesh` | -- | Typed bounded channels for inter-tile communication |
+| `paradencer-observability` | -- | Metrics HTTP endpoint |
+| `paradencer-core` | -- | Shared vocabulary types |
+| `paradencer-node` | -- | Binary entry point |
 
-## Firedancer Parity Status
+## Key Features
 
-Estimated at **~63%** weighted by functional importance for a working validator.
+### Consensus
 
-| Area | Parity | Key Capabilities |
-|------|--------|-----------------|
-| Sysvars | 90% | All 14 sysvars, SysvarCache, per-slot/per-epoch updates |
-| Builtin Programs | 82% | 12+ programs, 96+ instructions, comprehensive test coverage |
-| VM + Syscalls | 80% | Interpreter, CPI/crypto/PDA syscalls, SBPF versions, memory model |
-| Rewards & Stakes | 80% | Inflation, partitioned distribution, 18 stake handlers |
-| Runtime Core | 75% | Bank, executor, epoch processing, cost tracker, transaction cache |
-| Consensus | 70% | Tower BFT, GHOST fork choice, equivocation detection, commitment tracking |
-| Storage | 64% | MVCC accounts, blockstore, snapshots (read+write), persistent backend, compaction |
-| Types | 55% | Core types done, many inline serialization types pending |
-| Crypto | 50% | Ed25519 batch, Blake3, SHA-256, Keccak, Secp256k1, BN254, Reed-Solomon, LtHash |
-| Tile Pipeline | 30% | Replay stage, block production, shred assembly; pack/net/metrics gaps |
-| Network Stack | 35% | Custom QUIC/TLS/XDP engine, gossip/repair/turbine, ingress filter pipeline |
-| App/Config/IPC | 25% | Config done, control plane basic; no tango/shared-memory IPC |
+- **Tower BFT** with lockout-based vote tracking and switch threshold
+- **GHOST fork choice** with weighted voting and ancestry verification
+- **Multi-threshold confirmation** pipeline: propagated (1/3), duplicate confirmed (52%), optimistically confirmed (2/3), super confirmed (4/5)
+- **Equivocation detection** with cryptographic proof generation
+- **Full Bank lifecycle**: Processing -> Frozen -> Rooted with 64 ticks/slot
 
-See `docs/00_development_state.md` and `docs/04_module_residual_matrix.md` for detailed tracking.
+### Execution
 
-## Builtin Programs
+- **14 builtin programs**: System, Vote, Stake, Token, Token-2022, Associated Token, Memo, Compute Budget, Config, BPF Loader, Loader v4, Address Lookup Table, Ed25519 precompile, Secp256k1 precompile
+- **sBPF interpreter** with segment-based compute unit accounting (batch CU deduction at control-flow boundaries for reduced per-instruction overhead)
+- **ELF loader** with program caching
+- **Full CPI** support with syscall dispatch (crypto, PDA derivation, logging, memory, sysvar access)
+- **Pluggable execution backend**: consensus layer stays independent of VM implementation
 
-| Program | Instructions | Status |
-|---------|-------------|--------|
-| System Program | 13/13 | Complete |
-| Vote Program | 17/17 | Complete |
-| Stake Program | 18/18 | Complete |
-| Token Program | 23/23 | Complete |
-| Token-2022 Program | 15/15 | Complete |
-| Memo Program | 2/2 | Complete |
-| Associated Token Account | 2/2 | Complete |
+### Storage
 
-## Storage Pipeline
+- **MVCC account database**: Fork-aware with DashMap, copy-on-write ancestor chains
+- **Persistent backend**: Column-family key-value store with WAL, compaction, CRC32 checksums
+- **Full snapshot pipeline**: Create, load, and restore from Solana-compatible tar.zst archives
+- **Incremental snapshots**: Dirty-set tracking for efficient delta snapshots
+- **Blockstore**: Shred windowing with FEC reconstruction and slot metadata
+- **Genesis bootstrap**: Full initialization from snapshot (stakes, sysvars, features, history, transaction cache)
 
-The storage subsystem includes a complete snapshot pipeline:
+### Network
 
-- **AccountDatabase**: Fork-aware MVCC store with DashMap, copy-on-write ancestor chains
-- **DurableStore**: Persistent key-value backend with column families (file-based implementation)
-- **Blockstore**: Shred windowing with FEC reconstruction, persistent backend
-- **Snapshot creation**: Full and incremental snapshots via dirty-set tracking
-- **Snapshot loading**: Parse and restore from snapshot files with DB integration
-- **Solana-compatible archives**: Read AND write tar.zst snapshots with AppendVec binary format
-- **Snapshot scheduling**: Slot-based full/incremental scheduling with retention management
-- **Genesis bootstrap**: Full bootstrap from snapshot including stakes, sysvars, features, history
-- **Bank hash verification**: SHA-256 accounts hash with hash-verified state
+- **Custom QUIC engine**: No tokio/quinn dependency, synchronous poll-driven service loop
+- **TLS 1.3**: Minimal implementation (AES-128-GCM + X25519 + Ed25519)
+- **Gossip**: CRDS data model with 14 value types, FNV-1a bloom filters, weighted peer sampling, push/pull/prune protocol
+- **Turbine**: Shred broadcast tree, neighborhood assignment, retransmit service
+- **Repair**: Request/response protocol for missing shreds
+- **Ingress filter**: Signature deduplication, source rate limiting, cost budgets
+- **AF_XDP**: Kernel-bypass socket support (Linux, feature-gated)
+
+### RPC
+
+- **60+ JSON-RPC methods** with strict envelope and parameter validation
+- **9 WebSocket subscription types**: slot, account, root, signature, vote, block, logs, program, slotsUpdates
+- **Transaction simulation** engine
+- **Account caching** with LRU eviction
 
 ## Quick Start
 
@@ -143,8 +142,8 @@ just smoke        # Quick 2-second smoke run
 
 Paradencer supports two execution modes:
 
-- **`tokio`** — Cooperative async tasks (default)
-- **`pinned`** — One service per dedicated core/thread (Firedancer-style)
+- **`tokio`** -- Cooperative async tasks (default, development)
+- **`pinned`** -- One service per dedicated core/thread (production)
 
 ```bash
 PARADENCER_EXEC_MODE=tokio PARADENCER_RUN_SECONDS=10 cargo run -p paradencer-node
@@ -160,57 +159,45 @@ Configuration files in `config/`:
 | `ingress.default.toml` | Network ingress settings |
 | `topology.default.toml` | Service topology |
 
+Environment variables override TOML values. Live mode includes preflight safety checks (identity keypair, entrypoint routability, storage catalog validation).
+
 ## Project Structure
 
 ```
 paradencer/
-├── crates/                        # 19 Rust crates
-│   ├── paradencer-consensus/      # Consensus (Tower BFT, Bank, Economics)
-│   ├── paradencer-crypto/         # Cryptography (Ed25519, FEC, Hashing)
-│   ├── paradencer-sbpf/           # VM + Builtin programs
-│   ├── paradencer-storage/        # Storage (Accounts, Shreds, Snapshots)
-│   ├── paradencer-net/            # Network (Custom QUIC/TLS/XDP, Turbine, Gossip, Repair)
-│   ├── paradencer-rpc/            # RPC server (JSON-RPC, WebSocket)
-│   ├── paradencer-stages/         # Pipeline (Replay, Block Production)
-│   ├── paradencer-execution/      # Transaction execution
-│   ├── paradencer-types/          # Core type definitions
-│   ├── paradencer-ids/            # Program IDs
-│   ├── paradencer-constants/      # Protocol constants
-│   ├── paradencer-config/         # Configuration
-│   ├── paradencer-control/        # Control plane
-│   ├── paradencer-mesh/           # IPC channels
-│   ├── paradencer-node/           # Node entry point
-│   ├── paradencer-observability/  # Metrics
-│   ├── paradencer-topology/       # Service topology
-│   ├── paradencer-runtime/        # Runtime utilities
-│   └── paradencer-core/           # Core utilities
-├── config/                        # TOML configuration files
-├── docs/                          # Development documentation
-│   ├── 00_development_state.md    # Progress tracking
-│   ├── 04_module_residual_matrix.md # Module-by-module residual
-│   ├── 90_module_mapping_working.md # Firedancer → Paradencer mapping
-│   └── plans/                     # Cycle implementation plans
-├── Cargo.toml                     # Workspace definition
-├── rust-toolchain.toml            # Rust toolchain
-└── justfile                       # Development commands
++-- crates/                        # 20 Rust crates
+|   +-- paradencer-consensus/      # Consensus (Tower BFT, Bank, Economics)
+|   +-- paradencer-crypto/         # Cryptography (Ed25519, FEC, Hashing)
+|   +-- paradencer-sbpf/           # sBPF VM + Builtin programs
+|   +-- paradencer-storage/        # Storage (Accounts, Shreds, Snapshots)
+|   +-- paradencer-net/            # Network (Custom QUIC/TLS, Gossip, Turbine, Repair)
+|   +-- paradencer-rpc/            # RPC server (JSON-RPC, WebSocket)
+|   +-- paradencer-stages/         # Pipeline (Replay, Block Production, PoH)
+|   +-- paradencer-execution/      # Transaction execution adapter
+|   +-- paradencer-types/          # Core type definitions
+|   +-- paradencer-ids/            # Program IDs
+|   +-- paradencer-constants/      # Protocol constants
+|   +-- paradencer-config/         # Configuration management
+|   +-- paradencer-control/        # Control plane
+|   +-- paradencer-mesh/           # IPC channels
+|   +-- paradencer-node/           # Node entry point
+|   +-- paradencer-observability/  # Metrics
+|   +-- paradencer-topology/       # Service topology
+|   +-- paradencer-runtime/        # Runtime utilities
+|   +-- paradencer-core/           # Core utilities
++-- config/                        # TOML configuration files
++-- docs/                          # Development documentation
++-- Cargo.toml                     # Workspace definition
++-- rust-toolchain.toml            # Rust toolchain
++-- justfile                       # Development commands
 ```
-
-## Documentation
-
-| Document | Purpose |
-|----------|---------|
-| `docs/00_development_state.md` | Overall progress, Firedancer module comparison |
-| `docs/04_module_residual_matrix.md` | Per-module remaining work and priorities |
-| `docs/90_module_mapping_working.md` | Firedancer → Paradencer name mapping |
-| `docs/91_development_conventions.md` | Coding conventions and rules |
-| `docs/05_execution_architecture.md` | Transaction execution architecture |
-| `docs/plans/` | Detailed cycle implementation plans |
 
 ## Code Quality
 
 - **Linting**: `clippy` with `-D warnings` (zero warnings policy)
 - **Formatting**: `rustfmt` with custom rules (`rustfmt.toml`)
 - **CI**: `just ci` runs format check + clippy + all tests
+- **Constants discipline**: All protocol constants in `paradencer-constants` crate (single source of truth)
 
 ## License
 

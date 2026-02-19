@@ -172,6 +172,37 @@ impl From<MemoryError> for VmError {
 }
 
 // ---------------------------------------------------------------------------
+// Segment-based compute unit accounting helpers
+// ---------------------------------------------------------------------------
+
+/// Deduct accumulated compute units at a segment boundary.
+///
+/// Instead of checking CU on every instruction, we accumulate instruction
+/// costs within a straight-line segment and deduct the batch at control-flow
+/// boundaries (jumps, calls, exits). This reduces per-instruction overhead
+/// to a single counter increment.
+#[inline(always)]
+fn checkpoint_cu(vm: &mut VmState, segment_cu: &mut u64) -> Result<(), VmError> {
+    let cost = *segment_cu;
+    if vm.compute_meter < cost {
+        return Err(VmError::ComputeBudgetExceeded);
+    }
+    vm.compute_meter -= cost;
+    *segment_cu = 0;
+
+    if vm.instruction_count > MAX_INSTRUCTIONS {
+        return Err(VmError::InstructionLimitExceeded);
+    }
+    Ok(())
+}
+
+/// Compute the branch target PC from the current PC and signed offset.
+#[inline(always)]
+fn jump_target(pc: usize, off: i16) -> usize {
+    ((pc as isize) + 1 + (off as isize)) as usize
+}
+
+// ---------------------------------------------------------------------------
 // Interpreter
 // ---------------------------------------------------------------------------
 
@@ -212,6 +243,11 @@ pub fn execute(
     // Set initial frame pointer (r10)
     vm.registers[10] = vm.memory.frame_pointer();
 
+    // Segment-based CU accounting: accumulate instruction cost within
+    // straight-line segments and deduct the batch at control-flow boundaries
+    // (jumps, calls, exits). Eliminates per-instruction branch overhead.
+    let mut segment_cu: u64 = 0;
+
     loop {
         // Check PC bounds
         if vm.pc >= instructions.len() {
@@ -221,23 +257,20 @@ pub fn execute(
             });
         }
 
-        // Deduct compute unit per instruction
-        if vm.compute_meter < CU_PER_INSTRUCTION {
-            return Err(VmError::ComputeBudgetExceeded);
-        }
-        vm.compute_meter -= CU_PER_INSTRUCTION;
+        // Accumulate CU cost — deduction happens at segment boundaries
+        segment_cu += CU_PER_INSTRUCTION;
         vm.instruction_count += 1;
-
-        // Safety limit
-        if vm.instruction_count > MAX_INSTRUCTIONS {
-            return Err(VmError::InstructionLimitExceeded);
-        }
 
         let insn = &instructions[vm.pc];
         let dst = insn.dst as usize;
         let src = insn.src as usize;
         let imm = insn.immediate;
         let off = insn.offset;
+
+        // Pre-fetch register values before dispatch to help the CPU
+        // pipeline memory loads ahead of the match branch resolution.
+        let reg_dst = vm.registers[dst];
+        let reg_src = vm.registers[src];
 
         let opcode = match Opcode::from_raw(insn.opcode) {
             Some(op) => op,
@@ -254,31 +287,31 @@ pub fn execute(
             // ALU64 immediate
             // =================================================================
             Opcode::Add64Imm => {
-                vm.registers[dst] = vm.registers[dst].wrapping_add(imm as u64);
+                vm.registers[dst] = reg_dst.wrapping_add(imm as u64);
             }
             Opcode::Sub64Imm => {
-                vm.registers[dst] = vm.registers[dst].wrapping_sub(imm as u64);
+                vm.registers[dst] = reg_dst.wrapping_sub(imm as u64);
             }
             Opcode::Mul64Imm => {
-                vm.registers[dst] = vm.registers[dst].wrapping_mul(imm as u64);
+                vm.registers[dst] = reg_dst.wrapping_mul(imm as u64);
             }
             Opcode::Div64Imm => {
                 if imm == 0 {
                     return Err(VmError::DivisionByZero { pc: vm.pc });
                 }
-                vm.registers[dst] /= imm as u64;
+                vm.registers[dst] = reg_dst / imm as u64;
             }
             Opcode::Or64Imm => {
-                vm.registers[dst] |= imm as u64;
+                vm.registers[dst] = reg_dst | imm as u64;
             }
             Opcode::And64Imm => {
-                vm.registers[dst] &= imm as u64;
+                vm.registers[dst] = reg_dst & imm as u64;
             }
             Opcode::Lsh64Imm => {
-                vm.registers[dst] = vm.registers[dst].wrapping_shl(imm as u32);
+                vm.registers[dst] = reg_dst.wrapping_shl(imm as u32);
             }
             Opcode::Rsh64Imm => {
-                vm.registers[dst] = vm.registers[dst].wrapping_shr(imm as u32);
+                vm.registers[dst] = reg_dst.wrapping_shr(imm as u32);
             }
             Opcode::Neg64 => {
                 // NEG disabled in SBPF V2+
@@ -288,103 +321,99 @@ pub fn execute(
                         opcode: insn.opcode,
                     });
                 }
-                vm.registers[dst] = (-(vm.registers[dst] as i64)) as u64;
+                vm.registers[dst] = (-(reg_dst as i64)) as u64;
             }
             Opcode::Mod64Imm => {
                 if imm == 0 {
                     return Err(VmError::DivisionByZero { pc: vm.pc });
                 }
-                vm.registers[dst] %= imm as u64;
+                vm.registers[dst] = reg_dst % imm as u64;
             }
             Opcode::Xor64Imm => {
-                vm.registers[dst] ^= imm as u64;
+                vm.registers[dst] = reg_dst ^ imm as u64;
             }
             Opcode::Mov64Imm => {
                 vm.registers[dst] = imm as u64;
             }
             Opcode::Arsh64Imm => {
-                vm.registers[dst] = ((vm.registers[dst] as i64).wrapping_shr(imm as u32)) as u64;
+                vm.registers[dst] = ((reg_dst as i64).wrapping_shr(imm as u32)) as u64;
             }
 
             // =================================================================
             // ALU64 register
             // =================================================================
             Opcode::Add64Reg => {
-                vm.registers[dst] = vm.registers[dst].wrapping_add(vm.registers[src]);
+                vm.registers[dst] = reg_dst.wrapping_add(reg_src);
             }
             Opcode::Sub64Reg => {
-                vm.registers[dst] = vm.registers[dst].wrapping_sub(vm.registers[src]);
+                vm.registers[dst] = reg_dst.wrapping_sub(reg_src);
             }
             Opcode::Mul64Reg => {
-                vm.registers[dst] = vm.registers[dst].wrapping_mul(vm.registers[src]);
+                vm.registers[dst] = reg_dst.wrapping_mul(reg_src);
             }
             Opcode::Div64Reg => {
-                if vm.registers[src] == 0 {
+                if reg_src == 0 {
                     return Err(VmError::DivisionByZero { pc: vm.pc });
                 }
-                vm.registers[dst] /= vm.registers[src];
+                vm.registers[dst] = reg_dst / reg_src;
             }
             Opcode::Or64Reg => {
-                vm.registers[dst] |= vm.registers[src];
+                vm.registers[dst] = reg_dst | reg_src;
             }
             Opcode::And64Reg => {
-                vm.registers[dst] &= vm.registers[src];
+                vm.registers[dst] = reg_dst & reg_src;
             }
             Opcode::Lsh64Reg => {
-                vm.registers[dst] =
-                    vm.registers[dst].wrapping_shl((vm.registers[src] & 0x3F) as u32);
+                vm.registers[dst] = reg_dst.wrapping_shl((reg_src & 0x3F) as u32);
             }
             Opcode::Rsh64Reg => {
-                vm.registers[dst] =
-                    vm.registers[dst].wrapping_shr((vm.registers[src] & 0x3F) as u32);
+                vm.registers[dst] = reg_dst.wrapping_shr((reg_src & 0x3F) as u32);
             }
             Opcode::Mod64Reg => {
-                if vm.registers[src] == 0 {
+                if reg_src == 0 {
                     return Err(VmError::DivisionByZero { pc: vm.pc });
                 }
-                vm.registers[dst] %= vm.registers[src];
+                vm.registers[dst] = reg_dst % reg_src;
             }
             Opcode::Xor64Reg => {
-                vm.registers[dst] ^= vm.registers[src];
+                vm.registers[dst] = reg_dst ^ reg_src;
             }
             Opcode::Mov64Reg => {
-                vm.registers[dst] = vm.registers[src];
+                vm.registers[dst] = reg_src;
             }
             Opcode::Arsh64Reg => {
-                vm.registers[dst] = ((vm.registers[dst] as i64)
-                    .wrapping_shr((vm.registers[src] & 0x3F) as u32))
-                    as u64;
+                vm.registers[dst] = ((reg_dst as i64).wrapping_shr((reg_src & 0x3F) as u32)) as u64;
             }
 
             // =================================================================
             // ALU32 immediate (result zero-extended to 64 bits)
             // =================================================================
             Opcode::Add32Imm => {
-                vm.registers[dst] = (vm.registers[dst] as u32).wrapping_add(imm as u32) as u64;
+                vm.registers[dst] = (reg_dst as u32).wrapping_add(imm as u32) as u64;
             }
             Opcode::Sub32Imm => {
-                vm.registers[dst] = (vm.registers[dst] as u32).wrapping_sub(imm as u32) as u64;
+                vm.registers[dst] = (reg_dst as u32).wrapping_sub(imm as u32) as u64;
             }
             Opcode::Mul32Imm => {
-                vm.registers[dst] = (vm.registers[dst] as u32).wrapping_mul(imm as u32) as u64;
+                vm.registers[dst] = (reg_dst as u32).wrapping_mul(imm as u32) as u64;
             }
             Opcode::Div32Imm => {
                 if imm == 0 {
                     return Err(VmError::DivisionByZero { pc: vm.pc });
                 }
-                vm.registers[dst] = ((vm.registers[dst] as u32) / (imm as u32)) as u64;
+                vm.registers[dst] = ((reg_dst as u32) / (imm as u32)) as u64;
             }
             Opcode::Or32Imm => {
-                vm.registers[dst] = ((vm.registers[dst] as u32) | (imm as u32)) as u64;
+                vm.registers[dst] = ((reg_dst as u32) | (imm as u32)) as u64;
             }
             Opcode::And32Imm => {
-                vm.registers[dst] = ((vm.registers[dst] as u32) & (imm as u32)) as u64;
+                vm.registers[dst] = ((reg_dst as u32) & (imm as u32)) as u64;
             }
             Opcode::Lsh32Imm => {
-                vm.registers[dst] = (vm.registers[dst] as u32).wrapping_shl(imm as u32) as u64;
+                vm.registers[dst] = (reg_dst as u32).wrapping_shl(imm as u32) as u64;
             }
             Opcode::Rsh32Imm => {
-                vm.registers[dst] = (vm.registers[dst] as u32).wrapping_shr(imm as u32) as u64;
+                vm.registers[dst] = (reg_dst as u32).wrapping_shr(imm as u32) as u64;
             }
             Opcode::Neg32 => {
                 if sbpf_version.neg_disabled() {
@@ -393,83 +422,69 @@ pub fn execute(
                         opcode: insn.opcode,
                     });
                 }
-                vm.registers[dst] = (-(vm.registers[dst] as i32)) as u32 as u64;
+                vm.registers[dst] = (-(reg_dst as i32)) as u32 as u64;
             }
             Opcode::Mod32Imm => {
                 if imm == 0 {
                     return Err(VmError::DivisionByZero { pc: vm.pc });
                 }
-                vm.registers[dst] = ((vm.registers[dst] as u32) % (imm as u32)) as u64;
+                vm.registers[dst] = ((reg_dst as u32) % (imm as u32)) as u64;
             }
             Opcode::Xor32Imm => {
-                vm.registers[dst] = ((vm.registers[dst] as u32) ^ (imm as u32)) as u64;
+                vm.registers[dst] = ((reg_dst as u32) ^ (imm as u32)) as u64;
             }
             Opcode::Mov32Imm => {
                 vm.registers[dst] = imm as u32 as u64;
             }
             Opcode::Arsh32Imm => {
-                vm.registers[dst] =
-                    ((vm.registers[dst] as i32).wrapping_shr(imm as u32)) as u32 as u64;
+                vm.registers[dst] = ((reg_dst as i32).wrapping_shr(imm as u32)) as u32 as u64;
             }
 
             // =================================================================
             // ALU32 register (result zero-extended to 64 bits)
             // =================================================================
             Opcode::Add32Reg => {
-                vm.registers[dst] =
-                    (vm.registers[dst] as u32).wrapping_add(vm.registers[src] as u32) as u64;
+                vm.registers[dst] = (reg_dst as u32).wrapping_add(reg_src as u32) as u64;
             }
             Opcode::Sub32Reg => {
-                vm.registers[dst] =
-                    (vm.registers[dst] as u32).wrapping_sub(vm.registers[src] as u32) as u64;
+                vm.registers[dst] = (reg_dst as u32).wrapping_sub(reg_src as u32) as u64;
             }
             Opcode::Mul32Reg => {
-                vm.registers[dst] =
-                    (vm.registers[dst] as u32).wrapping_mul(vm.registers[src] as u32) as u64;
+                vm.registers[dst] = (reg_dst as u32).wrapping_mul(reg_src as u32) as u64;
             }
             Opcode::Div32Reg => {
-                if (vm.registers[src] as u32) == 0 {
+                if (reg_src as u32) == 0 {
                     return Err(VmError::DivisionByZero { pc: vm.pc });
                 }
-                vm.registers[dst] =
-                    ((vm.registers[dst] as u32) / (vm.registers[src] as u32)) as u64;
+                vm.registers[dst] = ((reg_dst as u32) / (reg_src as u32)) as u64;
             }
             Opcode::Or32Reg => {
-                vm.registers[dst] =
-                    ((vm.registers[dst] as u32) | (vm.registers[src] as u32)) as u64;
+                vm.registers[dst] = ((reg_dst as u32) | (reg_src as u32)) as u64;
             }
             Opcode::And32Reg => {
-                vm.registers[dst] =
-                    ((vm.registers[dst] as u32) & (vm.registers[src] as u32)) as u64;
+                vm.registers[dst] = ((reg_dst as u32) & (reg_src as u32)) as u64;
             }
             Opcode::Lsh32Reg => {
-                vm.registers[dst] = (vm.registers[dst] as u32)
-                    .wrapping_shl((vm.registers[src] & 0x1F) as u32)
-                    as u64;
+                vm.registers[dst] = (reg_dst as u32).wrapping_shl((reg_src & 0x1F) as u32) as u64;
             }
             Opcode::Rsh32Reg => {
-                vm.registers[dst] = (vm.registers[dst] as u32)
-                    .wrapping_shr((vm.registers[src] & 0x1F) as u32)
-                    as u64;
+                vm.registers[dst] = (reg_dst as u32).wrapping_shr((reg_src & 0x1F) as u32) as u64;
             }
             Opcode::Mod32Reg => {
-                if (vm.registers[src] as u32) == 0 {
+                if (reg_src as u32) == 0 {
                     return Err(VmError::DivisionByZero { pc: vm.pc });
                 }
-                vm.registers[dst] =
-                    ((vm.registers[dst] as u32) % (vm.registers[src] as u32)) as u64;
+                vm.registers[dst] = ((reg_dst as u32) % (reg_src as u32)) as u64;
             }
             Opcode::Xor32Reg => {
-                vm.registers[dst] =
-                    ((vm.registers[dst] as u32) ^ (vm.registers[src] as u32)) as u64;
+                vm.registers[dst] = ((reg_dst as u32) ^ (reg_src as u32)) as u64;
             }
             Opcode::Mov32Reg => {
-                vm.registers[dst] = vm.registers[src] as u32 as u64;
+                vm.registers[dst] = reg_src as u32 as u64;
             }
             Opcode::Arsh32Reg => {
-                vm.registers[dst] = ((vm.registers[dst] as i32)
-                    .wrapping_shr((vm.registers[src] & 0x1F) as u32))
-                    as u32 as u64;
+                vm.registers[dst] =
+                    ((reg_dst as i32).wrapping_shr((reg_src & 0x1F) as u32)) as u32 as u64;
             }
 
             // =================================================================
@@ -485,18 +500,18 @@ pub fn execute(
                 }
                 // Already little-endian on LE hosts; truncate to width
                 vm.registers[dst] = match imm {
-                    16 => vm.registers[dst] & 0xFFFF,
-                    32 => vm.registers[dst] & 0xFFFF_FFFF,
-                    64 => vm.registers[dst],
-                    _ => vm.registers[dst],
+                    16 => reg_dst & 0xFFFF,
+                    32 => reg_dst & 0xFFFF_FFFF,
+                    64 => reg_dst,
+                    _ => reg_dst,
                 };
             }
             Opcode::Be => {
                 vm.registers[dst] = match imm {
-                    16 => (vm.registers[dst] as u16).swap_bytes() as u64,
-                    32 => (vm.registers[dst] as u32).swap_bytes() as u64,
-                    64 => vm.registers[dst].swap_bytes(),
-                    _ => vm.registers[dst],
+                    16 => (reg_dst as u16).swap_bytes() as u64,
+                    32 => (reg_dst as u32).swap_bytes() as u64,
+                    64 => reg_dst.swap_bytes(),
+                    _ => reg_dst,
                 };
             }
 
@@ -521,6 +536,9 @@ pub fn execute(
                 }
                 let hi = instructions[vm.pc + 1].immediate as u32 as u64;
                 vm.registers[dst] = lo | (hi << 32);
+                // LDDW consumes two instruction slots; account for the second
+                segment_cu += CU_PER_INSTRUCTION;
+                vm.instruction_count += 1;
                 vm.pc += 2; // Skip both slots
                 continue;
             }
@@ -529,18 +547,18 @@ pub fn execute(
             // Memory load (LDX)
             // =================================================================
             Opcode::LdxByte => {
-                let addr = vm.registers[src].wrapping_add(off as i64 as u64);
+                let addr = reg_src.wrapping_add(off as i64 as u64);
                 vm.registers[dst] =
                     vm.memory
                         .load8(addr)
-                        .map_err(|e| VmError::AccessViolation {
+                        .map_err(|_| VmError::AccessViolation {
                             addr,
                             size: 1,
                             pc: vm.pc,
                         })?;
             }
             Opcode::LdxHalf => {
-                let addr = vm.registers[src].wrapping_add(off as i64 as u64);
+                let addr = reg_src.wrapping_add(off as i64 as u64);
                 vm.registers[dst] =
                     vm.memory
                         .load16(addr)
@@ -551,7 +569,7 @@ pub fn execute(
                         })?;
             }
             Opcode::LdxWord => {
-                let addr = vm.registers[src].wrapping_add(off as i64 as u64);
+                let addr = reg_src.wrapping_add(off as i64 as u64);
                 vm.registers[dst] =
                     vm.memory
                         .load32(addr)
@@ -562,7 +580,7 @@ pub fn execute(
                         })?;
             }
             Opcode::LdxDword => {
-                let addr = vm.registers[src].wrapping_add(off as i64 as u64);
+                let addr = reg_src.wrapping_add(off as i64 as u64);
                 vm.registers[dst] =
                     vm.memory
                         .load64(addr)
@@ -577,7 +595,7 @@ pub fn execute(
             // Memory store immediate (ST)
             // =================================================================
             Opcode::StByte => {
-                let addr = vm.registers[dst].wrapping_add(off as i64 as u64);
+                let addr = reg_dst.wrapping_add(off as i64 as u64);
                 vm.memory
                     .store8(addr, imm as u64)
                     .map_err(|_| VmError::AccessViolation {
@@ -587,7 +605,7 @@ pub fn execute(
                     })?;
             }
             Opcode::StHalf => {
-                let addr = vm.registers[dst].wrapping_add(off as i64 as u64);
+                let addr = reg_dst.wrapping_add(off as i64 as u64);
                 vm.memory
                     .store16(addr, imm as u64)
                     .map_err(|_| VmError::AccessViolation {
@@ -597,7 +615,7 @@ pub fn execute(
                     })?;
             }
             Opcode::StWord => {
-                let addr = vm.registers[dst].wrapping_add(off as i64 as u64);
+                let addr = reg_dst.wrapping_add(off as i64 as u64);
                 vm.memory
                     .store32(addr, imm as u64)
                     .map_err(|_| VmError::AccessViolation {
@@ -607,7 +625,7 @@ pub fn execute(
                     })?;
             }
             Opcode::StDword => {
-                let addr = vm.registers[dst].wrapping_add(off as i64 as u64);
+                let addr = reg_dst.wrapping_add(off as i64 as u64);
                 vm.memory
                     .store64(addr, imm as u64)
                     .map_err(|_| VmError::AccessViolation {
@@ -621,182 +639,205 @@ pub fn execute(
             // Memory store register (STX)
             // =================================================================
             Opcode::StxByte => {
-                let addr = vm.registers[dst].wrapping_add(off as i64 as u64);
-                vm.memory.store8(addr, vm.registers[src]).map_err(|_| {
-                    VmError::AccessViolation {
+                let addr = reg_dst.wrapping_add(off as i64 as u64);
+                vm.memory
+                    .store8(addr, reg_src)
+                    .map_err(|_| VmError::AccessViolation {
                         addr,
                         size: 1,
                         pc: vm.pc,
-                    }
-                })?;
+                    })?;
             }
             Opcode::StxHalf => {
-                let addr = vm.registers[dst].wrapping_add(off as i64 as u64);
-                vm.memory.store16(addr, vm.registers[src]).map_err(|_| {
-                    VmError::AccessViolation {
+                let addr = reg_dst.wrapping_add(off as i64 as u64);
+                vm.memory
+                    .store16(addr, reg_src)
+                    .map_err(|_| VmError::AccessViolation {
                         addr,
                         size: 2,
                         pc: vm.pc,
-                    }
-                })?;
+                    })?;
             }
             Opcode::StxWord => {
-                let addr = vm.registers[dst].wrapping_add(off as i64 as u64);
-                vm.memory.store32(addr, vm.registers[src]).map_err(|_| {
-                    VmError::AccessViolation {
+                let addr = reg_dst.wrapping_add(off as i64 as u64);
+                vm.memory
+                    .store32(addr, reg_src)
+                    .map_err(|_| VmError::AccessViolation {
                         addr,
                         size: 4,
                         pc: vm.pc,
-                    }
-                })?;
+                    })?;
             }
             Opcode::StxDword => {
-                let addr = vm.registers[dst].wrapping_add(off as i64 as u64);
-                vm.memory.store64(addr, vm.registers[src]).map_err(|_| {
-                    VmError::AccessViolation {
+                let addr = reg_dst.wrapping_add(off as i64 as u64);
+                vm.memory
+                    .store64(addr, reg_src)
+                    .map_err(|_| VmError::AccessViolation {
                         addr,
                         size: 8,
                         pc: vm.pc,
-                    }
-                })?;
+                    })?;
             }
 
             // =================================================================
             // Jumps (64-bit comparison)
             // =================================================================
             Opcode::Ja => {
-                vm.pc = ((vm.pc as isize) + 1 + (off as isize)) as usize;
+                checkpoint_cu(&mut vm, &mut segment_cu)?;
+                vm.pc = jump_target(vm.pc, off);
                 continue;
             }
             Opcode::JeqImm => {
-                if vm.registers[dst] == imm as u64 {
-                    vm.pc = ((vm.pc as isize) + 1 + (off as isize)) as usize;
+                if reg_dst == imm as u64 {
+                    checkpoint_cu(&mut vm, &mut segment_cu)?;
+                    vm.pc = jump_target(vm.pc, off);
                     continue;
                 }
             }
             Opcode::JeqReg => {
-                if vm.registers[dst] == vm.registers[src] {
-                    vm.pc = ((vm.pc as isize) + 1 + (off as isize)) as usize;
+                if reg_dst == reg_src {
+                    checkpoint_cu(&mut vm, &mut segment_cu)?;
+                    vm.pc = jump_target(vm.pc, off);
                     continue;
                 }
             }
             Opcode::JgtImm => {
-                if vm.registers[dst] > imm as u64 {
-                    vm.pc = ((vm.pc as isize) + 1 + (off as isize)) as usize;
+                if reg_dst > imm as u64 {
+                    checkpoint_cu(&mut vm, &mut segment_cu)?;
+                    vm.pc = jump_target(vm.pc, off);
                     continue;
                 }
             }
             Opcode::JgtReg => {
-                if vm.registers[dst] > vm.registers[src] {
-                    vm.pc = ((vm.pc as isize) + 1 + (off as isize)) as usize;
+                if reg_dst > reg_src {
+                    checkpoint_cu(&mut vm, &mut segment_cu)?;
+                    vm.pc = jump_target(vm.pc, off);
                     continue;
                 }
             }
             Opcode::JgeImm => {
-                if vm.registers[dst] >= imm as u64 {
-                    vm.pc = ((vm.pc as isize) + 1 + (off as isize)) as usize;
+                if reg_dst >= imm as u64 {
+                    checkpoint_cu(&mut vm, &mut segment_cu)?;
+                    vm.pc = jump_target(vm.pc, off);
                     continue;
                 }
             }
             Opcode::JgeReg => {
-                if vm.registers[dst] >= vm.registers[src] {
-                    vm.pc = ((vm.pc as isize) + 1 + (off as isize)) as usize;
+                if reg_dst >= reg_src {
+                    checkpoint_cu(&mut vm, &mut segment_cu)?;
+                    vm.pc = jump_target(vm.pc, off);
                     continue;
                 }
             }
             Opcode::JsetImm => {
-                if (vm.registers[dst] & (imm as u64)) != 0 {
-                    vm.pc = ((vm.pc as isize) + 1 + (off as isize)) as usize;
+                if (reg_dst & (imm as u64)) != 0 {
+                    checkpoint_cu(&mut vm, &mut segment_cu)?;
+                    vm.pc = jump_target(vm.pc, off);
                     continue;
                 }
             }
             Opcode::JsetReg => {
-                if (vm.registers[dst] & vm.registers[src]) != 0 {
-                    vm.pc = ((vm.pc as isize) + 1 + (off as isize)) as usize;
+                if (reg_dst & reg_src) != 0 {
+                    checkpoint_cu(&mut vm, &mut segment_cu)?;
+                    vm.pc = jump_target(vm.pc, off);
                     continue;
                 }
             }
             Opcode::JneImm => {
-                if vm.registers[dst] != imm as u64 {
-                    vm.pc = ((vm.pc as isize) + 1 + (off as isize)) as usize;
+                if reg_dst != imm as u64 {
+                    checkpoint_cu(&mut vm, &mut segment_cu)?;
+                    vm.pc = jump_target(vm.pc, off);
                     continue;
                 }
             }
             Opcode::JneReg => {
-                if vm.registers[dst] != vm.registers[src] {
-                    vm.pc = ((vm.pc as isize) + 1 + (off as isize)) as usize;
+                if reg_dst != reg_src {
+                    checkpoint_cu(&mut vm, &mut segment_cu)?;
+                    vm.pc = jump_target(vm.pc, off);
                     continue;
                 }
             }
             Opcode::JsgtImm => {
-                if (vm.registers[dst] as i64) > (imm as i64) {
-                    vm.pc = ((vm.pc as isize) + 1 + (off as isize)) as usize;
+                if (reg_dst as i64) > (imm as i64) {
+                    checkpoint_cu(&mut vm, &mut segment_cu)?;
+                    vm.pc = jump_target(vm.pc, off);
                     continue;
                 }
             }
             Opcode::JsgtReg => {
-                if (vm.registers[dst] as i64) > (vm.registers[src] as i64) {
-                    vm.pc = ((vm.pc as isize) + 1 + (off as isize)) as usize;
+                if (reg_dst as i64) > (reg_src as i64) {
+                    checkpoint_cu(&mut vm, &mut segment_cu)?;
+                    vm.pc = jump_target(vm.pc, off);
                     continue;
                 }
             }
             Opcode::JsgeImm => {
-                if (vm.registers[dst] as i64) >= (imm as i64) {
-                    vm.pc = ((vm.pc as isize) + 1 + (off as isize)) as usize;
+                if (reg_dst as i64) >= (imm as i64) {
+                    checkpoint_cu(&mut vm, &mut segment_cu)?;
+                    vm.pc = jump_target(vm.pc, off);
                     continue;
                 }
             }
             Opcode::JsgeReg => {
-                if (vm.registers[dst] as i64) >= (vm.registers[src] as i64) {
-                    vm.pc = ((vm.pc as isize) + 1 + (off as isize)) as usize;
+                if (reg_dst as i64) >= (reg_src as i64) {
+                    checkpoint_cu(&mut vm, &mut segment_cu)?;
+                    vm.pc = jump_target(vm.pc, off);
                     continue;
                 }
             }
             Opcode::JltImm => {
-                if vm.registers[dst] < imm as u64 {
-                    vm.pc = ((vm.pc as isize) + 1 + (off as isize)) as usize;
+                if reg_dst < imm as u64 {
+                    checkpoint_cu(&mut vm, &mut segment_cu)?;
+                    vm.pc = jump_target(vm.pc, off);
                     continue;
                 }
             }
             Opcode::JltReg => {
-                if vm.registers[dst] < vm.registers[src] {
-                    vm.pc = ((vm.pc as isize) + 1 + (off as isize)) as usize;
+                if reg_dst < reg_src {
+                    checkpoint_cu(&mut vm, &mut segment_cu)?;
+                    vm.pc = jump_target(vm.pc, off);
                     continue;
                 }
             }
             Opcode::JleImm => {
-                if vm.registers[dst] <= imm as u64 {
-                    vm.pc = ((vm.pc as isize) + 1 + (off as isize)) as usize;
+                if reg_dst <= imm as u64 {
+                    checkpoint_cu(&mut vm, &mut segment_cu)?;
+                    vm.pc = jump_target(vm.pc, off);
                     continue;
                 }
             }
             Opcode::JleReg => {
-                if vm.registers[dst] <= vm.registers[src] {
-                    vm.pc = ((vm.pc as isize) + 1 + (off as isize)) as usize;
+                if reg_dst <= reg_src {
+                    checkpoint_cu(&mut vm, &mut segment_cu)?;
+                    vm.pc = jump_target(vm.pc, off);
                     continue;
                 }
             }
             Opcode::JsltImm => {
-                if (vm.registers[dst] as i64) < (imm as i64) {
-                    vm.pc = ((vm.pc as isize) + 1 + (off as isize)) as usize;
+                if (reg_dst as i64) < (imm as i64) {
+                    checkpoint_cu(&mut vm, &mut segment_cu)?;
+                    vm.pc = jump_target(vm.pc, off);
                     continue;
                 }
             }
             Opcode::JsltReg => {
-                if (vm.registers[dst] as i64) < (vm.registers[src] as i64) {
-                    vm.pc = ((vm.pc as isize) + 1 + (off as isize)) as usize;
+                if (reg_dst as i64) < (reg_src as i64) {
+                    checkpoint_cu(&mut vm, &mut segment_cu)?;
+                    vm.pc = jump_target(vm.pc, off);
                     continue;
                 }
             }
             Opcode::JsleImm => {
-                if (vm.registers[dst] as i64) <= (imm as i64) {
-                    vm.pc = ((vm.pc as isize) + 1 + (off as isize)) as usize;
+                if (reg_dst as i64) <= (imm as i64) {
+                    checkpoint_cu(&mut vm, &mut segment_cu)?;
+                    vm.pc = jump_target(vm.pc, off);
                     continue;
                 }
             }
             Opcode::JsleReg => {
-                if (vm.registers[dst] as i64) <= (vm.registers[src] as i64) {
-                    vm.pc = ((vm.pc as isize) + 1 + (off as isize)) as usize;
+                if (reg_dst as i64) <= (reg_src as i64) {
+                    checkpoint_cu(&mut vm, &mut segment_cu)?;
+                    vm.pc = jump_target(vm.pc, off);
                     continue;
                 }
             }
@@ -805,134 +846,156 @@ pub fn execute(
             // Jump32 (32-bit comparison)
             // =================================================================
             Opcode::Jeq32Imm => {
-                if (vm.registers[dst] as u32) == (imm as u32) {
-                    vm.pc = ((vm.pc as isize) + 1 + (off as isize)) as usize;
+                if (reg_dst as u32) == (imm as u32) {
+                    checkpoint_cu(&mut vm, &mut segment_cu)?;
+                    vm.pc = jump_target(vm.pc, off);
                     continue;
                 }
             }
             Opcode::Jeq32Reg => {
-                if (vm.registers[dst] as u32) == (vm.registers[src] as u32) {
-                    vm.pc = ((vm.pc as isize) + 1 + (off as isize)) as usize;
+                if (reg_dst as u32) == (reg_src as u32) {
+                    checkpoint_cu(&mut vm, &mut segment_cu)?;
+                    vm.pc = jump_target(vm.pc, off);
                     continue;
                 }
             }
             Opcode::Jgt32Imm => {
-                if (vm.registers[dst] as u32) > (imm as u32) {
-                    vm.pc = ((vm.pc as isize) + 1 + (off as isize)) as usize;
+                if (reg_dst as u32) > (imm as u32) {
+                    checkpoint_cu(&mut vm, &mut segment_cu)?;
+                    vm.pc = jump_target(vm.pc, off);
                     continue;
                 }
             }
             Opcode::Jgt32Reg => {
-                if (vm.registers[dst] as u32) > (vm.registers[src] as u32) {
-                    vm.pc = ((vm.pc as isize) + 1 + (off as isize)) as usize;
+                if (reg_dst as u32) > (reg_src as u32) {
+                    checkpoint_cu(&mut vm, &mut segment_cu)?;
+                    vm.pc = jump_target(vm.pc, off);
                     continue;
                 }
             }
             Opcode::Jge32Imm => {
-                if (vm.registers[dst] as u32) >= (imm as u32) {
-                    vm.pc = ((vm.pc as isize) + 1 + (off as isize)) as usize;
+                if (reg_dst as u32) >= (imm as u32) {
+                    checkpoint_cu(&mut vm, &mut segment_cu)?;
+                    vm.pc = jump_target(vm.pc, off);
                     continue;
                 }
             }
             Opcode::Jge32Reg => {
-                if (vm.registers[dst] as u32) >= (vm.registers[src] as u32) {
-                    vm.pc = ((vm.pc as isize) + 1 + (off as isize)) as usize;
+                if (reg_dst as u32) >= (reg_src as u32) {
+                    checkpoint_cu(&mut vm, &mut segment_cu)?;
+                    vm.pc = jump_target(vm.pc, off);
                     continue;
                 }
             }
             Opcode::Jset32Imm => {
-                if ((vm.registers[dst] as u32) & (imm as u32)) != 0 {
-                    vm.pc = ((vm.pc as isize) + 1 + (off as isize)) as usize;
+                if ((reg_dst as u32) & (imm as u32)) != 0 {
+                    checkpoint_cu(&mut vm, &mut segment_cu)?;
+                    vm.pc = jump_target(vm.pc, off);
                     continue;
                 }
             }
             Opcode::Jset32Reg => {
-                if ((vm.registers[dst] as u32) & (vm.registers[src] as u32)) != 0 {
-                    vm.pc = ((vm.pc as isize) + 1 + (off as isize)) as usize;
+                if ((reg_dst as u32) & (reg_src as u32)) != 0 {
+                    checkpoint_cu(&mut vm, &mut segment_cu)?;
+                    vm.pc = jump_target(vm.pc, off);
                     continue;
                 }
             }
             Opcode::Jne32Imm => {
-                if (vm.registers[dst] as u32) != (imm as u32) {
-                    vm.pc = ((vm.pc as isize) + 1 + (off as isize)) as usize;
+                if (reg_dst as u32) != (imm as u32) {
+                    checkpoint_cu(&mut vm, &mut segment_cu)?;
+                    vm.pc = jump_target(vm.pc, off);
                     continue;
                 }
             }
             Opcode::Jne32Reg => {
-                if (vm.registers[dst] as u32) != (vm.registers[src] as u32) {
-                    vm.pc = ((vm.pc as isize) + 1 + (off as isize)) as usize;
+                if (reg_dst as u32) != (reg_src as u32) {
+                    checkpoint_cu(&mut vm, &mut segment_cu)?;
+                    vm.pc = jump_target(vm.pc, off);
                     continue;
                 }
             }
             Opcode::Jsgt32Imm => {
-                if (vm.registers[dst] as i32) > imm {
-                    vm.pc = ((vm.pc as isize) + 1 + (off as isize)) as usize;
+                if (reg_dst as i32) > imm {
+                    checkpoint_cu(&mut vm, &mut segment_cu)?;
+                    vm.pc = jump_target(vm.pc, off);
                     continue;
                 }
             }
             Opcode::Jsgt32Reg => {
-                if (vm.registers[dst] as i32) > (vm.registers[src] as i32) {
-                    vm.pc = ((vm.pc as isize) + 1 + (off as isize)) as usize;
+                if (reg_dst as i32) > (reg_src as i32) {
+                    checkpoint_cu(&mut vm, &mut segment_cu)?;
+                    vm.pc = jump_target(vm.pc, off);
                     continue;
                 }
             }
             Opcode::Jsge32Imm => {
-                if (vm.registers[dst] as i32) >= imm {
-                    vm.pc = ((vm.pc as isize) + 1 + (off as isize)) as usize;
+                if (reg_dst as i32) >= imm {
+                    checkpoint_cu(&mut vm, &mut segment_cu)?;
+                    vm.pc = jump_target(vm.pc, off);
                     continue;
                 }
             }
             Opcode::Jsge32Reg => {
-                if (vm.registers[dst] as i32) >= (vm.registers[src] as i32) {
-                    vm.pc = ((vm.pc as isize) + 1 + (off as isize)) as usize;
+                if (reg_dst as i32) >= (reg_src as i32) {
+                    checkpoint_cu(&mut vm, &mut segment_cu)?;
+                    vm.pc = jump_target(vm.pc, off);
                     continue;
                 }
             }
             Opcode::Jlt32Imm => {
-                if (vm.registers[dst] as u32) < (imm as u32) {
-                    vm.pc = ((vm.pc as isize) + 1 + (off as isize)) as usize;
+                if (reg_dst as u32) < (imm as u32) {
+                    checkpoint_cu(&mut vm, &mut segment_cu)?;
+                    vm.pc = jump_target(vm.pc, off);
                     continue;
                 }
             }
             Opcode::Jlt32Reg => {
-                if (vm.registers[dst] as u32) < (vm.registers[src] as u32) {
-                    vm.pc = ((vm.pc as isize) + 1 + (off as isize)) as usize;
+                if (reg_dst as u32) < (reg_src as u32) {
+                    checkpoint_cu(&mut vm, &mut segment_cu)?;
+                    vm.pc = jump_target(vm.pc, off);
                     continue;
                 }
             }
             Opcode::Jle32Imm => {
-                if (vm.registers[dst] as u32) <= (imm as u32) {
-                    vm.pc = ((vm.pc as isize) + 1 + (off as isize)) as usize;
+                if (reg_dst as u32) <= (imm as u32) {
+                    checkpoint_cu(&mut vm, &mut segment_cu)?;
+                    vm.pc = jump_target(vm.pc, off);
                     continue;
                 }
             }
             Opcode::Jle32Reg => {
-                if (vm.registers[dst] as u32) <= (vm.registers[src] as u32) {
-                    vm.pc = ((vm.pc as isize) + 1 + (off as isize)) as usize;
+                if (reg_dst as u32) <= (reg_src as u32) {
+                    checkpoint_cu(&mut vm, &mut segment_cu)?;
+                    vm.pc = jump_target(vm.pc, off);
                     continue;
                 }
             }
             Opcode::Jslt32Imm => {
-                if (vm.registers[dst] as i32) < imm {
-                    vm.pc = ((vm.pc as isize) + 1 + (off as isize)) as usize;
+                if (reg_dst as i32) < imm {
+                    checkpoint_cu(&mut vm, &mut segment_cu)?;
+                    vm.pc = jump_target(vm.pc, off);
                     continue;
                 }
             }
             Opcode::Jslt32Reg => {
-                if (vm.registers[dst] as i32) < (vm.registers[src] as i32) {
-                    vm.pc = ((vm.pc as isize) + 1 + (off as isize)) as usize;
+                if (reg_dst as i32) < (reg_src as i32) {
+                    checkpoint_cu(&mut vm, &mut segment_cu)?;
+                    vm.pc = jump_target(vm.pc, off);
                     continue;
                 }
             }
             Opcode::Jsle32Imm => {
-                if (vm.registers[dst] as i32) <= imm {
-                    vm.pc = ((vm.pc as isize) + 1 + (off as isize)) as usize;
+                if (reg_dst as i32) <= imm {
+                    checkpoint_cu(&mut vm, &mut segment_cu)?;
+                    vm.pc = jump_target(vm.pc, off);
                     continue;
                 }
             }
             Opcode::Jsle32Reg => {
-                if (vm.registers[dst] as i32) <= (vm.registers[src] as i32) {
-                    vm.pc = ((vm.pc as isize) + 1 + (off as isize)) as usize;
+                if (reg_dst as i32) <= (reg_src as i32) {
+                    checkpoint_cu(&mut vm, &mut segment_cu)?;
+                    vm.pc = jump_target(vm.pc, off);
                     continue;
                 }
             }
@@ -941,6 +1004,9 @@ pub fn execute(
             // CALL — function call or syscall
             // =================================================================
             Opcode::Call => {
+                // Deduct accumulated CU at function call boundary
+                checkpoint_cu(&mut vm, &mut segment_cu)?;
+
                 let target_id = imm as u32;
 
                 // Check if it's a local call (in call_targets)
@@ -983,6 +1049,9 @@ pub fn execute(
             // EXIT — return from function or halt
             // =================================================================
             Opcode::Exit => {
+                // Deduct accumulated CU at exit boundary
+                checkpoint_cu(&mut vm, &mut segment_cu)?;
+
                 if vm.call_stack.is_empty() {
                     // Program halt — return r0
                     let consumed = compute_budget - vm.compute_meter;
@@ -1511,5 +1580,123 @@ mod tests {
         assert!(!SbpfVersion::V0.has_static_syscalls());
         assert!(!SbpfVersion::V2.has_static_syscalls());
         assert!(SbpfVersion::V3.has_static_syscalls());
+    }
+
+    // --- Segment-based CU accounting tests ---
+
+    #[test]
+    fn segment_cu_deducted_at_exit() {
+        // 3 instructions: mov, add, exit. CU should be 3 * CU_PER_INSTRUCTION.
+        let result = run_program(&[
+            Instruction::new(Opcode::Mov64Imm as u8, 0, 0, 0, 10),
+            Instruction::new(Opcode::Add64Imm as u8, 0, 0, 0, 5),
+            Instruction::new(Opcode::Exit as u8, 0, 0, 0, 0),
+        ])
+        .unwrap();
+        assert_eq!(result.return_value, 15);
+        // All 3 instructions charged via segment accounting at EXIT
+        assert_eq!(result.compute_units_consumed, 3 * CU_PER_INSTRUCTION);
+    }
+
+    #[test]
+    fn segment_cu_deducted_at_loop_boundary() {
+        // Loop: 3 iterations of (add + sub + jne), then exit.
+        // Total instructions: 2(init) + 3*3(loop body) + 1(exit) = 12
+        let result = run_program(&[
+            Instruction::new(Opcode::Mov64Imm as u8, 0, 0, 0, 0), // 0: r0 = 0
+            Instruction::new(Opcode::Mov64Imm as u8, 1, 0, 0, 3), // 1: r1 = 3
+            Instruction::new(Opcode::Add64Imm as u8, 0, 0, 0, 1), // 2: r0 += 1
+            Instruction::new(Opcode::Sub64Imm as u8, 1, 0, 0, 1), // 3: r1 -= 1
+            Instruction::new(Opcode::JneImm as u8, 1, 0, -3, 0),  // 4: if r1 != 0 goto 2
+            Instruction::new(Opcode::Exit as u8, 0, 0, 0, 0),     // 5: exit
+        ])
+        .unwrap();
+        assert_eq!(result.return_value, 3);
+        // 2(init) + 3*3(loop: add, sub, jne-taken) + 2(add, sub in last iter before fall-through)
+        // Actually: init(2) + iter1(add+sub+jne_taken=3) + iter2(3) + iter3(add+sub+jne_not_taken=3) + exit(1)
+        // = 2 + 3 + 3 + 3 + 1 = 12
+        assert_eq!(result.compute_units_consumed, 12 * CU_PER_INSTRUCTION);
+    }
+
+    #[test]
+    fn segment_cu_budget_exceeded_in_loop() {
+        // Tight loop should exceed a budget of 10 CU
+        let result = run_program_with_budget(
+            &[
+                Instruction::new(Opcode::Mov64Imm as u8, 0, 0, 0, 0), // r0 = 0
+                Instruction::new(Opcode::Add64Imm as u8, 0, 0, 0, 1), // r0 += 1
+                Instruction::new(Opcode::Ja as u8, 0, 0, -2, 0),      // infinite loop back to add
+                Instruction::new(Opcode::Exit as u8, 0, 0, 0, 0),
+            ],
+            10,
+        );
+        assert!(matches!(result, Err(VmError::ComputeBudgetExceeded)));
+    }
+
+    #[test]
+    fn segment_cu_exact_budget_succeeds() {
+        // 2 instructions, budget = 2 * CU_PER_INSTRUCTION exactly
+        let result = run_program_with_budget(
+            &[
+                Instruction::new(Opcode::Mov64Imm as u8, 0, 0, 0, 42),
+                Instruction::new(Opcode::Exit as u8, 0, 0, 0, 0),
+            ],
+            2 * CU_PER_INSTRUCTION,
+        );
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap().return_value, 42);
+    }
+
+    #[test]
+    fn segment_cu_one_short_fails() {
+        // 2 instructions, budget = 2 * CU_PER_INSTRUCTION - 1 (one short)
+        let result = run_program_with_budget(
+            &[
+                Instruction::new(Opcode::Mov64Imm as u8, 0, 0, 0, 42),
+                Instruction::new(Opcode::Exit as u8, 0, 0, 0, 0),
+            ],
+            2 * CU_PER_INSTRUCTION - 1,
+        );
+        assert!(matches!(result, Err(VmError::ComputeBudgetExceeded)));
+    }
+
+    #[test]
+    fn lddw_charges_two_instruction_slots() {
+        // LDDW is encoded as 2 instruction slots, should charge 2 CU
+        let result = run_program(&[
+            Instruction::new(Opcode::Lddw as u8, 0, 0, 0, 42), // slot 0: LDDW lo
+            Instruction::new(0, 0, 0, 0, 0),                   // slot 1: LDDW hi
+            Instruction::new(Opcode::Exit as u8, 0, 0, 0, 0),  // slot 2: exit
+        ])
+        .unwrap();
+        assert_eq!(result.return_value, 42);
+        // LDDW costs 2 CU (2 slots) + EXIT costs 1 CU = 3 total
+        assert_eq!(result.compute_units_consumed, 3 * CU_PER_INSTRUCTION);
+    }
+
+    #[test]
+    fn function_call_deducts_cu_at_boundary() {
+        // Call a function and verify CU accounting is correct across the boundary
+        let insns = [
+            Instruction::new(Opcode::Mov64Imm as u8, 1, 0, 0, 10), // 0: r1 = 10
+            Instruction::new(Opcode::Call as u8, 0, 0, 0, 1),      // 1: call func@3
+            Instruction::new(Opcode::Exit as u8, 0, 0, 0, 0),      // 2: exit main
+            Instruction::new(Opcode::Mov64Reg as u8, 0, 1, 0, 0),  // 3: func: r0 = r1
+            Instruction::new(Opcode::Exit as u8, 0, 0, 0, 0),      // 4: return from func
+        ];
+        let bytes = make_program_bytes(&insns);
+        let program = load_raw(&bytes).unwrap();
+        let memory = MemoryMap::new(&[], TOTAL_STACK_SIZE, DEFAULT_HEAP_SIZE, vec![]);
+        let result = execute(
+            &program,
+            memory,
+            10_000,
+            &NoSyscalls,
+            SysvarSnapshot::default(),
+        )
+        .unwrap();
+        assert_eq!(result.return_value, 10);
+        // 5 instructions total: mov, call, mov(func), exit(func), exit(main)
+        assert_eq!(result.compute_units_consumed, 5 * CU_PER_INSTRUCTION);
     }
 }
