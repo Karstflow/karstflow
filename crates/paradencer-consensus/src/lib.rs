@@ -45,11 +45,11 @@ pub use clock::{
 };
 pub use commitment::{
     CommitmentConfig, CommitmentCounts, CommitmentLevel, CommitmentStats, CommitmentTracker,
-    SlotCommitment,
+    ConfirmationCounts, ConfirmationEvent, ConfirmationStatus, SlotCommitment,
 };
 pub use compute_budget::{ComputeBudget, ComputeBudgetError};
 pub use consensus_coordinator::{
-    ConsensusCoordinator, ConsensusDecision, DecisionReason, ValidatorVote,
+    ConsensusCoordinator, ConsensusDecision, DecisionReason, ValidatorVote, VoteProcessingResult,
 };
 pub use epoch_processing::{
     AccountDatabaseVoteReader, DefaultVoteReader, EpochContext, EpochError, EpochProcessor,

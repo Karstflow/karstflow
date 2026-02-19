@@ -83,7 +83,7 @@ Native Firedancer total: ~623,600 lines C+H (excluding discoh/Frankendancer).
 | `choreo/ghost` | 1,825 | `paradencer-consensus/fork_choice` | GHOST algorithm |
 | `choreo/eqvoc` | 1,098 | `paradencer-consensus/equivocation` | Equivocation detection |
 | `choreo/hfork` | 771 | partially in fork_choice | Heavy fork tracking |
-| `choreo/notar` | 555 | `paradencer-consensus/commitment` | Block commitment |
+| `choreo/notar` | 555 | `paradencer-consensus/commitment` | Block commitment (4 thresholds: propagated/dup_conf/opt_conf/sup_conf) |
 | `choreo/voter` | 407 | `paradencer-consensus/vote_processor` | Vote submission |
 | `disco/pack` | 11,860 | `paradencer-consensus/pack` + stages | Transaction scheduling |
 | `disco/shred` | 8,856 | `paradencer-stages/shred_assembler` + ingress/turbine | Shred tiles |

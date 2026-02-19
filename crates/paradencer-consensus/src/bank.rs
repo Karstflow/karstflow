@@ -626,11 +626,12 @@ impl Bank {
                 let stake = coordinator
                     .stake_tracker()
                     .total_stake_for_voter(&update.vote_account);
-                coordinator.record_validator_vote(crate::consensus_coordinator::ValidatorVote {
+                coordinator.process_incoming_vote(crate::consensus_coordinator::ValidatorVote {
                     validator: update.vote_account,
                     slot: voted_slot,
                     stake,
                     timestamp: 0,
+                    block_hash: None,
                 });
             }
         }

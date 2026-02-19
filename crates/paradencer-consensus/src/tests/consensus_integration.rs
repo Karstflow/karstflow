@@ -574,6 +574,7 @@ mod tests {
 
         let validator = Pubkey::new_unique();
         let mut coord = ConsensusCoordinator::new(validator, 10);
+        coord.disable_propagation_check();
 
         // Linear chain: 1 -> 2 -> 3 -> 4 -> 5
         for slot in 1..=5 {
@@ -616,11 +617,12 @@ mod tests {
         }
 
         // Record a vote at slot 5
-        coord.record_validator_vote(crate::ValidatorVote {
+        coord.process_incoming_vote(crate::ValidatorVote {
             validator: voter,
             slot: 5,
             stake: 1000,
             timestamp: 0,
+            block_hash: None,
         });
 
         // Advance root to 10

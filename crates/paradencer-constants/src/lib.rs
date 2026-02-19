@@ -130,8 +130,18 @@ pub mod consensus {
     /// Maximum confirmation count before a vote is considered rooted.
     pub const MAX_CONFIRMATION_COUNT: u32 = MAX_LOCKOUT_HISTORY as u32;
 
+    /// Threshold for propagation confirmation (1/3 of stake).
+    /// A slot is considered propagated when at least 1/3 of stake has voted.
+    pub const PROPAGATED_THRESHOLD: f64 = 1.0_f64 / 3.0_f64;
+
     /// Threshold for duplicate confirmation via gossip (52% of stake).
+    /// Ensures safety against equivocation: even if a validator equivocates,
+    /// a block with >52% cannot both be duplicate confirmed.
     pub const DUPLICATE_CONFIRMATION_THRESHOLD: f64 = 0.52_f64;
+
+    /// Threshold for super confirmation (4/5 of stake).
+    /// Provides stronger guarantees than optimistic confirmation.
+    pub const SUPER_CONFIRMATION_THRESHOLD: f64 = 4.0_f64 / 5.0_f64;
 
     /// Maximum number of slots to retain equivocation history for pruning.
     pub const MAX_EQUIVOCATION_HISTORY_SLOTS: u64 = 1_024;

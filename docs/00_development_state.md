@@ -18,8 +18,8 @@ Primary residual tracker:
   - Sysvars: ~90% (all 14 sysvars, SysvarCache, per-slot/per-epoch updates)
   - Builtin Programs: ~82% (all 12+ programs, 96+ instructions, 32+ tests per program)
   - Rewards & Stakes: ~80% (inflation, partitioned distribution, 18 stake handlers)
-  - Runtime Core: ~75% (bank, executor, epoch processing, cost tracker, tx cache)
-  - Consensus: ~70% (tower BFT, GHOST fork choice, equivocation detection, commitment)
+  - Runtime Core: ~78% (bank, executor, epoch processing, cost tracker, tx cache, end-to-end Bank→sBPF pipeline)
+  - Consensus: ~73% (tower BFT, GHOST fork choice, equivocation detection, multi-threshold optimistic confirmation pipeline)
   - VM + Syscalls: ~85% (interpreter, CPI/crypto/PDA/curve/hash syscalls, SBPF versions, memory model, abort/panic, BLS12-381 stubs)
   - Types: ~55% (core types done, many inline, not all generated types)
   - Crypto: ~50% (ed25519 batch, blake3, sha256, keccak, secp, bn254, reed-solomon, lthash; missing BLS)
@@ -36,6 +36,8 @@ Primary residual tracker:
   - updated 2026-02-18: network 30%→35% (net cycles 0-5: paradencer-net crate, packets, I/O, UDP socket, TLS crypto, QUIC key derivation, 91 tests)
   - updated 2026-02-19: VM+Syscalls 80%→85% (4 missing syscalls: abort, panic, BLS12-381 decompress/pairing), storage metrics + auto-compaction
   - updated 2026-02-19: Tile Pipeline 30%→32% (PoH 6-state machine, dynamic hashes_per_tick, low-power mode, bank/slot coordination)
+  - updated 2026-02-19: Runtime Core 75%→78% (verified Bank→sBPF VM end-to-end pipeline: SbpfExecutionAdapter, TransactionProcessor routing to 14 builtins + BytecodeVm, BlockProcessor execution, 63 pipeline tests)
+  - updated 2026-02-19: Consensus 70%→73% (multi-threshold optimistic confirmation pipeline: 4 levels — propagated 1/3, duplicate confirmed 52%, optimistically confirmed 2/3, super confirmed 4/5; notification events, auto-promotion, VoteProcessor→CommitmentTracker integration)
 
 ## Firedancer Module Comparison (deep analysis 2026-02-17, updated 2026-02-18)
 
@@ -44,9 +46,9 @@ Primary residual tracker:
 | **Sysvars** (14 types, cache, lifecycle) | ~1,900 | ~3,000 | **90%** | Done |
 | **Builtin Programs** (12+, 96+ instructions) | ~16,100 | ~20,000 | **82%** | High |
 | **Rewards & Stakes** (inflation, distribution) | ~2,500 | ~5,000 | **80%** | High |
-| **Runtime Core** (bank, executor, epoch) | ~8,400 | ~15,000 | **75%** | Critical |
+| **Runtime Core** (bank, executor, epoch) | ~8,400 | ~15,000 | **78%** | Critical |
 | **VM + Syscalls** (interp, CPI, crypto) | ~7,900 | ~10,300 | **85%** | High |
-| **Consensus** (tower, fork, equivocation) | ~7,900 | ~8,000 | **70%** | High |
+| **Consensus** (tower, fork, equivocation, confirmation) | ~7,900 | ~8,200 | **73%** | High |
 | **Types** (bincode serialization) | ~10,100 | ~3,000 | **55%** | High |
 | **Crypto** (ed25519, blake3, bn254...) | ~30,000 | ~5,000 | **50%** | Medium |
 | **Storage** (accdb, funk, vinyl, snapshots) | ~25,500 | ~16,300 | **60%** | Critical |

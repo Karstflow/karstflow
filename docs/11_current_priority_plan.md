@@ -6,27 +6,14 @@ Last updated: 2026-02-19
 
 Tasks ordered by priority (highest first). Each task improves Firedancer logic parity.
 
-### Priority 1: Bank → sBPF VM Integration (#26)
-**Status**: Pending
-**Impact**: Critical for end-to-end transaction execution
-**Scope**: paradencer-consensus bank + paradencer-sbpf integration
-**Details**:
-- Bank currently has transaction processing skeleton but doesn't invoke sBPF VM
-- Need: execution context construction, account loading, VM invocation, state commit
-- This is the critical path for a working validator
-
-### Priority 2: Optimistic Confirmation Pipeline (#27)
-**Status**: Pending
-**Impact**: Required for consensus participation
-**Scope**: paradencer-consensus
-**Details**:
-- Add optimistic confirmation tracking (supermajority vote observation)
-- Needed for commitment level reporting and proper fork choice weighting
+(No active tasks — scanning for next priority.)
 
 ## Completed Tasks
 
 | Task | Date | Commit |
 |------|------|--------|
+| Optimistic Confirmation Pipeline (multi-threshold: 1/3, 52%, 2/3, 4/5) | 2026-02-19 | pending |
+| Bank → sBPF VM integration (verified end-to-end) | 2026-02-19 | — (already complete) |
 | PoH 6-state machine + dynamic hashing | 2026-02-19 | 1dd0070 |
 | Status cache analysis (matches Firedancer) | 2026-02-19 | — |
 | Missing VM syscalls (abort, panic, BLS12-381) | 2026-02-19 | 78234a9 |

@@ -2,20 +2,26 @@
 ///
 /// Handles validation of validator votes, tower lockout enforcement,
 /// and stake-weighted vote aggregation for fork choice and commitment tracking.
-use crate::{ForkChoice, StakeTracker, Tower, VoteError, VoteState};
+///
+/// When a vote pushes a slot past a confirmation threshold, the processor
+/// emits `ConfirmationEvent`s so callers (e.g. replay stage, RPC) can react.
+use crate::{
+    CommitmentTracker, ConfirmationEvent, ConfirmationStatus, ForkChoice, StakeTracker, Tower,
+    VoteError, VoteState,
+};
 use paradencer_storage::Pubkey;
 use std::collections::HashMap;
 
 /// Configuration for vote processing behavior.
 #[derive(Debug, Clone)]
 pub struct VoteProcessorConfig {
-    /// Minimum stake required for a vote to be considered
+    /// Minimum stake required for a vote to be considered.
     pub min_stake_threshold: u64,
-    /// Enable strict tower lockout enforcement
+    /// Enable strict tower lockout enforcement.
     pub enforce_tower_lockouts: bool,
-    /// Enable vote signature verification
+    /// Enable vote signature verification.
     pub verify_signatures: bool,
-    /// Enable vote account authorization checks
+    /// Enable vote account authorization checks.
     pub verify_authorization: bool,
 }
 
@@ -33,14 +39,16 @@ impl Default for VoteProcessorConfig {
 /// Tracks vote aggregation for a specific slot.
 #[derive(Debug, Clone)]
 pub struct SlotVoteInfo {
-    /// Slot being voted on
+    /// Slot being voted on.
     pub slot: u64,
-    /// Total stake that has voted for this slot
+    /// Total stake that has voted for this slot.
     pub total_stake: u64,
-    /// Map of vote account -> stake amount
+    /// Map of vote account -> stake amount.
     pub votes_by_account: HashMap<Pubkey, u64>,
-    /// Whether this slot has reached supermajority (2/3+ stake)
+    /// Whether this slot has reached supermajority (2/3+ stake).
     pub has_supermajority: bool,
+    /// Current confirmation status based on stake thresholds.
+    pub confirmation_status: ConfirmationStatus,
 }
 
 impl SlotVoteInfo {
@@ -50,6 +58,7 @@ impl SlotVoteInfo {
             total_stake: 0,
             votes_by_account: HashMap::new(),
             has_supermajority: false,
+            confirmation_status: ConfirmationStatus::Unconfirmed,
         }
     }
 
@@ -70,15 +79,17 @@ impl SlotVoteInfo {
         }
     }
 
-    /// Update supermajority status based on total network stake.
-    pub fn update_supermajority(&mut self, total_network_stake: u64) {
+    /// Update supermajority status and confirmation status based on total network stake.
+    pub fn update_thresholds(&mut self, total_network_stake: u64) {
         if total_network_stake == 0 {
             self.has_supermajority = false;
+            self.confirmation_status = ConfirmationStatus::Unconfirmed;
             return;
         }
 
         let ratio = self.total_stake as f64 / total_network_stake as f64;
         self.has_supermajority = ratio >= 2.0 / 3.0;
+        self.confirmation_status = ConfirmationStatus::from_stake_ratio(ratio);
     }
 
     /// Get the stake ratio (0.0 to 1.0) for this slot.
@@ -103,18 +114,19 @@ impl SlotVoteInfo {
 /// Processes and validates validator votes for consensus.
 ///
 /// Integrates with Tower for lockout enforcement, StakeTracker for
-/// stake weighting, and ForkChoice for fork selection.
+/// stake weighting, ForkChoice for fork selection, and CommitmentTracker
+/// for multi-threshold confirmation events.
 #[derive(Debug)]
 pub struct VoteProcessor {
-    /// Configuration for vote processing
+    /// Configuration for vote processing.
     config: VoteProcessorConfig,
-    /// Vote aggregation by slot
+    /// Vote aggregation by slot.
     slot_votes: HashMap<u64, SlotVoteInfo>,
-    /// Current vote states for each vote account
+    /// Current vote states for each vote account.
     vote_states: HashMap<Pubkey, VoteState>,
-    /// Stake tracker for vote weighting
+    /// Stake tracker for vote weighting.
     stake_tracker: StakeTracker,
-    /// Total active stake in the network
+    /// Total active stake in the network.
     total_stake: u64,
 }
 
@@ -150,11 +162,11 @@ impl VoteProcessor {
         self.total_stake = stake_tracker.total_stake();
         self.stake_tracker = stake_tracker;
 
-        // Recalculate supermajority for all slots
+        // Recalculate thresholds for all slots
         let slots: Vec<u64> = self.slot_votes.keys().copied().collect();
         for slot in slots {
             if let Some(vote_info) = self.slot_votes.get_mut(&slot) {
-                vote_info.update_supermajority(self.total_stake);
+                vote_info.update_thresholds(self.total_stake);
             }
         }
     }
@@ -200,9 +212,6 @@ impl VoteProcessor {
                 if !vote_state.can_vote_on_slot(slot) {
                     return Err(VoteProcessorError::LockoutViolation { slot });
                 }
-
-                // Check tower-specific lockouts (requires fork ancestry check)
-                // This would need fork choice integration for full validation
             }
         }
 
@@ -235,7 +244,7 @@ impl VoteProcessor {
                     let should_remove =
                         if let Some(old_vote_info) = self.slot_votes.get_mut(&last_voted) {
                             old_vote_info.remove_vote(&vote_account);
-                            old_vote_info.update_supermajority(self.total_stake);
+                            old_vote_info.update_thresholds(self.total_stake);
                             old_vote_info.votes_by_account.is_empty()
                         } else {
                             false
@@ -263,7 +272,7 @@ impl VoteProcessor {
             .entry(slot)
             .or_insert_with(|| SlotVoteInfo::new(slot));
         vote_info.add_vote(vote_account, stake);
-        vote_info.update_supermajority(self.total_stake);
+        vote_info.update_thresholds(self.total_stake);
 
         // Update fork choice with LMD-GHOST vote recording
         if let Some(fc) = fork_choice {
@@ -271,6 +280,27 @@ impl VoteProcessor {
         }
 
         Ok(vote_info.total_stake)
+    }
+
+    /// Process a vote and feed results into the commitment tracker.
+    ///
+    /// Returns confirmation events for any newly crossed thresholds.
+    pub fn process_vote_with_commitment(
+        &mut self,
+        vote_account: Pubkey,
+        slot: u64,
+        timestamp: i64,
+        tower: Option<&Tower>,
+        fork_choice: Option<&mut ForkChoice>,
+        commitment_tracker: &mut CommitmentTracker,
+    ) -> Result<Vec<ConfirmationEvent>, VoteProcessorError> {
+        let total_stake_for_slot =
+            self.process_vote(vote_account, slot, timestamp, tower, fork_choice)?;
+
+        // Feed updated stake into commitment tracker
+        let events = commitment_tracker.update_stake(slot, total_stake_for_slot, self.total_stake);
+
+        Ok(events)
     }
 
     /// Process multiple votes as a batch.
@@ -296,6 +326,41 @@ impl VoteProcessor {
         results
     }
 
+    /// Process a batch of votes and feed results into the commitment tracker.
+    ///
+    /// Returns all confirmation events from the batch.
+    pub fn process_votes_batch_with_commitment(
+        &mut self,
+        votes: Vec<(Pubkey, u64, i64)>,
+        tower: Option<&Tower>,
+        mut fork_choice: Option<&mut ForkChoice>,
+        commitment_tracker: &mut CommitmentTracker,
+    ) -> (Vec<Result<u64, VoteProcessorError>>, Vec<ConfirmationEvent>) {
+        let mut results = Vec::with_capacity(votes.len());
+        let mut all_events = Vec::new();
+
+        for (vote_account, slot, timestamp) in votes {
+            let result = self.process_vote(
+                vote_account,
+                slot,
+                timestamp,
+                tower,
+                fork_choice.as_deref_mut(),
+            );
+
+            // Feed stake into commitment tracker for successful votes
+            if let Ok(total_slot_stake) = &result {
+                let events =
+                    commitment_tracker.update_stake(slot, *total_slot_stake, self.total_stake);
+                all_events.extend(events);
+            }
+
+            results.push(result);
+        }
+
+        (results, all_events)
+    }
+
     /// Get vote information for a specific slot.
     pub fn get_slot_votes(&self, slot: u64) -> Option<&SlotVoteInfo> {
         self.slot_votes.get(&slot)
@@ -307,6 +372,19 @@ impl VoteProcessor {
             .get(&slot)
             .map(|v| v.has_supermajority)
             .unwrap_or(false)
+    }
+
+    /// Get the confirmation status for a slot based on vote aggregation.
+    pub fn get_confirmation_status(&self, slot: u64) -> ConfirmationStatus {
+        self.slot_votes
+            .get(&slot)
+            .map(|v| v.confirmation_status)
+            .unwrap_or(ConfirmationStatus::Unconfirmed)
+    }
+
+    /// Check if a slot is propagated (1/3+ stake has voted).
+    pub fn is_propagated(&self, slot: u64) -> bool {
+        self.get_confirmation_status(slot) >= ConfirmationStatus::Propagated
     }
 
     /// Get the total stake that has voted for a slot.
@@ -375,9 +453,28 @@ impl VoteProcessor {
             .filter(|va| self.get_vote_stake(va) > 0)
             .count();
 
+        let slots_propagated = self
+            .slot_votes
+            .values()
+            .filter(|v| v.confirmation_status >= ConfirmationStatus::Propagated)
+            .count();
+        let slots_duplicate_confirmed = self
+            .slot_votes
+            .values()
+            .filter(|v| v.confirmation_status >= ConfirmationStatus::DuplicateConfirmed)
+            .count();
+        let slots_super_confirmed = self
+            .slot_votes
+            .values()
+            .filter(|v| v.confirmation_status >= ConfirmationStatus::SuperConfirmed)
+            .count();
+
         VoteProcessorStats {
             total_slots_with_votes,
             slots_with_supermajority,
+            slots_propagated,
+            slots_duplicate_confirmed,
+            slots_super_confirmed,
             total_validators,
             active_validators,
             total_stake: self.total_stake,
@@ -390,6 +487,9 @@ impl VoteProcessor {
 pub struct VoteProcessorStats {
     pub total_slots_with_votes: usize,
     pub slots_with_supermajority: usize,
+    pub slots_propagated: usize,
+    pub slots_duplicate_confirmed: usize,
+    pub slots_super_confirmed: usize,
     pub total_validators: usize,
     pub active_validators: usize,
     pub total_stake: u64,
@@ -421,7 +521,7 @@ pub enum VoteProcessorError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{Delegation, VoteState};
+    use crate::{CommitmentConfig, Delegation, VoteState};
 
     fn create_test_vote_processor() -> VoteProcessor {
         let config = VoteProcessorConfig::default();
@@ -720,5 +820,112 @@ mod tests {
         // Root still has stake from the new vote's ancestry
         assert_eq!(fc.get_fork(0).unwrap().stake_weight, 500);
         assert_eq!(fc.validator_vote_slot(&vote_account), Some(2));
+    }
+
+    #[test]
+    fn vote_processor_tracks_confirmation_status() {
+        let mut processor = create_test_vote_processor();
+        let (vote1, _) = setup_vote_account(&mut processor, 400);
+        let (vote2, _) = setup_vote_account(&mut processor, 300);
+        processor.total_stake = 1000;
+
+        // 400/1000 = 40% — propagated (>33%)
+        processor
+            .process_vote(vote1, 100, 1000, None, None)
+            .unwrap();
+        assert_eq!(
+            processor.get_confirmation_status(100),
+            ConfirmationStatus::Propagated
+        );
+        assert!(processor.is_propagated(100));
+
+        // 700/1000 = 70% — optimistically confirmed (>66.7%)
+        processor
+            .process_vote(vote2, 100, 1000, None, None)
+            .unwrap();
+        assert_eq!(
+            processor.get_confirmation_status(100),
+            ConfirmationStatus::OptimisticallyConfirmed
+        );
+    }
+
+    #[test]
+    fn vote_processor_with_commitment_emits_events() {
+        let mut processor = create_test_vote_processor();
+        let (vote1, _) = setup_vote_account(&mut processor, 400);
+        let (vote2, _) = setup_vote_account(&mut processor, 400);
+        processor.total_stake = 1000;
+
+        let mut commitment = CommitmentTracker::new(CommitmentConfig::default());
+        commitment.mark_processed(100, 0, 1000);
+
+        // First vote: 400/1000 = 40% — crosses propagated (1/3)
+        let events = processor
+            .process_vote_with_commitment(vote1, 100, 1000, None, None, &mut commitment)
+            .unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].status, ConfirmationStatus::Propagated);
+
+        // Second vote: 800/1000 = 80% — crosses duplicate, optimistic, super
+        let events = processor
+            .process_vote_with_commitment(vote2, 100, 1001, None, None, &mut commitment)
+            .unwrap();
+        // Should cross DuplicateConfirmed, OptimisticallyConfirmed, SuperConfirmed
+        assert_eq!(events.len(), 3);
+        assert_eq!(events[0].status, ConfirmationStatus::DuplicateConfirmed);
+        assert_eq!(
+            events[1].status,
+            ConfirmationStatus::OptimisticallyConfirmed
+        );
+        assert_eq!(events[2].status, ConfirmationStatus::SuperConfirmed);
+
+        // Commitment tracker should have auto-promoted to Confirmed
+        assert!(commitment.is_optimistically_confirmed(100));
+    }
+
+    #[test]
+    fn vote_processor_batch_with_commitment() {
+        let mut processor = create_test_vote_processor();
+        let (vote1, _) = setup_vote_account(&mut processor, 500);
+        let (vote2, _) = setup_vote_account(&mut processor, 500);
+        processor.total_stake = 1000;
+
+        let mut commitment = CommitmentTracker::new(CommitmentConfig::default());
+        commitment.mark_processed(100, 0, 1000);
+
+        let votes = vec![(vote1, 100, 1000), (vote2, 100, 1001)];
+        let (results, events) =
+            processor.process_votes_batch_with_commitment(votes, None, None, &mut commitment);
+
+        assert!(results.iter().all(|r| r.is_ok()));
+        // Should have events from crossing thresholds
+        assert!(!events.is_empty());
+        // 100% stake should cross all thresholds
+        assert!(commitment.is_super_confirmed(100));
+    }
+
+    #[test]
+    fn vote_processor_stats_includes_confirmation_counts() {
+        let mut processor = create_test_vote_processor();
+        let (vote1, _) = setup_vote_account(&mut processor, 350);
+        let (vote2, _) = setup_vote_account(&mut processor, 350);
+        processor.total_stake = 1000;
+
+        // Slot 100: 350/1000 = 35% — propagated
+        processor
+            .process_vote(vote1, 100, 1000, None, None)
+            .unwrap();
+
+        // Slot 101: 700/1000 = 70% — supermajority
+        processor
+            .process_vote(vote2, 101, 1001, None, None)
+            .unwrap();
+        processor
+            .process_vote(vote1, 101, 1002, None, None)
+            .unwrap();
+
+        let stats = processor.get_stats();
+        assert_eq!(stats.slots_propagated, 1); // slot 101 only (100 removed by fork switch)
+        assert_eq!(stats.slots_with_supermajority, 1);
     }
 }
