@@ -90,12 +90,21 @@ pub enum PohRecord {
 // ---------------------------------------------------------------------------
 
 /// Current state of the PoH tile.
+///
+/// Extended state machine matching Firedancer's 6-state model for proper
+/// coordination between PoH, replay, and pack tiles.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PohState {
+    /// Not yet initialized (before first reset).
+    Uninitialized,
     /// Not leader, background hashing for proof-of-skipping.
     Idling,
     /// Approaching own leader slot, accumulating tick hashes.
     Hashing,
+    /// Leader slot reached but waiting for bank info from replay.
+    WaitingForBank,
+    /// Have bank info but haven't reached the leader slot in the hash chain.
+    WaitingForSlot,
     /// Active leader, accepting microblocks and producing entries.
     Leading,
 }
@@ -197,8 +206,18 @@ pub struct PohService {
     /// Number of microblocks received in the current leader slot.
     microblocks_in_slot: u64,
 
+    /// Lower bound of expected microblocks (from pack's done_packing signal).
+    /// Used to ensure enough hashcnts remain for remaining microblocks.
+    microblocks_lower_bound: u64,
+
     /// Whether pack has signaled done packing for the current slot.
     slot_done: bool,
+
+    /// Whether the leader bank info has been received from replay.
+    have_leader_bank: bool,
+
+    /// Expected next microblock pack index (for ordering enforcement).
+    expect_pack_idx: u64,
 
     /// The slot we last reset onto (building on top of).
     reset_slot: u64,
@@ -264,7 +283,10 @@ impl PohService {
             last_entry_hashcnt: 0,
             last_entry_slot: 0,
             microblocks_in_slot: 0,
+            microblocks_lower_bound: 0,
             slot_done: false,
+            have_leader_bank: false,
+            expect_pack_idx: 0,
             reset_slot: 0,
             reset_hash: genesis_hash,
             next_leader_slot: u64::MAX,
@@ -301,6 +323,28 @@ impl PohService {
         self.state == PohState::Leading
     }
 
+    /// Whether the service is in low-power mode (hashes_per_tick == 1).
+    ///
+    /// In low-power mode, transactions can be mixed in at any hashcnt
+    /// without needing to avoid tick boundaries.
+    pub fn is_low_power(&self) -> bool {
+        self.hashes_per_tick == 1
+    }
+
+    /// Whether the PoH chain is still hashing toward the leader slot.
+    ///
+    /// Returns true when we have leader bank info but haven't reached
+    /// the actual leader slot in the hash chain yet.
+    pub fn is_hashing_to_leader_slot(&self) -> bool {
+        self.state == PohState::WaitingForSlot
+            || (self.state == PohState::Leading && self.slot < self.next_leader_slot)
+    }
+
+    /// Whether a leader bank has been received from replay.
+    pub fn has_leader_bank(&self) -> bool {
+        self.have_leader_bank
+    }
+
     pub fn stats(&self) -> &PohStats {
         &self.stats
     }
@@ -315,6 +359,35 @@ impl PohService {
 
     pub fn tick_count(&self) -> u64 {
         self.stats.total_ticks
+    }
+
+    // -----------------------------------------------------------------------
+    // Dynamic configuration
+    // -----------------------------------------------------------------------
+
+    /// Update hashes_per_tick if changed (e.g. after feature activation).
+    ///
+    /// When the rate changes, all accumulated skipped tick hashes are
+    /// discarded and derived values are recomputed. This may only be
+    /// called at a slot boundary (hashcnt == 0, slot == reset_slot).
+    pub fn update_hashes_per_tick(&mut self, new_hashes_per_tick: u64) {
+        let new_hpt = new_hashes_per_tick.max(1);
+        if self.hashes_per_tick == new_hpt {
+            return;
+        }
+
+        // Discard accumulated skip proof — no longer valid at old rate.
+        self.skipped_tick_hashes.clear();
+
+        // Reset to the last reset point.
+        self.slot = self.reset_slot;
+        self.hashcnt = 0;
+        self.last_entry_hashcnt = 0;
+        self.last_entry_slot = self.slot;
+
+        // Apply new rate.
+        self.hashes_per_tick = new_hpt;
+        self.hashcnt_per_slot = new_hpt * self.ticks_per_slot;
     }
 
     // -----------------------------------------------------------------------
@@ -408,17 +481,39 @@ impl PohService {
         self.last_entry_slot = self.slot;
         self.last_entry_hashcnt = 0;
         self.microblocks_in_slot = 0;
+        self.microblocks_lower_bound = 0;
         self.slot_done = false;
+        self.have_leader_bank = false;
+        self.expect_pack_idx = 0;
         self.next_leader_slot = next_leader_slot;
         self.skipped_tick_hashes.clear();
 
         self.state = if next_leader_slot == self.slot {
-            PohState::Leading
+            // We're the next leader but need bank info from replay first.
+            PohState::WaitingForBank
         } else if next_leader_slot != u64::MAX {
             PohState::Hashing
         } else {
             PohState::Idling
         };
+    }
+
+    /// Signal that the leader bank info has been received from replay.
+    ///
+    /// Transitions from WaitingForBank to either WaitingForSlot (if the
+    /// hash chain hasn't reached the leader slot yet) or Leading.
+    pub fn set_leader_bank(&mut self, leader_slot: u64, hashes_per_tick: u64) {
+        self.have_leader_bank = true;
+        self.next_leader_slot = leader_slot;
+
+        // Apply any hashes_per_tick change (e.g. from feature activation).
+        self.update_hashes_per_tick(hashes_per_tick);
+
+        if self.slot >= leader_slot {
+            self.state = PohState::Leading;
+        } else {
+            self.state = PohState::WaitingForSlot;
+        }
     }
 
     /// Begin leading a slot.
@@ -427,14 +522,32 @@ impl PohService {
     pub fn begin_leader(&mut self, leader_slot: u64) {
         self.next_leader_slot = leader_slot;
         self.microblocks_in_slot = 0;
+        self.microblocks_lower_bound = 0;
         self.slot_done = false;
+        self.expect_pack_idx = 0;
         self.state = PohState::Leading;
     }
 
     /// Signal that pack is done sending microblocks for this slot.
     pub fn done_packing(&mut self, microblocks_count: u64) {
         self.slot_done = true;
-        self.microblocks_in_slot = microblocks_count;
+        self.microblocks_lower_bound = microblocks_count;
+    }
+
+    /// Whether the service can accept a microblock with the given pack index.
+    ///
+    /// Enforces in-order microblock delivery from the pack tile.
+    pub fn can_accept_microblock(&self, pack_idx: u64) -> bool {
+        if self.state != PohState::Leading {
+            return false;
+        }
+        if !self.have_leader_bank {
+            return false;
+        }
+        if self.slot < self.next_leader_slot {
+            return false; // Still hashing to leader slot
+        }
+        pack_idx == self.expect_pack_idx
     }
 
     // -----------------------------------------------------------------------
@@ -505,8 +618,17 @@ impl PohService {
         self.slot_done = false;
 
         // Update state for next slot
+        self.microblocks_in_slot = 0;
+        self.microblocks_lower_bound = 0;
+        self.slot_done = false;
+        self.expect_pack_idx = 0;
+
         if self.slot == self.next_leader_slot {
-            self.state = PohState::Leading;
+            if self.have_leader_bank {
+                self.state = PohState::Leading;
+            } else {
+                self.state = PohState::WaitingForBank;
+            }
         } else if self.next_leader_slot != u64::MAX {
             self.state = PohState::Hashing;
         } else {
@@ -523,6 +645,9 @@ impl PohService {
     ///
     /// Returns the microblock entry, or None if we can't accept more
     /// microblocks (at tick boundary, past slot end, or limit reached).
+    ///
+    /// In low-power mode (hashes_per_tick == 1), tick boundaries do not
+    /// block mixin — the tick boundary check is skipped.
     pub fn mixin(
         &mut self,
         mixin_hash: &[u8; 32],
@@ -532,8 +657,8 @@ impl PohService {
             return None;
         }
 
-        // Can't mixin on a tick boundary
-        if self.is_tick_boundary() {
+        // Can't mixin on a tick boundary (unless low-power mode).
+        if !self.is_low_power() && self.is_tick_boundary() {
             return None;
         }
 
@@ -543,6 +668,7 @@ impl PohService {
 
         let hashes_since_last = self.hashcnt_since_last_entry();
         self.microblocks_in_slot += 1;
+        self.expect_pack_idx += 1;
 
         let entry = MicroblockEntry {
             hash: self.hash,
@@ -675,12 +801,29 @@ mod tests {
         assert_eq!(poh.hashes_per_tick(), 1);
     }
 
+    /// Helper: reset + set_leader_bank to get into Leading state.
+    fn reset_as_leader(poh: &mut PohService, completed_slot: u64, hash: Hash, leader_slot: u64) {
+        poh.reset(completed_slot, hash, leader_slot);
+        poh.set_leader_bank(leader_slot, poh.hashes_per_tick());
+    }
+
     #[test]
-    fn reset_sets_state_to_leading_when_next_leader() {
+    fn reset_sets_state_to_waiting_for_bank_when_next_leader() {
         let mut poh = PohService::with_config(zero_hash(), 10, 4, 100);
         poh.reset(5, test_hash(), 6);
-        assert_eq!(poh.state(), PohState::Leading);
+        assert_eq!(poh.state(), PohState::WaitingForBank);
         assert_eq!(poh.slot(), 6);
+        assert!(!poh.is_leader());
+    }
+
+    #[test]
+    fn set_leader_bank_transitions_to_leading() {
+        let mut poh = PohService::with_config(zero_hash(), 10, 4, 100);
+        poh.reset(5, test_hash(), 6);
+        assert_eq!(poh.state(), PohState::WaitingForBank);
+
+        poh.set_leader_bank(6, 10);
+        assert_eq!(poh.state(), PohState::Leading);
         assert!(poh.is_leader());
     }
 
@@ -702,7 +845,7 @@ mod tests {
     #[test]
     fn advance_produces_ticks_when_leading() {
         let mut poh = PohService::with_config(zero_hash(), 5, 4, 100);
-        poh.reset(0, zero_hash(), 1);
+        reset_as_leader(&mut poh, 0, zero_hash(), 1);
         assert_eq!(poh.state(), PohState::Leading);
 
         let entries = poh.advance(5);
@@ -725,7 +868,7 @@ mod tests {
     #[test]
     fn advance_multiple_ticks() {
         let mut poh = PohService::with_config(zero_hash(), 5, 4, 100);
-        poh.reset(0, zero_hash(), 1);
+        reset_as_leader(&mut poh, 0, zero_hash(), 1);
 
         let entries = poh.advance(15);
         assert_eq!(entries.len(), 3);
@@ -738,7 +881,7 @@ mod tests {
     #[test]
     fn advance_does_not_exceed_slot_boundary() {
         let mut poh = PohService::with_config(zero_hash(), 5, 4, 100);
-        poh.reset(0, zero_hash(), 1);
+        reset_as_leader(&mut poh, 0, zero_hash(), 1);
 
         let entries = poh.advance(100);
         assert_eq!(entries.len(), 4);
@@ -748,7 +891,7 @@ mod tests {
     #[test]
     fn finish_slot_completes_and_advances() {
         let mut poh = PohService::with_config(zero_hash(), 5, 4, 100);
-        poh.reset(0, zero_hash(), 1);
+        reset_as_leader(&mut poh, 0, zero_hash(), 1);
 
         let (entries, completion) = poh.finish_slot();
         assert_eq!(entries.len(), 4);
@@ -761,7 +904,7 @@ mod tests {
     #[test]
     fn mixin_produces_microblock_entry() {
         let mut poh = PohService::with_config(zero_hash(), 10, 4, 100);
-        poh.reset(0, zero_hash(), 1);
+        reset_as_leader(&mut poh, 0, zero_hash(), 1);
 
         poh.advance(1);
 
@@ -787,7 +930,7 @@ mod tests {
     #[test]
     fn mixin_rejected_on_tick_boundary() {
         let mut poh = PohService::with_config(zero_hash(), 5, 4, 100);
-        poh.reset(0, zero_hash(), 1);
+        reset_as_leader(&mut poh, 0, zero_hash(), 1);
 
         poh.advance(5);
         assert!(poh.is_tick_boundary());
@@ -799,7 +942,7 @@ mod tests {
     #[test]
     fn verify_tick_entries() {
         let mut poh = PohService::with_config(zero_hash(), 3, 2, 100);
-        poh.reset(0, zero_hash(), 1);
+        reset_as_leader(&mut poh, 0, zero_hash(), 1);
 
         let entries = poh.advance(6);
         assert_eq!(entries.len(), 2);
@@ -828,12 +971,12 @@ mod tests {
     #[test]
     fn done_packing_sets_flag() {
         let mut poh = PohService::with_config(zero_hash(), 10, 4, 100);
-        poh.reset(0, zero_hash(), 1);
+        reset_as_leader(&mut poh, 0, zero_hash(), 1);
 
         assert!(!poh.slot_done);
         poh.done_packing(42);
         assert!(poh.slot_done);
-        assert_eq!(poh.microblocks_in_slot, 42);
+        assert_eq!(poh.microblocks_lower_bound, 42);
     }
 
     #[test]
@@ -849,7 +992,7 @@ mod tests {
     fn full_leader_cycle() {
         let mut poh = PohService::with_config(zero_hash(), 5, 4, 100);
 
-        poh.reset(0, zero_hash(), 1);
+        reset_as_leader(&mut poh, 0, zero_hash(), 1);
         assert!(poh.is_leader());
         assert_eq!(poh.slot(), 1);
 
@@ -867,7 +1010,7 @@ mod tests {
     #[test]
     fn stats_accumulate_correctly() {
         let mut poh = PohService::with_config(zero_hash(), 5, 2, 100);
-        poh.reset(0, zero_hash(), 1);
+        reset_as_leader(&mut poh, 0, zero_hash(), 1);
 
         poh.advance(3);
         poh.mixin(&[1u8; 32], 2);
@@ -889,7 +1032,7 @@ mod tests {
         poh.advance(5);
         assert!(!poh.skipped_tick_hashes().is_empty());
 
-        poh.reset(1, test_hash(), 2);
+        poh.reset(1, test_hash(), 5);
         assert!(poh.skipped_tick_hashes().is_empty());
     }
 
@@ -978,5 +1121,95 @@ mod tests {
         let bytes = entry.to_bytes();
         assert_eq!(bytes.len(), entry.size_bytes());
         assert!(bytes.len() > 48);
+    }
+
+    // --- New state machine tests ---
+
+    #[test]
+    fn waiting_for_bank_to_waiting_for_slot() {
+        let mut poh = PohService::with_config(zero_hash(), 10, 4, 100);
+        // Reset with leader at slot 5, but we're at slot 1.
+        poh.reset(0, zero_hash(), 5);
+        assert_eq!(poh.state(), PohState::Hashing);
+
+        // Simulate replay sending bank info before we reach slot 5.
+        poh.set_leader_bank(5, 10);
+        assert_eq!(poh.state(), PohState::WaitingForSlot);
+        assert!(poh.is_hashing_to_leader_slot());
+    }
+
+    #[test]
+    fn update_hashes_per_tick_recomputes_derived() {
+        let mut poh = PohService::with_config(zero_hash(), 10, 4, 100);
+        assert_eq!(poh.hashes_per_tick(), 10);
+        assert_eq!(poh.hashcnt_per_slot, 40);
+
+        poh.update_hashes_per_tick(20);
+        assert_eq!(poh.hashes_per_tick(), 20);
+        assert_eq!(poh.hashcnt_per_slot, 80);
+    }
+
+    #[test]
+    fn update_hashes_per_tick_discards_skipped_ticks() {
+        let mut poh = PohService::with_config(zero_hash(), 5, 4, 100);
+        poh.reset(0, zero_hash(), 10);
+        poh.advance(5);
+        assert!(!poh.skipped_tick_hashes().is_empty());
+
+        poh.update_hashes_per_tick(20);
+        assert!(poh.skipped_tick_hashes().is_empty());
+        assert_eq!(poh.hashcnt(), 0);
+    }
+
+    #[test]
+    fn update_hashes_per_tick_no_change_is_noop() {
+        let mut poh = PohService::with_config(zero_hash(), 5, 4, 100);
+        poh.reset(0, zero_hash(), 10);
+        poh.advance(5);
+        let skip_count = poh.skipped_tick_hashes().len();
+
+        poh.update_hashes_per_tick(5); // same value
+        assert_eq!(poh.skipped_tick_hashes().len(), skip_count); // unchanged
+    }
+
+    #[test]
+    fn low_power_mode_allows_mixin_on_tick_boundary() {
+        // hashes_per_tick = 1 → low-power mode
+        let mut poh = PohService::with_config(zero_hash(), 1, 4, 100);
+        reset_as_leader(&mut poh, 0, zero_hash(), 1);
+        assert!(poh.is_low_power());
+
+        // Advance to tick boundary (hashcnt=1 with hashes_per_tick=1)
+        poh.advance(1);
+        assert!(poh.is_tick_boundary());
+
+        // In low-power mode, mixin should still work at tick boundary.
+        let entry = poh.mixin(&[42u8; 32], 1);
+        assert!(entry.is_some());
+    }
+
+    #[test]
+    fn can_accept_microblock_enforces_ordering() {
+        let mut poh = PohService::with_config(zero_hash(), 10, 4, 100);
+        reset_as_leader(&mut poh, 0, zero_hash(), 1);
+
+        assert!(poh.can_accept_microblock(0));
+        assert!(!poh.can_accept_microblock(1)); // out of order
+
+        poh.advance(1);
+        poh.mixin(&[1u8; 32], 1);
+
+        assert!(poh.can_accept_microblock(1));
+        assert!(!poh.can_accept_microblock(0)); // already past
+    }
+
+    #[test]
+    fn can_accept_microblock_requires_leader_bank() {
+        let mut poh = PohService::with_config(zero_hash(), 10, 4, 100);
+        poh.reset(0, zero_hash(), 1); // WaitingForBank, no leader bank yet
+        assert!(!poh.can_accept_microblock(0));
+
+        poh.set_leader_bank(1, 10);
+        assert!(poh.can_accept_microblock(0));
     }
 }
