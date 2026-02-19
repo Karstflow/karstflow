@@ -125,3 +125,10 @@ pub const WAL_FILE_NAME: &str = "wal.log";
 
 /// Dead space ratio above which compaction is recommended (50%).
 pub const COMPACTION_DEAD_SPACE_RATIO: f64 = 0.5;
+
+/// Minimum dead bytes before compaction is worth attempting (1 MB).
+/// Avoids compacting tiny files where the overhead exceeds the benefit.
+pub const COMPACTION_MIN_DEAD_BYTES: u64 = 1024 * 1024;
+
+/// Default auto-compaction check interval in milliseconds (60 seconds).
+pub const AUTO_COMPACTION_INTERVAL_MS: u64 = 60_000;

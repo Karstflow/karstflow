@@ -120,6 +120,21 @@ impl StorageEngine {
         self.store.cache_stats()
     }
 
+    /// Storage operation metrics snapshot.
+    pub fn metrics(&self) -> crate::durable::MetricsSnapshot {
+        self.store.metrics()
+    }
+
+    /// Run a single auto-compaction pass on all column families.
+    ///
+    /// Compacts CFs that exceed dead space thresholds. Intended to be called
+    /// periodically from a background housekeeping loop.
+    pub fn auto_compact(
+        &self,
+    ) -> Result<Vec<(String, crate::durable::CfCompactionStats)>, crate::StorageError> {
+        self.store.auto_compact()
+    }
+
     /// Flush all pending writes to disk.
     pub fn flush(&self) -> Result<(), StorageError> {
         self.store.flush()

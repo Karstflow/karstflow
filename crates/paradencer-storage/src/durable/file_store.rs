@@ -34,6 +34,7 @@ use paradencer_constants::durable_store::{
     RECORD_STATUS_ACTIVE, RECORD_STATUS_DELETED, STANDARD_COLUMN_FAMILIES,
 };
 
+use super::metrics::{MetricsSnapshot, StoreMetrics};
 use super::read_cache::{CacheStats, ReadCache};
 
 use super::batch::WriteOp;
@@ -98,6 +99,8 @@ pub struct FileDurableStore {
     wal: Mutex<super::wal::WriteAheadLog>,
     /// LRU cache for recently accessed key-value pairs.
     cache: Mutex<ReadCache>,
+    /// Operation counters for observability.
+    metrics: StoreMetrics,
     /// If true, directory is temporary and deleted on drop.
     is_temporary: bool,
 }
@@ -129,6 +132,7 @@ impl FileDurableStore {
             families,
             wal: Mutex::new(wal),
             cache: Mutex::new(ReadCache::with_default_capacity()),
+            metrics: StoreMetrics::new(),
             is_temporary: false,
         })
     }
@@ -465,6 +469,43 @@ impl FileDurableStore {
         self.cache.lock().unwrap().stats()
     }
 
+    /// Storage operation metrics snapshot.
+    pub fn metrics(&self) -> MetricsSnapshot {
+        self.metrics.snapshot()
+    }
+
+    /// Run a single auto-compaction pass.
+    ///
+    /// Checks each CF's dead space ratio and compacts those exceeding
+    /// the threshold, provided they have accumulated enough dead bytes
+    /// to make compaction worthwhile.
+    pub fn auto_compact(&self) -> Result<Vec<(String, CfCompactionStats)>, StorageError> {
+        use paradencer_constants::durable_store::{
+            COMPACTION_DEAD_SPACE_RATIO, COMPACTION_MIN_DEAD_BYTES,
+        };
+
+        let cf_names: Vec<String> = self.families.keys().cloned().collect();
+        let mut results = Vec::new();
+
+        for cf_name in cf_names {
+            let (ratio, dead_bytes) = {
+                let mutex = self.cf(&cf_name)?;
+                let state = mutex.lock().unwrap();
+                (state.dead_ratio(), state.dead_bytes)
+            };
+
+            if ratio >= COMPACTION_DEAD_SPACE_RATIO && dead_bytes >= COMPACTION_MIN_DEAD_BYTES {
+                let stats = self.compact_cf(&cf_name)?;
+                if stats.bytes_reclaimed > 0 {
+                    self.metrics.record_compaction(stats.bytes_reclaimed);
+                    results.push((cf_name, stats));
+                }
+            }
+        }
+
+        Ok(results)
+    }
+
     /// Compact a single column family by rewriting only live records.
     ///
     /// Writes all live records to a new temporary file, then atomically
@@ -646,6 +687,7 @@ impl DurableStore for FileDurableStore {
         {
             let mut cache = self.cache.lock().unwrap();
             if let Some(value) = cache.get(cf, key) {
+                self.metrics.record_read(value.len() as u64);
                 return Ok(Some(value));
             }
         }
@@ -655,11 +697,15 @@ impl DurableStore for FileDurableStore {
         match state.index.get(key) {
             Some(loc) => {
                 let value = Self::read_value_at(&state.file, loc)?;
+                self.metrics.record_read(value.len() as u64);
                 // Populate cache on miss.
                 self.cache.lock().unwrap().insert(cf, key, &value);
                 Ok(Some(value))
             }
-            None => Ok(None),
+            None => {
+                self.metrics.record_read(0);
+                Ok(None)
+            }
         }
     }
 
@@ -667,6 +713,7 @@ impl DurableStore for FileDurableStore {
         let mutex = self.cf(cf)?;
         let mut state = mutex.lock().unwrap();
         Self::append_record(&mut state, RECORD_STATUS_ACTIVE, key, value)?;
+        self.metrics.record_write((key.len() + value.len()) as u64);
         // Update cache with the new value.
         self.cache.lock().unwrap().insert(cf, key, value);
         Ok(())
@@ -678,6 +725,7 @@ impl DurableStore for FileDurableStore {
         // Only write tombstone if key actually exists.
         if state.index.contains_key(key) {
             Self::append_record(&mut state, RECORD_STATUS_DELETED, key, &[])?;
+            self.metrics.record_delete();
             self.cache.lock().unwrap().invalidate(cf, key);
         }
         Ok(())
@@ -743,7 +791,9 @@ impl DurableStore for FileDurableStore {
             wal.clear()?;
         }
 
-        // Phase 4: Update cache for all applied operations.
+        // Phase 4: Update cache and metrics for all applied operations.
+        let op_count = batch.ops().len() as u64;
+        self.metrics.record_batch(op_count);
         {
             let mut cache = self.cache.lock().unwrap();
             for op in batch.ops() {
@@ -1544,5 +1594,103 @@ mod tests {
         // Value should still be correct (re-read from disk, not stale cache).
         let val = store.get(CF_ACCOUNTS, &0u32.to_le_bytes()).unwrap();
         assert_eq!(val, Some(b"updated!".to_vec()));
+    }
+
+    // --- Metrics tests ---
+
+    #[test]
+    fn metrics_track_operations() {
+        let store = temp_store();
+
+        store.put(CF_ACCOUNTS, b"mk", b"mv").unwrap();
+        store.get(CF_ACCOUNTS, b"mk").unwrap();
+        store.get(CF_ACCOUNTS, b"missing").unwrap();
+        store.delete(CF_ACCOUNTS, b"mk").unwrap();
+
+        let m = store.metrics();
+        assert_eq!(m.writes, 1);
+        assert_eq!(m.reads, 2);
+        assert_eq!(m.deletes, 1);
+    }
+
+    #[test]
+    fn metrics_track_batch_ops() {
+        let store = temp_store();
+
+        let mut batch = WriteBatch::new();
+        batch.put(CF_ACCOUNTS, b"a", b"1").unwrap();
+        batch.put(CF_ACCOUNTS, b"b", b"2").unwrap();
+        batch.delete(CF_ACCOUNTS, b"a").unwrap();
+        store.write_batch(&batch).unwrap();
+
+        let m = store.metrics();
+        assert_eq!(m.batches, 1);
+        assert_eq!(m.batch_ops, 3);
+    }
+
+    #[test]
+    fn metrics_track_bytes() {
+        let store = temp_store();
+
+        let value = vec![0xABu8; 1000];
+        store.put(CF_ACCOUNTS, b"bk", &value).unwrap();
+
+        let m = store.metrics();
+        assert!(
+            m.bytes_written >= 1000,
+            "bytes_written should reflect value size"
+        );
+
+        // Read the value — should track bytes read.
+        store.get(CF_ACCOUNTS, b"bk").unwrap();
+        let m2 = store.metrics();
+        assert!(
+            m2.bytes_read >= 1000,
+            "bytes_read should reflect value size"
+        );
+    }
+
+    // --- Auto-compaction tests ---
+
+    #[test]
+    fn auto_compact_skips_when_below_threshold() {
+        let store = temp_store();
+
+        // Write 10 records with no overwrites — zero dead space.
+        for i in 0u32..10 {
+            store.put(CF_ACCOUNTS, &i.to_le_bytes(), b"value").unwrap();
+        }
+
+        let results = store.auto_compact().unwrap();
+        assert!(
+            results.is_empty(),
+            "no compaction needed when dead space is zero"
+        );
+    }
+
+    #[test]
+    fn auto_compact_tracks_compaction_metrics() {
+        let store = temp_store();
+
+        // Write large records, then overwrite them all to create >1MB dead space.
+        let big_value = vec![0xCDu8; 8192];
+        for i in 0u32..200 {
+            store
+                .put(CF_ACCOUNTS, &i.to_le_bytes(), &big_value)
+                .unwrap();
+        }
+        for i in 0u32..200 {
+            store
+                .put(CF_ACCOUNTS, &i.to_le_bytes(), &big_value)
+                .unwrap();
+        }
+
+        let results = store.auto_compact().unwrap();
+
+        if !results.is_empty() {
+            let m = store.metrics();
+            assert!(m.compactions > 0, "compaction count should be recorded");
+            assert!(m.bytes_compacted > 0, "compacted bytes should be recorded");
+        }
     }
 }
