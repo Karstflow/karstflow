@@ -41,6 +41,7 @@ fn write_catalog_with_fragments(path: &std::path::Path, fragments: &[u64]) {
 
 mod block_assembler_runtime;
 mod block_assembler_startup;
+mod leader_pipeline_e2e;
 mod metrics_reporter;
 mod pipeline;
 mod shred_filter;
