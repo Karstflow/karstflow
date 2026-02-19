@@ -34,6 +34,8 @@ use paradencer_constants::durable_store::{
     RECORD_STATUS_ACTIVE, RECORD_STATUS_DELETED, STANDARD_COLUMN_FAMILIES,
 };
 
+use super::read_cache::{CacheStats, ReadCache};
+
 use super::batch::WriteOp;
 use super::{DurableStore, ScanEntry, WriteBatch};
 use crate::StorageError;
@@ -94,6 +96,8 @@ pub struct FileDurableStore {
     data_dir: PathBuf,
     families: HashMap<String, Mutex<CfState>>,
     wal: Mutex<super::wal::WriteAheadLog>,
+    /// LRU cache for recently accessed key-value pairs.
+    cache: Mutex<ReadCache>,
     /// If true, directory is temporary and deleted on drop.
     is_temporary: bool,
 }
@@ -124,6 +128,7 @@ impl FileDurableStore {
             data_dir: data_dir.to_owned(),
             families,
             wal: Mutex::new(wal),
+            cache: Mutex::new(ReadCache::with_default_capacity()),
             is_temporary: false,
         })
     }
@@ -455,6 +460,11 @@ impl FileDurableStore {
             .sum()
     }
 
+    /// Read cache statistics snapshot.
+    pub fn cache_stats(&self) -> CacheStats {
+        self.cache.lock().unwrap().stats()
+    }
+
     /// Compact a single column family by rewriting only live records.
     ///
     /// Writes all live records to a new temporary file, then atomically
@@ -577,6 +587,9 @@ impl FileDurableStore {
         state.file_end = write_offset;
         state.dead_bytes = 0;
 
+        // Invalidate cache for this CF — record offsets have all changed.
+        self.cache.lock().unwrap().invalidate_cf(cf);
+
         let bytes_reclaimed = original_size.saturating_sub(write_offset);
 
         Ok(CfCompactionStats {
@@ -629,10 +642,23 @@ pub struct CfCompactionStats {
 
 impl DurableStore for FileDurableStore {
     fn get(&self, cf: &str, key: &[u8]) -> Result<Option<Vec<u8>>, StorageError> {
+        // Check cache first.
+        {
+            let mut cache = self.cache.lock().unwrap();
+            if let Some(value) = cache.get(cf, key) {
+                return Ok(Some(value));
+            }
+        }
+
         let mutex = self.cf(cf)?;
         let state = mutex.lock().unwrap();
         match state.index.get(key) {
-            Some(loc) => Ok(Some(Self::read_value_at(&state.file, loc)?)),
+            Some(loc) => {
+                let value = Self::read_value_at(&state.file, loc)?;
+                // Populate cache on miss.
+                self.cache.lock().unwrap().insert(cf, key, &value);
+                Ok(Some(value))
+            }
             None => Ok(None),
         }
     }
@@ -640,7 +666,10 @@ impl DurableStore for FileDurableStore {
     fn put(&self, cf: &str, key: &[u8], value: &[u8]) -> Result<(), StorageError> {
         let mutex = self.cf(cf)?;
         let mut state = mutex.lock().unwrap();
-        Self::append_record(&mut state, RECORD_STATUS_ACTIVE, key, value)
+        Self::append_record(&mut state, RECORD_STATUS_ACTIVE, key, value)?;
+        // Update cache with the new value.
+        self.cache.lock().unwrap().insert(cf, key, value);
+        Ok(())
     }
 
     fn delete(&self, cf: &str, key: &[u8]) -> Result<(), StorageError> {
@@ -648,10 +677,10 @@ impl DurableStore for FileDurableStore {
         let mut state = mutex.lock().unwrap();
         // Only write tombstone if key actually exists.
         if state.index.contains_key(key) {
-            Self::append_record(&mut state, RECORD_STATUS_DELETED, key, &[])
-        } else {
-            Ok(())
+            Self::append_record(&mut state, RECORD_STATUS_DELETED, key, &[])?;
+            self.cache.lock().unwrap().invalidate(cf, key);
         }
+        Ok(())
     }
 
     fn write_batch(&self, batch: &WriteBatch) -> Result<(), StorageError> {
@@ -712,6 +741,21 @@ impl DurableStore for FileDurableStore {
         {
             let mut wal = self.wal.lock().unwrap();
             wal.clear()?;
+        }
+
+        // Phase 4: Update cache for all applied operations.
+        {
+            let mut cache = self.cache.lock().unwrap();
+            for op in batch.ops() {
+                match op {
+                    WriteOp::Put { cf, key, value } => {
+                        cache.insert(cf, key, value);
+                    }
+                    WriteOp::Delete { cf, key } => {
+                        cache.invalidate(cf, key);
+                    }
+                }
+            }
         }
 
         Ok(())
@@ -1410,5 +1454,95 @@ mod tests {
         let wal_path = path.join(paradencer_constants::durable_store::WAL_FILE_NAME);
         let wal_len = fs::metadata(&wal_path).map(|m| m.len()).unwrap_or(0);
         assert_eq!(wal_len, 0, "WAL should be cleared after batch");
+    }
+
+    // --- Cache integration tests ---
+
+    #[test]
+    fn cache_hit_after_put() {
+        let store = temp_store();
+        store.put(CF_ACCOUNTS, b"ck", b"cv").unwrap();
+
+        // Second get should hit cache (first get after put also goes via cache).
+        let val = store.get(CF_ACCOUNTS, b"ck").unwrap();
+        assert_eq!(val, Some(b"cv".to_vec()));
+
+        let stats = store.cache_stats();
+        assert!(stats.hits >= 1, "expected at least one cache hit");
+    }
+
+    #[test]
+    fn cache_invalidated_on_delete() {
+        let store = temp_store();
+        store.put(CF_ACCOUNTS, b"dk", b"dv").unwrap();
+
+        // Should be cached.
+        assert_eq!(store.get(CF_ACCOUNTS, b"dk").unwrap(), Some(b"dv".to_vec()));
+
+        store.delete(CF_ACCOUNTS, b"dk").unwrap();
+
+        // Cache should be invalidated — and key doesn't exist on disk either.
+        assert_eq!(store.get(CF_ACCOUNTS, b"dk").unwrap(), None);
+    }
+
+    #[test]
+    fn cache_updated_on_overwrite() {
+        let store = temp_store();
+        store.put(CF_ACCOUNTS, b"ok", b"old").unwrap();
+        store.put(CF_ACCOUNTS, b"ok", b"new").unwrap();
+
+        // Cache should return the new value without disk read.
+        let val = store.get(CF_ACCOUNTS, b"ok").unwrap();
+        assert_eq!(val, Some(b"new".to_vec()));
+
+        let stats = store.cache_stats();
+        assert!(stats.hits >= 1);
+    }
+
+    #[test]
+    fn cache_populated_on_batch() {
+        let store = temp_store();
+        let mut batch = WriteBatch::new();
+        batch.put(CF_ACCOUNTS, b"b1", b"v1").unwrap();
+        batch.put(CF_ACCOUNTS, b"b2", b"v2").unwrap();
+        store.write_batch(&batch).unwrap();
+
+        // Both values should be in cache.
+        let stats_before = store.cache_stats();
+        let _ = store.get(CF_ACCOUNTS, b"b1").unwrap();
+        let _ = store.get(CF_ACCOUNTS, b"b2").unwrap();
+        let stats_after = store.cache_stats();
+
+        assert!(
+            stats_after.hits >= stats_before.hits + 2,
+            "batch values should be cache hits"
+        );
+    }
+
+    #[test]
+    fn cache_invalidated_on_compact() {
+        let store = temp_store();
+
+        // Write and overwrite to create dead space.
+        for i in 0u32..10 {
+            store
+                .put(CF_ACCOUNTS, &i.to_le_bytes(), b"original")
+                .unwrap();
+        }
+        for i in 0u32..10 {
+            store
+                .put(CF_ACCOUNTS, &i.to_le_bytes(), b"updated!")
+                .unwrap();
+        }
+
+        // Populate cache.
+        let _ = store.get(CF_ACCOUNTS, &0u32.to_le_bytes()).unwrap();
+
+        // Compact — cache for this CF should be invalidated.
+        store.compact_cf(CF_ACCOUNTS).unwrap();
+
+        // Value should still be correct (re-read from disk, not stale cache).
+        let val = store.get(CF_ACCOUNTS, &0u32.to_le_bytes()).unwrap();
+        assert_eq!(val, Some(b"updated!".to_vec()));
     }
 }

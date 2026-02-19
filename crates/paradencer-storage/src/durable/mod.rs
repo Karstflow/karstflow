@@ -7,6 +7,7 @@ mod batch;
 mod compaction;
 mod engine;
 mod file_store;
+mod read_cache;
 pub mod recovery;
 mod wal;
 
@@ -14,6 +15,7 @@ pub use batch::{WriteBatch, WriteOp};
 pub use compaction::{compact_below_slot, compact_below_slot_and_reclaim, CompactionStats};
 pub use engine::{FullRecoveryStats, StorageEngine};
 pub use file_store::{CfCompactionStats, FileDurableStore};
+pub use read_cache::CacheStats;
 pub use recovery::{recover_accounts, RecoveryStats};
 
 use crate::StorageError;

@@ -115,6 +115,11 @@ impl StorageEngine {
         self.store.total_dead_bytes()
     }
 
+    /// Read cache statistics snapshot.
+    pub fn cache_stats(&self) -> crate::durable::CacheStats {
+        self.store.cache_stats()
+    }
+
     /// Flush all pending writes to disk.
     pub fn flush(&self) -> Result<(), StorageError> {
         self.store.flush()
