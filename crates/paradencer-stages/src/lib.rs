@@ -34,6 +34,7 @@ mod replay_stage;
 mod resolv_service;
 mod resolv_stage;
 mod shred_assembler;
+mod shred_collector;
 mod shred_filter;
 mod shred_network;
 mod stats;
@@ -63,6 +64,7 @@ pub use shred_assembler::{
     detect_block_boundary, group_shreds_by_slot, AssembledBlock, Entry, ShredAssembler,
     ShredAssemblyError, ShredAssemblyResult, ShredAssemblyStats,
 };
+pub use shred_collector::{ShredCollector, ShredCollectorConfig, ShredCollectorStats};
 pub use shred_filter::ShredFilter;
 pub use stats::{BlockAssemblyStats, IngressFilterStats, ShredFilterStats};
 pub use tx_filter::TxFilter;

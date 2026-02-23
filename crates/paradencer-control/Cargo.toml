@@ -17,6 +17,7 @@ paradencer-runtime = { path = "../paradencer-runtime" }
 paradencer-stages = { path = "../paradencer-stages" }
 paradencer-storage = { path = "../paradencer-storage" }
 paradencer-topology = { path = "../paradencer-topology" }
+paradencer-types = { path = "../paradencer-types" }
 
 paradencer-observability = { path = "../paradencer-observability" }
 paradencer-rpc = { path = "../paradencer-rpc" }

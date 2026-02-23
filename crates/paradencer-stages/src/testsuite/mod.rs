@@ -44,5 +44,6 @@ mod block_assembler_startup;
 mod leader_pipeline_e2e;
 mod metrics_reporter;
 mod pipeline;
+mod shred_collector;
 mod shred_filter;
 mod tx_filter;

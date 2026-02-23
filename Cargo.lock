@@ -1435,6 +1435,7 @@ dependencies = [
  "paradencer-stages",
  "paradencer-storage",
  "paradencer-topology",
+ "paradencer-types",
  "thiserror 2.0.18",
 ]
 

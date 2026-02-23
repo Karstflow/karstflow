@@ -13,14 +13,15 @@ use paradencer_consensus::{
 };
 use paradencer_core::{ExecutionMode, LinkKind, PinnedCorePolicy, StageKind};
 use paradencer_execution::ExecutionBridge;
-use paradencer_mesh::{bounded_link, OutPort};
+use paradencer_mesh::{bounded_link, InPort, OutPort};
 use paradencer_net::IngressMode;
 use paradencer_observability::spawn_metrics_http_bridge;
 use paradencer_rpc::{metrics_file_provider, spawn_rpc_http_server};
 use paradencer_runtime::{build_pinned_affinity_plan, run_services, Service, ServiceProbeReport};
 use paradencer_stages::{
     ExecutionErrorHandlingPolicy, MetricsOutputTarget, PipelineHandle, PipelineServiceBuilder,
-    PipelineServiceConfig, RawTransaction, ReplayService, ReplayServiceConfig,
+    PipelineServiceConfig, RawTransaction, ReplayService, ReplayServiceConfig, ShredCollector,
+    ShredCollectorConfig,
 };
 use paradencer_storage::{AccountDatabase, Pubkey};
 use paradencer_topology::{materialize_services, MaterializedTopology};
@@ -160,6 +161,45 @@ pub fn build_replay_service(config: ReplayServiceConfig, initial_stake: u64) -> 
         service: Box::new(service),
         consensus,
         block_input: block_tx,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Shred pipeline: ShredCollector → ReplayService
+// ---------------------------------------------------------------------------
+
+/// Result of building the shred collection pipeline.
+///
+/// The shred collector receives parsed shreds, groups them by slot,
+/// assembles complete slots into blocks, and feeds them to the replay service.
+pub struct ShredPipelineBundle {
+    /// The collector service to add to the node runtime.
+    pub service: Box<dyn Service>,
+    /// Input channel sender for individual parsed shreds (from ShredFilter).
+    pub shred_input: OutPort<paradencer_types::shred::Shred>,
+    /// Receiver for assembled blocks (connect to ReplayService).
+    pub block_receiver: InPort<paradencer_stages::AssembledBlock>,
+}
+
+/// Build a shred collection pipeline.
+///
+/// Creates a ShredCollector service that receives individual parsed shreds,
+/// groups them by slot, detects block boundaries, and emits assembled blocks.
+/// The caller should connect `block_receiver` to a ReplayService block input.
+pub fn build_shred_pipeline(config: ShredCollectorConfig) -> ShredPipelineBundle {
+    let shred_channel_depth = config.max_shreds_per_slot.max(256);
+    let block_channel_depth = config.max_buffered_slots.max(64);
+
+    let (shred_tx, shred_rx) = bounded_link::<paradencer_types::shred::Shred>(shred_channel_depth);
+    let (block_tx, block_rx) =
+        bounded_link::<paradencer_stages::AssembledBlock>(block_channel_depth);
+
+    let collector = ShredCollector::with_config(shred_rx, block_tx, config);
+
+    ShredPipelineBundle {
+        service: Box::new(collector),
+        shred_input: shred_tx,
+        block_receiver: block_rx,
     }
 }
 
@@ -661,8 +701,8 @@ pub fn ensure_mainnet_readiness(report: &MainnetReadinessReport) -> Result<()> {
 mod tests {
     use super::{
         build_consensus_infrastructure, build_pipeline_service, build_replay_service,
-        ensure_mainnet_readiness, evaluate_mainnet_readiness, load_node_config,
-        materialize_service_pair_from_config, materialize_services_from_config,
+        build_shred_pipeline, ensure_mainnet_readiness, evaluate_mainnet_readiness,
+        load_node_config, materialize_service_pair_from_config, materialize_services_from_config,
         maybe_start_metrics_http_bridge, maybe_start_rpc_http_server, run_diagnostics_phase,
     };
     use crate::errors::ControlPlaneError;
@@ -799,6 +839,44 @@ mod tests {
         let names: Vec<&str> = services.iter().map(|s| s.name()).collect();
         assert!(names.contains(&"replay-service"));
         assert!(names.contains(&"validator-pipeline"));
+    }
+
+    #[test]
+    fn build_shred_pipeline_creates_service_and_channels() {
+        use paradencer_runtime::{ServiceContext, ShutdownSwitch};
+        use paradencer_stages::ShredCollectorConfig;
+
+        let bundle = build_shred_pipeline(ShredCollectorConfig::default());
+        assert_eq!(bundle.service.name(), "shred-collector");
+
+        // Service ticks without error (no shreds pending).
+        let ctx = ServiceContext::new(ShutdownSwitch::new());
+        let mut service = bundle.service;
+        service.tick(&ctx).unwrap();
+    }
+
+    #[test]
+    fn shred_pipeline_integrates_with_replay_and_topology() {
+        use paradencer_stages::{PipelineServiceConfig, ReplayServiceConfig, ShredCollectorConfig};
+
+        let node_config = NodeConfig::from_profile(None).unwrap();
+        let materialized = materialize_services_from_config(&node_config).unwrap();
+        let replay_bundle = build_replay_service(ReplayServiceConfig::default(), 1_000_000);
+        let pipeline_bundle = build_pipeline_service(PipelineServiceConfig::default());
+        let shred_bundle = build_shred_pipeline(ShredCollectorConfig::default());
+
+        let mut services = materialized.services;
+        services.push(replay_bundle.service);
+        services.push(pipeline_bundle.service);
+        services.push(shred_bundle.service);
+
+        // Topology (5) + replay (1) + pipeline (1) + shred-collector (1) = 8 total services.
+        assert_eq!(services.len(), 8);
+
+        let names: Vec<&str> = services.iter().map(|s| s.name()).collect();
+        assert!(names.contains(&"replay-service"));
+        assert!(names.contains(&"validator-pipeline"));
+        assert!(names.contains(&"shred-collector"));
     }
 
     #[test]
