@@ -6,12 +6,15 @@
 /// enough coding shreds arrive, and makes retransmit decisions based on
 /// the turbine tree structure.
 use paradencer_crypto::reed_solomon::FecReconstructor;
+use paradencer_mesh::{InPort, OutPort, ReceiveError, SendError};
+use paradencer_runtime::{RuntimeError, RuntimeResult, Service, ServiceContext};
 use paradencer_types::shred::{
     CodingShredHeader, DataShredHeader, Shred, ShredCommonHeader, ShredVariant,
 };
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::time::Duration;
 
 /// Source of a received shred.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -570,6 +573,129 @@ impl ShredNetworkStage {
         }
 
         Some(Self::extract_completed_set(slot, fec_set_index, fec, true))
+    }
+}
+
+// ---------------------------------------------------------------------------
+// ShredNetworkService — Service wrapper for pipeline integration
+// ---------------------------------------------------------------------------
+
+/// Service wrapper that drives ShredNetworkStage from mesh channels.
+///
+/// Receives parsed shreds from ShredFilter, feeds them into the FEC resolver,
+/// and pushes completed/recovered FEC sets to ShredCollector.
+/// Also drains retransmit decisions for turbine broadcasting.
+pub struct ShredNetworkService {
+    stage: ShredNetworkStage,
+    /// Parsed shreds from the ingress filter.
+    incoming_shreds: InPort<Shred>,
+    /// Completed FEC sets sent to ShredCollector.
+    completed_output: OutPort<CompletedFecSet>,
+    /// Retransmit decisions sent to turbine broadcaster.
+    retransmit_output: Option<OutPort<RetransmitDecision>>,
+    /// Default source for incoming shreds (typically Turbine).
+    default_source: ShredSource,
+}
+
+impl ShredNetworkService {
+    /// Create a new shred network service.
+    pub fn new(
+        config: ShredNetworkConfig,
+        incoming_shreds: InPort<Shred>,
+        completed_output: OutPort<CompletedFecSet>,
+    ) -> Self {
+        Self {
+            stage: ShredNetworkStage::with_config(config),
+            incoming_shreds,
+            completed_output,
+            retransmit_output: None,
+            default_source: ShredSource::Turbine,
+        }
+    }
+
+    /// Set the retransmit output channel for turbine broadcasting.
+    pub fn with_retransmit_output(mut self, output: OutPort<RetransmitDecision>) -> Self {
+        self.retransmit_output = Some(output);
+        self
+    }
+
+    /// Set the default shred source (for classifying incoming shreds).
+    pub fn with_default_source(mut self, source: ShredSource) -> Self {
+        self.default_source = source;
+        self
+    }
+
+    /// Get a shared reference to the underlying statistics.
+    pub fn stats(&self) -> Arc<ShredNetworkStats> {
+        self.stage.stats()
+    }
+
+    /// Drain all available shreds from the incoming channel and process them.
+    fn drain_and_process(&mut self) -> Result<(), ReceiveError> {
+        loop {
+            match self.incoming_shreds.try_recv() {
+                Ok(Some(shred)) => {
+                    let net_shred = NetworkShred {
+                        shred,
+                        source: self.default_source,
+                    };
+                    self.stage.insert_shred(net_shred);
+                }
+                Ok(None) => break,
+                Err(ReceiveError::QueueClosed) => return Err(ReceiveError::QueueClosed),
+            }
+        }
+        Ok(())
+    }
+
+    /// Push completed FEC sets to the output channel.
+    fn flush_completed(&mut self) {
+        let completed = self.stage.drain_completed_sets();
+        for fec_set in completed {
+            // Best-effort send — drop on backpressure.
+            let _ = self.completed_output.try_send(fec_set);
+        }
+    }
+
+    /// Push retransmit decisions to the output channel.
+    fn flush_retransmits(&mut self) {
+        if let Some(ref output) = self.retransmit_output {
+            let retransmits = self.stage.drain_retransmits();
+            for decision in retransmits {
+                let _ = output.try_send(decision);
+            }
+        } else {
+            // Discard retransmits if no output channel configured.
+            self.stage.drain_retransmits();
+        }
+    }
+}
+
+impl Service for ShredNetworkService {
+    fn name(&self) -> &'static str {
+        "shred-network"
+    }
+
+    fn tick_interval(&self) -> Duration {
+        Duration::from_millis(2)
+    }
+
+    fn tick(&mut self, context: &ServiceContext) -> RuntimeResult<()> {
+        match self.drain_and_process() {
+            Ok(()) => {}
+            Err(ReceiveError::QueueClosed) => {
+                context.shutdown.request_stop();
+                return Err(RuntimeError::service_failure(
+                    self.name(),
+                    "shred input channel closed",
+                ));
+            }
+        }
+
+        self.flush_completed();
+        self.flush_retransmits();
+
+        Ok(())
     }
 }
 
@@ -1142,5 +1268,76 @@ mod tests {
         let completed = stage.drain_completed_sets();
         assert_eq!(completed.len(), 1);
         assert_eq!(completed[0].slot, 100);
+    }
+
+    // -----------------------------------------------------------------------
+    // ShredNetworkService tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn service_processes_shreds_and_emits_completed_fec_sets() {
+        use paradencer_mesh::bounded_link;
+        use paradencer_runtime::{ServiceContext, ShutdownSwitch};
+
+        let (shred_tx, shred_rx) = bounded_link::<Shred>(64);
+        let (fec_tx, fec_rx) = bounded_link::<CompletedFecSet>(16);
+
+        let config = ShredNetworkConfig {
+            turbine_neighbor_count: 0,
+            ..Default::default()
+        };
+        let mut service = ShredNetworkService::new(config, shred_rx, fec_tx);
+        let context = ServiceContext::new(ShutdownSwitch::new());
+
+        // Create a FEC set (2 data + 2 coding).
+        let (data_shreds, coding_shreds) = create_fec_set(100, 0, 2, 2);
+
+        // Send both data shreds + one coding shred (to learn params and complete).
+        for ns in &data_shreds {
+            shred_tx.try_send(ns.shred.clone()).unwrap();
+        }
+        shred_tx.try_send(coding_shreds[0].shred.clone()).unwrap();
+
+        // Tick the service to process.
+        service.tick(&context).unwrap();
+
+        // Should have produced a CompletedFecSet.
+        let fec_set = fec_rx.try_recv().unwrap();
+        assert!(fec_set.is_some());
+        let fec_set = fec_set.unwrap();
+        assert_eq!(fec_set.slot, 100);
+        assert_eq!(fec_set.data_shreds.len(), 2);
+        assert!(!fec_set.was_recovered);
+    }
+
+    #[test]
+    fn service_retransmits_to_output_channel() {
+        use paradencer_mesh::bounded_link;
+        use paradencer_runtime::{ServiceContext, ShutdownSwitch};
+
+        let (shred_tx, shred_rx) = bounded_link::<Shred>(64);
+        let (fec_tx, _fec_rx) = bounded_link::<CompletedFecSet>(16);
+        let (retx_tx, retx_rx) = bounded_link::<RetransmitDecision>(16);
+
+        let config = ShredNetworkConfig {
+            turbine_neighbor_count: 3,
+            ..Default::default()
+        };
+        let mut service =
+            ShredNetworkService::new(config, shred_rx, fec_tx).with_retransmit_output(retx_tx);
+        let context = ServiceContext::new(ShutdownSwitch::new());
+
+        // Send a turbine shred.
+        let ns = make_data_shred(100, 0, 0);
+        shred_tx.try_send(ns.shred).unwrap();
+
+        service.tick(&context).unwrap();
+
+        // Should have a retransmit decision.
+        let decision = retx_rx.try_recv().unwrap();
+        assert!(decision.is_some());
+        let decision = decision.unwrap();
+        assert_eq!(decision.slot, 100);
+        assert_eq!(decision.destination_indices.len(), 3);
     }
 }

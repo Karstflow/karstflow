@@ -1,6 +1,7 @@
 use super::*;
 use crate::block_producer::PohEntry;
 use crate::shred_assembler::AssembledBlock;
+use crate::shred_network::{CompletedFecSet, ShredNetworkConfig, ShredNetworkService};
 use crate::{ShredCollector, ShredCollectorConfig};
 use paradencer_types::shred::{
     DataShredHeader, Shred, ShredCommonHeader, ShredVariant, SHRED_DATA_FLAG, SHRED_LAST_IN_SLOT,
@@ -174,4 +175,141 @@ fn collector_evicts_overflow_slots() {
     let stats = collector.stats();
     assert_eq!(stats.shreds_received, 4);
     assert_eq!(stats.slots_evicted_overflow, 2);
+}
+
+#[test]
+fn collector_receives_fec_sets_from_channel() {
+    let (shred_tx, shred_rx) = bounded_link::<Shred>(16);
+    let (fec_tx, fec_rx) = bounded_link::<CompletedFecSet>(16);
+    let (block_tx, block_rx) = bounded_link::<AssembledBlock>(16);
+
+    let mut collector = ShredCollector::with_fec_input(shred_rx, fec_rx, block_tx);
+    let context = ServiceContext::new(ShutdownSwitch::new());
+
+    // Send a CompletedFecSet with a last-in-slot shred.
+    let payload = make_entry_batch_payload();
+    let mut shred = make_shred(50, 0, true, payload);
+
+    let fec_set = CompletedFecSet {
+        slot: 50,
+        fec_set_index: 0,
+        data_shreds: vec![shred],
+        was_recovered: false,
+    };
+    fec_tx.try_send(fec_set).unwrap();
+
+    // Tick to drain FEC sets and emit block.
+    collector.tick(&context).unwrap();
+
+    let stats = collector.stats();
+    assert_eq!(stats.fec_sets_received, 1);
+    assert_eq!(stats.blocks_emitted, 1);
+
+    let block = block_rx.try_recv().unwrap().unwrap();
+    assert_eq!(block.slot, 50);
+}
+
+#[test]
+fn full_pipeline_filter_to_fec_to_collector_to_block() {
+    // End-to-end: shreds → ShredNetworkService → ShredCollector → AssembledBlock.
+    let (filter_tx, filter_rx) = bounded_link::<Shred>(64);
+    let (fec_tx, fec_rx) = bounded_link::<CompletedFecSet>(16);
+    let (shred_direct_tx, shred_direct_rx) = bounded_link::<Shred>(16);
+    let (block_tx, block_rx) = bounded_link::<AssembledBlock>(16);
+
+    let config = ShredNetworkConfig {
+        turbine_neighbor_count: 0,
+        ..Default::default()
+    };
+    let mut network_svc = ShredNetworkService::new(config, filter_rx, fec_tx);
+    let mut collector = ShredCollector::with_fec_input(shred_direct_rx, fec_rx, block_tx);
+    let context = ServiceContext::new(ShutdownSwitch::new());
+
+    // Create a simple FEC set: 2 data + 2 coding.
+    // Data shreds carry a valid entry batch payload.
+    let entry = PohEntry::new(42, Hash::new([0xEE; 32]), vec![vec![1, 2, 3]]);
+    let batch_bytes = PohEntry::batch_to_bytes(&[entry]);
+
+    // Create data shreds with unique signatures.
+    let data0 = {
+        let mut sig = [0u8; 64];
+        sig[0] = 1;
+        Shred::new(
+            ShredCommonHeader {
+                signature: sig,
+                variant: paradencer_types::shred::SHRED_DATA_FLAG,
+                slot: 100,
+                index: 0,
+                version: 1,
+                fec_set_index: 0,
+            },
+            ShredVariant::LegacyData(DataShredHeader {
+                parent_offset: 1,
+                flags: SHRED_LAST_IN_SLOT,
+                size: batch_bytes.len() as u16,
+            }),
+            batch_bytes.clone(),
+        )
+    };
+    let data1 = {
+        let mut sig = [0u8; 64];
+        sig[0] = 2;
+        Shred::new(
+            ShredCommonHeader {
+                signature: sig,
+                variant: paradencer_types::shred::SHRED_DATA_FLAG,
+                slot: 100,
+                index: 1,
+                version: 1,
+                fec_set_index: 0,
+            },
+            ShredVariant::LegacyData(DataShredHeader {
+                parent_offset: 1,
+                flags: 0,
+                size: batch_bytes.len() as u16,
+            }),
+            batch_bytes.clone(),
+        )
+    };
+    // One coding shred to learn FEC params (num_data=2, num_coding=2).
+    let coding0 = {
+        let mut sig = [0u8; 64];
+        sig[0] = 3;
+        Shred::new(
+            ShredCommonHeader {
+                signature: sig,
+                variant: paradencer_types::shred::SHRED_CODE_FLAG,
+                slot: 100,
+                index: 2,
+                version: 1,
+                fec_set_index: 0,
+            },
+            ShredVariant::LegacyCoding(paradencer_types::shred::CodingShredHeader {
+                num_data_shreds: 2,
+                num_coding_shreds: 2,
+                position: 0,
+            }),
+            vec![0u8; batch_bytes.len()],
+        )
+    };
+
+    // Send shreds through the filter channel.
+    filter_tx.try_send(data0).unwrap();
+    filter_tx.try_send(data1).unwrap();
+    filter_tx.try_send(coding0).unwrap();
+
+    // Tick network service → produces CompletedFecSet.
+    network_svc.tick(&context).unwrap();
+
+    // Tick collector → drains FEC sets, assembles block.
+    collector.tick(&context).unwrap();
+
+    let stats = collector.stats();
+    assert_eq!(stats.fec_sets_received, 1);
+    assert_eq!(stats.blocks_emitted, 1);
+
+    let block = block_rx.try_recv().unwrap().unwrap();
+    assert_eq!(block.slot, 100);
+    assert!(block.entries.len() >= 1);
+    assert_eq!(block.entries[0].num_hashes, 42);
 }

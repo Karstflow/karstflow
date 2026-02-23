@@ -97,8 +97,9 @@ pub use resolv_stage::{
     ResolvedTransaction,
 };
 pub use shred_network::{
-    NetworkShred, RetransmitDecision, ShredInsertOutcome, ShredNetworkConfig, ShredNetworkStage,
-    ShredNetworkStats, ShredNetworkStatsSnapshot, ShredSource,
+    CompletedFecSet, NetworkShred, RetransmitDecision, ShredInsertOutcome, ShredNetworkConfig,
+    ShredNetworkService, ShredNetworkStage, ShredNetworkStats, ShredNetworkStatsSnapshot,
+    ShredSource,
 };
 pub use tile_pipeline::{
     PipelineConfig, ResolvTile, TransactionPipeline, ValidatorPipeline, ValidatorPipelineResult,

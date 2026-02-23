@@ -59,6 +59,8 @@ pub struct ShredCollectorStats {
 pub struct ShredCollector {
     config: ShredCollectorConfig,
     incoming_shreds: InPort<Shred>,
+    /// Channel for completed FEC sets from the shred network stage.
+    incoming_fec_sets: Option<InPort<CompletedFecSet>>,
     block_output: OutPort<AssembledBlock>,
     slot_buffers: BTreeMap<u64, SlotBuffer>,
     assembler: ShredAssembler,
@@ -74,6 +76,23 @@ impl ShredCollector {
         )
     }
 
+    /// Create with an additional channel for FEC-resolved shred sets.
+    pub fn with_fec_input(
+        incoming_shreds: InPort<Shred>,
+        incoming_fec_sets: InPort<CompletedFecSet>,
+        block_output: OutPort<AssembledBlock>,
+    ) -> Self {
+        Self {
+            config: ShredCollectorConfig::default(),
+            incoming_shreds,
+            incoming_fec_sets: Some(incoming_fec_sets),
+            block_output,
+            slot_buffers: BTreeMap::new(),
+            assembler: ShredAssembler::new(),
+            stats: ShredCollectorStats::default(),
+        }
+    }
+
     pub fn with_config(
         incoming_shreds: InPort<Shred>,
         block_output: OutPort<AssembledBlock>,
@@ -82,6 +101,7 @@ impl ShredCollector {
         Self {
             config,
             incoming_shreds,
+            incoming_fec_sets: None,
             block_output,
             slot_buffers: BTreeMap::new(),
             assembler: ShredAssembler::new(),
@@ -118,6 +138,24 @@ impl ShredCollector {
             if is_last {
                 buffer.last_in_slot_seen = true;
             }
+        }
+    }
+
+    /// Drain completed FEC sets from the network stage channel.
+    fn drain_incoming_fec_sets(&mut self) {
+        // Collect FEC sets first to avoid borrow conflict.
+        let mut fec_sets = Vec::new();
+        if let Some(ref fec_port) = self.incoming_fec_sets {
+            loop {
+                match fec_port.try_recv() {
+                    Ok(Some(fec_set)) => fec_sets.push(fec_set),
+                    Ok(None) => break,
+                    Err(ReceiveError::QueueClosed) => break,
+                }
+            }
+        }
+        for fec_set in fec_sets {
+            self.insert_completed_fec_set(fec_set);
         }
     }
 
@@ -242,6 +280,9 @@ impl Service for ShredCollector {
                 ));
             }
         }
+
+        // Drain completed FEC sets from the network stage.
+        self.drain_incoming_fec_sets();
 
         self.try_emit_complete_slots(context)?;
         self.age_and_evict();
