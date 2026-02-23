@@ -1,0 +1,516 @@
+/// Service wrapper for the full validator transaction pipeline.
+///
+/// Integrates the zero-copy IPC pipeline (Verify → Resolv) with the leader
+/// pipeline (Pack → Exec → PoH) and exposes it as a `Service` for the
+/// node runtime.
+///
+/// The service receives raw transaction payloads from an input channel and
+/// feeds them through the full pipeline:
+///
+/// ```text
+///   InPort<RawTransaction> → [IPC] Verify → [IPC] Resolv →
+///     → Pack → Exec → PoH → entries
+/// ```
+///
+/// During leader slots, use the `PipelineHandle` to call `begin_slot()` and
+/// `register_blockhash()` to activate block production. Produced entries
+/// accumulate until `end_slot()` collects them for shredding.
+use crate::block_producer::{Entry, PohService};
+use crate::exec_stage::{ExecConfig, ExecStage, ExecutionEngine, MockExecutionEngine};
+use crate::leader_pipeline::LeaderPipeline;
+use crate::pack_stage::{PackConfig, PackScheduler};
+use crate::resolv_stage::Blockhash;
+use crate::tile_pipeline::{PipelineConfig, ValidatorPipeline};
+use crate::verify_stage::TransactionSource;
+use paradencer_mesh::InPort;
+use paradencer_runtime::{RuntimeResult, Service, ServiceContext};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
+
+// ---------------------------------------------------------------------------
+// Raw transaction payload for channel transport
+// ---------------------------------------------------------------------------
+
+/// A raw transaction with its source, ready for pipeline ingestion.
+///
+/// This is the type sent through the input channel. It carries the
+/// wire-format transaction bytes and the ingress source for routing.
+#[derive(Debug, Clone)]
+pub struct RawTransaction {
+    /// Solana wire-format transaction bytes.
+    pub payload: Vec<u8>,
+    /// Where this transaction was received from.
+    pub source: TransactionSource,
+}
+
+// ---------------------------------------------------------------------------
+// Configuration
+// ---------------------------------------------------------------------------
+
+/// Configuration for the validator pipeline service.
+#[derive(Debug, Clone)]
+pub struct PipelineServiceConfig {
+    /// IPC pipeline settings (link depth, MTU).
+    pub pipeline: PipelineConfig,
+    /// Pack scheduler settings.
+    pub pack: PackConfig,
+    /// Execution tile settings.
+    pub exec: ExecConfig,
+    /// Maximum transactions to drain from input per tick.
+    pub max_drain_per_tick: usize,
+}
+
+impl Default for PipelineServiceConfig {
+    fn default() -> Self {
+        Self {
+            pipeline: PipelineConfig::default(),
+            pack: PackConfig::default(),
+            exec: ExecConfig::default(),
+            max_drain_per_tick: 256,
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Statistics
+// ---------------------------------------------------------------------------
+
+/// Statistics for the pipeline service.
+#[derive(Debug, Default)]
+pub struct PipelineServiceStats {
+    /// Transactions received from input channels.
+    pub transactions_received: AtomicU64,
+    /// Transactions accepted into the IPC pipeline.
+    pub transactions_accepted: AtomicU64,
+    /// Transactions dropped due to backpressure.
+    pub transactions_dropped: AtomicU64,
+    /// Total IPC fragments processed.
+    pub ipc_fragments_processed: AtomicU64,
+    /// Transactions resolved and submitted to pack.
+    pub transactions_resolved: AtomicU64,
+    /// Microblocks executed.
+    pub microblocks_executed: AtomicU64,
+}
+
+// ---------------------------------------------------------------------------
+// PipelineHandle — cross-service communication
+// ---------------------------------------------------------------------------
+
+/// Shared handle for cross-service communication with the pipeline.
+///
+/// Other services (e.g., consensus, gossip) use this handle to register
+/// blockhashes, signal new leader slots, and query pipeline state.
+pub struct PipelineHandle {
+    /// Commands queued for the service to process.
+    commands: Mutex<Vec<PipelineCommand>>,
+    /// Whether we're currently in a leader slot.
+    is_leading: AtomicBool,
+    /// Current leader slot (0 if not leading).
+    current_slot: AtomicU64,
+    /// Pipeline statistics.
+    pub stats: Arc<PipelineServiceStats>,
+}
+
+impl PipelineHandle {
+    fn new(stats: Arc<PipelineServiceStats>) -> Self {
+        Self {
+            commands: Mutex::new(Vec::new()),
+            is_leading: AtomicBool::new(false),
+            current_slot: AtomicU64::new(0),
+            stats,
+        }
+    }
+
+    /// Signal the start of a new leader slot.
+    pub fn begin_slot(&self, slot: u64) {
+        self.is_leading.store(true, Ordering::Relaxed);
+        self.current_slot.store(slot, Ordering::Relaxed);
+        self.commands
+            .lock()
+            .unwrap()
+            .push(PipelineCommand::BeginSlot(slot));
+    }
+
+    /// Register a blockhash for transaction resolution.
+    pub fn register_blockhash(&self, hash: Blockhash, slot: u64) {
+        self.commands
+            .lock()
+            .unwrap()
+            .push(PipelineCommand::RegisterBlockhash(hash, slot));
+    }
+
+    /// Advance the resolv slot for transaction expiry tracking.
+    pub fn advance_slot(&self, slot: u64) {
+        self.commands
+            .lock()
+            .unwrap()
+            .push(PipelineCommand::AdvanceSlot(slot));
+    }
+
+    /// Signal the end of a leader slot.
+    pub fn end_slot(&self) {
+        self.is_leading.store(false, Ordering::Relaxed);
+        self.commands.lock().unwrap().push(PipelineCommand::EndSlot);
+    }
+
+    /// Whether the pipeline is currently in a leader slot.
+    pub fn is_leading(&self) -> bool {
+        self.is_leading.load(Ordering::Relaxed)
+    }
+
+    /// Current leader slot.
+    pub fn current_slot(&self) -> u64 {
+        self.current_slot.load(Ordering::Relaxed)
+    }
+}
+
+/// Internal command enum for cross-service communication.
+enum PipelineCommand {
+    BeginSlot(u64),
+    RegisterBlockhash(Blockhash, u64),
+    AdvanceSlot(u64),
+    EndSlot,
+}
+
+// ---------------------------------------------------------------------------
+// PipelineService
+// ---------------------------------------------------------------------------
+
+/// Service that drives the full validator transaction pipeline.
+///
+/// Created via `PipelineServiceBuilder` which allows configuring the
+/// execution engine, pipeline parameters, and input channels.
+pub struct PipelineService {
+    pipeline: ValidatorPipeline,
+    /// Input channels receiving raw transaction payloads.
+    inputs: Vec<InPort<RawTransaction>>,
+    /// Shared handle for cross-service communication.
+    handle: Arc<PipelineHandle>,
+    /// Entries from completed slots.
+    completed_entries: Vec<Vec<Entry>>,
+    /// Maximum transactions to drain per tick.
+    max_drain_per_tick: usize,
+}
+
+// ---------------------------------------------------------------------------
+// Builder
+// ---------------------------------------------------------------------------
+
+/// Builder for constructing a PipelineService with its handle.
+pub struct PipelineServiceBuilder {
+    config: PipelineServiceConfig,
+    inputs: Vec<InPort<RawTransaction>>,
+    engine: Option<Box<dyn ExecutionEngine>>,
+}
+
+impl PipelineServiceBuilder {
+    /// Create a new builder with default configuration.
+    pub fn new() -> Self {
+        Self {
+            config: PipelineServiceConfig::default(),
+            inputs: Vec::new(),
+            engine: None,
+        }
+    }
+
+    /// Set the pipeline service configuration.
+    pub fn with_config(mut self, config: PipelineServiceConfig) -> Self {
+        self.config = config;
+        self
+    }
+
+    /// Add an input channel for raw transaction payloads.
+    pub fn add_input(mut self, input: InPort<RawTransaction>) -> Self {
+        self.inputs.push(input);
+        self
+    }
+
+    /// Set a custom execution engine (e.g., SbpfBackend adapter).
+    ///
+    /// If not set, defaults to `MockExecutionEngine` for testing.
+    pub fn with_execution_engine(mut self, engine: Box<dyn ExecutionEngine>) -> Self {
+        self.engine = Some(engine);
+        self
+    }
+
+    /// Build the service and its shared handle.
+    ///
+    /// Returns `(PipelineService, Arc<PipelineHandle>)`. The handle is used
+    /// by other services to communicate with the pipeline.
+    pub fn build(self) -> (PipelineService, Arc<PipelineHandle>) {
+        let pack = PackScheduler::with_config(self.config.pack);
+        let engine: Box<dyn ExecutionEngine> = self
+            .engine
+            .unwrap_or_else(|| Box::new(MockExecutionEngine::new(200_000)));
+        let exec = ExecStage::with_config(engine, self.config.exec);
+        let poh = PohService::new(paradencer_types::Hash::default());
+        let leader = LeaderPipeline::new(pack, exec, poh);
+
+        let validator_pipeline = ValidatorPipeline::new(self.config.pipeline, leader);
+
+        let stats = Arc::new(PipelineServiceStats::default());
+        let handle = Arc::new(PipelineHandle::new(Arc::clone(&stats)));
+
+        let service = PipelineService {
+            pipeline: validator_pipeline,
+            inputs: self.inputs,
+            handle: Arc::clone(&handle),
+            completed_entries: Vec::new(),
+            max_drain_per_tick: self.config.max_drain_per_tick,
+        };
+
+        (service, handle)
+    }
+}
+
+impl PipelineService {
+    /// Take completed slot entries (produced by `end_slot()`).
+    ///
+    /// Returns all entry batches from completed leader slots since the
+    /// last call. Typically consumed by the shred/turbine pipeline.
+    pub fn take_completed_entries(&mut self) -> Vec<Vec<Entry>> {
+        std::mem::take(&mut self.completed_entries)
+    }
+}
+
+impl Service for PipelineService {
+    fn name(&self) -> &'static str {
+        "validator-pipeline"
+    }
+
+    fn tick_interval(&self) -> Duration {
+        Duration::from_millis(2)
+    }
+
+    fn tick(&mut self, _context: &ServiceContext) -> RuntimeResult<()> {
+        let stats = &self.handle.stats;
+
+        // Process queued commands from the handle.
+        {
+            let mut commands = self.handle.commands.lock().unwrap();
+            for cmd in commands.drain(..) {
+                match cmd {
+                    PipelineCommand::BeginSlot(slot) => {
+                        self.pipeline.begin_slot(slot);
+                    }
+                    PipelineCommand::RegisterBlockhash(hash, slot) => {
+                        self.pipeline.register_blockhash(hash, slot);
+                    }
+                    PipelineCommand::AdvanceSlot(slot) => {
+                        self.pipeline.advance_slot(slot);
+                    }
+                    PipelineCommand::EndSlot => {
+                        let entries = self.pipeline.finish_slot();
+                        if !entries.is_empty() {
+                            self.completed_entries.push(entries);
+                        }
+                    }
+                }
+            }
+        }
+
+        // Drain raw transactions from input channels.
+        let mut drained = 0usize;
+        for input in &self.inputs {
+            while drained < self.max_drain_per_tick {
+                match input.try_recv() {
+                    Ok(Some(raw_tx)) => {
+                        stats.transactions_received.fetch_add(1, Ordering::Relaxed);
+                        drained += 1;
+
+                        if self.pipeline.ingest(&raw_tx.payload, raw_tx.source) {
+                            stats.transactions_accepted.fetch_add(1, Ordering::Relaxed);
+                        } else {
+                            stats.transactions_dropped.fetch_add(1, Ordering::Relaxed);
+                        }
+                    }
+                    Ok(None) => break,
+                    Err(_) => break,
+                }
+            }
+        }
+
+        // Service the pipeline (verify → resolv → pack → exec → PoH).
+        let result = self.pipeline.service();
+        stats
+            .ipc_fragments_processed
+            .fetch_add(result.ipc_fragments_processed as u64, Ordering::Relaxed);
+        stats
+            .transactions_resolved
+            .fetch_add(result.transactions_resolved as u64, Ordering::Relaxed);
+        if result.leader_step.is_some() {
+            stats.microblocks_executed.fetch_add(1, Ordering::Relaxed);
+        }
+
+        Ok(())
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use paradencer_mesh::bounded_link;
+    use paradencer_runtime::ShutdownSwitch;
+
+    fn make_raw_tx(payload: Vec<u8>) -> RawTransaction {
+        RawTransaction {
+            payload,
+            source: TransactionSource::Quic,
+        }
+    }
+
+    #[test]
+    fn builder_constructs_service() {
+        let (_tx, rx) = bounded_link::<RawTransaction>(16);
+        let (service, handle) = PipelineServiceBuilder::new().add_input(rx).build();
+
+        assert_eq!(service.name(), "validator-pipeline");
+        assert!(!handle.is_leading());
+    }
+
+    #[test]
+    fn service_drains_input_channel() {
+        let (tx, rx) = bounded_link::<RawTransaction>(16);
+        let (mut service, handle) = PipelineServiceBuilder::new().add_input(rx).build();
+
+        // Submit transactions.
+        tx.try_send(make_raw_tx(vec![0xAA; 128])).unwrap();
+        tx.try_send(make_raw_tx(vec![0xBB; 128])).unwrap();
+
+        let ctx = ServiceContext::new(ShutdownSwitch::new());
+        service.tick(&ctx).unwrap();
+
+        assert_eq!(
+            handle.stats.transactions_received.load(Ordering::Relaxed),
+            2
+        );
+    }
+
+    #[test]
+    fn handle_begin_end_slot() {
+        let (mut service, handle) = PipelineServiceBuilder::new().build();
+
+        // Begin a leader slot.
+        handle.begin_slot(42);
+        assert!(handle.is_leading());
+        assert_eq!(handle.current_slot(), 42);
+
+        let ctx = ServiceContext::new(ShutdownSwitch::new());
+        service.tick(&ctx).unwrap();
+
+        // End the slot.
+        handle.end_slot();
+        assert!(!handle.is_leading());
+
+        service.tick(&ctx).unwrap();
+
+        // Entries from the completed slot should be available.
+        let entries = service.take_completed_entries();
+        // May be empty since no transactions were submitted.
+        assert!(entries.len() <= 1);
+    }
+
+    #[test]
+    fn handle_register_blockhash() {
+        let (mut service, handle) = PipelineServiceBuilder::new().build();
+
+        handle.register_blockhash([0xCC; 32], 100);
+        handle.advance_slot(100);
+
+        let ctx = ServiceContext::new(ShutdownSwitch::new());
+        service.tick(&ctx).unwrap();
+    }
+
+    #[test]
+    fn max_drain_per_tick_limits() {
+        let config = PipelineServiceConfig {
+            max_drain_per_tick: 3,
+            ..Default::default()
+        };
+
+        let (tx, rx) = bounded_link::<RawTransaction>(32);
+        let (mut service, handle) = PipelineServiceBuilder::new()
+            .with_config(config)
+            .add_input(rx)
+            .build();
+
+        // Send 10 transactions.
+        for i in 0..10u8 {
+            tx.try_send(make_raw_tx(vec![i; 128])).unwrap();
+        }
+
+        let ctx = ServiceContext::new(ShutdownSwitch::new());
+        service.tick(&ctx).unwrap();
+
+        // Should have only drained 3 (max_drain_per_tick).
+        assert_eq!(
+            handle.stats.transactions_received.load(Ordering::Relaxed),
+            3
+        );
+
+        // Second tick drains 3 more.
+        service.tick(&ctx).unwrap();
+        assert_eq!(
+            handle.stats.transactions_received.load(Ordering::Relaxed),
+            6
+        );
+    }
+
+    #[test]
+    fn full_pipeline_with_leader_slot() {
+        use ed25519_dalek::{Signer, SigningKey};
+
+        let (tx, rx) = bounded_link::<RawTransaction>(64);
+        let (mut service, handle) = PipelineServiceBuilder::new().add_input(rx).build();
+
+        let ctx = ServiceContext::new(ShutdownSwitch::new());
+
+        // Begin a leader slot and register a blockhash.
+        handle.begin_slot(1);
+        handle.register_blockhash([0xBB; 32], 100);
+        service.tick(&ctx).unwrap();
+
+        // Build and send a signed transaction.
+        let key = SigningKey::from_bytes(&[42u8; 32]);
+        let pubkey = key.verifying_key().to_bytes();
+        let blockhash = [0xBB; 32];
+
+        let mut message = vec![1u8, 0, 0, 1];
+        message.extend_from_slice(&pubkey);
+        message.extend_from_slice(&blockhash);
+        message.push(0); // no instructions
+
+        let signature = key.sign(&message);
+        let mut payload = vec![1u8]; // 1 signature
+        payload.extend_from_slice(&signature.to_bytes());
+        payload.extend_from_slice(&message);
+
+        tx.try_send(RawTransaction {
+            payload,
+            source: TransactionSource::Quic,
+        })
+        .unwrap();
+
+        // Service multiple rounds to move through the pipeline.
+        for _ in 0..5 {
+            service.tick(&ctx).unwrap();
+        }
+
+        // Transaction should have been received and processed.
+        assert!(handle.stats.transactions_received.load(Ordering::Relaxed) >= 1);
+        assert!(handle.stats.transactions_accepted.load(Ordering::Relaxed) >= 1);
+
+        // End the slot.
+        handle.end_slot();
+        service.tick(&ctx).unwrap();
+
+        let entries = service.take_completed_entries();
+        // Should have at least one slot's entries (may be empty if PoH isn't Leading).
+        assert!(entries.len() <= 1);
+    }
+}

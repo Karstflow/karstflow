@@ -28,6 +28,7 @@ mod integration_tests;
 mod leader_pipeline;
 mod metrics_reporter;
 pub mod pack_stage;
+mod pipeline_service;
 mod replay_service;
 mod replay_stage;
 mod resolv_service;
@@ -82,6 +83,10 @@ pub use leader_pipeline::{LeaderPipeline, PipelineStepResult, SbpfExecutionEngin
 pub use pack_stage::{
     AccountLock, ConflictDetector, LockKind, Microblock, PackConfig, PackLimits, PackOutcome,
     PackScheduler, PackStats, PackStatsSnapshot, PackedTransaction, TransactionQueue,
+};
+pub use pipeline_service::{
+    PipelineHandle, PipelineService, PipelineServiceBuilder, PipelineServiceConfig,
+    PipelineServiceStats, RawTransaction,
 };
 pub use replay_service::{ReplayService, ReplayServiceConfig};
 pub use resolv_service::{ResolvService, ResolvServiceStats};
