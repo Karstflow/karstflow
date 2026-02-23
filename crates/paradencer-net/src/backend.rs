@@ -2,15 +2,35 @@
 ///
 /// Provides a unified interface over different packet transport mechanisms:
 /// - UDP socket (portable, uses sendto/recvfrom, non-blocking)
-/// - AF_XDP (Linux kernel bypass, zero-copy) — future integration
+/// - AF_XDP (Linux kernel bypass, zero-copy, requires root/CAP_NET_ADMIN)
 ///
 /// The backend is selected at initialization time. Both backends expose
 /// the same batch receive/send API through the `Transport` struct.
+///
+/// For XDP, received packets contain raw ethernet frames (L2+L3+L4+payload).
+/// The caller is responsible for header parsing. For UDP, packets contain
+/// only the UDP payload with the source address metadata.
 use std::io;
 use std::net::{Ipv4Addr, SocketAddrV4};
 
 use crate::packet::PacketBatch;
 use crate::socket::{SocketConfig, UdpSocket};
+
+#[cfg(target_os = "linux")]
+use crate::xdp::socket::XdpSocketConfig;
+#[cfg(target_os = "linux")]
+use crate::xdp::sys::XdpDesc;
+#[cfg(target_os = "linux")]
+use crate::xdp::{LiveXdpSocket, LiveXdpStats, XdpProgram, XskMap};
+#[cfg(target_os = "linux")]
+use std::sync::Arc;
+
+#[cfg(target_os = "linux")]
+use paradencer_constants::network::PACKET_BUFFER_SIZE;
+
+/// Maximum XDP descriptors to process per receive call.
+#[cfg(target_os = "linux")]
+const XDP_RX_BATCH_SIZE: usize = 64;
 
 /// Transport backend type.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -118,10 +138,22 @@ impl TransportStats {
     }
 }
 
+/// XDP backend state holding the live socket and pre-allocated receive buffer.
+#[cfg(target_os = "linux")]
+struct XdpBackendState {
+    /// Live AF_XDP socket with kernel ring integration.
+    socket: LiveXdpSocket,
+    /// Pre-allocated descriptor buffer for batch receive operations.
+    rx_descs: Vec<XdpDesc>,
+}
+
 /// Active backend resource.
 enum Backend {
     /// UDP socket backend.
     Udp(UdpSocket),
+    /// AF_XDP kernel bypass backend (Linux only).
+    #[cfg(target_os = "linux")]
+    Xdp(XdpBackendState),
     /// Not yet bound (initial state before `bind()`).
     Unbound,
 }
@@ -170,14 +202,47 @@ impl Transport {
                 Ok(())
             }
             BackendType::Xdp => {
-                // TODO: XDP backend integration with LiveXdpSocket.
-                // Requires Linux, root privileges, and interface configuration.
-                Err(io::Error::new(
-                    io::ErrorKind::Unsupported,
-                    "XDP backend requires Linux and is not yet integrated into Transport",
-                ))
+                // XDP requires shared eBPF program and XSKMAP resources that are
+                // created externally (typically by install_xdp). Use open_xdp()
+                // with those shared resources instead of open().
+                #[cfg(target_os = "linux")]
+                {
+                    Err(io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        "XDP backend requires open_xdp() with shared XSKMAP and eBPF program",
+                    ))
+                }
+                #[cfg(not(target_os = "linux"))]
+                {
+                    Err(io::Error::new(
+                        io::ErrorKind::Unsupported,
+                        "XDP backend is only available on Linux",
+                    ))
+                }
             }
         }
+    }
+
+    /// Open the transport with an AF_XDP kernel-bypass socket.
+    ///
+    /// Requires a pre-configured `XdpSocketConfig`, a shared XSKMAP, and
+    /// a shared eBPF program (typically obtained from `install_xdp()`).
+    /// The eBPF program steers matching packets to the XSK socket.
+    ///
+    /// This method is Linux-only. On other platforms, use UDP.
+    #[cfg(target_os = "linux")]
+    pub fn open_xdp(
+        &mut self,
+        xdp_config: &XdpSocketConfig,
+        xsk_map: Arc<XskMap>,
+        program: Arc<XdpProgram>,
+    ) -> io::Result<()> {
+        let socket = LiveXdpSocket::open(xdp_config, xsk_map, program)
+            .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
+        let rx_descs = vec![XdpDesc::default(); XDP_RX_BATCH_SIZE];
+        self.backend = Backend::Xdp(XdpBackendState { socket, rx_descs });
+        self.backend_type = BackendType::Xdp;
+        Ok(())
     }
 
     /// Whether the transport is open and ready for I/O.
@@ -189,9 +254,15 @@ impl Transport {
     ///
     /// Returns the number of packets received. Non-blocking: returns 0
     /// immediately if no packets are available.
+    ///
+    /// For the UDP backend, each packet contains the UDP payload with source
+    /// address metadata. For the XDP backend, each packet contains the raw
+    /// ethernet frame (L2 headers included); the caller must parse headers.
     pub fn receive_batch<const N: usize>(&mut self, batch: &mut PacketBatch<N>) -> usize {
-        let count = match &self.backend {
+        let count = match &mut self.backend {
             Backend::Udp(socket) => socket.recv_batch(batch),
+            #[cfg(target_os = "linux")]
+            Backend::Xdp(state) => Self::receive_xdp(state, batch),
             Backend::Unbound => 0,
         };
 
@@ -208,12 +279,50 @@ impl Transport {
         count
     }
 
+    /// XDP receive: service the kernel rings and copy frame data into the batch.
+    #[cfg(target_os = "linux")]
+    fn receive_xdp<const N: usize>(
+        state: &mut XdpBackendState,
+        batch: &mut PacketBatch<N>,
+    ) -> usize {
+        let received = state.socket.service(&mut state.rx_descs);
+        let mut count = 0;
+
+        for i in 0..received {
+            let desc = state.rx_descs[i];
+
+            if !batch.is_full() {
+                // SAFETY: desc is from a valid RX ring entry. The frame has not
+                // been released yet (we release below after copying).
+                let frame_data = unsafe { state.socket.frame_data(&desc) };
+                let copy_len = frame_data.len().min(PACKET_BUFFER_SIZE);
+
+                if let Some(slot) = batch.reserve_slot() {
+                    slot.data_mut()[..copy_len].copy_from_slice(&frame_data[..copy_len]);
+                    slot.set_len(copy_len as u16);
+                    count += 1;
+                }
+            }
+
+            // Always release the frame, even if the batch was full.
+            state.socket.release_rx_frame(desc.addr);
+        }
+
+        count
+    }
+
     /// Send a batch of packets.
     ///
     /// Returns the number of packets successfully sent.
+    ///
+    /// For the XDP backend, packet data is copied into UMEM frames and
+    /// submitted to the kernel TX ring. The caller must provide complete
+    /// ethernet frames (L2 headers included) for XDP.
     pub fn send_batch<const N: usize>(&mut self, batch: &PacketBatch<N>) -> usize {
-        let count = match &self.backend {
+        let count = match &mut self.backend {
             Backend::Udp(socket) => socket.send_batch_to(batch),
+            #[cfg(target_os = "linux")]
+            Backend::Xdp(state) => Self::send_batch_xdp(state, batch),
             Backend::Unbound => 0,
         };
 
@@ -230,13 +339,97 @@ impl Transport {
         count
     }
 
+    /// XDP send: allocate frames, copy data, submit to TX ring, and flush.
+    #[cfg(target_os = "linux")]
+    fn send_batch_xdp<const N: usize>(
+        state: &mut XdpBackendState,
+        batch: &PacketBatch<N>,
+    ) -> usize {
+        let mut sent = 0;
+
+        for pkt in batch.as_slice() {
+            if pkt.is_empty() {
+                sent += 1;
+                continue;
+            }
+
+            let payload = pkt.payload();
+            let frame_addr = match state.socket.allocate_tx_frame() {
+                Some(addr) => addr,
+                None => break, // No frames available.
+            };
+
+            // SAFETY: frame_addr is from a freshly allocated frame. We have
+            // exclusive ownership until we submit it to the TX ring.
+            unsafe {
+                let frame = state
+                    .socket
+                    .frame_data_mut(frame_addr, payload.len() as u32);
+                frame.copy_from_slice(payload);
+            }
+
+            let desc = XdpDesc {
+                addr: frame_addr,
+                len: payload.len() as u32,
+                options: 0,
+            };
+
+            if !state.socket.transmit(&desc) {
+                // TX ring full — release the allocated frame.
+                state.socket.release_rx_frame(frame_addr);
+                break;
+            }
+            sent += 1;
+        }
+
+        if sent > 0 {
+            let _ = state.socket.flush_tx();
+        }
+
+        sent
+    }
+
     /// Send a single packet to a specific address.
+    ///
+    /// For the XDP backend, the destination address is ignored — XDP operates
+    /// at the L2 level and the packet data must include all headers. The
+    /// `addr` parameter is only used by the UDP backend.
     pub fn send_to(&mut self, data: &[u8], addr: &SocketAddrV4) -> io::Result<usize> {
-        match &self.backend {
+        match &mut self.backend {
             Backend::Udp(socket) => {
                 let n = socket.send_to(data, addr)?;
                 self.stats.record_tx(1, n);
                 Ok(n)
+            }
+            #[cfg(target_os = "linux")]
+            Backend::Xdp(state) => {
+                let frame_addr = state.socket.allocate_tx_frame().ok_or_else(|| {
+                    io::Error::new(io::ErrorKind::Other, "no UMEM frames available for TX")
+                })?;
+
+                // SAFETY: frame_addr is from a freshly allocated frame.
+                unsafe {
+                    let frame = state.socket.frame_data_mut(frame_addr, data.len() as u32);
+                    frame.copy_from_slice(data);
+                }
+
+                let desc = XdpDesc {
+                    addr: frame_addr,
+                    len: data.len() as u32,
+                    options: 0,
+                };
+
+                if state.socket.transmit(&desc) {
+                    let _ = state.socket.flush_tx();
+                    self.stats.record_tx(1, data.len());
+                    Ok(data.len())
+                } else {
+                    state.socket.release_rx_frame(frame_addr);
+                    Err(io::Error::new(
+                        io::ErrorKind::WouldBlock,
+                        "XDP TX ring full",
+                    ))
+                }
             }
             Backend::Unbound => Err(io::Error::new(
                 io::ErrorKind::NotConnected,
@@ -271,10 +464,26 @@ impl Transport {
     }
 
     /// Get the local bind address (only valid after `open()`).
+    ///
+    /// Returns `None` for XDP backends, which bind to NIC interface + queue
+    /// rather than an IP:port pair.
     pub fn local_addr(&self) -> Option<SocketAddrV4> {
         match &self.backend {
             Backend::Udp(socket) => Some(socket.local_addr()),
+            #[cfg(target_os = "linux")]
+            Backend::Xdp(_) => None,
             Backend::Unbound => None,
+        }
+    }
+
+    /// Get AF_XDP-specific runtime statistics.
+    ///
+    /// Returns `None` if the backend is not XDP.
+    #[cfg(target_os = "linux")]
+    pub fn xdp_stats(&self) -> Option<&LiveXdpStats> {
+        match &self.backend {
+            Backend::Xdp(state) => Some(state.socket.stats()),
+            _ => None,
         }
     }
 }
@@ -409,5 +618,18 @@ mod tests {
         assert_eq!(stats.tx_packets, 5);
         assert_eq!(stats.tx_bytes, 750);
         assert_eq!(stats.rx_errors, 1);
+    }
+
+    #[test]
+    fn transport_xdp_open_requires_explicit_setup() {
+        let config = TransportConfig {
+            backend: BackendType::Xdp,
+            ..Default::default()
+        };
+        let mut transport = Transport::new(config);
+        // open() should fail for XDP — must use open_xdp() with shared resources.
+        let result = transport.open();
+        assert!(result.is_err());
+        assert!(!transport.is_open());
     }
 }
