@@ -8,14 +8,19 @@ use crate::{
 };
 use paradencer_config::NodeConfig;
 use paradencer_core::{ExecutionMode, LinkKind, PinnedCorePolicy, StageKind};
+use paradencer_mesh::{bounded_link, OutPort};
 use paradencer_net::IngressMode;
 use paradencer_observability::spawn_metrics_http_bridge;
 use paradencer_rpc::{metrics_file_provider, spawn_rpc_http_server};
 use paradencer_runtime::{build_pinned_affinity_plan, run_services, Service, ServiceProbeReport};
-use paradencer_stages::{ExecutionErrorHandlingPolicy, MetricsOutputTarget};
+use paradencer_stages::{
+    ExecutionErrorHandlingPolicy, MetricsOutputTarget, PipelineHandle, PipelineServiceBuilder,
+    PipelineServiceConfig, RawTransaction,
+};
 use paradencer_topology::{materialize_services, MaterializedTopology};
 use std::collections::HashSet;
 use std::path::Path;
+use std::sync::Arc;
 
 pub struct ServiceBundle {
     pub topology_name: String,
@@ -27,6 +32,40 @@ pub struct ServiceBundle {
 pub struct MaterializedServicePair {
     pub startup: MaterializedTopology,
     pub runtime: MaterializedTopology,
+}
+
+/// Result of building a transaction pipeline service.
+///
+/// Contains the service (for the runtime), the cross-service handle
+/// (for consensus and gossip to control leader slots), and the input
+/// channel sender (for feeding raw transactions from network layers).
+pub struct PipelineBundle {
+    /// The pipeline service to add to the node runtime.
+    pub service: Box<dyn Service>,
+    /// Handle for cross-service communication (begin/end slot, blockhash).
+    pub handle: Arc<PipelineHandle>,
+    /// Input channel sender for raw transactions from the network layer.
+    pub input: OutPort<RawTransaction>,
+}
+
+/// Build a transaction pipeline service for block production.
+///
+/// Creates the unified verify → resolv → pack → exec → PoH pipeline
+/// with an input channel for raw transaction ingestion. The returned
+/// `PipelineHandle` allows other services (consensus, gossip) to
+/// signal leader slots and register blockhashes.
+pub fn build_pipeline_service(config: PipelineServiceConfig) -> PipelineBundle {
+    let channel_depth = config.max_drain_per_tick.saturating_mul(4).max(256);
+    let (tx, rx) = bounded_link::<RawTransaction>(channel_depth);
+    let (service, handle) = PipelineServiceBuilder::new()
+        .with_config(config)
+        .add_input(rx)
+        .build();
+    PipelineBundle {
+        service: Box::new(service),
+        handle,
+        input: tx,
+    }
 }
 
 pub struct DiagnosticsSummary {
@@ -526,8 +565,8 @@ pub fn ensure_mainnet_readiness(report: &MainnetReadinessReport) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::{
-        ensure_mainnet_readiness, evaluate_mainnet_readiness, load_node_config,
-        materialize_service_pair_from_config, materialize_services_from_config,
+        build_pipeline_service, ensure_mainnet_readiness, evaluate_mainnet_readiness,
+        load_node_config, materialize_service_pair_from_config, materialize_services_from_config,
         maybe_start_metrics_http_bridge, maybe_start_rpc_http_server, run_diagnostics_phase,
     };
     use crate::errors::ControlPlaneError;
@@ -586,6 +625,37 @@ mod tests {
         let pair = materialize_service_pair_from_config(&node_config).unwrap();
         assert_eq!(pair.startup.services.len(), pair.runtime.services.len());
         assert_eq!(pair.runtime.services.len(), 5);
+    }
+
+    #[test]
+    fn build_pipeline_service_creates_service_and_handle() {
+        use paradencer_runtime::{ServiceContext, ShutdownSwitch};
+        use paradencer_stages::PipelineServiceConfig;
+
+        let bundle = build_pipeline_service(PipelineServiceConfig::default());
+        assert_eq!(bundle.service.name(), "validator-pipeline");
+        assert!(!bundle.handle.is_leading());
+
+        // Service ticks without error.
+        let ctx = ServiceContext::new(ShutdownSwitch::new());
+        let mut service = bundle.service;
+        service.tick(&ctx).unwrap();
+    }
+
+    #[test]
+    fn pipeline_service_integrates_with_topology_services() {
+        use paradencer_stages::PipelineServiceConfig;
+
+        let node_config = NodeConfig::from_profile(None).unwrap();
+        let materialized = materialize_services_from_config(&node_config).unwrap();
+        let bundle = build_pipeline_service(PipelineServiceConfig::default());
+
+        let mut services = materialized.services;
+        services.push(bundle.service);
+
+        // Topology (5) + pipeline (1) = 6 total services.
+        assert_eq!(services.len(), 6);
+        assert_eq!(services.last().unwrap().name(), "validator-pipeline");
     }
 
     #[test]

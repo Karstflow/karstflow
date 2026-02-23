@@ -8,4 +8,5 @@ authors.workspace = true
 [dependencies]
 paradencer-control = { path = "../paradencer-control" }
 paradencer-config = { path = "../paradencer-config" }
+paradencer-stages = { path = "../paradencer-stages" }
 paradencer-topology = { path = "../paradencer-topology" }

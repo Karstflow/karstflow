@@ -1,6 +1,6 @@
 use paradencer_control::{
-    build_diagnostics_summary_from_probe, dispatch_command, ensure_mainnet_readiness,
-    evaluate_mainnet_readiness, materialize_service_pair_from_config,
+    build_diagnostics_summary_from_probe, build_pipeline_service, dispatch_command,
+    ensure_mainnet_readiness, evaluate_mainnet_readiness, materialize_service_pair_from_config,
     materialize_services_from_config, parse_command, render_diagnostics_cluster_mode_line,
     render_diagnostics_lane_capacity_line, render_diagnostics_ok_line,
     render_diagnostics_probe_line, render_diagnostics_readiness_issue_line,
@@ -27,6 +27,17 @@ fn run_with_node_config(
     let mut topology_pair = materialize_service_pair_from_config(&node_config)?;
     let runtime_topology = topology_pair.runtime;
 
+    // Build the transaction pipeline for block production.
+    // The pipeline handle will be used by consensus/gossip to control
+    // leader slots; the input sender will be connected to the network layer.
+    let pipeline_bundle =
+        build_pipeline_service(paradencer_stages::PipelineServiceConfig::default());
+    let _pipeline_handle = pipeline_bundle.handle;
+    let _pipeline_input = pipeline_bundle.input;
+
+    let mut services = runtime_topology.services;
+    services.push(pipeline_bundle.service);
+
     run_runtime_phase(
         &node_config,
         topology_pair.startup.services.as_mut_slice(),
@@ -34,7 +45,7 @@ fn run_with_node_config(
             topology_name: runtime_topology.topology_spec.topology_name,
             stage_count: runtime_topology.topology_spec.stages.len(),
             link_count: runtime_topology.topology_spec.links.len(),
-            services: runtime_topology.services,
+            services,
         },
     )
 }

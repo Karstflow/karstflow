@@ -1425,6 +1425,7 @@ version = "0.1.0"
 dependencies = [
  "paradencer-config",
  "paradencer-core",
+ "paradencer-mesh",
  "paradencer-net",
  "paradencer-observability",
  "paradencer-rpc",
@@ -1527,6 +1528,7 @@ version = "0.1.0"
 dependencies = [
  "paradencer-config",
  "paradencer-control",
+ "paradencer-stages",
  "paradencer-topology",
 ]
 
