@@ -42,6 +42,7 @@ impl PacketDecoder {
             estimated_cost_units: cost_units,
             dedup_fingerprint,
             source: frame.source,
+            raw_payload: frame.data.clone(),
         })
     }
 }

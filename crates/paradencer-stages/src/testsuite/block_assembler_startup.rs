@@ -27,6 +27,7 @@ fn block_assembler_persists_snapshot_catalog_when_path_is_configured() {
                 estimated_cost_units: 10,
                 dedup_fingerprint: transaction_id,
                 source: IngressSource::Quic,
+                raw_payload: vec![],
             })
             .unwrap();
         block_assembler.tick(&context).unwrap();
@@ -68,6 +69,7 @@ fn block_assembler_prunes_old_catalog_snapshots_when_retention_is_enabled() {
                 estimated_cost_units: 10,
                 dedup_fingerprint: transaction_id,
                 source: IngressSource::Quic,
+                raw_payload: vec![],
             })
             .unwrap();
         block_assembler.tick(&context).unwrap();
@@ -223,6 +225,7 @@ fn block_assembler_runtime_like_restore_latest_commits_next_fragment_without_dri
                 estimated_cost_units: 10,
                 dedup_fingerprint: transaction_id,
                 source: IngressSource::Quic,
+                raw_payload: vec![],
             })
             .unwrap();
         block_assembler.tick(&context).unwrap();
@@ -469,6 +472,7 @@ fn block_assembler_returns_runtime_error_when_catalog_parent_is_missing() {
                 estimated_cost_units: 10,
                 dedup_fingerprint: transaction_id,
                 source: IngressSource::Quic,
+                raw_payload: vec![],
             })
             .unwrap();
         if let Err(error) = block_assembler.tick(&context) {
@@ -515,6 +519,7 @@ fn block_assembler_returns_runtime_error_when_catalog_parent_is_not_writable() {
                 estimated_cost_units: 10,
                 dedup_fingerprint: transaction_id,
                 source: IngressSource::Quic,
+                raw_payload: vec![],
             })
             .unwrap();
         if let Err(error) = block_assembler.tick(&context) {

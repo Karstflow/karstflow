@@ -1,6 +1,7 @@
 use crate::errors::Result;
 use crate::topology_parts::types::MaterializedTopology;
 use crate::topology_parts::validation::{find_link_capacity, validate_topology_requirements};
+use paradencer_constants::ipc::PIPELINE_CHANNEL_DEPTH_PER_WORKER;
 use paradencer_core::{LinkKind, StageKind, TopologySpec};
 use paradencer_mesh::bounded_link;
 use paradencer_net::IngressPolicy;
@@ -8,8 +9,8 @@ use paradencer_runtime::Service;
 use paradencer_stages::{
     AssembledBlock, BlockAssembler, BlockAssemblyStats, EdgeIntake, InboundPacket,
     IngressFilterStats, LinkTelemetryStats, MetricsOutputFormat, MetricsOutputTarget,
-    MetricsReporter, SanitizedTransaction, ShredCollector, ShredCollectorConfig, ShredFilter,
-    ShredFilterStats, StageTelemetryStats, StorageRuntimePolicy, TxFilter,
+    MetricsReporter, RawTransaction, SanitizedTransaction, ShredCollector, ShredCollectorConfig,
+    ShredFilter, ShredFilterStats, StageTelemetryStats, StorageRuntimePolicy, TxFilter,
 };
 use paradencer_types::shred::Shred;
 use std::collections::HashMap;
@@ -108,6 +109,7 @@ pub fn materialize_services(
 
     let mut services: Vec<Box<dyn Service>> = Vec::new();
     let mut shred_collector_added = false;
+    let mut pipeline_inputs: Vec<paradencer_mesh::InPort<RawTransaction>> = Vec::new();
 
     for stage in &topology_spec.stages {
         match stage.stage_kind {
@@ -127,9 +129,13 @@ pub fn materialize_services(
                     .get(&stage.stage_id)
                     .cloned()
                     .expect("transaction stream outbound link must exist for transaction sanitizer stage");
-                services.push(Box::new(TxFilter::with_policy_and_stats(
+                let (pipeline_tx, pipeline_rx) =
+                    bounded_link::<RawTransaction>(PIPELINE_CHANNEL_DEPTH_PER_WORKER);
+                pipeline_inputs.push(pipeline_rx);
+                services.push(Box::new(TxFilter::with_policy_pipeline_and_stats(
                     packet_inbound,
                     transaction_outbound,
+                    pipeline_tx,
                     ingress_policy.clone(),
                     ingress_filter_stats.clone(),
                 )))
@@ -207,5 +213,6 @@ pub fn materialize_services(
         } else {
             None
         },
+        pipeline_inputs,
     })
 }

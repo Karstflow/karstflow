@@ -97,3 +97,11 @@ pub const FLOW_SEQ_APP_SIZE: usize = 96;
 
 /// Alignment of the application region within a FlowSequence.
 pub const FLOW_SEQ_APP_ALIGN: usize = 32;
+
+// ---------------------------------------------------------------------------
+// Pipeline channel sizing
+// ---------------------------------------------------------------------------
+
+/// Channel depth from TxFilter to ValidatorPipeline per sanitizer worker.
+/// Sized to buffer one full tick's worth of transactions with headroom.
+pub const PIPELINE_CHANNEL_DEPTH_PER_WORKER: usize = 1024;

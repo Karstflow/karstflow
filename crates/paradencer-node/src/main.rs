@@ -37,12 +37,13 @@ fn run_with_node_config(
     let _block_input = replay_bundle.block_input;
 
     // Build the transaction pipeline for block production.
-    // The pipeline handle will be used by consensus/gossip to control
-    // leader slots; the input sender will be connected to the network layer.
-    let pipeline_bundle =
-        build_pipeline_service(paradencer_stages::PipelineServiceConfig::default());
+    // Pipeline inputs come directly from the topology — each TxFilter stage
+    // forwards accepted raw transactions into the pipeline via a dedicated channel.
+    let pipeline_bundle = build_pipeline_service(
+        paradencer_stages::PipelineServiceConfig::default(),
+        runtime_topology.pipeline_inputs,
+    );
     let _pipeline_handle = pipeline_bundle.handle;
-    let _pipeline_input = pipeline_bundle.input;
 
     // Shred collection pipeline is part of the materialized topology.
     // Its block output can be connected to the replay service.

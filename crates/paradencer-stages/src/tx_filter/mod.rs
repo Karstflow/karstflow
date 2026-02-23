@@ -1,7 +1,7 @@
 mod egress;
 mod service;
 
-use crate::{InboundPacket, IngressFilterStats, SanitizedTransaction};
+use crate::{InboundPacket, IngressFilterStats, RawTransaction, SanitizedTransaction};
 use paradencer_mesh::{InPort, OutPort};
 use paradencer_net::{
     IngressPolicy, PacketDecoder, SignatureDeduplicator, SourceCostBudgetLimiter, SourceRateLimiter,
@@ -18,6 +18,9 @@ struct PendingEgressTransaction {
 pub struct TxFilter {
     incoming_packets: InPort<InboundPacket>,
     outgoing_transactions: OutPort<SanitizedTransaction>,
+    /// Optional output to the validator pipeline for real execution.
+    /// When present, accepted transactions are forwarded with raw bytes.
+    outgoing_pipeline: Option<OutPort<RawTransaction>>,
     packet_decoder: PacketDecoder,
     ingress_policy: IngressPolicy,
     signature_deduplicator: SignatureDeduplicator,
@@ -61,6 +64,43 @@ impl TxFilter {
         mut ingress_policy: IngressPolicy,
         ingress_filter_stats: Arc<IngressFilterStats>,
     ) -> Self {
+        Self::build(
+            incoming_packets,
+            outgoing_transactions,
+            None,
+            ingress_policy,
+            ingress_filter_stats,
+        )
+    }
+
+    /// Create a TxFilter with both the legacy metadata output and a pipeline output.
+    ///
+    /// Accepted transactions are sent to both:
+    /// - `outgoing_transactions` as `SanitizedTransaction` (metadata for BlockAssembler)
+    /// - `outgoing_pipeline` as `RawTransaction` (raw bytes for ValidatorPipeline)
+    pub fn with_policy_pipeline_and_stats(
+        incoming_packets: InPort<InboundPacket>,
+        outgoing_transactions: OutPort<SanitizedTransaction>,
+        outgoing_pipeline: OutPort<RawTransaction>,
+        ingress_policy: IngressPolicy,
+        ingress_filter_stats: Arc<IngressFilterStats>,
+    ) -> Self {
+        Self::build(
+            incoming_packets,
+            outgoing_transactions,
+            Some(outgoing_pipeline),
+            ingress_policy,
+            ingress_filter_stats,
+        )
+    }
+
+    fn build(
+        incoming_packets: InPort<InboundPacket>,
+        outgoing_transactions: OutPort<SanitizedTransaction>,
+        outgoing_pipeline: Option<OutPort<RawTransaction>>,
+        mut ingress_policy: IngressPolicy,
+        ingress_filter_stats: Arc<IngressFilterStats>,
+    ) -> Self {
         if ingress_policy.validate().is_err() {
             ingress_policy = IngressPolicy::default();
         }
@@ -75,6 +115,7 @@ impl TxFilter {
         Self {
             incoming_packets,
             outgoing_transactions,
+            outgoing_pipeline,
             packet_decoder,
             ingress_policy,
             signature_deduplicator: SignatureDeduplicator::new(dedup_window_capacity),

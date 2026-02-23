@@ -43,35 +43,36 @@ pub struct MaterializedServicePair {
 
 /// Result of building a transaction pipeline service.
 ///
-/// Contains the service (for the runtime), the cross-service handle
-/// (for consensus and gossip to control leader slots), and the input
-/// channel sender (for feeding raw transactions from network layers).
+/// Contains the service (for the runtime) and the cross-service handle
+/// (for consensus and gossip to control leader slots).
 pub struct PipelineBundle {
     /// The pipeline service to add to the node runtime.
     pub service: Box<dyn Service>,
     /// Handle for cross-service communication (begin/end slot, blockhash).
     pub handle: Arc<PipelineHandle>,
-    /// Input channel sender for raw transactions from the network layer.
-    pub input: OutPort<RawTransaction>,
 }
 
 /// Build a transaction pipeline service for block production.
 ///
-/// Creates the unified verify → resolv → pack → exec → PoH pipeline
-/// with an input channel for raw transaction ingestion. The returned
-/// `PipelineHandle` allows other services (consensus, gossip) to
-/// signal leader slots and register blockhashes.
-pub fn build_pipeline_service(config: PipelineServiceConfig) -> PipelineBundle {
-    let channel_depth = config.max_drain_per_tick.saturating_mul(4).max(256);
-    let (tx, rx) = bounded_link::<RawTransaction>(channel_depth);
-    let (service, handle) = PipelineServiceBuilder::new()
-        .with_config(config)
-        .add_input(rx)
-        .build();
+/// Creates the unified verify → resolv → pack → exec → PoH pipeline.
+/// Input channels are provided by the topology materializer — each
+/// `TransactionSanitizer` stage produces an `InPort<RawTransaction>`
+/// that feeds directly into the pipeline.
+///
+/// The returned `PipelineHandle` allows other services (consensus, gossip)
+/// to signal leader slots and register blockhashes.
+pub fn build_pipeline_service(
+    config: PipelineServiceConfig,
+    inputs: Vec<InPort<RawTransaction>>,
+) -> PipelineBundle {
+    let mut builder = PipelineServiceBuilder::new().with_config(config);
+    for input in inputs {
+        builder = builder.add_input(input);
+    }
+    let (service, handle) = builder.build();
     PipelineBundle {
         service: Box::new(service),
         handle,
-        input: tx,
     }
 }
 
@@ -769,7 +770,7 @@ mod tests {
         use paradencer_runtime::{ServiceContext, ShutdownSwitch};
         use paradencer_stages::PipelineServiceConfig;
 
-        let bundle = build_pipeline_service(PipelineServiceConfig::default());
+        let bundle = build_pipeline_service(PipelineServiceConfig::default(), Vec::new());
         assert_eq!(bundle.service.name(), "validator-pipeline");
         assert!(!bundle.handle.is_leading());
 
@@ -785,7 +786,10 @@ mod tests {
 
         let node_config = NodeConfig::from_profile(None).unwrap();
         let materialized = materialize_services_from_config(&node_config).unwrap();
-        let bundle = build_pipeline_service(PipelineServiceConfig::default());
+        let bundle = build_pipeline_service(
+            PipelineServiceConfig::default(),
+            materialized.pipeline_inputs,
+        );
 
         let mut services = materialized.services;
         services.push(bundle.service);
@@ -828,7 +832,10 @@ mod tests {
         let node_config = NodeConfig::from_profile(None).unwrap();
         let materialized = materialize_services_from_config(&node_config).unwrap();
         let replay_bundle = build_replay_service(ReplayServiceConfig::default(), 1_000_000);
-        let pipeline_bundle = build_pipeline_service(PipelineServiceConfig::default());
+        let pipeline_bundle = build_pipeline_service(
+            PipelineServiceConfig::default(),
+            materialized.pipeline_inputs,
+        );
 
         let mut services = materialized.services;
         services.push(replay_bundle.service);
@@ -867,7 +874,10 @@ mod tests {
         assert!(materialized.shred_block_receiver.is_some());
 
         let replay_bundle = build_replay_service(ReplayServiceConfig::default(), 1_000_000);
-        let pipeline_bundle = build_pipeline_service(PipelineServiceConfig::default());
+        let pipeline_bundle = build_pipeline_service(
+            PipelineServiceConfig::default(),
+            materialized.pipeline_inputs,
+        );
 
         let mut services = materialized.services;
         services.push(replay_bundle.service);

@@ -1,8 +1,20 @@
 use super::TxFilter;
+use crate::RawTransaction;
 use paradencer_mesh::ReceiveError;
-use paradencer_net::{DecodeOutcome, DedupDecision};
+use paradencer_net::{DecodeOutcome, DedupDecision, IngressSource};
 use paradencer_runtime::{RuntimeError, RuntimeResult, Service, ServiceContext};
 use std::time::Duration;
+
+use crate::verify_stage::TransactionSource;
+
+fn map_ingress_to_transaction_source(source: IngressSource) -> TransactionSource {
+    match source {
+        IngressSource::Quic => TransactionSource::Quic,
+        IngressSource::Gossip => TransactionSource::Gossip,
+        IngressSource::Bundle => TransactionSource::Bundle,
+        IngressSource::Rpc => TransactionSource::Forwarded,
+    }
+}
 
 impl Service for TxFilter {
     fn name(&self) -> &'static str {
@@ -78,6 +90,15 @@ impl Service for TxFilter {
                 }
                 self.ingress_filter_stats
                     .increment_accepted(transaction.source);
+                // Forward raw bytes to the validator pipeline if connected.
+                if let Some(ref pipeline_out) = self.outgoing_pipeline {
+                    if !transaction.raw_payload.is_empty() {
+                        let _ = pipeline_out.try_send(RawTransaction {
+                            payload: transaction.raw_payload.clone(),
+                            source: map_ingress_to_transaction_source(transaction.source),
+                        });
+                    }
+                }
                 self.try_send_or_buffer(transaction)
             }
             Ok(None) => Ok(()),

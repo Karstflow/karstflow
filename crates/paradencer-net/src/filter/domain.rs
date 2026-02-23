@@ -21,6 +21,8 @@ pub struct PreparedTransaction {
     pub estimated_cost_units: u64,
     pub dedup_fingerprint: u64,
     pub source: IngressSource,
+    /// Raw wire-format transaction bytes. Empty for synthetic or metadata-only frames.
+    pub raw_payload: Vec<u8>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

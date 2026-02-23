@@ -152,6 +152,7 @@ fn block_assembler_defers_fragment_on_retry_directive() {
                 estimated_cost_units: 10,
                 dedup_fingerprint: transaction_id,
                 source: IngressSource::Quic,
+                raw_payload: vec![],
             })
             .unwrap();
         block_assembler.tick(&context).unwrap();
@@ -176,6 +177,7 @@ fn block_assembler_returns_runtime_error_on_fragment_counter_overflow() {
                 estimated_cost_units: 10,
                 dedup_fingerprint: transaction_id,
                 source: IngressSource::Quic,
+                raw_payload: vec![],
             })
             .unwrap();
     }
@@ -231,6 +233,7 @@ fn block_assembler_fail_open_on_execution_error_records_telemetry_and_continues(
                 estimated_cost_units: 10,
                 dedup_fingerprint: transaction_id,
                 source: IngressSource::Quic,
+                raw_payload: vec![],
             })
             .unwrap();
         block_assembler.tick(&context).unwrap();
@@ -280,6 +283,7 @@ fn block_assembler_fail_open_replay_conflict_error_schedules_retry_and_does_not_
                 estimated_cost_units: 10,
                 dedup_fingerprint: transaction_id,
                 source: IngressSource::Quic,
+                raw_payload: vec![],
             })
             .unwrap();
         block_assembler.tick(&context).unwrap();
@@ -319,6 +323,7 @@ fn block_assembler_fail_open_contract_violation_drops_without_retry() {
                 estimated_cost_units: 10,
                 dedup_fingerprint: transaction_id,
                 source: IngressSource::Quic,
+                raw_payload: vec![],
             })
             .unwrap();
         block_assembler.tick(&context).unwrap();
@@ -366,6 +371,7 @@ fn block_assembler_fail_fast_on_execution_error_returns_runtime_error() {
                 estimated_cost_units: 10,
                 dedup_fingerprint: transaction_id,
                 source: IngressSource::Quic,
+                raw_payload: vec![],
             })
             .unwrap();
     }
@@ -418,6 +424,7 @@ fn block_assembler_fail_open_circuit_breaker_halts_after_consecutive_errors() {
                 estimated_cost_units: 10,
                 dedup_fingerprint: transaction_id,
                 source: IngressSource::Quic,
+                raw_payload: vec![],
             })
             .unwrap();
     }
@@ -474,6 +481,7 @@ fn block_assembler_resets_consecutive_execution_errors_after_successful_retry() 
                 estimated_cost_units: 10,
                 dedup_fingerprint: transaction_id,
                 source: IngressSource::Quic,
+                raw_payload: vec![],
             })
             .unwrap();
     }
@@ -514,6 +522,7 @@ fn block_assembler_applies_retry_budget_and_backoff_cap_from_runtime_policy() {
                 estimated_cost_units: 10,
                 dedup_fingerprint: transaction_id,
                 source: IngressSource::Quic,
+                raw_payload: vec![],
             })
             .unwrap();
         block_assembler.tick(&context).unwrap();
@@ -554,6 +563,7 @@ fn block_assembler_honors_short_execution_replay_retry_delay_policy() {
                 estimated_cost_units: 10,
                 dedup_fingerprint: transaction_id,
                 source: IngressSource::Quic,
+                raw_payload: vec![],
             })
             .unwrap();
         block_assembler.tick(&context).unwrap();
@@ -607,6 +617,7 @@ fn block_assembler_applies_failure_class_retry_budget_for_replay_conflicts() {
                 estimated_cost_units: 10,
                 dedup_fingerprint: transaction_id,
                 source: IngressSource::Quic,
+                raw_payload: vec![],
             })
             .unwrap();
         block_assembler.tick(&context).unwrap();
@@ -662,6 +673,7 @@ fn block_assembler_applies_failure_class_retry_budget_for_resource_exhaustion() 
                 estimated_cost_units: 20_000,
                 dedup_fingerprint: transaction_id,
                 source: IngressSource::Quic,
+                raw_payload: vec![],
             })
             .unwrap();
         block_assembler.tick(&context).unwrap();
@@ -702,6 +714,7 @@ fn block_assembler_honors_long_execution_replay_retry_delay_policy() {
                 estimated_cost_units: 10,
                 dedup_fingerprint: transaction_id,
                 source: IngressSource::Quic,
+                raw_payload: vec![],
             })
             .unwrap();
         block_assembler.tick(&context).unwrap();
@@ -747,6 +760,7 @@ fn block_assembler_execution_health_policy_enters_and_drains_cooldown() {
                 estimated_cost_units: 10,
                 dedup_fingerprint: transaction_id,
                 source: IngressSource::Quic,
+                raw_payload: vec![],
             })
             .unwrap();
         block_assembler.tick(&context).unwrap();
@@ -793,6 +807,7 @@ fn block_assembler_execution_health_policy_disabled_does_not_enter_cooldown() {
                 estimated_cost_units: 10,
                 dedup_fingerprint: transaction_id,
                 source: IngressSource::Quic,
+                raw_payload: vec![],
             })
             .unwrap();
         block_assembler.tick(&context).unwrap();
@@ -815,6 +830,7 @@ fn block_assembler_slot_pipeline_advances_on_commit() {
                 estimated_cost_units: 10,
                 dedup_fingerprint: transaction_id,
                 source: IngressSource::Quic,
+                raw_payload: vec![],
             })
             .unwrap();
         block_assembler.tick(&context).unwrap();
@@ -853,6 +869,7 @@ fn block_assembler_slot_pipeline_advances_on_drop_after_retries() {
                 estimated_cost_units: 10,
                 dedup_fingerprint: transaction_id,
                 source: IngressSource::Quic,
+                raw_payload: vec![],
             })
             .unwrap();
         block_assembler.tick(&context).unwrap();
@@ -891,6 +908,7 @@ fn block_assembler_replay_controller_tracks_reorg_candidate_for_replay_conflict(
                 estimated_cost_units: 10,
                 dedup_fingerprint: transaction_id,
                 source: IngressSource::Quic,
+                raw_payload: vec![],
             })
             .unwrap();
         block_assembler.tick(&context).unwrap();
@@ -933,6 +951,7 @@ fn block_assembler_replay_window_rewinds_to_checkpoint_on_confirmed_reorg_when_e
                 estimated_cost_units: 10,
                 dedup_fingerprint: transaction_id,
                 source: IngressSource::Quic,
+                raw_payload: vec![],
             })
             .unwrap();
         block_assembler.tick(&context).unwrap();
@@ -949,6 +968,7 @@ fn block_assembler_replay_window_rewinds_to_checkpoint_on_confirmed_reorg_when_e
                 estimated_cost_units: 10,
                 dedup_fingerprint: transaction_id,
                 source: IngressSource::Quic,
+                raw_payload: vec![],
             })
             .unwrap();
         block_assembler.tick(&context).unwrap();
@@ -1003,6 +1023,7 @@ fn block_assembler_replay_window_does_not_rewind_when_disabled() {
                 estimated_cost_units: 10,
                 dedup_fingerprint: transaction_id,
                 source: IngressSource::Quic,
+                raw_payload: vec![],
             })
             .unwrap();
         block_assembler.tick(&context).unwrap();
@@ -1016,6 +1037,7 @@ fn block_assembler_replay_window_does_not_rewind_when_disabled() {
                 estimated_cost_units: 10,
                 dedup_fingerprint: transaction_id,
                 source: IngressSource::Quic,
+                raw_payload: vec![],
             })
             .unwrap();
         block_assembler.tick(&context).unwrap();
@@ -1073,6 +1095,7 @@ fn block_assembler_confirmed_reorg_rewind_failure_bubbles_runtime_error() {
                 estimated_cost_units: 10,
                 dedup_fingerprint: transaction_id,
                 source: IngressSource::Quic,
+                raw_payload: vec![],
             })
             .unwrap();
         block_assembler.tick(&context).unwrap();
@@ -1086,6 +1109,7 @@ fn block_assembler_confirmed_reorg_rewind_failure_bubbles_runtime_error() {
                 estimated_cost_units: 10,
                 dedup_fingerprint: transaction_id,
                 source: IngressSource::Quic,
+                raw_payload: vec![],
             })
             .unwrap();
     }
@@ -1151,6 +1175,7 @@ fn block_assembler_confirmed_reorg_rewind_persists_pruned_snapshot_catalog() {
                 estimated_cost_units: 10,
                 dedup_fingerprint: transaction_id,
                 source: IngressSource::Quic,
+                raw_payload: vec![],
             })
             .unwrap();
         block_assembler.tick(&context).unwrap();
@@ -1168,6 +1193,7 @@ fn block_assembler_confirmed_reorg_rewind_persists_pruned_snapshot_catalog() {
                 estimated_cost_units: 10,
                 dedup_fingerprint: transaction_id,
                 source: IngressSource::Quic,
+                raw_payload: vec![],
             })
             .unwrap();
         block_assembler.tick(&context).unwrap();
@@ -1242,6 +1268,7 @@ fn block_assembler_confirmed_reorg_rewind_respects_leader_initial_slot_floor() {
                 estimated_cost_units: 10,
                 dedup_fingerprint: transaction_id,
                 source: IngressSource::Quic,
+                raw_payload: vec![],
             })
             .unwrap();
         block_assembler.tick(&context).unwrap();
@@ -1255,6 +1282,7 @@ fn block_assembler_confirmed_reorg_rewind_respects_leader_initial_slot_floor() {
                 estimated_cost_units: 10,
                 dedup_fingerprint: transaction_id,
                 source: IngressSource::Quic,
+                raw_payload: vec![],
             })
             .unwrap();
         block_assembler.tick(&context).unwrap();
@@ -1297,6 +1325,7 @@ fn block_assembler_replay_safety_policy_enters_and_drains_hold() {
                 estimated_cost_units: 10,
                 dedup_fingerprint: transaction_id,
                 source: IngressSource::Quic,
+                raw_payload: vec![],
             })
             .unwrap();
         block_assembler.tick(&context).unwrap();
@@ -1338,6 +1367,7 @@ fn block_assembler_replay_safety_policy_disabled_does_not_enter_hold() {
                 estimated_cost_units: 10,
                 dedup_fingerprint: transaction_id,
                 source: IngressSource::Quic,
+                raw_payload: vec![],
             })
             .unwrap();
         block_assembler.tick(&context).unwrap();
@@ -1372,6 +1402,7 @@ fn block_assembler_fork_choice_quarantine_enters_and_drains() {
                 estimated_cost_units: 10,
                 dedup_fingerprint: transaction_id,
                 source: IngressSource::Quic,
+                raw_payload: vec![],
             })
             .unwrap();
         block_assembler.tick(&context).unwrap();
@@ -1412,6 +1443,7 @@ fn block_assembler_fork_choice_quarantine_disabled_does_not_enter() {
                 estimated_cost_units: 10,
                 dedup_fingerprint: transaction_id,
                 source: IngressSource::Quic,
+                raw_payload: vec![],
             })
             .unwrap();
         block_assembler.tick(&context).unwrap();
@@ -1447,6 +1479,7 @@ fn block_assembler_holds_fragment_while_not_leader_and_commits_after_rotation() 
                 estimated_cost_units: 10,
                 dedup_fingerprint: transaction_id,
                 source: IngressSource::Quic,
+                raw_payload: vec![],
             })
             .unwrap();
         block_assembler.tick(&context).unwrap();
@@ -1494,6 +1527,7 @@ fn block_assembler_scheduler_policy_increases_retry_wait_for_priority_class_two(
                 estimated_cost_units: 10,
                 dedup_fingerprint: transaction_id,
                 source: IngressSource::Quic,
+                raw_payload: vec![],
             })
             .unwrap();
         block_assembler.tick(&context).unwrap();
@@ -1534,6 +1568,7 @@ fn block_assembler_fork_choice_policy_retries_reorg_then_drops() {
                 estimated_cost_units: 10,
                 dedup_fingerprint: transaction_id,
                 source: IngressSource::Quic,
+                raw_payload: vec![],
             })
             .unwrap();
         block_assembler.tick(&context).unwrap();
@@ -1579,6 +1614,7 @@ fn block_assembler_assembles_fragment_when_cost_budget_is_reached_before_tx_coun
                 estimated_cost_units: 10,
                 dedup_fingerprint: transaction_id,
                 source: IngressSource::Quic,
+                raw_payload: vec![],
             })
             .unwrap();
         block_assembler.tick(&context).unwrap();
@@ -1610,6 +1646,7 @@ fn block_assembler_assembles_fragment_when_wait_ticks_budget_is_reached() {
             estimated_cost_units: 10,
             dedup_fingerprint: 700,
             source: IngressSource::Quic,
+            raw_payload: vec![],
         })
         .unwrap();
     block_assembler.tick(&context).unwrap();
@@ -1633,6 +1670,7 @@ fn block_assembler_drops_fragment_after_retry_budget_exhaustion() {
                 estimated_cost_units: 10,
                 dedup_fingerprint: transaction_id,
                 source: IngressSource::Quic,
+                raw_payload: vec![],
             })
             .unwrap();
         block_assembler.tick(&context).unwrap();
@@ -1663,6 +1701,7 @@ fn block_assembler_drops_deterministic_failure_without_retry() {
                 estimated_cost_units: 10,
                 dedup_fingerprint: transaction_id,
                 source: IngressSource::Quic,
+                raw_payload: vec![],
             })
             .unwrap();
         block_assembler.tick(&context).unwrap();

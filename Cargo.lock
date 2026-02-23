@@ -1644,6 +1644,7 @@ dependencies = [
 name = "paradencer-topology"
 version = "0.1.0"
 dependencies = [
+ "paradencer-constants",
  "paradencer-core",
  "paradencer-mesh",
  "paradencer-net",
