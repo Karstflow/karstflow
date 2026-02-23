@@ -1649,6 +1649,7 @@ dependencies = [
  "paradencer-net",
  "paradencer-runtime",
  "paradencer-stages",
+ "paradencer-types",
  "thiserror 2.0.18",
  "toml",
 ]

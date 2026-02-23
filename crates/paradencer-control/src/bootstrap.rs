@@ -752,7 +752,8 @@ mod tests {
     fn materialize_services_from_config_builds_default_services() {
         let node_config = NodeConfig::from_profile(None).unwrap();
         let materialized = materialize_services_from_config(&node_config).unwrap();
-        assert_eq!(materialized.services.len(), 5);
+        // 5 topology stages + 1 ShredCollector = 6 services.
+        assert_eq!(materialized.services.len(), 6);
     }
 
     #[test]
@@ -760,7 +761,7 @@ mod tests {
         let node_config = NodeConfig::from_profile(None).unwrap();
         let pair = materialize_service_pair_from_config(&node_config).unwrap();
         assert_eq!(pair.startup.services.len(), pair.runtime.services.len());
-        assert_eq!(pair.runtime.services.len(), 5);
+        assert_eq!(pair.runtime.services.len(), 6);
     }
 
     #[test]
@@ -789,8 +790,8 @@ mod tests {
         let mut services = materialized.services;
         services.push(bundle.service);
 
-        // Topology (5) + pipeline (1) = 6 total services.
-        assert_eq!(services.len(), 6);
+        // Topology (6) + pipeline (1) = 7 total services.
+        assert_eq!(services.len(), 7);
         assert_eq!(services.last().unwrap().name(), "validator-pipeline");
     }
 
@@ -833,8 +834,8 @@ mod tests {
         services.push(replay_bundle.service);
         services.push(pipeline_bundle.service);
 
-        // Topology (5) + replay (1) + pipeline (1) = 7 total services.
-        assert_eq!(services.len(), 7);
+        // Topology (6) + replay (1) + pipeline (1) = 8 total services.
+        assert_eq!(services.len(), 8);
 
         let names: Vec<&str> = services.iter().map(|s| s.name()).collect();
         assert!(names.contains(&"replay-service"));
@@ -856,21 +857,23 @@ mod tests {
     }
 
     #[test]
-    fn shred_pipeline_integrates_with_replay_and_topology() {
-        use paradencer_stages::{PipelineServiceConfig, ReplayServiceConfig, ShredCollectorConfig};
+    fn topology_includes_shred_collector_and_integrates_with_bootstrap_services() {
+        use paradencer_stages::{PipelineServiceConfig, ReplayServiceConfig};
 
         let node_config = NodeConfig::from_profile(None).unwrap();
         let materialized = materialize_services_from_config(&node_config).unwrap();
+
+        // ShredCollector is now part of the materialized topology.
+        assert!(materialized.shred_block_receiver.is_some());
+
         let replay_bundle = build_replay_service(ReplayServiceConfig::default(), 1_000_000);
         let pipeline_bundle = build_pipeline_service(PipelineServiceConfig::default());
-        let shred_bundle = build_shred_pipeline(ShredCollectorConfig::default());
 
         let mut services = materialized.services;
         services.push(replay_bundle.service);
         services.push(pipeline_bundle.service);
-        services.push(shred_bundle.service);
 
-        // Topology (5) + replay (1) + pipeline (1) + shred-collector (1) = 8 total services.
+        // Topology (6, including shred-collector) + replay (1) + pipeline (1) = 8.
         assert_eq!(services.len(), 8);
 
         let names: Vec<&str> = services.iter().map(|s| s.name()).collect();
@@ -927,10 +930,10 @@ mod tests {
             summary.transaction_stream_capacity,
             expected_transaction_capacity
         );
-        assert_eq!(summary.runtime_service_names.len(), 5);
-        assert_eq!(summary.startup_probe_report.started_ok, 5);
-        assert_eq!(summary.startup_probe_report.ticked_ok, 5);
-        assert_eq!(summary.startup_probe_report.stopped_ok, 5);
+        assert_eq!(summary.runtime_service_names.len(), 6);
+        assert_eq!(summary.startup_probe_report.started_ok, 6);
+        assert_eq!(summary.startup_probe_report.ticked_ok, 6);
+        assert_eq!(summary.startup_probe_report.stopped_ok, 6);
     }
 
     #[test]
@@ -978,7 +981,7 @@ mod tests {
         let mut node_config = NodeConfig::from_profile(None).unwrap();
         node_config.runtime_spec.mode = paradencer_core::ExecutionMode::Pinned;
         node_config.runtime_spec.pinned_core_policy = paradencer_core::PinnedCorePolicy::Strict;
-        node_config.runtime_spec.pinned_service_core_ids = Some(vec![0, 0, 0, 0, 0]);
+        node_config.runtime_spec.pinned_service_core_ids = Some(vec![0, 0, 0, 0, 0, 0]);
         let mut materialized = materialize_services_from_config(&node_config).unwrap();
         let result = run_diagnostics_phase(
             &node_config,

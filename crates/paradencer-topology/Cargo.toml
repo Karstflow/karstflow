@@ -13,3 +13,4 @@ paradencer-net = { path = "../paradencer-net" }
 paradencer-runtime = { path = "../paradencer-runtime" }
 paradencer-stages = { path = "../paradencer-stages" }
 paradencer-mesh = { path = "../paradencer-mesh" }
+paradencer-types = { path = "../paradencer-types" }

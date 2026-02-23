@@ -1,6 +1,6 @@
 use paradencer_control::{
     build_diagnostics_summary_from_probe, build_pipeline_service, build_replay_service,
-    build_shred_pipeline, dispatch_command, ensure_mainnet_readiness, evaluate_mainnet_readiness,
+    dispatch_command, ensure_mainnet_readiness, evaluate_mainnet_readiness,
     materialize_service_pair_from_config, materialize_services_from_config, parse_command,
     render_diagnostics_cluster_mode_line, render_diagnostics_lane_capacity_line,
     render_diagnostics_ok_line, render_diagnostics_probe_line,
@@ -44,17 +44,13 @@ fn run_with_node_config(
     let _pipeline_handle = pipeline_bundle.handle;
     let _pipeline_input = pipeline_bundle.input;
 
-    // Build the shred collection pipeline.
-    // Receives individual parsed shreds from ShredFilter, groups by slot,
-    // and emits assembled blocks for the replay service.
-    let shred_bundle = build_shred_pipeline(paradencer_stages::ShredCollectorConfig::default());
-    let _shred_input = shred_bundle.shred_input;
-    let _block_receiver = shred_bundle.block_receiver;
+    // Shred collection pipeline is part of the materialized topology.
+    // Its block output can be connected to the replay service.
+    let _shred_block_receiver = runtime_topology.shred_block_receiver;
 
     let mut services = runtime_topology.services;
     services.push(replay_bundle.service);
     services.push(pipeline_bundle.service);
-    services.push(shred_bundle.service);
 
     run_runtime_phase(
         &node_config,

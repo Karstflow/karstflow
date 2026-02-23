@@ -6,11 +6,12 @@ use paradencer_mesh::bounded_link;
 use paradencer_net::IngressPolicy;
 use paradencer_runtime::Service;
 use paradencer_stages::{
-    BlockAssembler, BlockAssemblyStats, EdgeIntake, InboundPacket, IngressFilterStats,
-    LinkTelemetryStats, MetricsOutputFormat, MetricsOutputTarget, MetricsReporter,
-    SanitizedTransaction, ShredFilter, ShredFilterStats, StageTelemetryStats, StorageRuntimePolicy,
-    TxFilter,
+    AssembledBlock, BlockAssembler, BlockAssemblyStats, EdgeIntake, InboundPacket,
+    IngressFilterStats, LinkTelemetryStats, MetricsOutputFormat, MetricsOutputTarget,
+    MetricsReporter, SanitizedTransaction, ShredCollector, ShredCollectorConfig, ShredFilter,
+    ShredFilterStats, StageTelemetryStats, StorageRuntimePolicy, TxFilter,
 };
+use paradencer_types::shred::Shred;
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -92,11 +93,21 @@ pub fn materialize_services(
         !transaction_stats.is_empty(),
         "transaction links must exist after topology validation"
     );
+    // Internal shred pipeline: ShredFilter → ShredCollector → block output.
+    // The filtered shred link connects ShredFilter output to ShredCollector input.
+    // The block link carries assembled blocks out of the topology for replay.
+    let shred_pipeline_capacity = 2048;
+    let block_pipeline_capacity = 64;
+    let (filtered_shred_tx, filtered_shred_rx) = bounded_link::<Shred>(shred_pipeline_capacity);
+    let (assembled_block_tx, assembled_block_rx) =
+        bounded_link::<AssembledBlock>(block_pipeline_capacity);
+
     let ingress_filter_stats = Arc::new(IngressFilterStats::default());
     let shred_filter_stats = Arc::new(ShredFilterStats::default());
     let block_assembly_stats = Arc::new(BlockAssemblyStats::default());
 
     let mut services: Vec<Box<dyn Service>> = Vec::new();
+    let mut shred_collector_added = false;
 
     for stage in &topology_spec.stages {
         match stage.stage_kind {
@@ -128,11 +139,21 @@ pub fn materialize_services(
                     .get(&stage.stage_id)
                     .cloned()
                     .expect("shred stream link must exist for shred sanitizer stage");
-                services.push(Box::new(ShredFilter::with_policy_and_stats(
+                services.push(Box::new(ShredFilter::with_output(
                     shred_inbound,
                     ingress_policy.clone(),
                     shred_filter_stats.clone(),
-                )))
+                    filtered_shred_tx.clone(),
+                )));
+                // Add the shred collector once (after the first ShredSanitizer).
+                if !shred_collector_added {
+                    services.push(Box::new(ShredCollector::with_config(
+                        filtered_shred_rx.clone(),
+                        assembled_block_tx.clone(),
+                        ShredCollectorConfig::default(),
+                    )));
+                    shred_collector_added = true;
+                }
             }
             StageKind::BlockBuilder => {
                 let transaction_inbound = transaction_inbound_by_stage
@@ -181,5 +202,10 @@ pub fn materialize_services(
     Ok(MaterializedTopology {
         topology_spec,
         services,
+        shred_block_receiver: if shred_collector_added {
+            Some(assembled_block_rx)
+        } else {
+            None
+        },
     })
 }
