@@ -32,14 +32,14 @@ impl UdpSocket {
 
         bind_socket(raw, &config.bind_addr)?;
 
+        // Query the actual bound address (resolves port 0 to assigned port).
+        let local_addr = get_local_addr(raw).unwrap_or(config.bind_addr);
+
         if config.non_blocking {
             set_non_blocking(raw)?;
         }
 
-        Ok(Self {
-            fd,
-            local_addr: config.bind_addr,
-        })
+        Ok(Self { fd, local_addr })
     }
 
     /// Returns the local address the socket is bound to.
@@ -101,6 +101,7 @@ impl UdpSocket {
     pub fn recv_batch<const N: usize>(&self, batch: &mut PacketBatch<N>) -> usize {
         let mut count = 0;
         while !batch.is_full() {
+            let start_count = batch.count();
             let slot = match batch.reserve_slot() {
                 Some(s) => s,
                 None => break,
@@ -111,17 +112,9 @@ impl UdpSocket {
                     slot.set_addr(addr);
                     count += 1;
                 }
-                Err(e) => {
-                    // EAGAIN/EWOULDBLOCK means no more data available
-                    if e.kind() == io::ErrorKind::WouldBlock {
-                        // Undo the reserved slot
-                        batch.consume(0); // no-op but need to adjust count
-                                          // Actually we need to decrement count since reserve_slot incremented it.
-                                          // The simplest approach: clear the slot and adjust batch.
-                                          // Since we can't "unreserve", we'll just leave it empty.
-                                          // The slot has len=0 which is effectively empty.
-                        break;
-                    }
+                Err(_) => {
+                    // Undo the reserved slot (WouldBlock or other error).
+                    batch.truncate(start_count);
                     break;
                 }
             }
@@ -272,6 +265,23 @@ fn set_send_buf_size(fd: RawFd, size: usize) -> io::Result<()> {
         Err(io::Error::last_os_error())
     } else {
         Ok(())
+    }
+}
+
+fn get_local_addr(fd: RawFd) -> Option<SocketAddrV4> {
+    let mut sa: libc::sockaddr_in = unsafe { std::mem::zeroed() };
+    let mut len = std::mem::size_of::<libc::sockaddr_in>() as libc::socklen_t;
+    let ret = unsafe {
+        libc::getsockname(
+            fd,
+            &mut sa as *mut libc::sockaddr_in as *mut libc::sockaddr,
+            &mut len,
+        )
+    };
+    if ret < 0 {
+        None
+    } else {
+        Some(from_sockaddr_in(&sa))
     }
 }
 

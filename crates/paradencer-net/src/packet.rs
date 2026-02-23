@@ -192,6 +192,12 @@ impl<const N: usize> PacketBatch<N> {
         Some(&mut self.packets[idx])
     }
 
+    /// Truncate the batch to `n` packets (discard the rest).
+    #[inline]
+    pub fn truncate(&mut self, n: usize) {
+        self.count = n.min(self.count);
+    }
+
     /// Reset the batch to empty (does not zero packet data).
     #[inline]
     pub fn clear(&mut self) {
