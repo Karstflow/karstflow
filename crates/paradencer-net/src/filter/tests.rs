@@ -11,6 +11,7 @@ fn decoder_builds_transaction_with_cost_and_fingerprint() {
         packet_id: 42,
         payload_bytes: 1200,
         source: IngressSource::Quic,
+        data: vec![],
     };
 
     let outcome = decoder.decode(&frame);
@@ -29,6 +30,7 @@ fn decoder_drops_empty_packet() {
         packet_id: 7,
         payload_bytes: 0,
         source: IngressSource::Quic,
+        data: vec![],
     };
 
     assert_eq!(
@@ -44,6 +46,7 @@ fn decoder_drops_oversized_packet() {
         packet_id: 8,
         payload_bytes: 2048,
         source: IngressSource::Quic,
+        data: vec![],
     };
 
     assert_eq!(
@@ -63,6 +66,7 @@ fn decoder_drops_packet_from_disallowed_source() {
         packet_id: 9,
         payload_bytes: 800,
         source: IngressSource::Bundle,
+        data: vec![],
     };
 
     assert_eq!(

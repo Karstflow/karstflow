@@ -12,6 +12,7 @@ fn tx_filter_drops_duplicate_transactions() {
             packet_id: 100,
             payload_bytes: 1200,
             source: IngressSource::Quic,
+            data: vec![],
         })
         .unwrap();
     packet_outbound
@@ -19,6 +20,7 @@ fn tx_filter_drops_duplicate_transactions() {
             packet_id: 100,
             payload_bytes: 1200,
             source: IngressSource::Quic,
+            data: vec![],
         })
         .unwrap();
 
@@ -48,6 +50,7 @@ fn tx_filter_applies_source_policy_rules() {
             packet_id: 101,
             payload_bytes: 900,
             source: IngressSource::Bundle,
+            data: vec![],
         })
         .unwrap();
 
@@ -72,6 +75,7 @@ fn tx_filter_applies_per_source_min_gap_rate_limit() {
             packet_id: 201,
             payload_bytes: 900,
             source: IngressSource::Quic,
+            data: vec![],
         })
         .unwrap();
     packet_outbound
@@ -79,6 +83,7 @@ fn tx_filter_applies_per_source_min_gap_rate_limit() {
             packet_id: 202,
             payload_bytes: 900,
             source: IngressSource::Quic,
+            data: vec![],
         })
         .unwrap();
 
@@ -91,6 +96,7 @@ fn tx_filter_applies_per_source_min_gap_rate_limit() {
             packet_id: 203,
             payload_bytes: 900,
             source: IngressSource::Quic,
+            data: vec![],
         })
         .unwrap();
     tx_filter.tick(&context).unwrap();
@@ -122,6 +128,7 @@ fn tx_filter_applies_per_source_burst_rate_limit_and_refill() {
                 packet_id,
                 payload_bytes: 900,
                 source: IngressSource::Quic,
+                data: vec![],
             })
             .unwrap();
         tx_filter.tick(&context).unwrap();
@@ -135,6 +142,7 @@ fn tx_filter_applies_per_source_burst_rate_limit_and_refill() {
             packet_id: 304,
             payload_bytes: 900,
             source: IngressSource::Quic,
+            data: vec![],
         })
         .unwrap();
     tx_filter.tick(&context).unwrap();
@@ -170,6 +178,7 @@ fn tx_filter_applies_per_source_cost_budget_window_limit() {
                 packet_id,
                 payload_bytes: 900,
                 source: IngressSource::Quic,
+                data: vec![],
             })
             .unwrap();
         tx_filter.tick(&context).unwrap();
@@ -183,6 +192,7 @@ fn tx_filter_applies_per_source_cost_budget_window_limit() {
             packet_id: 404,
             payload_bytes: 900,
             source: IngressSource::Quic,
+            data: vec![],
         })
         .unwrap();
     tx_filter.tick(&context).unwrap();
@@ -217,6 +227,7 @@ fn tx_filter_buffers_and_retries_when_downstream_recovers_from_backpressure() {
             packet_id: 501,
             payload_bytes: 900,
             source: IngressSource::Quic,
+            data: vec![],
         })
         .unwrap();
     packet_outbound
@@ -224,6 +235,7 @@ fn tx_filter_buffers_and_retries_when_downstream_recovers_from_backpressure() {
             packet_id: 502,
             payload_bytes: 900,
             source: IngressSource::Quic,
+            data: vec![],
         })
         .unwrap();
 
@@ -255,6 +267,7 @@ fn tx_filter_drops_buffered_tx_after_backpressure_wait_budget_is_exceeded() {
             packet_id: 601,
             payload_bytes: 900,
             source: IngressSource::Quic,
+            data: vec![],
         })
         .unwrap();
     packet_outbound
@@ -262,6 +275,7 @@ fn tx_filter_drops_buffered_tx_after_backpressure_wait_budget_is_exceeded() {
             packet_id: 602,
             payload_bytes: 900,
             source: IngressSource::Quic,
+            data: vec![],
         })
         .unwrap();
 

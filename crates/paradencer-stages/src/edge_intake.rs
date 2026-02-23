@@ -161,6 +161,7 @@ impl EdgeIntake {
             packet_id: self.next_packet_id,
             payload_bytes: self.ingress_policy.synthetic_payload_bytes,
             source,
+            data: vec![],
         };
         self.next_packet_id += 1;
         self.packets_sent_in_batch = self.packets_sent_in_batch.saturating_add(1);
@@ -186,6 +187,7 @@ impl EdgeIntake {
                         source: self
                             .ingress_policy
                             .classify_udp_source_port(source_addr.port()),
+                        data: buffer[..packet_len].to_vec(),
                     };
                     self.next_packet_id = self.next_packet_id.saturating_add(1);
 

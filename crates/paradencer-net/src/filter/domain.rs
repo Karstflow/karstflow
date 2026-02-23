@@ -11,6 +11,8 @@ pub struct InboundFrame {
     pub packet_id: u64,
     pub payload_bytes: usize,
     pub source: IngressSource,
+    /// Raw packet bytes. Empty for synthetic/metadata-only frames.
+    pub data: Vec<u8>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
