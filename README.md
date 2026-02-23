@@ -4,13 +4,13 @@
 
 Paradencer is a ground-up Solana validator built for maximum throughput and minimal latency. It features a custom network stack, pre-allocated data structures, zero-copy I/O patterns, and a modular tile-based architecture designed for predictable performance at scale.
 
-**185K+ lines of Rust | 3,480+ tests | 20 crates**
+**188K+ lines of Rust | 3,660+ tests | 19 crates**
 
 ## Design Principles
 
 - **Performance first**: Pre-allocated pools, batch processing, zero-copy where possible, segment-based compute metering
 - **Native implementation**: No runtime dependency on existing Solana validator codebases
-- **Clean architecture**: 20-crate workspace with strict dependency hierarchy and single-responsibility modules
+- **Clean architecture**: 19-crate workspace with strict dependency hierarchy and single-responsibility modules
 - **Idiomatic Rust**: Leverages Rust's type system, ownership model, traits, and ecosystem for safety and correctness
 - **Tile-based execution**: Pinned-core service model for deterministic scheduling and cache locality
 
@@ -42,24 +42,24 @@ paradencer-types          (core types: Pubkey, Account, Hash, Shred)
 
 | Crate | Tests | Purpose |
 |-------|-------|---------|
-| `paradencer-consensus` | 763 | Tower BFT, GHOST fork choice, leader schedule, epoch processing, Bank lifecycle, multi-threshold confirmation |
-| `paradencer-sbpf` | 600 | sBPF interpreter, 14 builtin programs, ELF loader, CPI, syscalls, transaction processor |
-| `paradencer-net` | 529 | Custom QUIC engine, TLS 1.3, gossip with 14-type CRDS, turbine broadcast, repair, XDP |
-| `paradencer-storage` | 444 | MVCC account database, blockstore, full snapshot pipeline, persistent storage, compaction |
-| `paradencer-stages` | 387 | Replay with fork tracking, block production, PoH state machine, pack scheduler |
-| `paradencer-rpc` | 330 | 60+ JSON-RPC methods, 9 WebSocket subscription types, transaction simulation |
-| `paradencer-crypto` | 111 | Ed25519 batch verification, Blake3/SHA-256/Keccak, secp256k1/r1, BN254, Reed-Solomon FEC, LtHash |
+| `paradencer-consensus` | 734 | Tower BFT, GHOST fork choice, leader schedule, epoch processing, Bank lifecycle, multi-threshold confirmation |
+| `paradencer-net` | 602 | Custom QUIC engine, TLS 1.3, gossip with 14-type CRDS, turbine broadcast, repair, XDP |
+| `paradencer-sbpf` | 596 | sBPF interpreter, 14 builtin programs, ELF loader, CPI, syscalls, transaction processor |
+| `paradencer-storage` | 450 | MVCC account database, blockstore, full snapshot pipeline, persistent storage, compaction |
+| `paradencer-stages` | 436 | Replay with fork tracking, block production, PoH state machine, pack scheduler, shred pipeline |
+| `paradencer-rpc` | 374 | 60+ JSON-RPC methods, 9 WebSocket subscription types, transaction simulation |
+| `paradencer-crypto` | 145 | Ed25519 batch verification, Blake3/SHA-256/Keccak, secp256k1/r1, BN254, Reed-Solomon FEC, LtHash |
 | `paradencer-config` | 87 | TOML configuration with env override, live-mode preflight checks |
 | `paradencer-execution` | 72 | SVM backend adapter, batch execution orchestration, retry policies |
-| `paradencer-types` | 60 | Core types: Account, Pubkey, Hash, Transaction, Shred, compact-u16 codec |
-| `paradencer-control` | 37 | Control plane: startup checks, preflight validation, diagnostics |
+| `paradencer-mesh` | 57 | Typed bounded channels for inter-tile communication |
+| `paradencer-types` | 52 | Core types: Account, Pubkey, Hash, Transaction, Shred, compact-u16 codec |
+| `paradencer-control` | 44 | Control plane: startup checks, preflight validation, diagnostics |
 | `paradencer-runtime` | 14 | Execution substrate: tokio/pinned modes, CPU affinity, lifecycle |
-| `paradencer-topology` | 9 | Service topology planning and materialization |
+| `paradencer-topology` | 10 | Service topology planning and materialization |
+| `paradencer-core` | 2 | Shared vocabulary types |
 | `paradencer-constants` | -- | Protocol constants: fees, timing, compute limits, program parameters |
 | `paradencer-ids` | -- | Well-known program and sysvar addresses |
-| `paradencer-mesh` | -- | Typed bounded channels for inter-tile communication |
 | `paradencer-observability` | -- | Metrics HTTP endpoint |
-| `paradencer-core` | -- | Shared vocabulary types |
 | `paradencer-node` | -- | Binary entry point |
 
 ## Key Features
