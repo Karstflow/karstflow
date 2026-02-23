@@ -7,7 +7,12 @@ use crate::{
     ensure_service_startup_probe_ok, run_network_socket_preflight, run_service_startup_probe,
 };
 use paradencer_config::NodeConfig;
+use paradencer_consensus::{
+    Bank, BankForks, CommitmentTracker, EpochSchedule, ForkChoice, LeaderSchedule, StakeTracker,
+    Tower, VoteProcessor, VoteProcessorConfig,
+};
 use paradencer_core::{ExecutionMode, LinkKind, PinnedCorePolicy, StageKind};
+use paradencer_execution::ExecutionBridge;
 use paradencer_mesh::{bounded_link, OutPort};
 use paradencer_net::IngressMode;
 use paradencer_observability::spawn_metrics_http_bridge;
@@ -15,12 +20,13 @@ use paradencer_rpc::{metrics_file_provider, spawn_rpc_http_server};
 use paradencer_runtime::{build_pinned_affinity_plan, run_services, Service, ServiceProbeReport};
 use paradencer_stages::{
     ExecutionErrorHandlingPolicy, MetricsOutputTarget, PipelineHandle, PipelineServiceBuilder,
-    PipelineServiceConfig, RawTransaction,
+    PipelineServiceConfig, RawTransaction, ReplayService, ReplayServiceConfig,
 };
+use paradencer_storage::{AccountDatabase, Pubkey};
 use paradencer_topology::{materialize_services, MaterializedTopology};
 use std::collections::HashSet;
 use std::path::Path;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, RwLock};
 
 pub struct ServiceBundle {
     pub topology_name: String,
@@ -65,6 +71,95 @@ pub fn build_pipeline_service(config: PipelineServiceConfig) -> PipelineBundle {
         service: Box::new(service),
         handle,
         input: tx,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Consensus infrastructure + replay service
+// ---------------------------------------------------------------------------
+
+/// Shared consensus infrastructure used by replay and other services.
+///
+/// These components hold the mutable consensus state that multiple services
+/// need access to: bank forks, fork choice, tower, vote processing, and
+/// commitment tracking.
+pub struct ConsensusBundle {
+    pub bank_forks: Arc<RwLock<BankForks>>,
+    pub fork_choice: Arc<Mutex<ForkChoice>>,
+    pub execution_bridge: Arc<ExecutionBridge>,
+    pub vote_processor: Arc<Mutex<VoteProcessor>>,
+    pub tower: Arc<RwLock<Tower>>,
+    pub commitment_tracker: Arc<Mutex<CommitmentTracker>>,
+}
+
+/// Result of building the replay service.
+pub struct ReplayBundle {
+    /// The replay service to add to the node runtime.
+    pub service: Box<dyn Service>,
+    /// Shared consensus infrastructure for other services to use.
+    pub consensus: ConsensusBundle,
+    /// Input channel sender for assembled blocks.
+    pub block_input: OutPort<paradencer_stages::AssembledBlock>,
+}
+
+/// Build consensus infrastructure from genesis state.
+///
+/// Creates all shared consensus components (BankForks, ForkChoice, Tower,
+/// VoteProcessor, CommitmentTracker) initialized from a genesis bank.
+/// The initial stake is used for fork choice weight calculations.
+pub fn build_consensus_infrastructure(initial_stake: u64) -> ConsensusBundle {
+    let accounts = Arc::new(AccountDatabase::new());
+    let epoch_schedule = Arc::new(EpochSchedule::default());
+    let validator = Pubkey::new_unique();
+    let validators = vec![(validator, initial_stake)];
+    let leader_schedule = Arc::new(LeaderSchedule::new(0, &validators).unwrap());
+    let genesis = Bank::new_genesis(accounts, epoch_schedule, leader_schedule);
+    let bank_forks = Arc::new(RwLock::new(BankForks::new(genesis)));
+    let fork_choice = Arc::new(Mutex::new(ForkChoice::new(initial_stake)));
+    let execution_bridge = Arc::new(ExecutionBridge::new());
+    let vote_processor = Arc::new(Mutex::new(VoteProcessor::new(
+        VoteProcessorConfig::default(),
+        StakeTracker::new(0),
+    )));
+    let tower = Arc::new(RwLock::new(Tower::new()));
+    let commitment_tracker = Arc::new(Mutex::new(CommitmentTracker::default()));
+
+    ConsensusBundle {
+        bank_forks,
+        fork_choice,
+        execution_bridge,
+        vote_processor,
+        tower,
+        commitment_tracker,
+    }
+}
+
+/// Build the replay service for processing assembled blocks through consensus.
+///
+/// Creates the replay pipeline with an input channel for assembled blocks
+/// and returns the shared consensus infrastructure so other services
+/// (e.g., pipeline, gossip) can interact with consensus state.
+pub fn build_replay_service(config: ReplayServiceConfig, initial_stake: u64) -> ReplayBundle {
+    let consensus = build_consensus_infrastructure(initial_stake);
+
+    let channel_depth = config.max_blocks_per_tick.saturating_mul(8).max(64);
+    let (block_tx, block_rx) = bounded_link::<paradencer_stages::AssembledBlock>(channel_depth);
+
+    let service = ReplayService::with_block_input(
+        config,
+        block_rx,
+        Arc::clone(&consensus.bank_forks),
+        Arc::clone(&consensus.fork_choice),
+        Arc::clone(&consensus.execution_bridge),
+        Arc::clone(&consensus.vote_processor),
+        Arc::clone(&consensus.tower),
+        Arc::clone(&consensus.commitment_tracker),
+    );
+
+    ReplayBundle {
+        service: Box::new(service),
+        consensus,
+        block_input: block_tx,
     }
 }
 
@@ -565,8 +660,9 @@ pub fn ensure_mainnet_readiness(report: &MainnetReadinessReport) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::{
-        build_pipeline_service, ensure_mainnet_readiness, evaluate_mainnet_readiness,
-        load_node_config, materialize_service_pair_from_config, materialize_services_from_config,
+        build_consensus_infrastructure, build_pipeline_service, build_replay_service,
+        ensure_mainnet_readiness, evaluate_mainnet_readiness, load_node_config,
+        materialize_service_pair_from_config, materialize_services_from_config,
         maybe_start_metrics_http_bridge, maybe_start_rpc_http_server, run_diagnostics_phase,
     };
     use crate::errors::ControlPlaneError;
@@ -656,6 +752,53 @@ mod tests {
         // Topology (5) + pipeline (1) = 6 total services.
         assert_eq!(services.len(), 6);
         assert_eq!(services.last().unwrap().name(), "validator-pipeline");
+    }
+
+    #[test]
+    fn build_consensus_infrastructure_creates_all_components() {
+        let consensus = build_consensus_infrastructure(1_000_000);
+        let forks = consensus.bank_forks.read().unwrap();
+        assert_eq!(forks.root_slot(), 0);
+    }
+
+    #[test]
+    fn build_replay_service_creates_service_and_consensus() {
+        use paradencer_runtime::{ServiceContext, ShutdownSwitch};
+        use paradencer_stages::ReplayServiceConfig;
+
+        let bundle = build_replay_service(ReplayServiceConfig::default(), 1_000_000);
+        assert_eq!(bundle.service.name(), "replay-service");
+
+        // Consensus infrastructure accessible.
+        let forks = bundle.consensus.bank_forks.read().unwrap();
+        assert_eq!(forks.root_slot(), 0);
+        drop(forks);
+
+        // Service ticks without error (no blocks pending).
+        let ctx = ServiceContext::new(ShutdownSwitch::new());
+        let mut service = bundle.service;
+        service.tick(&ctx).unwrap();
+    }
+
+    #[test]
+    fn replay_and_pipeline_integrate_with_topology() {
+        use paradencer_stages::{PipelineServiceConfig, ReplayServiceConfig};
+
+        let node_config = NodeConfig::from_profile(None).unwrap();
+        let materialized = materialize_services_from_config(&node_config).unwrap();
+        let replay_bundle = build_replay_service(ReplayServiceConfig::default(), 1_000_000);
+        let pipeline_bundle = build_pipeline_service(PipelineServiceConfig::default());
+
+        let mut services = materialized.services;
+        services.push(replay_bundle.service);
+        services.push(pipeline_bundle.service);
+
+        // Topology (5) + replay (1) + pipeline (1) = 7 total services.
+        assert_eq!(services.len(), 7);
+
+        let names: Vec<&str> = services.iter().map(|s| s.name()).collect();
+        assert!(names.contains(&"replay-service"));
+        assert!(names.contains(&"validator-pipeline"));
     }
 
     #[test]

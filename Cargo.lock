@@ -1424,13 +1424,16 @@ name = "paradencer-control"
 version = "0.1.0"
 dependencies = [
  "paradencer-config",
+ "paradencer-consensus",
  "paradencer-core",
+ "paradencer-execution",
  "paradencer-mesh",
  "paradencer-net",
  "paradencer-observability",
  "paradencer-rpc",
  "paradencer-runtime",
  "paradencer-stages",
+ "paradencer-storage",
  "paradencer-topology",
  "thiserror 2.0.18",
 ]

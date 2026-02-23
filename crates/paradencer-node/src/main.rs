@@ -1,14 +1,14 @@
 use paradencer_control::{
-    build_diagnostics_summary_from_probe, build_pipeline_service, dispatch_command,
-    ensure_mainnet_readiness, evaluate_mainnet_readiness, materialize_service_pair_from_config,
-    materialize_services_from_config, parse_command, render_diagnostics_cluster_mode_line,
-    render_diagnostics_lane_capacity_line, render_diagnostics_ok_line,
-    render_diagnostics_probe_line, render_diagnostics_readiness_issue_line,
-    render_diagnostics_readiness_line, render_diagnostics_services_line,
-    render_diagnostics_stage_mix_line, render_diagnostics_topology_line,
-    render_preflight_readiness_issue_line, render_preflight_readiness_line,
-    render_readiness_policy_line, run_diagnostics_phase, run_preflight_phase,
-    run_preflight_phase_with_probe_report, run_runtime_phase, ServiceBundle,
+    build_diagnostics_summary_from_probe, build_pipeline_service, build_replay_service,
+    dispatch_command, ensure_mainnet_readiness, evaluate_mainnet_readiness,
+    materialize_service_pair_from_config, materialize_services_from_config, parse_command,
+    render_diagnostics_cluster_mode_line, render_diagnostics_lane_capacity_line,
+    render_diagnostics_ok_line, render_diagnostics_probe_line,
+    render_diagnostics_readiness_issue_line, render_diagnostics_readiness_line,
+    render_diagnostics_services_line, render_diagnostics_stage_mix_line,
+    render_diagnostics_topology_line, render_preflight_readiness_issue_line,
+    render_preflight_readiness_line, render_readiness_policy_line, run_diagnostics_phase,
+    run_preflight_phase, run_preflight_phase_with_probe_report, run_runtime_phase, ServiceBundle,
 };
 
 fn main() -> paradencer_control::Result<()> {
@@ -27,6 +27,15 @@ fn run_with_node_config(
     let mut topology_pair = materialize_service_pair_from_config(&node_config)?;
     let runtime_topology = topology_pair.runtime;
 
+    // Build the replay service for processing blocks through consensus.
+    // Consensus infrastructure is shared across replay and other services.
+    let replay_bundle = build_replay_service(
+        paradencer_stages::ReplayServiceConfig::default(),
+        1_000_000, // initial stake for fork choice
+    );
+    let _consensus = replay_bundle.consensus;
+    let _block_input = replay_bundle.block_input;
+
     // Build the transaction pipeline for block production.
     // The pipeline handle will be used by consensus/gossip to control
     // leader slots; the input sender will be connected to the network layer.
@@ -36,6 +45,7 @@ fn run_with_node_config(
     let _pipeline_input = pipeline_bundle.input;
 
     let mut services = runtime_topology.services;
+    services.push(replay_bundle.service);
     services.push(pipeline_bundle.service);
 
     run_runtime_phase(
