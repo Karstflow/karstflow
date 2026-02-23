@@ -1,22 +1,25 @@
 use super::*;
+use crate::block_producer::PohEntry;
 use crate::shred_assembler::AssembledBlock;
 use crate::{ShredCollector, ShredCollectorConfig};
 use paradencer_types::shred::{
     DataShredHeader, Shred, ShredCommonHeader, ShredVariant, SHRED_DATA_FLAG, SHRED_LAST_IN_SLOT,
     SIGNATURE_SIZE,
 };
+use paradencer_types::Hash;
 
-fn create_test_shred(slot: u64, index: u32, last_in_slot: bool) -> Shred {
+/// Create a valid bincode batch payload for a single tick entry.
+fn make_entry_batch_payload() -> Vec<u8> {
+    let entry = PohEntry::new(1, Hash::new([0xAB; 32]), vec![]);
+    PohEntry::batch_to_bytes(&[entry])
+}
+
+/// Create a shred from a raw payload slice.
+fn make_shred(slot: u64, index: u32, last_in_slot: bool, payload: Vec<u8>) -> Shred {
     let mut flags = 0u8;
     if last_in_slot {
         flags |= SHRED_LAST_IN_SLOT;
     }
-    // Build a minimal entry payload: num_hashes(8) + hash(32) + num_transactions(8) = 48 bytes
-    let mut payload = Vec::new();
-    payload.extend_from_slice(&1u64.to_le_bytes()); // num_hashes
-    payload.extend_from_slice(&[0xABu8; 32]); // hash
-    payload.extend_from_slice(&0u64.to_le_bytes()); // num_transactions = 0
-
     Shred::new(
         ShredCommonHeader {
             signature: [0; SIGNATURE_SIZE],
@@ -35,6 +38,11 @@ fn create_test_shred(slot: u64, index: u32, last_in_slot: bool) -> Shred {
     )
 }
 
+/// Create a single-shred slot (complete entry in one shred).
+fn create_test_shred(slot: u64, index: u32, last_in_slot: bool) -> Shred {
+    make_shred(slot, index, last_in_slot, make_entry_batch_payload())
+}
+
 #[test]
 fn collector_emits_block_when_last_in_slot_received() {
     let (shred_tx, shred_rx) = bounded_link::<Shred>(16);
@@ -42,9 +50,15 @@ fn collector_emits_block_when_last_in_slot_received() {
     let mut collector = ShredCollector::new(shred_rx, block_tx);
     let context = ServiceContext::new(ShutdownSwitch::new());
 
-    // Send two shreds for slot 10, second is last-in-slot.
-    shred_tx.try_send(create_test_shred(10, 0, false)).unwrap();
-    shred_tx.try_send(create_test_shred(10, 1, true)).unwrap();
+    // Split one entry batch across two shreds for slot 10.
+    let batch = make_entry_batch_payload();
+    let mid = batch.len() / 2;
+    shred_tx
+        .try_send(make_shred(10, 0, false, batch[..mid].to_vec()))
+        .unwrap();
+    shred_tx
+        .try_send(make_shred(10, 1, true, batch[mid..].to_vec()))
+        .unwrap();
 
     collector.tick(&context).unwrap();
 

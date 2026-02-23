@@ -60,22 +60,35 @@ impl PohEntry {
         self.transactions.is_empty()
     }
 
-    /// Serialize to bytes (num_hashes + hash + txs).
+    /// Serialize to bytes using bincode.
+    ///
+    /// Layout matches the standard Solana entry wire format:
+    /// - num_hashes: u64 (8 bytes LE)
+    /// - hash: [u8; 32]
+    /// - transaction_count: u64 (8 bytes LE, bincode Vec prefix)
+    /// - per transaction: u64 length + raw bytes
     pub fn to_bytes(&self) -> Vec<u8> {
-        let mut buf = Vec::with_capacity(self.size_bytes());
-        buf.extend_from_slice(&self.num_hashes.to_le_bytes());
-        buf.extend_from_slice(self.hash.as_bytes());
-        buf.extend_from_slice(&(self.transactions.len() as u32).to_le_bytes());
-        for tx in &self.transactions {
-            buf.extend_from_slice(&(tx.len() as u32).to_le_bytes());
-            buf.extend_from_slice(tx);
-        }
-        buf
+        bincode::serialize(self).expect("PohEntry serialization cannot fail")
     }
 
-    /// Serialized size in bytes.
+    /// Deserialize from bincode bytes.
+    pub fn from_bytes(data: &[u8]) -> Result<Self, bincode::Error> {
+        bincode::deserialize(data)
+    }
+
+    /// Deserialize a batch of entries from concatenated bincode bytes.
+    pub fn batch_from_bytes(data: &[u8]) -> Result<Vec<Self>, bincode::Error> {
+        bincode::deserialize(data)
+    }
+
+    /// Serialize a batch of entries to bincode bytes.
+    pub fn batch_to_bytes(entries: &[Self]) -> Vec<u8> {
+        bincode::serialize(entries).expect("PohEntry batch serialization cannot fail")
+    }
+
+    /// Serialized size in bytes (bincode format).
     pub fn size_bytes(&self) -> usize {
-        8 + 32 + 4 + self.transactions.iter().map(|t| 4 + t.len()).sum::<usize>()
+        bincode::serialized_size(self).unwrap_or(0) as usize
     }
 }
 

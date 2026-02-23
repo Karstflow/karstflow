@@ -150,15 +150,12 @@ impl EntryShredder {
     pub fn create_data_shreds(&mut self, entries: &[PohEntry]) -> ShredderResult<Vec<Shred>> {
         let mut shreds = Vec::new();
 
-        // Serialize all entries into a contiguous buffer
-        let mut entry_data = Vec::new();
-        for entry in entries {
-            entry_data.extend_from_slice(&entry.to_bytes());
-        }
-
-        if entry_data.is_empty() {
+        if entries.is_empty() {
             return Ok(shreds);
         }
+
+        // Serialize all entries as a bincode Vec — matches Solana wire format
+        let entry_data = PohEntry::batch_to_bytes(entries);
 
         // Split data into shred-sized chunks
         let chunks: Vec<&[u8]> = entry_data.chunks(DATA_SHRED_PAYLOAD_SIZE).collect();

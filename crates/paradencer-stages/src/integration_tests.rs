@@ -4,10 +4,12 @@
 
 #[cfg(test)]
 mod tests {
+    use crate::block_producer::PohEntry;
     use crate::shred_assembler::*;
     use paradencer_crypto::FecReconstructor;
     use paradencer_storage::{ShredWindowConfig, ShredWindowStore};
     use paradencer_types::shred::*;
+    use paradencer_types::Hash;
     use reed_solomon_erasure::galois_8::ReedSolomon;
 
     /// Create a deterministic test shred
@@ -57,44 +59,29 @@ mod tests {
         )
     }
 
-    /// Create entry bytes for testing
-    fn create_entry_bytes(num_hashes: u64, hash: [u8; 32], transactions: Vec<Vec<u8>>) -> Vec<u8> {
-        let mut bytes = Vec::new();
-        bytes.extend_from_slice(&num_hashes.to_le_bytes());
-        bytes.extend_from_slice(&hash);
-        bytes.extend_from_slice(&(transactions.len() as u64).to_le_bytes());
-
-        for tx in transactions {
-            bytes.extend_from_slice(&(tx.len() as u64).to_le_bytes());
-            bytes.extend_from_slice(&tx);
-        }
-
-        bytes
+    /// Create a bincode-serialized entry batch.
+    fn create_entry_batch(entries: &[PohEntry]) -> Vec<u8> {
+        PohEntry::batch_to_bytes(entries)
     }
 
     #[test]
     fn test_complete_pipeline_single_fec_set() {
-        // Step 1: Create test data representing entries
         let tx1 = vec![1, 2, 3, 4, 5];
         let tx2 = vec![6, 7, 8, 9, 10];
-        let entry_data = create_entry_bytes(10, [0xAB; 32], vec![tx1.clone(), tx2.clone()]);
+        let entry = PohEntry::new(10, Hash::new([0xAB; 32]), vec![tx1.clone(), tx2.clone()]);
+        let entry_data = create_entry_batch(&[entry]);
 
-        // Step 2: Create shreds with the entry data
         let shred = create_test_shred(100, 0, 0, &entry_data);
 
-        // Step 3: Insert into window store
         let window = ShredWindowStore::with_defaults();
         assert!(window.insert(shred.clone()).unwrap());
 
-        // Step 4: Retrieve shreds from window
         let retrieved = window.get_slot_shreds(100).unwrap();
         assert_eq!(retrieved.len(), 1);
 
-        // Step 5: Assemble block
         let mut assembler = ShredAssembler::new();
         let block = assembler.assemble_block(retrieved).unwrap();
 
-        // Verify block contents
         assert_eq!(block.slot, 100);
         assert_eq!(block.entries.len(), 1);
         assert_eq!(block.entries[0].transactions.len(), 2);
@@ -104,16 +91,10 @@ mod tests {
 
     #[test]
     fn test_pipeline_with_multiple_shreds() {
-        // Create multiple entries
-        let entry1 = create_entry_bytes(10, [0xAA; 32], vec![vec![1, 2, 3]]);
-        let entry2 = create_entry_bytes(20, [0xBB; 32], vec![vec![4, 5, 6]]);
-        let entry3 = create_entry_bytes(30, [0xCC; 32], vec![vec![7, 8, 9]]);
-
-        // Split across multiple shreds
-        let mut all_data = Vec::new();
-        all_data.extend_from_slice(&entry1);
-        all_data.extend_from_slice(&entry2);
-        all_data.extend_from_slice(&entry3);
+        let entry1 = PohEntry::new(10, Hash::new([0xAA; 32]), vec![vec![1, 2, 3]]);
+        let entry2 = PohEntry::new(20, Hash::new([0xBB; 32]), vec![vec![4, 5, 6]]);
+        let entry3 = PohEntry::new(30, Hash::new([0xCC; 32]), vec![vec![7, 8, 9]]);
+        let all_data = create_entry_batch(&[entry1, entry2, entry3]);
 
         let chunk_size = all_data.len() / 3;
         let shreds = vec![
@@ -122,13 +103,11 @@ mod tests {
             create_test_shred(100, 2, 0, &all_data[chunk_size * 2..]),
         ];
 
-        // Insert into window (out of order)
         let window = ShredWindowStore::with_defaults();
         window.insert(shreds[2].clone()).unwrap();
         window.insert(shreds[0].clone()).unwrap();
         window.insert(shreds[1].clone()).unwrap();
 
-        // Retrieve and assemble
         let retrieved = window.get_slot_shreds(100).unwrap();
         assert_eq!(retrieved.len(), 3);
 
@@ -142,35 +121,28 @@ mod tests {
 
     #[test]
     fn test_pipeline_with_fec_reconstruction() {
-        // Create test data
+        // Create test shred payloads (not entries — just raw FEC data for RS test)
+        let payload_size = 128;
         let test_data: Vec<Vec<u8>> = (0..4)
             .map(|i| {
-                let entry = create_entry_bytes(i, [i as u8; 32], vec![vec![i as u8; 10]]);
-                entry
+                let mut data = vec![i as u8; payload_size];
+                data[0] = i as u8;
+                data
             })
             .collect();
 
-        // Pad to uniform size
-        let max_size = test_data.iter().map(|d| d.len()).max().unwrap();
-        let mut uniform_data: Vec<Vec<u8>> = test_data
-            .iter()
-            .map(|d| {
-                let mut padded = d.clone();
-                padded.resize(max_size, 0);
-                padded
-            })
-            .collect();
+        let mut uniform_data = test_data.clone();
 
         // Create FEC coding shreds using Reed-Solomon
         let codec = ReedSolomon::new(4, 4).unwrap();
         let mut all_shreds = uniform_data.clone();
-        all_shreds.extend(vec![vec![0u8; max_size]; 4]);
+        all_shreds.extend(vec![vec![0u8; payload_size]; 4]);
 
         let mut shreds_refs: Vec<_> = all_shreds.iter_mut().map(|s| s.as_mut_slice()).collect();
         codec.encode(&mut shreds_refs).unwrap();
 
         // Create shred objects
-        let mut data_shreds: Vec<Shred> = uniform_data
+        let data_shreds: Vec<Shred> = uniform_data
             .iter()
             .enumerate()
             .map(|(i, data)| create_test_shred(100, i as u32, 0, data))
@@ -189,7 +161,6 @@ mod tests {
             .cloned()
             .collect();
 
-        // Insert into window with auto-reconstruction enabled
         let config = ShredWindowConfig {
             enable_auto_reconstruction: true,
             min_shreds_for_reconstruction: 4,
@@ -201,34 +172,30 @@ mod tests {
             window.insert(shred).unwrap();
         }
 
-        // Check statistics
         let stats = window.stats();
-        assert!(stats.total_shreds_inserted >= 4); // At least the ones we inserted
+        assert!(stats.total_shreds_inserted >= 4);
     }
 
     #[test]
     fn test_pipeline_multiple_slots() {
         let window = ShredWindowStore::with_defaults();
 
-        // Create shreds for multiple slots
         for slot in 100..110 {
-            let entry_data = create_entry_bytes(slot, [slot as u8; 32], vec![vec![slot as u8; 5]]);
+            let entry = PohEntry::new(slot, Hash::new([slot as u8; 32]), vec![vec![slot as u8; 5]]);
+            let entry_data = create_entry_batch(&[entry]);
             let shred = create_test_shred(slot, 0, 0, &entry_data);
             window.insert(shred).unwrap();
         }
 
-        // Verify all slots are tracked
         let stats = window.stats();
         assert_eq!(stats.active_slots, 10);
 
-        // Advance root and prune old slots
         let pruned = window.advance_root(105);
         assert_eq!(pruned, 5);
 
         let stats = window.stats();
         assert_eq!(stats.active_slots, 5);
 
-        // Assemble remaining slots
         let mut assembler = ShredAssembler::new();
         for slot in 105..110 {
             if let Some(shreds) = window.get_slot_shreds(slot) {
@@ -292,7 +259,8 @@ mod tests {
 
     #[test]
     fn test_parse_serialize_in_pipeline() {
-        let entry_data = create_entry_bytes(42, [0xDE; 32], vec![vec![1, 2, 3, 4]]);
+        let entry = PohEntry::new(42, Hash::new([0xDE; 32]), vec![vec![1, 2, 3, 4]]);
+        let entry_data = create_entry_batch(&[entry]);
         let original_shred = create_test_shred(100, 5, 0, &entry_data);
 
         // Serialize as if sending over network
@@ -318,12 +286,13 @@ mod tests {
     #[test]
     fn test_large_block_assembly() {
         // Create a larger block with many entries
-        let mut all_data = Vec::new();
-        for i in 0..20 {
-            let tx = vec![i as u8; 100];
-            let entry = create_entry_bytes(i as u64, [i as u8; 32], vec![tx]);
-            all_data.extend_from_slice(&entry);
-        }
+        let entries: Vec<PohEntry> = (0..20)
+            .map(|i| {
+                let tx = vec![i as u8; 100];
+                PohEntry::new(i as u64, Hash::new([i as u8; 32]), vec![tx])
+            })
+            .collect();
+        let all_data = create_entry_batch(&entries);
 
         // Split into multiple shreds
         let shred_size = 500;
@@ -355,7 +324,6 @@ mod tests {
         assert_eq!(block.entries.len(), 20);
         assert_eq!(block.transaction_count, 20);
 
-        // Verify statistics
         let stats = assembler.stats();
         assert_eq!(stats.blocks_assembled, 1);
         assert_eq!(stats.entries_extracted, 20);

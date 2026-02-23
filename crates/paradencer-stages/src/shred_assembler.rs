@@ -3,6 +3,7 @@
 //! This module takes complete shred sets from the window store and reconstructs
 //! entries and blocks.
 
+use crate::block_producer::PohEntry;
 use paradencer_types::shred::{Shred, ShredVariant};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -173,93 +174,30 @@ impl ShredAssembler {
         })
     }
 
-    /// Parse entries from raw entry data
+    /// Parse entries from raw entry data using bincode deserialization.
+    ///
+    /// The data is a bincode-serialized `Vec<PohEntry>`, matching the
+    /// standard Solana entry wire format used in shred payloads.
     fn parse_entries(&self, data: &[u8]) -> ShredAssemblyResult<Vec<Entry>> {
-        let mut entries = Vec::new();
-        let mut offset = 0;
-
-        while offset < data.len() {
-            // Check if we have enough data for entry header
-            if offset + 40 > data.len() {
-                // Not enough data for another entry, stop parsing
-                break;
-            }
-
-            // Parse entry header
-            let entry = self.parse_single_entry(data, &mut offset)?;
-            entries.push(entry);
+        if data.is_empty() {
+            return Ok(Vec::new());
         }
 
-        Ok(entries)
-    }
-
-    /// Parse a single entry from data at the given offset
-    fn parse_single_entry(&self, data: &[u8], offset: &mut usize) -> ShredAssemblyResult<Entry> {
-        // Entry format:
-        // - num_hashes: u64 (8 bytes)
-        // - hash: [u8; 32] (32 bytes)
-        // - num_transactions: u64 (8 bytes)
-        // - transactions: variable length
-
-        if *offset + 48 > data.len() {
-            return Err(ShredAssemblyError::PayloadTooShort {
-                expected: 48,
-                actual: data.len() - *offset,
-            });
-        }
-
-        // Parse num_hashes
-        let num_hashes =
-            u64::from_le_bytes(data[*offset..*offset + 8].try_into().map_err(|_| {
-                ShredAssemblyError::InvalidEntryData("Failed to parse num_hashes".to_string())
-            })?);
-        *offset += 8;
-
-        // Parse hash
-        let hash: [u8; 32] = data[*offset..*offset + 32].try_into().map_err(|_| {
-            ShredAssemblyError::InvalidEntryData("Failed to parse hash".to_string())
+        let poh_entries: Vec<PohEntry> = PohEntry::batch_from_bytes(data).map_err(|e| {
+            ShredAssemblyError::DeserializationFailed(format!(
+                "bincode deserialization failed: {}",
+                e
+            ))
         })?;
-        *offset += 32;
 
-        // Parse number of transactions
-        let num_transactions =
-            u64::from_le_bytes(data[*offset..*offset + 8].try_into().map_err(|_| {
-                ShredAssemblyError::InvalidEntryData("Failed to parse num_transactions".to_string())
-            })?);
-        *offset += 8;
-
-        // Parse transactions
-        let mut transactions = Vec::new();
-        for _ in 0..num_transactions {
-            if *offset + 8 > data.len() {
-                break; // Not enough data for transaction length
-            }
-
-            // Read transaction length
-            let tx_len =
-                u64::from_le_bytes(data[*offset..*offset + 8].try_into().map_err(|_| {
-                    ShredAssemblyError::InvalidEntryData(
-                        "Failed to parse transaction length".to_string(),
-                    )
-                })?) as usize;
-            *offset += 8;
-
-            if *offset + tx_len > data.len() {
-                break; // Not enough data for transaction
-            }
-
-            // Read transaction data
-            let tx_data = data[*offset..*offset + tx_len].to_vec();
-            *offset += tx_len;
-
-            transactions.push(tx_data);
-        }
-
-        Ok(Entry {
-            num_hashes,
-            hash,
-            transactions,
-        })
+        Ok(poh_entries
+            .into_iter()
+            .map(|pe| Entry {
+                num_hashes: pe.num_hashes,
+                hash: *pe.hash.as_bytes(),
+                transactions: pe.transactions,
+            })
+            .collect())
     }
 
     /// Get assembly statistics
@@ -304,6 +242,7 @@ pub fn group_shreds_by_slot(shreds: Vec<Shred>) -> BTreeMap<u64, Vec<Shred>> {
 mod tests {
     use super::*;
     use paradencer_types::shred::*;
+    use paradencer_types::Hash;
 
     fn create_test_shred(slot: u64, index: u32, payload: Vec<u8>) -> Shred {
         Shred::new(
@@ -324,25 +263,9 @@ mod tests {
         )
     }
 
-    fn create_entry_bytes(num_hashes: u64, hash: [u8; 32], transactions: Vec<Vec<u8>>) -> Vec<u8> {
-        let mut bytes = Vec::new();
-
-        // num_hashes
-        bytes.extend_from_slice(&num_hashes.to_le_bytes());
-
-        // hash
-        bytes.extend_from_slice(&hash);
-
-        // num_transactions
-        bytes.extend_from_slice(&(transactions.len() as u64).to_le_bytes());
-
-        // transactions
-        for tx in transactions {
-            bytes.extend_from_slice(&(tx.len() as u64).to_le_bytes());
-            bytes.extend_from_slice(&tx);
-        }
-
-        bytes
+    /// Create bincode-serialized entry batch bytes (matches shredder output).
+    fn create_entry_batch_bytes(entries: &[PohEntry]) -> Vec<u8> {
+        PohEntry::batch_to_bytes(entries)
     }
 
     #[test]
@@ -362,14 +285,12 @@ mod tests {
     fn test_assemble_single_entry() {
         let mut assembler = ShredAssembler::new();
 
-        // Create entry data
         let tx1 = vec![1, 2, 3, 4, 5];
         let tx2 = vec![6, 7, 8, 9, 10];
-        let entry_data = create_entry_bytes(10, [0xAB; 32], vec![tx1.clone(), tx2.clone()]);
+        let entry = PohEntry::new(10, Hash::new([0xAB; 32]), vec![tx1.clone(), tx2.clone()]);
+        let entry_data = create_entry_batch_bytes(&[entry]);
 
-        // Create shred with entry data
         let shred = create_test_shred(100, 0, entry_data);
-
         let block = assembler.assemble_block(vec![shred]).unwrap();
 
         assert_eq!(block.slot, 100);
@@ -386,16 +307,15 @@ mod tests {
     fn test_assemble_multiple_entries() {
         let mut assembler = ShredAssembler::new();
 
-        // Create multiple entries
-        let entry1 = create_entry_bytes(10, [0xAA; 32], vec![vec![1, 2, 3]]);
-        let entry2 = create_entry_bytes(20, [0xBB; 32], vec![vec![4, 5, 6], vec![7, 8, 9]]);
-
-        let mut combined = Vec::new();
-        combined.extend_from_slice(&entry1);
-        combined.extend_from_slice(&entry2);
+        let entry1 = PohEntry::new(10, Hash::new([0xAA; 32]), vec![vec![1, 2, 3]]);
+        let entry2 = PohEntry::new(
+            20,
+            Hash::new([0xBB; 32]),
+            vec![vec![4, 5, 6], vec![7, 8, 9]],
+        );
+        let combined = create_entry_batch_bytes(&[entry1, entry2]);
 
         let shred = create_test_shred(100, 0, combined);
-
         let block = assembler.assemble_block(vec![shred]).unwrap();
 
         assert_eq!(block.entries.len(), 2);
@@ -408,8 +328,8 @@ mod tests {
     fn test_assemble_multiple_shreds() {
         let mut assembler = ShredAssembler::new();
 
-        // Split entry across multiple shreds
-        let entry_data = create_entry_bytes(10, [0xAB; 32], vec![vec![1, 2, 3, 4, 5]]);
+        let entry = PohEntry::new(10, Hash::new([0xAB; 32]), vec![vec![1, 2, 3, 4, 5]]);
+        let entry_data = create_entry_batch_bytes(&[entry]);
 
         let mid = entry_data.len() / 2;
         let shred1 = create_test_shred(100, 0, entry_data[..mid].to_vec());
@@ -441,7 +361,6 @@ mod tests {
         let shred1 = create_test_shred(100, 0, vec![]);
         let mut shred2 = create_test_shred(100, 1, vec![]);
 
-        // Mark shred2 as last in slot
         if let ShredVariant::LegacyData(ref mut header) = shred2.variant {
             header.flags |= SHRED_LAST_IN_SLOT;
         }
@@ -473,7 +392,8 @@ mod tests {
     fn test_stats_tracking() {
         let mut assembler = ShredAssembler::new();
 
-        let entry_data = create_entry_bytes(10, [0xAB; 32], vec![vec![1, 2, 3]]);
+        let entry = PohEntry::new(10, Hash::new([0xAB; 32]), vec![vec![1, 2, 3]]);
+        let entry_data = create_entry_batch_bytes(&[entry]);
         let shred = create_test_shred(100, 0, entry_data);
 
         assembler.assemble_block(vec![shred]).unwrap();
@@ -483,5 +403,29 @@ mod tests {
         assert_eq!(stats.entries_extracted, 1);
         assert_eq!(stats.transactions_extracted, 1);
         assert!(stats.bytes_processed > 0);
+    }
+
+    #[test]
+    fn test_round_trip_shred_assemble() {
+        // Verify shredder → assembler round-trip works with bincode format
+        let mut assembler = ShredAssembler::new();
+
+        let tx1 = vec![10, 20, 30, 40, 50];
+        let tx2 = vec![60, 70, 80];
+        let entry1 = PohEntry::new(42, Hash::new([0xCC; 32]), vec![tx1.clone(), tx2.clone()]);
+        let entry2 = PohEntry::new(7, Hash::new([0xDD; 32]), vec![]);
+
+        let batch_bytes = PohEntry::batch_to_bytes(&[entry1, entry2]);
+        let shred = create_test_shred(200, 0, batch_bytes);
+
+        let block = assembler.assemble_block(vec![shred]).unwrap();
+
+        assert_eq!(block.entries.len(), 2);
+        assert_eq!(block.entries[0].num_hashes, 42);
+        assert_eq!(block.entries[0].hash, [0xCC; 32]);
+        assert_eq!(block.entries[0].transactions, vec![tx1, tx2]);
+        assert_eq!(block.entries[1].num_hashes, 7);
+        assert_eq!(block.entries[1].hash, [0xDD; 32]);
+        assert!(block.entries[1].transactions.is_empty());
     }
 }
