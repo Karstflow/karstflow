@@ -27,6 +27,8 @@ serde = { workspace = true }
 bincode = { workspace = true }
 bs58 = { workspace = true }
 bytes = { workspace = true }
+bv = { workspace = true }
+serde-big-array = { workspace = true }
 
 # Concurrency
 parking_lot = { workspace = true }

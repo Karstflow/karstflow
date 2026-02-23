@@ -259,6 +259,11 @@ impl ClusterInfo {
         self.node_id
     }
 
+    /// Access the Ed25519 signing key (if configured).
+    pub fn signing_key(&self) -> Option<&[u8; 32]> {
+        self.signing_key.as_ref()
+    }
+
     pub fn self_contact_info(&self) -> ContactInfo {
         self.self_contact_info.read().clone()
     }

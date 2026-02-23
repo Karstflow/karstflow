@@ -2,6 +2,7 @@ mod cluster_info;
 pub mod crds;
 mod protocol;
 mod service;
+pub mod wire;
 
 #[cfg(test)]
 mod tests;

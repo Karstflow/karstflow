@@ -194,3 +194,25 @@ pub const UPDATE_TAG_VOTE: u8 = 3;
 pub const UPDATE_TAG_DUPLICATE_SHRED: u8 = 4;
 /// Update: snapshot hashes received.
 pub const UPDATE_TAG_SNAPSHOT_HASHES: u8 = 5;
+
+// ---------------------------------------------------------------------------
+// Wire format constants
+// ---------------------------------------------------------------------------
+
+/// Maximum serialized size of a single CRDS data entry.
+pub const MAX_CRDS_OBJECT_SIZE: usize = 928;
+
+/// Maximum number of prune target nodes per prune message.
+pub const MAX_PRUNE_DATA_NODES: usize = 32;
+
+/// Size of the ping/pong token in bytes.
+pub const PING_TOKEN_SIZE: usize = 32;
+
+/// Prefix for pong hash derivation: SHA256(prefix || token).
+pub const PING_PONG_HASH_PREFIX: &[u8] = b"SOLANA_PING_PONG";
+
+/// Maximum wallclock value in milliseconds (sanity bound).
+pub const MAX_WALLCLOCK_MS: u64 = 1_000_000_000_000_000;
+
+/// Number of duplicate shred proof chunks per complete proof.
+pub const DUPLICATE_SHRED_MAX_CHUNKS: u16 = 16;
