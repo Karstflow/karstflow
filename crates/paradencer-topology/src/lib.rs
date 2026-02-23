@@ -192,6 +192,76 @@ capacity = 64
         assert!(load_result.is_err());
     }
 
+    /// End-to-end test: synthetic gossip packets flow through the full shred pipeline.
+    ///
+    /// EdgeIntake generates synthetic gossip-sourced shred packets →
+    /// ShredFilter parses and forwards → ShredCollector assembles →
+    /// block arrives on shred_block_receiver.
+    #[test]
+    fn shred_pipeline_end_to_end_synthetic_gossip() {
+        use paradencer_runtime::{ServiceContext, ShutdownSwitch};
+
+        // Configure all synthetic traffic as gossip so it flows through
+        // the shred path (EdgeIntake → ShredFilter → ShredCollector).
+        let policy = IngressPolicy {
+            synthetic_source_weight_quic: 0,
+            synthetic_source_weight_gossip: 1,
+            synthetic_source_weight_bundle: 0,
+            synthetic_source_weight_rpc: 0,
+            synthetic_batch_size_per_tick: 4,
+            synthetic_idle_ticks_between_batches: 0,
+            ..IngressPolicy::default()
+        };
+
+        let topology = plan_default_topology(64, 64, 64, 1, 1).unwrap();
+        let materialized = materialize_services(
+            topology,
+            policy,
+            MetricsOutputFormat::JsonLines,
+            MetricsOutputTarget::Stdout,
+            StorageRuntimePolicy::default(),
+        )
+        .unwrap();
+
+        let block_receiver = materialized
+            .shred_block_receiver
+            .expect("shred pipeline must produce a block receiver");
+
+        let context = ServiceContext::new(ShutdownSwitch::new());
+        let mut services = materialized.services;
+
+        // Start all services.
+        for svc in services.iter_mut() {
+            svc.on_start(&context).unwrap();
+        }
+
+        // Tick all services for enough rounds to produce at least one complete
+        // slot. With batch_size=4, after 8 ticks EdgeIntake generates 32 gossip
+        // packets (indices 0..31). The 32nd packet has is_last=true, completing
+        // slot 0. Extra rounds ensure downstream services process the data.
+        let mut block_received = false;
+        for _ in 0..50 {
+            for svc in services.iter_mut() {
+                let _ = svc.tick(&context);
+            }
+
+            if block_receiver.try_recv().unwrap_or(None).is_some() {
+                block_received = true;
+                break;
+            }
+        }
+
+        // Stop all services.
+        for svc in services.iter_mut() {
+            let _ = svc.on_stop(&context);
+        }
+
+        assert!(
+            block_received,
+            "expected at least one assembled block from the shred pipeline"
+        );
+    }
+
     #[test]
     fn loader_rejects_transaction_stream_not_pointing_to_block_builder() {
         let suffix = SystemTime::now()
