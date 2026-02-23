@@ -1,6 +1,6 @@
 use crate::InboundPacket;
 use paradencer_mesh::{OutPort, SendError};
-use paradencer_net::{IngressMode, IngressPolicy};
+use paradencer_net::{IngressMode, IngressPolicy, IngressSource};
 use paradencer_runtime::{RuntimeError, RuntimeResult, Service, ServiceContext};
 use std::net::UdpSocket;
 use std::time::Duration;
@@ -136,6 +136,42 @@ impl EdgeIntake {
             .and_then(|socket| socket.local_addr().ok())
     }
 
+    /// Build synthetic shred bytes for gossip-sourced packets.
+    ///
+    /// Creates a minimal valid legacy data shred with an empty entry payload
+    /// (num_hashes=1, zero hash, 0 transactions). The slot is derived from
+    /// the packet ID so that shreds from consecutive IDs share the same slot.
+    fn build_synthetic_shred_data(packet_id: u64) -> Vec<u8> {
+        // Derive slot from packet_id: every 32 packets share a slot.
+        let slot = packet_id / 32;
+        let index = (packet_id % 32) as u32;
+        let is_last = index == 31;
+
+        let mut buf = Vec::with_capacity(152);
+        // Signature (64 bytes)
+        buf.extend_from_slice(&[0u8; 64]);
+        // Variant: legacy data (0b0101)
+        buf.push(0b0101);
+        // Slot (8 bytes LE)
+        buf.extend_from_slice(&slot.to_le_bytes());
+        // Index (4 bytes LE)
+        buf.extend_from_slice(&index.to_le_bytes());
+        // Version (2 bytes LE)
+        buf.extend_from_slice(&1u16.to_le_bytes());
+        // FEC set index (4 bytes LE)
+        buf.extend_from_slice(&0u32.to_le_bytes());
+        // Data header: parent_offset=1, flags, size=48
+        buf.extend_from_slice(&1u16.to_le_bytes());
+        let flags = if is_last { 0x80u8 } else { 0u8 };
+        buf.push(flags);
+        buf.extend_from_slice(&48u16.to_le_bytes());
+        // Entry payload: num_hashes(8) + hash(32) + num_transactions(8)
+        buf.extend_from_slice(&1u64.to_le_bytes());
+        buf.extend_from_slice(&[0u8; 32]);
+        buf.extend_from_slice(&0u64.to_le_bytes());
+        buf
+    }
+
     fn tick_synthetic(&mut self, context: &ServiceContext) -> RuntimeResult<()> {
         if self.idle_ticks_remaining > 0 {
             self.idle_ticks_remaining = self.idle_ticks_remaining.saturating_sub(1);
@@ -157,11 +193,23 @@ impl EdgeIntake {
             .ingress_policy
             .synthetic_source_for_cursor(self.synthetic_source_cursor);
         self.synthetic_source_cursor = self.synthetic_source_cursor.saturating_add(1);
+
+        let data = if source == IngressSource::Gossip {
+            Self::build_synthetic_shred_data(self.next_packet_id)
+        } else {
+            vec![]
+        };
+        let payload_bytes = if data.is_empty() {
+            self.ingress_policy.synthetic_payload_bytes
+        } else {
+            data.len()
+        };
+
         let packet = InboundPacket {
             packet_id: self.next_packet_id,
-            payload_bytes: self.ingress_policy.synthetic_payload_bytes,
+            payload_bytes,
             source,
-            data: vec![],
+            data,
         };
         self.next_packet_id += 1;
         self.packets_sent_in_batch = self.packets_sent_in_batch.saturating_add(1);
