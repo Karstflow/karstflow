@@ -93,7 +93,10 @@ pub use shred_network::{
     NetworkShred, RetransmitDecision, ShredInsertOutcome, ShredNetworkConfig, ShredNetworkStage,
     ShredNetworkStats, ShredNetworkStatsSnapshot, ShredSource,
 };
-pub use tile_pipeline::{PipelineConfig, ResolvTile, TransactionPipeline, VerifyTile};
+pub use tile_pipeline::{
+    PipelineConfig, ResolvTile, TransactionPipeline, ValidatorPipeline, ValidatorPipelineResult,
+    VerifyTile,
+};
 pub use verify_service::{VerifyService, VerifyServiceStats};
 pub use verify_stage::{
     TransactionSource, UnverifiedTransaction, VerifiedTransaction, VerifyConfig, VerifyOutcome,

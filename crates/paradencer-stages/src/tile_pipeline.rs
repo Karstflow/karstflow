@@ -584,6 +584,222 @@ impl TransactionPipeline {
 }
 
 // ---------------------------------------------------------------------------
+// Resolved-to-packed transaction conversion
+// ---------------------------------------------------------------------------
+
+/// Convert raw resolved transaction bytes into a PackedTransaction for
+/// the pack scheduler.
+///
+/// Parses the wire-format transaction to extract account keys (for lock
+/// detection), blockhash, and metadata. If parsing fails, the transaction
+/// is still packable with default metadata (the execution engine will
+/// handle the parse failure gracefully).
+fn resolved_to_packed(payload: Vec<u8>) -> PackedTransaction {
+    let blockhash = extract_blockhash(&payload);
+
+    // Parse the full transaction to extract account keys.
+    match paradencer_types::parse_transaction(&payload) {
+        Ok(parsed) => {
+            let header = &parsed.message.header;
+
+            // Writable accounts: first N keys where N = num_required_signatures - num_readonly_signed
+            // Plus unsigned writable accounts.
+            let total_keys = parsed.message.account_keys.len();
+            let num_writable_signed = header.num_writable_signed();
+            let num_writable_unsigned = header.num_writable_unsigned(total_keys);
+
+            let mut write_accounts = Vec::new();
+            let mut read_accounts = Vec::new();
+
+            for (i, key) in parsed.message.account_keys.iter().enumerate() {
+                let is_writable = if i < header.num_required_signatures as usize {
+                    // Signed accounts: writable if in the first num_writable_signed
+                    i < num_writable_signed
+                } else {
+                    // Unsigned accounts: writable if in the writable-unsigned range
+                    let unsigned_idx = i - header.num_required_signatures as usize;
+                    unsigned_idx < num_writable_unsigned
+                };
+
+                if is_writable {
+                    write_accounts.push(key.to_bytes());
+                } else {
+                    read_accounts.push(key.to_bytes());
+                }
+            }
+
+            let data_size = payload.len();
+            let is_vote = false; // TODO: detect vote transactions by program ID
+
+            PackedTransaction {
+                payload,
+                blockhash,
+                priority_fee: 0,
+                compute_units: paradencer_constants::execution::MAX_COMPUTE_UNITS,
+                is_vote,
+                expires_at_slot: u64::MAX,
+                write_accounts,
+                read_accounts,
+                data_size,
+                insertion_order: 0,
+            }
+        }
+        Err(_) => {
+            // Unparseable — submit with empty locks; execution will fail.
+            PackedTransaction {
+                data_size: payload.len(),
+                payload,
+                blockhash,
+                priority_fee: 0,
+                compute_units: paradencer_constants::execution::MAX_COMPUTE_UNITS,
+                is_vote: false,
+                expires_at_slot: u64::MAX,
+                write_accounts: vec![],
+                read_accounts: vec![],
+                insertion_order: 0,
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// ValidatorPipeline — full end-to-end: Ingress → Verify → Resolv → Pack → Exec → PoH
+// ---------------------------------------------------------------------------
+
+/// Full validator transaction pipeline from ingress to block production.
+///
+/// Combines zero-copy IPC for the hot path (Ingress → Verify → Resolv) with
+/// the LeaderPipeline for block production (Pack → Exec → PoH). Resolved
+/// transactions are automatically converted to PackedTransactions and fed
+/// to the pack scheduler.
+///
+/// ```text
+///   QuicTile → [IPC] → VerifyTile → [IPC] → ResolvTile → [IPC] →
+///     → resolved_to_packed() → PackScheduler → ExecStage → PoH
+/// ```
+pub struct ValidatorPipeline {
+    /// IPC pipeline: ingress → verify → resolv.
+    txn_pipeline: TransactionPipeline,
+    /// Block production: pack → exec → PoH.
+    leader: crate::leader_pipeline::LeaderPipeline,
+}
+
+impl ValidatorPipeline {
+    /// Create a new validator pipeline.
+    pub fn new(
+        pipeline_config: PipelineConfig,
+        leader: crate::leader_pipeline::LeaderPipeline,
+    ) -> Self {
+        Self {
+            txn_pipeline: TransactionPipeline::with_config(pipeline_config),
+            leader,
+        }
+    }
+
+    /// Ingest a raw transaction packet.
+    ///
+    /// Returns `true` if accepted, `false` if backpressure prevented ingestion.
+    pub fn ingest(&mut self, payload: &[u8], source: TransactionSource) -> bool {
+        self.txn_pipeline.ingest(payload, source)
+    }
+
+    /// Register a blockhash for resolv.
+    pub fn register_blockhash(&mut self, hash: Blockhash, slot: u64) {
+        self.txn_pipeline.register_blockhash(hash, slot);
+    }
+
+    /// Advance the resolv slot for expiry tracking.
+    pub fn advance_slot(&mut self, slot: u64) {
+        self.txn_pipeline.advance_slot(slot);
+    }
+
+    /// Start a new leader slot. Resets pack limits and configures PoH.
+    pub fn begin_slot(&mut self, slot: u64) {
+        self.leader.begin_slot(slot);
+    }
+
+    /// Service one iteration of the full pipeline.
+    ///
+    /// 1. Services the IPC pipeline (Verify + Resolv tiles)
+    /// 2. Drains resolved transactions and feeds them to the pack scheduler
+    /// 3. Steps the leader pipeline (Pack → Exec → PoH) once
+    ///
+    /// Returns the total fragments processed plus leader step outcome.
+    pub fn service(&mut self) -> ValidatorPipelineResult {
+        // Step 1: Service IPC tiles.
+        let ipc_processed = self.txn_pipeline.service();
+
+        // Step 2: Drain resolved transactions → pack scheduler.
+        let resolved = self.txn_pipeline.drain_resolved();
+        let resolved_count = resolved.len();
+        for payload in resolved {
+            let packed = resolved_to_packed(payload);
+            self.leader.submit_transaction(packed);
+        }
+
+        // Step 3: Step leader pipeline (produces microblock if available).
+        let leader_step = self.leader.step();
+
+        ValidatorPipelineResult {
+            ipc_fragments_processed: ipc_processed,
+            transactions_resolved: resolved_count,
+            leader_step,
+        }
+    }
+
+    /// Advance PoH ticks.
+    pub fn advance_poh(&mut self, target_hashes: u64) {
+        self.leader.advance_poh(target_hashes);
+    }
+
+    /// Finish the current slot and get accumulated entries.
+    pub fn finish_slot(&mut self) -> Vec<crate::block_producer::Entry> {
+        self.leader.finish_slot()
+    }
+
+    /// Number of queued transactions in the pack scheduler.
+    pub fn queue_depth(&self) -> usize {
+        self.leader.queue_depth()
+    }
+
+    /// Number of microblocks executed in the current slot.
+    pub fn microblocks_executed(&self) -> u64 {
+        self.leader.microblocks_executed()
+    }
+
+    /// Whether the leader pipeline is in Leading state.
+    pub fn is_leading(&self) -> bool {
+        self.leader.is_leading()
+    }
+
+    /// Access the underlying TransactionPipeline.
+    pub fn txn_pipeline(&self) -> &TransactionPipeline {
+        &self.txn_pipeline
+    }
+
+    /// Access the underlying LeaderPipeline.
+    pub fn leader_pipeline(&self) -> &crate::leader_pipeline::LeaderPipeline {
+        &self.leader
+    }
+
+    /// Mutable access to the LeaderPipeline.
+    pub fn leader_pipeline_mut(&mut self) -> &mut crate::leader_pipeline::LeaderPipeline {
+        &mut self.leader
+    }
+}
+
+/// Result of one ValidatorPipeline service iteration.
+#[derive(Debug)]
+pub struct ValidatorPipelineResult {
+    /// Fragments processed by IPC tiles (verify + resolv).
+    pub ipc_fragments_processed: usize,
+    /// Transactions that passed resolv and were submitted to pack.
+    pub transactions_resolved: usize,
+    /// Result of the leader pipeline step (None if no microblock produced).
+    pub leader_step: Option<crate::leader_pipeline::PipelineStepResult>,
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -753,5 +969,66 @@ mod tests {
             let back = origin_to_source(origin);
             assert_eq!(back, source);
         }
+    }
+
+    #[test]
+    fn resolved_to_packed_extracts_accounts() {
+        let key = SigningKey::from_bytes(&[42u8; 32]);
+        let payload = make_signed_transaction(&key);
+        let packed = resolved_to_packed(payload.clone());
+
+        assert_eq!(packed.payload, payload);
+        assert_eq!(packed.blockhash, [0xBB; 32]);
+        // The signer should be a write account.
+        assert_eq!(packed.write_accounts.len(), 1);
+        assert_eq!(packed.write_accounts[0], key.verifying_key().to_bytes());
+    }
+
+    #[test]
+    fn resolved_to_packed_handles_malformed() {
+        let packed = resolved_to_packed(vec![0xFF, 0xFF]);
+        // Should still produce a PackedTransaction with empty locks.
+        assert_eq!(packed.payload, vec![0xFF, 0xFF]);
+        assert!(packed.write_accounts.is_empty());
+        assert!(packed.read_accounts.is_empty());
+    }
+
+    #[test]
+    fn validator_pipeline_end_to_end() {
+        use crate::block_producer::PohService;
+        use crate::exec_stage::MockExecutionEngine;
+        use crate::leader_pipeline::LeaderPipeline;
+        use crate::pack_stage::PackScheduler;
+        use paradencer_types::Hash;
+
+        // Build leader pipeline.
+        let pack = PackScheduler::new();
+        let engine = MockExecutionEngine::new(50_000);
+        let exec = ExecStage::new(Box::new(engine));
+        let poh = PohService::new(Hash::default());
+        let leader = LeaderPipeline::new(pack, exec, poh);
+
+        // Build full pipeline.
+        let mut pipeline = ValidatorPipeline::new(PipelineConfig::default(), leader);
+
+        // Start a leader slot.
+        pipeline.begin_slot(1);
+
+        // Register blockhash.
+        let blockhash = [0xBB; 32];
+        pipeline.register_blockhash(blockhash, 100);
+
+        // Ingest a signed transaction.
+        let key = SigningKey::from_bytes(&[42u8; 32]);
+        let payload = make_signed_transaction(&key);
+        assert!(pipeline.ingest(&payload, TransactionSource::Quic));
+
+        // Service multiple rounds to move through verify → resolv → pack.
+        for _ in 0..5 {
+            pipeline.service();
+        }
+
+        // The transaction should have been verified, resolved, packed, and executed.
+        assert!(pipeline.microblocks_executed() >= 1);
     }
 }
