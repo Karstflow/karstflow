@@ -5,9 +5,10 @@
 /// Manages FEC set completion, triggers Reed-Solomon reconstruction when
 /// enough coding shreds arrive, and makes retransmit decisions based on
 /// the turbine tree structure.
-///
-/// This corresponds to Firedancer's shred tile and resolv tile
-/// functionality for the network-facing shred pipeline.
+use paradencer_crypto::reed_solomon::FecReconstructor;
+use paradencer_types::shred::{
+    CodingShredHeader, DataShredHeader, Shred, ShredCommonHeader, ShredVariant,
+};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -23,25 +24,13 @@ pub enum ShredSource {
     Repair,
 }
 
-/// A network shred with its metadata.
+/// A network shred with its source metadata.
 #[derive(Debug, Clone)]
 pub struct NetworkShred {
-    /// Slot this shred belongs to.
-    pub slot: u64,
-    /// Index within the slot.
-    pub index: u32,
-    /// FEC set index.
-    pub fec_set_index: u32,
-    /// Whether this is a coding (parity) shred.
-    pub is_coding: bool,
-    /// Whether this is the last shred in the slot.
-    pub is_last_in_slot: bool,
-    /// Raw shred bytes.
-    pub data: Vec<u8>,
+    /// The parsed shred.
+    pub shred: Shred,
     /// Source of this shred.
     pub source: ShredSource,
-    /// Shred signature for deduplication.
-    pub signature: [u8; 64],
 }
 
 /// Result of inserting a shred into the network stage.
@@ -49,7 +38,7 @@ pub struct NetworkShred {
 pub enum ShredInsertOutcome {
     /// Shred accepted, FEC set still incomplete.
     Accepted,
-    /// Shred completed a FEC set (ready for assembly).
+    /// Shred completed a FEC set (all data shreds received, ready for assembly).
     FecSetComplete { fec_set_index: u32 },
     /// Shred triggered FEC recovery (partial data + enough coding).
     FecRecoverable { fec_set_index: u32 },
@@ -72,40 +61,72 @@ pub struct RetransmitDecision {
     pub slot: u64,
 }
 
+/// A completed FEC set with all data shreds resolved.
+#[derive(Debug, Clone)]
+pub struct CompletedFecSet {
+    /// Slot number.
+    pub slot: u64,
+    /// FEC set index within the slot.
+    pub fec_set_index: u32,
+    /// All data shreds in order (index-sorted).
+    pub data_shreds: Vec<Shred>,
+    /// Whether Reed-Solomon reconstruction was needed.
+    pub was_recovered: bool,
+}
+
 /// Tracks the state of a single FEC set.
 #[derive(Debug)]
 struct FecSetState {
-    /// Expected number of data shreds in this FEC set.
-    expected_data: u32,
-    /// Expected number of coding shreds in this FEC set.
-    expected_coding: u32,
-    /// Set of received data shred indices.
-    received_data: HashSet<u32>,
-    /// Set of received coding shred indices.
-    received_coding: HashSet<u32>,
+    /// Number of data shreds in this FEC set (learned from coding header).
+    num_data: u32,
+    /// Number of coding shreds in this FEC set (learned from coding header).
+    num_coding: u32,
+    /// Whether FEC parameters are known (from first coding shred).
+    params_known: bool,
+    /// Received data shreds (relative index within FEC set → shred).
+    data_shreds: HashMap<u32, Shred>,
+    /// Received coding shreds (position within FEC set → shred).
+    coding_shreds: HashMap<u32, Shred>,
+    /// Whether this FEC set has already been resolved.
+    resolved: bool,
 }
 
 impl FecSetState {
-    fn new(expected_data: u32, expected_coding: u32) -> Self {
+    fn new() -> Self {
         Self {
-            expected_data,
-            expected_coding,
-            received_data: HashSet::new(),
-            received_coding: HashSet::new(),
+            num_data: 0,
+            num_coding: 0,
+            params_known: false,
+            data_shreds: HashMap::new(),
+            coding_shreds: HashMap::new(),
+            resolved: false,
         }
     }
 
     fn total_received(&self) -> u32 {
-        self.received_data.len() as u32 + self.received_coding.len() as u32
+        self.data_shreds.len() as u32 + self.coding_shreds.len() as u32
     }
 
+    /// All data shreds received (no RS needed).
     fn is_complete(&self) -> bool {
-        self.received_data.len() as u32 >= self.expected_data
+        self.params_known && self.data_shreds.len() as u32 >= self.num_data && !self.resolved
     }
 
+    /// Enough total shreds for RS recovery but not all data present.
     fn is_recoverable(&self) -> bool {
-        // Reed-Solomon can recover if we have at least `expected_data` shreds total
-        self.total_received() >= self.expected_data && !self.is_complete()
+        self.params_known
+            && self.total_received() >= self.num_data
+            && (self.data_shreds.len() as u32) < self.num_data
+            && !self.resolved
+    }
+
+    /// Learn FEC parameters from a coding shred header.
+    fn learn_params(&mut self, num_data: u16, num_coding: u16) {
+        if !self.params_known {
+            self.num_data = num_data as u32;
+            self.num_coding = num_coding as u32;
+            self.params_known = true;
+        }
     }
 }
 
@@ -132,10 +153,6 @@ impl SlotState {
 pub struct ShredNetworkConfig {
     /// Maximum number of slots to track simultaneously.
     pub max_tracked_slots: usize,
-    /// Default FEC set size (data shreds per set).
-    pub default_data_shreds_per_fec: u32,
-    /// Default FEC set coding shreds per set.
-    pub default_coding_shreds_per_fec: u32,
     /// This validator's position in the turbine tree (for retransmit).
     pub turbine_layer: u16,
     /// Number of neighbors in our turbine layer.
@@ -148,8 +165,6 @@ impl Default for ShredNetworkConfig {
     fn default() -> Self {
         Self {
             max_tracked_slots: 512,
-            default_data_shreds_per_fec: 32,
-            default_coding_shreds_per_fec: 32,
             turbine_layer: 0,
             turbine_neighbor_count: 0,
             min_slot: 0,
@@ -210,6 +225,8 @@ pub struct ShredNetworkStage {
     slot_order: VecDeque<u64>,
     /// Pending retransmit decisions.
     pending_retransmits: Vec<RetransmitDecision>,
+    /// Completed FEC sets waiting to be drained.
+    pending_completed: Vec<CompletedFecSet>,
     /// Statistics.
     stats: Arc<ShredNetworkStats>,
 }
@@ -226,6 +243,7 @@ impl ShredNetworkStage {
             slots: HashMap::new(),
             slot_order: VecDeque::new(),
             pending_retransmits: Vec::new(),
+            pending_completed: Vec::new(),
             config,
             stats: Arc::new(ShredNetworkStats::default()),
         }
@@ -237,10 +255,10 @@ impl ShredNetworkStage {
     }
 
     /// Insert a shred into the stage. Returns the insertion outcome.
-    pub fn insert_shred(&mut self, shred: NetworkShred) -> ShredInsertOutcome {
+    pub fn insert_shred(&mut self, net_shred: NetworkShred) -> ShredInsertOutcome {
         self.stats.shreds_received.fetch_add(1, Ordering::Relaxed);
 
-        match shred.source {
+        match net_shred.source {
             ShredSource::Turbine => {
                 self.stats
                     .shreds_from_turbine
@@ -256,47 +274,65 @@ impl ShredNetworkStage {
             }
         }
 
+        let slot = net_shred.shred.slot();
+        let fec_set_index = net_shred.shred.fec_set_index();
+
         // Check minimum slot.
-        if shred.slot < self.config.min_slot {
+        if slot < self.config.min_slot {
             return ShredInsertOutcome::TooOld;
         }
 
         // Ensure slot state exists.
-        self.ensure_slot_tracked(shred.slot);
+        self.ensure_slot_tracked(slot);
 
         // Schedule retransmit for turbine shreds BEFORE borrowing slot state.
         let should_retransmit =
-            shred.source == ShredSource::Turbine && self.config.turbine_neighbor_count > 0;
+            net_shred.source == ShredSource::Turbine && self.config.turbine_neighbor_count > 0;
         if should_retransmit {
-            self.schedule_retransmit(shred.slot, &shred.data);
+            self.schedule_retransmit(slot, &net_shred.shred.payload);
         }
 
-        let default_data = self.config.default_data_shreds_per_fec;
-        let default_coding = self.config.default_coding_shreds_per_fec;
-
-        let slot_state = self.slots.get_mut(&shred.slot).unwrap();
+        let slot_state = self.slots.get_mut(&slot).unwrap();
 
         // Dedup by signature.
-        if !slot_state.seen_signatures.insert(shred.signature) {
+        if !slot_state
+            .seen_signatures
+            .insert(net_shred.shred.common_header.signature)
+        {
             self.stats.shreds_duplicate.fetch_add(1, Ordering::Relaxed);
             return ShredInsertOutcome::Duplicate;
         }
 
-        if shred.is_last_in_slot {
+        if net_shred.shred.is_last_in_slot() {
             slot_state.last_shred_seen = true;
         }
 
         // Get or create FEC set state.
         let fec = slot_state
             .fec_sets
-            .entry(shred.fec_set_index)
-            .or_insert_with(|| FecSetState::new(default_data, default_coding));
+            .entry(fec_set_index)
+            .or_insert_with(FecSetState::new);
+
+        // Learn FEC params from coding shred headers.
+        if let Some(coding_header) = net_shred.shred.coding_header() {
+            fec.learn_params(
+                coding_header.num_data_shreds,
+                coding_header.num_coding_shreds,
+            );
+        }
 
         // Insert shred into FEC set.
-        if shred.is_coding {
-            fec.received_coding.insert(shred.index);
+        if net_shred.shred.is_coding() {
+            if let Some(coding_header) = net_shred.shred.coding_header() {
+                let position = coding_header.position as u32;
+                fec.coding_shreds.entry(position).or_insert(net_shred.shred);
+            }
         } else {
-            fec.received_data.insert(shred.index);
+            // Data shred: relative index = absolute index - fec_set_index
+            let relative_index = net_shred.shred.index().saturating_sub(fec_set_index);
+            fec.data_shreds
+                .entry(relative_index)
+                .or_insert(net_shred.shred);
         }
 
         // Check FEC set status.
@@ -304,16 +340,25 @@ impl ShredNetworkStage {
             self.stats
                 .fec_sets_completed
                 .fetch_add(1, Ordering::Relaxed);
-            ShredInsertOutcome::FecSetComplete {
-                fec_set_index: shred.fec_set_index,
-            }
+
+            // Extract completed data shreds.
+            let fec = slot_state.fec_sets.get_mut(&fec_set_index).unwrap();
+            let completed = Self::extract_completed_set(slot, fec_set_index, fec, false);
+            self.pending_completed.push(completed);
+
+            ShredInsertOutcome::FecSetComplete { fec_set_index }
         } else if fec.is_recoverable() {
             self.stats
                 .fec_sets_recovered
                 .fetch_add(1, Ordering::Relaxed);
-            ShredInsertOutcome::FecRecoverable {
-                fec_set_index: shred.fec_set_index,
+
+            // Attempt RS recovery.
+            let fec = slot_state.fec_sets.get_mut(&fec_set_index).unwrap();
+            if let Some(completed) = Self::attempt_recovery(slot, fec_set_index, fec) {
+                self.pending_completed.push(completed);
             }
+
+            ShredInsertOutcome::FecRecoverable { fec_set_index }
         } else {
             ShredInsertOutcome::Accepted
         }
@@ -322,6 +367,11 @@ impl ShredNetworkStage {
     /// Drain pending retransmit decisions.
     pub fn drain_retransmits(&mut self) -> Vec<RetransmitDecision> {
         std::mem::take(&mut self.pending_retransmits)
+    }
+
+    /// Drain completed FEC sets.
+    pub fn drain_completed_sets(&mut self) -> Vec<CompletedFecSet> {
+        std::mem::take(&mut self.pending_completed)
     }
 
     /// Check if a slot has received its last shred.
@@ -340,6 +390,24 @@ impl ShredNetworkStage {
     /// Number of FEC sets tracked for a slot.
     pub fn fec_set_count(&self, slot: u64) -> usize {
         self.slots.get(&slot).map(|s| s.fec_sets.len()).unwrap_or(0)
+    }
+
+    /// Number of data shreds received for a specific FEC set.
+    pub fn fec_data_count(&self, slot: u64, fec_set_index: u32) -> usize {
+        self.slots
+            .get(&slot)
+            .and_then(|s| s.fec_sets.get(&fec_set_index))
+            .map(|f| f.data_shreds.len())
+            .unwrap_or(0)
+    }
+
+    /// Number of coding shreds received for a specific FEC set.
+    pub fn fec_coding_count(&self, slot: u64, fec_set_index: u32) -> usize {
+        self.slots
+            .get(&slot)
+            .and_then(|s| s.fec_sets.get(&fec_set_index))
+            .map(|f| f.coding_shreds.len())
+            .unwrap_or(0)
     }
 
     /// Set the minimum slot (prune older slots).
@@ -391,53 +459,189 @@ impl ShredNetworkStage {
 
         self.stats.retransmits_sent.fetch_add(1, Ordering::Relaxed);
     }
+
+    /// Extract a completed FEC set's data shreds in order.
+    fn extract_completed_set(
+        slot: u64,
+        fec_set_index: u32,
+        fec: &mut FecSetState,
+        was_recovered: bool,
+    ) -> CompletedFecSet {
+        fec.resolved = true;
+
+        // Collect data shreds sorted by relative index.
+        let mut indices: Vec<u32> = fec.data_shreds.keys().copied().collect();
+        indices.sort_unstable();
+
+        let data_shreds: Vec<Shred> = indices
+            .into_iter()
+            .filter_map(|idx| fec.data_shreds.get(&idx).cloned())
+            .collect();
+
+        CompletedFecSet {
+            slot,
+            fec_set_index,
+            data_shreds,
+            was_recovered,
+        }
+    }
+
+    /// Attempt Reed-Solomon recovery on a FEC set that has enough total shreds.
+    fn attempt_recovery(
+        slot: u64,
+        fec_set_index: u32,
+        fec: &mut FecSetState,
+    ) -> Option<CompletedFecSet> {
+        let num_data = fec.num_data as usize;
+        let num_coding = fec.num_coding as usize;
+
+        let reconstructor = FecReconstructor::new(num_data, num_coding).ok()?;
+
+        // Determine uniform shard size from any available shred payload.
+        let shard_size = fec
+            .data_shreds
+            .values()
+            .next()
+            .or_else(|| fec.coding_shreds.values().next())
+            .map(|s| s.payload.len())?;
+
+        // Build data shard array: Some(payload) for present, None for missing.
+        let data_array: Vec<Option<Vec<u8>>> = (0..num_data as u32)
+            .map(|rel_idx| {
+                fec.data_shreds.get(&rel_idx).map(|s| {
+                    let mut payload = s.payload.clone();
+                    payload.resize(shard_size, 0);
+                    payload
+                })
+            })
+            .collect();
+
+        // Build coding shard array: Some(payload) for present, None for missing.
+        let coding_array: Vec<Option<Vec<u8>>> = (0..num_coding as u32)
+            .map(|pos| {
+                fec.coding_shreds.get(&pos).map(|s| {
+                    let mut payload = s.payload.clone();
+                    payload.resize(shard_size, 0);
+                    payload
+                })
+            })
+            .collect();
+
+        let result = reconstructor.reconstruct(data_array, coding_array).ok()?;
+
+        // Get a reference data shred for reconstructing headers.
+        let ref_shred = fec
+            .data_shreds
+            .values()
+            .next()
+            .or_else(|| fec.coding_shreds.values().next())?;
+
+        let ref_version = ref_shred.common_header.version;
+        let ref_variant_byte = ref_shred.common_header.variant;
+        let ref_parent_offset = ref_shred
+            .data_header()
+            .map(|h| h.parent_offset)
+            .unwrap_or(1);
+
+        // Insert recovered data shreds into the FEC set.
+        for (rel_idx, maybe_recovered) in result.data_shreds.into_iter().enumerate() {
+            if let Some(payload) = maybe_recovered {
+                let abs_index = fec_set_index + rel_idx as u32;
+                let recovered_shred = Shred::new(
+                    ShredCommonHeader {
+                        signature: [0u8; 64], // TODO: recovered shreds don't have valid signatures
+                        variant: ref_variant_byte,
+                        slot,
+                        index: abs_index,
+                        version: ref_version,
+                        fec_set_index,
+                    },
+                    ShredVariant::LegacyData(DataShredHeader {
+                        parent_offset: ref_parent_offset,
+                        flags: 0,
+                        size: payload.len() as u16,
+                    }),
+                    payload,
+                );
+                fec.data_shreds
+                    .entry(rel_idx as u32)
+                    .or_insert(recovered_shred);
+            }
+        }
+
+        Some(Self::extract_completed_set(slot, fec_set_index, fec, true))
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use paradencer_types::shred::*;
 
-    fn make_data_shred(slot: u64, index: u32, fec_set: u32) -> NetworkShred {
+    fn make_common_header(slot: u64, index: u32, fec_set_index: u32) -> ShredCommonHeader {
         let mut sig = [0u8; 64];
         sig[..8].copy_from_slice(&slot.to_le_bytes());
         sig[8..12].copy_from_slice(&index.to_le_bytes());
-        NetworkShred {
+        sig[12..16].copy_from_slice(&fec_set_index.to_le_bytes());
+        ShredCommonHeader {
+            signature: sig,
+            variant: SHRED_DATA_FLAG,
             slot,
             index,
-            fec_set_index: fec_set,
-            is_coding: false,
-            is_last_in_slot: false,
-            data: vec![0u8; 1228],
-            source: ShredSource::Turbine,
-            signature: sig,
+            version: 1,
+            fec_set_index,
         }
     }
 
-    fn make_coding_shred(slot: u64, index: u32, fec_set: u32) -> NetworkShred {
-        let mut sig = [0u8; 64];
-        sig[..8].copy_from_slice(&slot.to_le_bytes());
-        sig[8..12].copy_from_slice(&index.to_le_bytes());
-        sig[12] = 1; // differentiate from data shred sig
+    fn make_data_shred(slot: u64, index: u32, fec_set_index: u32) -> NetworkShred {
+        let header = make_common_header(slot, index, fec_set_index);
+        let shred = Shred::new(
+            header,
+            ShredVariant::LegacyData(DataShredHeader {
+                parent_offset: 1,
+                flags: 0,
+                size: DATA_SHRED_PAYLOAD_SIZE as u16,
+            }),
+            vec![0u8; DATA_SHRED_PAYLOAD_SIZE],
+        );
         NetworkShred {
-            slot,
-            index,
-            fec_set_index: fec_set,
-            is_coding: true,
-            is_last_in_slot: false,
-            data: vec![0u8; 1228],
+            shred,
             source: ShredSource::Turbine,
-            signature: sig,
+        }
+    }
+
+    fn make_coding_shred(
+        slot: u64,
+        index: u32,
+        fec_set_index: u32,
+        position: u16,
+        num_data: u16,
+        num_coding: u16,
+    ) -> NetworkShred {
+        let mut header = make_common_header(slot, index, fec_set_index);
+        header.variant = SHRED_CODE_FLAG;
+        // Make signature unique from data shreds
+        header.signature[16] = 1;
+        header.signature[17..19].copy_from_slice(&position.to_le_bytes());
+
+        let shred = Shred::new(
+            header,
+            ShredVariant::LegacyCoding(CodingShredHeader {
+                num_data_shreds: num_data,
+                num_coding_shreds: num_coding,
+                position,
+            }),
+            vec![0u8; DATA_SHRED_PAYLOAD_SIZE],
+        );
+        NetworkShred {
+            shred,
+            source: ShredSource::Turbine,
         }
     }
 
     #[test]
     fn insert_single_shred() {
-        let config = ShredNetworkConfig {
-            default_data_shreds_per_fec: 4,
-            default_coding_shreds_per_fec: 4,
-            ..Default::default()
-        };
-        let mut stage = ShredNetworkStage::with_config(config);
+        let mut stage = ShredNetworkStage::new();
 
         let shred = make_data_shred(100, 0, 0);
         let outcome = stage.insert_shred(shred);
@@ -447,36 +651,42 @@ mod tests {
 
     #[test]
     fn fec_set_completes_with_enough_data() {
-        let config = ShredNetworkConfig {
-            default_data_shreds_per_fec: 2,
-            default_coding_shreds_per_fec: 2,
-            ..Default::default()
-        };
-        let mut stage = ShredNetworkStage::with_config(config);
+        let mut stage = ShredNetworkStage::new();
 
+        // Insert data shreds first (no params known yet, stays Accepted).
         let s1 = make_data_shred(100, 0, 0);
         assert_eq!(stage.insert_shred(s1), ShredInsertOutcome::Accepted);
 
         let s2 = make_data_shred(100, 1, 0);
-        let outcome = stage.insert_shred(s2);
+        assert_eq!(stage.insert_shred(s2), ShredInsertOutcome::Accepted);
+
+        // Insert coding shred to establish FEC params (2 data, 2 coding).
+        // At this point: 2 data + 1 coding, params now known, 2 data >= 2 = complete.
+        let coding = make_coding_shred(100, 2, 0, 0, 2, 2);
+        let outcome = stage.insert_shred(coding);
         assert!(matches!(outcome, ShredInsertOutcome::FecSetComplete { .. }));
+
+        // Should have a completed FEC set.
+        let completed = stage.drain_completed_sets();
+        assert_eq!(completed.len(), 1);
+        assert_eq!(completed[0].slot, 100);
+        assert_eq!(completed[0].fec_set_index, 0);
+        assert_eq!(completed[0].data_shreds.len(), 2);
+        assert!(!completed[0].was_recovered);
     }
 
     #[test]
     fn fec_recovery_with_coding_shreds() {
-        let config = ShredNetworkConfig {
-            default_data_shreds_per_fec: 3,
-            default_coding_shreds_per_fec: 3,
-            ..Default::default()
-        };
-        let mut stage = ShredNetworkStage::with_config(config);
+        let mut stage = ShredNetworkStage::new();
 
-        // Insert 2 data shreds (missing 1) + 1 coding shred = 3 total = recoverable
+        // FEC set: 3 data, 3 coding. Insert 2 data + 1 coding = 3 total = recoverable.
+        let coding = make_coding_shred(100, 3, 0, 0, 3, 3);
+        stage.insert_shred(coding);
+
         stage.insert_shred(make_data_shred(100, 0, 0));
-        stage.insert_shred(make_data_shred(100, 1, 0));
 
-        let coding = make_coding_shred(100, 0, 0);
-        let outcome = stage.insert_shred(coding);
+        let s2 = make_data_shred(100, 1, 0);
+        let outcome = stage.insert_shred(s2);
         assert!(matches!(outcome, ShredInsertOutcome::FecRecoverable { .. }));
     }
 
@@ -571,7 +781,9 @@ mod tests {
         let mut stage = ShredNetworkStage::new();
 
         let mut shred = make_data_shred(100, 0, 0);
-        shred.is_last_in_slot = true;
+        if let ShredVariant::LegacyData(ref mut header) = shred.shred.variant {
+            header.flags |= SHRED_LAST_IN_SLOT;
+        }
         stage.insert_shred(shred);
 
         assert!(stage.is_slot_complete(100));
@@ -589,8 +801,6 @@ mod tests {
         stage.insert_shred(make_data_shred(100, 0, 0)); // turbine
         let mut repair_shred = make_data_shred(100, 1, 0);
         repair_shred.source = ShredSource::Repair;
-        // Give it a unique signature
-        repair_shred.signature[12] = 99;
         stage.insert_shred(repair_shred);
 
         let snap = stage.stats().snapshot();
@@ -598,5 +808,339 @@ mod tests {
         assert_eq!(snap.shreds_from_turbine, 1);
         assert_eq!(snap.shreds_from_repair, 1);
         assert_eq!(snap.retransmits_sent, 1); // only turbine triggers retransmit
+    }
+
+    #[test]
+    fn fec_params_learned_from_coding_shred() {
+        let mut stage = ShredNetworkStage::new();
+
+        // Insert data shred first (no FEC params yet — stays Accepted).
+        stage.insert_shred(make_data_shred(100, 0, 0));
+        assert_eq!(stage.fec_data_count(100, 0), 1);
+        assert_eq!(stage.fec_coding_count(100, 0), 0);
+
+        // Insert coding shred with FEC params (4 data, 4 coding).
+        // 1 data + 1 coding = 2 total < 4 needed → Accepted.
+        let coding = make_coding_shred(100, 4, 0, 0, 4, 4);
+        let outcome = stage.insert_shred(coding);
+        assert_eq!(outcome, ShredInsertOutcome::Accepted);
+        assert_eq!(stage.fec_coding_count(100, 0), 1);
+
+        // Add more data shreds. 2 data + 1 coding = 3 total < 4 needed.
+        let outcome = stage.insert_shred(make_data_shred(100, 1, 0));
+        assert_eq!(outcome, ShredInsertOutcome::Accepted);
+
+        // 3 data + 1 coding = 4 total >= 4 needed but only 3 data < 4 → FecRecoverable.
+        let outcome = stage.insert_shred(make_data_shred(100, 2, 0));
+        assert!(matches!(outcome, ShredInsertOutcome::FecRecoverable { .. }));
+
+        // FEC set was resolved via recovery, verify completed set exists.
+        let completed = stage.drain_completed_sets();
+        assert_eq!(completed.len(), 1);
+        assert!(completed[0].was_recovered);
+        assert_eq!(completed[0].data_shreds.len(), 4);
+    }
+
+    #[test]
+    fn multiple_fec_sets_per_slot() {
+        let mut stage = ShredNetworkStage::new();
+
+        // FEC set 0: 2 data, 2 coding.
+        let coding0 = make_coding_shred(100, 2, 0, 0, 2, 2);
+        stage.insert_shred(coding0);
+        stage.insert_shred(make_data_shred(100, 0, 0));
+        stage.insert_shred(make_data_shred(100, 1, 0));
+
+        // FEC set 4: 2 data, 2 coding.
+        let coding4 = make_coding_shred(100, 6, 4, 0, 2, 2);
+        stage.insert_shred(coding4);
+        stage.insert_shred(make_data_shred(100, 4, 4));
+        stage.insert_shred(make_data_shred(100, 5, 4));
+
+        let completed = stage.drain_completed_sets();
+        assert_eq!(completed.len(), 2);
+        assert_eq!(stage.fec_set_count(100), 2);
+    }
+
+    #[test]
+    fn completed_set_data_shreds_ordered() {
+        let mut stage = ShredNetworkStage::new();
+
+        // FEC set: 3 data, 3 coding. Insert in reverse order.
+        let coding = make_coding_shred(100, 3, 0, 0, 3, 3);
+        stage.insert_shred(coding);
+
+        stage.insert_shred(make_data_shred(100, 2, 0));
+        stage.insert_shred(make_data_shred(100, 0, 0));
+        stage.insert_shred(make_data_shred(100, 1, 0));
+
+        let completed = stage.drain_completed_sets();
+        assert_eq!(completed.len(), 1);
+        let set = &completed[0];
+        assert_eq!(set.data_shreds.len(), 3);
+
+        // Verify ordering by index.
+        assert_eq!(set.data_shreds[0].index(), 0);
+        assert_eq!(set.data_shreds[1].index(), 1);
+        assert_eq!(set.data_shreds[2].index(), 2);
+    }
+
+    // --- Wave 2: RS Recovery tests ---
+
+    /// Create a full FEC set (data + coding) using actual Reed-Solomon encoding.
+    fn create_fec_set(
+        slot: u64,
+        fec_set_index: u32,
+        num_data: usize,
+        num_coding: usize,
+    ) -> (Vec<NetworkShred>, Vec<NetworkShred>) {
+        use reed_solomon_erasure::galois_8::ReedSolomon;
+
+        let shard_size = DATA_SHRED_PAYLOAD_SIZE;
+        let rs = ReedSolomon::new(num_data, num_coding).unwrap();
+
+        // Create deterministic data payloads.
+        let mut all_payloads: Vec<Vec<u8>> = Vec::with_capacity(num_data + num_coding);
+        for i in 0..num_data {
+            let mut payload = vec![0u8; shard_size];
+            for (j, byte) in payload.iter_mut().enumerate() {
+                *byte = ((i * 256 + j + 1) % 256) as u8;
+            }
+            all_payloads.push(payload);
+        }
+        for _ in 0..num_coding {
+            all_payloads.push(vec![0u8; shard_size]);
+        }
+
+        // Encode RS parity.
+        let mut shard_refs: Vec<&mut [u8]> =
+            all_payloads.iter_mut().map(|s| s.as_mut_slice()).collect();
+        rs.encode(&mut shard_refs).unwrap();
+
+        // Build data shreds.
+        let mut data_shreds = Vec::with_capacity(num_data);
+        for (i, payload) in all_payloads[..num_data].iter().enumerate() {
+            let abs_index = fec_set_index + i as u32;
+            let mut header = make_common_header(slot, abs_index, fec_set_index);
+            // Give each a unique signature.
+            header.signature[20..24].copy_from_slice(&(i as u32).to_le_bytes());
+            let shred = Shred::new(
+                header,
+                ShredVariant::LegacyData(DataShredHeader {
+                    parent_offset: 1,
+                    flags: 0,
+                    size: shard_size as u16,
+                }),
+                payload.clone(),
+            );
+            data_shreds.push(NetworkShred {
+                shred,
+                source: ShredSource::Turbine,
+            });
+        }
+
+        // Build coding shreds.
+        let mut coding_shreds = Vec::with_capacity(num_coding);
+        for (i, payload) in all_payloads[num_data..].iter().enumerate() {
+            let abs_index = fec_set_index + num_data as u32 + i as u32;
+            let mut header = make_common_header(slot, abs_index, fec_set_index);
+            header.variant = SHRED_CODE_FLAG;
+            header.signature[16] = 1;
+            header.signature[20..24].copy_from_slice(&(i as u32).to_le_bytes());
+            let shred = Shred::new(
+                header,
+                ShredVariant::LegacyCoding(CodingShredHeader {
+                    num_data_shreds: num_data as u16,
+                    num_coding_shreds: num_coding as u16,
+                    position: i as u16,
+                }),
+                payload.clone(),
+            );
+            coding_shreds.push(NetworkShred {
+                shred,
+                source: ShredSource::Turbine,
+            });
+        }
+
+        (data_shreds, coding_shreds)
+    }
+
+    #[test]
+    fn rs_recovery_single_missing_data() {
+        let mut stage = ShredNetworkStage::new();
+        let (data_shreds, coding_shreds) = create_fec_set(100, 0, 4, 4);
+
+        let original_payload = data_shreds[0].shred.payload.clone();
+
+        // Insert data shreds 1, 2, 3 (skip 0) + coding shred 0.
+        for ds in &data_shreds[1..] {
+            stage.insert_shred(ds.clone());
+        }
+        let outcome = stage.insert_shred(coding_shreds[0].clone());
+        assert!(matches!(outcome, ShredInsertOutcome::FecRecoverable { .. }));
+
+        // Should have recovered.
+        let completed = stage.drain_completed_sets();
+        assert_eq!(completed.len(), 1);
+        assert!(completed[0].was_recovered);
+        assert_eq!(completed[0].data_shreds.len(), 4);
+
+        // Verify recovered payload matches original.
+        assert_eq!(completed[0].data_shreds[0].payload, original_payload);
+    }
+
+    #[test]
+    fn rs_recovery_two_missing_data() {
+        let mut stage = ShredNetworkStage::new();
+        let (data_shreds, coding_shreds) = create_fec_set(100, 0, 4, 4);
+
+        let original_0 = data_shreds[0].shred.payload.clone();
+        let original_2 = data_shreds[2].shred.payload.clone();
+
+        // Insert data 1, 3 (skip 0, 2) + coding 0, 1.
+        stage.insert_shred(data_shreds[1].clone());
+        stage.insert_shred(data_shreds[3].clone());
+        stage.insert_shred(coding_shreds[0].clone());
+        let outcome = stage.insert_shred(coding_shreds[1].clone());
+        assert!(matches!(outcome, ShredInsertOutcome::FecRecoverable { .. }));
+
+        let completed = stage.drain_completed_sets();
+        assert_eq!(completed.len(), 1);
+        assert!(completed[0].was_recovered);
+        assert_eq!(completed[0].data_shreds.len(), 4);
+
+        // Verify both recovered payloads.
+        assert_eq!(completed[0].data_shreds[0].payload, original_0);
+        assert_eq!(completed[0].data_shreds[2].payload, original_2);
+    }
+
+    #[test]
+    fn rs_insufficient_shreds_no_completion() {
+        let mut stage = ShredNetworkStage::new();
+        let (data_shreds, coding_shreds) = create_fec_set(100, 0, 4, 4);
+
+        // Insert only 3 shreds (need 4 for recovery): 2 data + 1 coding.
+        stage.insert_shred(data_shreds[0].clone());
+        stage.insert_shred(data_shreds[1].clone());
+        let outcome = stage.insert_shred(coding_shreds[0].clone());
+        assert_eq!(outcome, ShredInsertOutcome::Accepted);
+
+        let completed = stage.drain_completed_sets();
+        assert!(completed.is_empty());
+    }
+
+    #[test]
+    fn rs_all_data_present_no_recovery_needed() {
+        let mut stage = ShredNetworkStage::new();
+        let (data_shreds, coding_shreds) = create_fec_set(100, 0, 4, 4);
+
+        // Insert all data shreds (no coding needed except for params).
+        for ds in &data_shreds {
+            stage.insert_shred(ds.clone());
+        }
+        // Insert coding to establish params and trigger completion.
+        let outcome = stage.insert_shred(coding_shreds[0].clone());
+        assert!(matches!(outcome, ShredInsertOutcome::FecSetComplete { .. }));
+
+        let completed = stage.drain_completed_sets();
+        assert_eq!(completed.len(), 1);
+        assert!(!completed[0].was_recovered);
+        assert_eq!(completed[0].data_shreds.len(), 4);
+    }
+
+    #[test]
+    fn rs_recovered_shred_has_correct_index() {
+        let mut stage = ShredNetworkStage::new();
+        let (data_shreds, coding_shreds) = create_fec_set(200, 10, 3, 3);
+
+        // Skip data shred at index 11 (relative index 1).
+        stage.insert_shred(data_shreds[0].clone());
+        stage.insert_shred(data_shreds[2].clone());
+        let outcome = stage.insert_shred(coding_shreds[0].clone());
+        assert!(matches!(outcome, ShredInsertOutcome::FecRecoverable { .. }));
+
+        let completed = stage.drain_completed_sets();
+        assert_eq!(completed.len(), 1);
+        assert_eq!(completed[0].fec_set_index, 10);
+
+        // Verify indices are correct.
+        assert_eq!(completed[0].data_shreds[0].index(), 10);
+        assert_eq!(completed[0].data_shreds[1].index(), 11); // recovered
+        assert_eq!(completed[0].data_shreds[2].index(), 12);
+    }
+
+    #[test]
+    fn rs_round_trip_encode_drop_recover() {
+        // Full round-trip: encode data → create FEC set → drop some → recover → verify.
+        let mut stage = ShredNetworkStage::new();
+        let num_data = 8;
+        let num_coding = 8;
+        let (data_shreds, coding_shreds) = create_fec_set(500, 0, num_data, num_coding);
+
+        // Save original payloads.
+        let originals: Vec<Vec<u8>> = data_shreds
+            .iter()
+            .map(|ds| ds.shred.payload.clone())
+            .collect();
+
+        // Drop first 3 data shreds, provide 3 coding shreds to compensate.
+        for ds in &data_shreds[3..] {
+            stage.insert_shred(ds.clone());
+        }
+        for cs in &coding_shreds[..3] {
+            stage.insert_shred(cs.clone());
+        }
+
+        let completed = stage.drain_completed_sets();
+        assert_eq!(completed.len(), 1);
+        assert!(completed[0].was_recovered);
+        assert_eq!(completed[0].data_shreds.len(), num_data);
+
+        // Verify ALL payloads match originals (both received and recovered).
+        for (i, shred) in completed[0].data_shreds.iter().enumerate() {
+            assert_eq!(
+                shred.payload, originals[i],
+                "Payload mismatch at data shred index {i}"
+            );
+        }
+    }
+
+    #[test]
+    fn drain_completed_clears_queue() {
+        let mut stage = ShredNetworkStage::new();
+        let (data_shreds, coding_shreds) = create_fec_set(100, 0, 2, 2);
+
+        // Complete a FEC set.
+        stage.insert_shred(data_shreds[0].clone());
+        stage.insert_shred(data_shreds[1].clone());
+        stage.insert_shred(coding_shreds[0].clone());
+
+        let completed = stage.drain_completed_sets();
+        assert_eq!(completed.len(), 1);
+
+        // Second drain should be empty.
+        let completed2 = stage.drain_completed_sets();
+        assert!(completed2.is_empty());
+    }
+
+    #[test]
+    fn fec_sets_across_different_slots_independent() {
+        let mut stage = ShredNetworkStage::new();
+        let (data_100, coding_100) = create_fec_set(100, 0, 3, 3);
+        let (data_200, coding_200) = create_fec_set(200, 0, 3, 3);
+
+        // Complete slot 100.
+        for ds in &data_100 {
+            stage.insert_shred(ds.clone());
+        }
+        stage.insert_shred(coding_100[0].clone());
+
+        // Partially fill slot 200 (not enough for completion).
+        stage.insert_shred(data_200[0].clone());
+        stage.insert_shred(coding_200[0].clone());
+
+        let completed = stage.drain_completed_sets();
+        assert_eq!(completed.len(), 1);
+        assert_eq!(completed[0].slot, 100);
     }
 }

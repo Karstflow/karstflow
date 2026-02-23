@@ -5,7 +5,11 @@
 /// shreds) and ReplayService (which expects assembled blocks). It maintains
 /// a per-slot buffer and uses the last-in-slot flag to determine when a
 /// complete slot can be assembled.
+///
+/// Also accepts completed FEC sets from the shred network stage, which
+/// provide already-resolved data shreds (possibly recovered via Reed-Solomon).
 use crate::shred_assembler::{AssembledBlock, ShredAssembler};
+use crate::shred_network::CompletedFecSet;
 use paradencer_mesh::{InPort, OutPort, ReceiveError, SendError};
 use paradencer_runtime::{RuntimeError, RuntimeResult, Service, ServiceContext};
 use paradencer_types::shred::Shred;
@@ -44,6 +48,7 @@ struct SlotBuffer {
 #[derive(Debug, Clone, Default)]
 pub struct ShredCollectorStats {
     pub shreds_received: u64,
+    pub fec_sets_received: u64,
     pub blocks_emitted: u64,
     pub slots_evicted_age: u64,
     pub slots_evicted_overflow: u64,
@@ -86,6 +91,34 @@ impl ShredCollector {
 
     pub fn stats(&self) -> &ShredCollectorStats {
         &self.stats
+    }
+
+    /// Insert a completed FEC set's data shreds into the slot buffers.
+    ///
+    /// This is the primary integration point with `ShredNetworkStage`.
+    /// After the network stage resolves FEC sets (via direct reception or
+    /// Reed-Solomon recovery), completed sets are fed here for block assembly.
+    pub fn insert_completed_fec_set(&mut self, fec_set: CompletedFecSet) {
+        self.stats.fec_sets_received += 1;
+        let slot = fec_set.slot;
+
+        let buffer = self.slot_buffers.entry(slot).or_insert_with(|| SlotBuffer {
+            shreds: Vec::new(),
+            last_in_slot_seen: false,
+            age_ticks: 0,
+        });
+
+        for shred in fec_set.data_shreds {
+            self.stats.shreds_received += 1;
+            let is_last = shred.is_last_in_slot();
+
+            if buffer.shreds.len() < self.config.max_shreds_per_slot {
+                buffer.shreds.push(shred);
+            }
+            if is_last {
+                buffer.last_in_slot_seen = true;
+            }
+        }
     }
 
     /// Drain all available shreds from the input channel into slot buffers.

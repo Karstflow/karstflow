@@ -3,18 +3,19 @@
 //! This module provides Forward Error Correction (FEC) using Reed-Solomon
 //! erasure codes to recover missing data shreds from coding shreds.
 
+use paradencer_constants::shred;
 use reed_solomon_erasure::galois_8::ReedSolomon;
 use thiserror::Error;
 
-/// Maximum number of data shreds in a FEC set (matches Solana's default)
-pub const MAX_FEC_DATA_SHREDS: usize = 67;
+/// Maximum number of data shreds in a FEC set.
+pub const MAX_FEC_DATA_SHREDS: usize = shred::MAX_FEC_DATA_SHREDS;
 
-/// Maximum number of coding shreds in a FEC set
-pub const MAX_FEC_CODING_SHREDS: usize = 67;
+/// Maximum number of coding shreds in a FEC set.
+pub const MAX_FEC_CODING_SHREDS: usize = shred::MAX_FEC_CODING_SHREDS;
 
-/// Default FEC configuration: 32 data + 32 coding shreds
-pub const DEFAULT_FEC_DATA: usize = 32;
-pub const DEFAULT_FEC_CODING: usize = 32;
+/// Default FEC configuration: 32 data + 32 coding shreds.
+pub const DEFAULT_FEC_DATA: usize = shred::DEFAULT_FEC_DATA_SHREDS;
+pub const DEFAULT_FEC_CODING: usize = shred::DEFAULT_FEC_CODING_SHREDS;
 
 /// Errors that can occur during FEC operations
 #[derive(Debug, Error)]
