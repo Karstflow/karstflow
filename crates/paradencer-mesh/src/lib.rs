@@ -21,4 +21,5 @@ pub mod flow;
 pub mod fragment;
 pub mod meta_ring;
 pub mod stem;
+pub mod tile;
 pub mod tile_link;

@@ -38,6 +38,7 @@ mod shred_network;
 mod stats;
 #[cfg(test)]
 mod testsuite;
+mod tile_pipeline;
 mod tx_filter;
 mod types;
 mod verify_service;
@@ -92,6 +93,7 @@ pub use shred_network::{
     NetworkShred, RetransmitDecision, ShredInsertOutcome, ShredNetworkConfig, ShredNetworkStage,
     ShredNetworkStats, ShredNetworkStatsSnapshot, ShredSource,
 };
+pub use tile_pipeline::{PipelineConfig, ResolvTile, TransactionPipeline, VerifyTile};
 pub use verify_service::{VerifyService, VerifyServiceStats};
 pub use verify_stage::{
     TransactionSource, UnverifiedTransaction, VerifiedTransaction, VerifyConfig, VerifyOutcome,

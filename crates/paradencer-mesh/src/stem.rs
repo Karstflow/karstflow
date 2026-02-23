@@ -4,12 +4,13 @@
 /// manages all output links for a tile, providing credit-tracked
 /// publishing and round-robin input polling.
 ///
-/// Each output has its own MetaRing + DataRegion + sequence counter.
-/// Credits are tracked per-output to prevent overwhelming slow consumers.
+/// Each output has its own MetaRing + DataRegion + FlowSequence + sequence
+/// counter. Credits are tracked per-output to prevent overwhelming slow
+/// consumers.
 use crate::data_region::{compact_next, DataRegion};
 use crate::flow::FlowSequence;
-use crate::fragment::{seq_diff, seq_inc};
-use crate::meta_ring::MetaRing;
+use crate::fragment::{seq_diff, seq_inc, FragmentMeta};
+use crate::meta_ring::{MetaRing, PollResult};
 
 // ---------------------------------------------------------------------------
 // StemOutput — one output link managed by the stem
@@ -21,8 +22,12 @@ pub struct StemOutput {
     meta_ring: MetaRing,
     /// Data region for payload storage.
     data_region: DataRegion,
+    /// Flow sequence for consumer backpressure.
+    flow_seq: FlowSequence,
     /// Next sequence number to publish.
     seq: u64,
+    /// Initial sequence number (for consumer creation).
+    initial_seq: u64,
     /// Ring depth.
     depth: usize,
     /// Current write chunk position.
@@ -62,28 +67,128 @@ impl Default for StemOutputConfig {
 // StemInput — one input link consumed by the tile
 // ---------------------------------------------------------------------------
 
-/// An input link consumed by a tile via the TileStem.
+/// An input link consumed by a tile via raw pointers.
+///
+/// Created from a `TileStem`'s output, this provides consumer-side access
+/// to the producer's MetaRing, DataRegion, and FlowSequence. The producer
+/// tile must outlive this input.
+///
+/// Uses raw pointers for `'static` lifetime, allowing tiles to own their
+/// inputs independently from the pipeline's link ownership.
 pub struct StemInput {
-    /// Reference to the producer's metadata ring.
-    // TODO: Used when input polling is implemented.
-    _meta_ring_ptr: *const MetaRing,
-    /// Reference to the producer's data region.
-    _data_region_ptr: *const DataRegion,
-    /// Flow sequence for returning credits to the producer.
-    _flow_seq_ptr: *const FlowSequence,
+    /// Pointer to the producer's metadata ring.
+    meta_ring: *const MetaRing,
+    /// Pointer to the producer's data region.
+    data_region: *const DataRegion,
+    /// Pointer to the flow sequence (consumer writes, producer reads).
+    flow_seq: *const FlowSequence,
     /// Next expected sequence number.
-    _seq: u64,
-    /// Ring depth.
-    _depth: u32,
-    /// Index of this input in the stem's input list.
-    _idx: u32,
+    next_seq: u64,
+    /// Index of this input (for round-robin tracking).
+    idx: u32,
 }
 
 // SAFETY: StemInput holds raw pointers to shared resources that are
-// guaranteed to outlive the stem (owned by TileLink or similar).
-// Access patterns follow the SPSC protocol.
+// guaranteed to outlive the input (owned by TileStem). Access patterns
+// follow the SPSC protocol: one consumer reads metadata + payload,
+// one producer writes them.
 unsafe impl Send for StemInput {}
 unsafe impl Sync for StemInput {}
+
+/// Result of polling a StemInput for a fragment.
+#[derive(Debug)]
+pub enum InputResult<'a> {
+    /// Fragment received with metadata and zero-copy payload reference.
+    Ready {
+        meta: FragmentMeta,
+        payload: &'a [u8],
+    },
+    /// Consumer was overrun (producer wrapped around the ring).
+    Overrun { recover_seq: u64 },
+    /// No fragment available yet.
+    Empty,
+}
+
+impl StemInput {
+    /// Create a StemInput wired to the given stem output.
+    ///
+    /// # Safety
+    ///
+    /// The `TileStem` that owns the output at `out_idx` must outlive this
+    /// `StemInput`. The caller must ensure that only one consumer exists
+    /// per output.
+    pub unsafe fn from_stem(stem: &TileStem, out_idx: usize, idx: u32) -> Self {
+        let output = &stem.outputs[out_idx];
+        Self {
+            meta_ring: &output.meta_ring as *const MetaRing,
+            data_region: &output.data_region as *const DataRegion,
+            flow_seq: &output.flow_seq as *const FlowSequence,
+            next_seq: output.initial_seq,
+            idx,
+        }
+    }
+
+    /// Poll for the next fragment.
+    ///
+    /// Returns `InputResult::Ready` with metadata and a zero-copy payload
+    /// slice, `InputResult::Overrun` if the consumer fell behind, or
+    /// `InputResult::Empty` if nothing is available.
+    pub fn receive(&mut self, max_polls: usize) -> InputResult<'_> {
+        // SAFETY: meta_ring pointer is valid for the lifetime of the stem.
+        let ring = unsafe { &*self.meta_ring };
+
+        match ring.poll(self.next_seq, max_polls) {
+            PollResult::Ready(meta) => {
+                // SAFETY: data_region pointer is valid, chunk+sz within bounds.
+                let payload = unsafe { (*self.data_region).read_payload(meta.chunk, meta.sz) };
+
+                // Advance consumer state.
+                self.next_seq = seq_inc(self.next_seq, 1);
+
+                // Update flow sequence for producer backpressure.
+                // SAFETY: flow_seq pointer is valid.
+                unsafe { (*self.flow_seq).update(self.next_seq) };
+
+                InputResult::Ready { meta, payload }
+            }
+            PollResult::Overrun { found_seq } => {
+                // Recover to the found sequence.
+                self.next_seq = found_seq;
+                // SAFETY: flow_seq pointer is valid.
+                unsafe { (*self.flow_seq).update(self.next_seq) };
+                InputResult::Overrun {
+                    recover_seq: found_seq,
+                }
+            }
+            PollResult::Timeout => InputResult::Empty,
+        }
+    }
+
+    /// Next expected sequence number.
+    #[inline]
+    pub fn next_seq(&self) -> u64 {
+        self.next_seq
+    }
+
+    /// Index of this input in the tile's input list.
+    #[inline]
+    pub fn idx(&self) -> u32 {
+        self.idx
+    }
+
+    /// How far behind this consumer is from the producer watermark.
+    pub fn lag(&self) -> u64 {
+        // SAFETY: meta_ring pointer is valid.
+        let ring = unsafe { &*self.meta_ring };
+        let watermark = ring.query_watermark();
+        let diff = seq_diff(watermark, self.next_seq);
+        if diff > 0 {
+            diff as u64
+        } else {
+            0
+        }
+    }
+}
 
 // ---------------------------------------------------------------------------
 // TileStem
@@ -92,8 +197,9 @@ unsafe impl Sync for StemInput {}
 /// Multi-link manager for a tile.
 ///
 /// Manages multiple output links (for publishing) and provides
-/// credit tracking per output. Input links are managed separately
-/// by the tile's polling loop.
+/// credit tracking per output. Each output has its own MetaRing,
+/// DataRegion, and FlowSequence. Consumers connect via `StemInput`
+/// created with `create_input()`.
 pub struct TileStem {
     /// Output links.
     outputs: Vec<StemOutput>,
@@ -109,13 +215,16 @@ impl TileStem {
             .map(|cfg| {
                 let meta_ring = MetaRing::new(cfg.depth, cfg.initial_seq);
                 let data_region = DataRegion::for_link(cfg.mtu, cfg.depth, 1, true);
+                let flow_seq = FlowSequence::new(cfg.initial_seq);
                 let chunk0 = data_region.chunk0();
                 let wmark = data_region.watermark(cfg.mtu);
 
                 StemOutput {
                     meta_ring,
                     data_region,
+                    flow_seq,
                     seq: cfg.initial_seq,
+                    initial_seq: cfg.initial_seq,
                     depth: cfg.depth,
                     current_chunk: chunk0,
                     chunk0,
@@ -140,11 +249,22 @@ impl TileStem {
         self.outputs.len()
     }
 
+    /// Create a consumer input wired to the given output.
+    ///
+    /// # Safety
+    ///
+    /// This TileStem must outlive the returned `StemInput`. Only one
+    /// consumer should exist per output for correct SPSC semantics.
+    pub unsafe fn create_input(&self, out_idx: usize, input_idx: u32) -> StemInput {
+        StemInput::from_stem(self, out_idx, input_idx)
+    }
+
     /// Publish a fragment to a specific output.
     ///
     /// Writes the payload to the output's data region and publishes
     /// metadata to its MetaRing. Returns the sequence number on success,
     /// or `None` if no credits are available for this output.
+    #[allow(clippy::too_many_arguments)]
     pub fn publish(
         &mut self,
         out_idx: usize,
@@ -190,17 +310,32 @@ impl TileStem {
         Some(seq)
     }
 
-    /// Refresh credits for an output based on consumer flow sequence.
+    /// Refresh credits for an output by reading its consumer's flow sequence.
     ///
     /// Call this periodically to update credits from consumer progress.
-    pub fn refresh_credits(&mut self, out_idx: usize, consumer_fseq: &FlowSequence) {
+    pub fn refresh_credits(&mut self, out_idx: usize) {
         let output = &mut self.outputs[out_idx];
-        let consumer_seq = consumer_fseq.query();
+        let consumer_seq = output.flow_seq.query();
         let ahead = seq_diff(output.seq, consumer_seq);
         if ahead >= 0 {
             output.credits = output.depth.saturating_sub(ahead as usize);
         } else {
             output.credits = output.depth;
+        }
+        self.min_credits = self.outputs.iter().map(|o| o.credits).min().unwrap_or(0);
+    }
+
+    /// Refresh credits for all outputs.
+    pub fn refresh_all_credits(&mut self) {
+        for i in 0..self.outputs.len() {
+            let output = &mut self.outputs[i];
+            let consumer_seq = output.flow_seq.query();
+            let ahead = seq_diff(output.seq, consumer_seq);
+            if ahead >= 0 {
+                output.credits = output.depth.saturating_sub(ahead as usize);
+            } else {
+                output.credits = output.depth;
+            }
         }
         self.min_credits = self.outputs.iter().map(|o| o.credits).min().unwrap_or(0);
     }
@@ -217,14 +352,19 @@ impl TileStem {
         self.min_credits > 0
     }
 
-    /// Access a specific output's MetaRing (for wiring to consumers).
+    /// Access a specific output's MetaRing (for diagnostics/wiring).
     pub fn output_meta_ring(&self, out_idx: usize) -> &MetaRing {
         &self.outputs[out_idx].meta_ring
     }
 
-    /// Access a specific output's DataRegion (for wiring to consumers).
+    /// Access a specific output's DataRegion (for diagnostics/wiring).
     pub fn output_data_region(&self, out_idx: usize) -> &DataRegion {
         &self.outputs[out_idx].data_region
+    }
+
+    /// Access a specific output's FlowSequence (for external credit refresh).
+    pub fn output_flow_seq(&self, out_idx: usize) -> &FlowSequence {
+        &self.outputs[out_idx].flow_seq
     }
 
     /// Current sequence number for a specific output.
@@ -246,7 +386,6 @@ impl TileStem {
 mod tests {
     use super::*;
     use crate::fragment::ctl_pack;
-    use crate::meta_ring::PollResult;
 
     fn default_stem() -> TileStem {
         TileStem::new(&[StemOutputConfig {
@@ -281,6 +420,77 @@ mod tests {
             }
             other => panic!("expected Ready, got {:?}", other),
         }
+    }
+
+    #[test]
+    fn stem_input_receive() {
+        let mut stem = TileStem::new(&[StemOutputConfig {
+            mtu: 256,
+            depth: 16,
+            initial_seq: 0,
+        }]);
+
+        let ctl = ctl_pack(0, true, true, false);
+
+        // Publish a fragment.
+        stem.publish(0, 0xBEEF, b"hello input", ctl, 0, 0);
+
+        // Create an input consumer.
+        // SAFETY: stem outlives input within this test.
+        let mut input = unsafe { stem.create_input(0, 0) };
+
+        // Receive the fragment.
+        match input.receive(1) {
+            InputResult::Ready { meta, payload } => {
+                assert_eq!(meta.sig, 0xBEEF);
+                assert_eq!(payload, b"hello input");
+            }
+            other => panic!("expected Ready, got {:?}", other),
+        }
+
+        // No more fragments.
+        match input.receive(1) {
+            InputResult::Empty => {}
+            other => panic!("expected Empty, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn stem_input_backpressure() {
+        let mut stem = TileStem::new(&[StemOutputConfig {
+            mtu: 64,
+            depth: 4,
+            initial_seq: 0,
+        }]);
+
+        let ctl = ctl_pack(0, true, true, false);
+
+        // Create input before publishing.
+        // SAFETY: stem outlives input within this test.
+        let mut input = unsafe { stem.create_input(0, 0) };
+
+        // Exhaust credits.
+        for i in 0..4u64 {
+            assert!(stem.publish(0, i, b"x", ctl, 0, 0).is_some());
+        }
+        assert_eq!(stem.output_credits(0), 0);
+
+        // Consumer reads 2 fragments (advancing flow sequence).
+        for _ in 0..2 {
+            match input.receive(1) {
+                InputResult::Ready { .. } => {}
+                other => panic!("expected Ready, got {:?}", other),
+            }
+        }
+
+        // Refresh credits from the output's own flow sequence.
+        stem.refresh_credits(0);
+        assert_eq!(stem.output_credits(0), 2);
+
+        // Can publish 2 more.
+        assert!(stem.publish(0, 10, b"y", ctl, 0, 0).is_some());
+        assert!(stem.publish(0, 11, b"y", ctl, 0, 0).is_some());
+        assert!(stem.publish(0, 12, b"y", ctl, 0, 0).is_none());
     }
 
     #[test]
@@ -337,32 +547,24 @@ mod tests {
     }
 
     #[test]
-    fn credit_refresh() {
+    fn stem_input_lag() {
         let mut stem = TileStem::new(&[StemOutputConfig {
             mtu: 64,
-            depth: 4,
+            depth: 16,
             initial_seq: 0,
         }]);
 
         let ctl = ctl_pack(0, true, true, false);
-        let consumer_fseq = FlowSequence::new(0);
 
-        // Exhaust credits.
-        for i in 0..4 {
+        // SAFETY: stem outlives input within this test.
+        let input = unsafe { stem.create_input(0, 0) };
+
+        // Publish 5 fragments.
+        for i in 0..5u64 {
             stem.publish(0, i, b"x", ctl, 0, 0);
         }
-        assert_eq!(stem.output_credits(0), 0);
 
-        // Simulate consumer progress.
-        consumer_fseq.update(2);
-        stem.refresh_credits(0, &consumer_fseq);
-
-        // Should now have 2 credits.
-        assert_eq!(stem.output_credits(0), 2);
-
-        // Can publish 2 more.
-        assert!(stem.publish(0, 10, b"y", ctl, 0, 0).is_some());
-        assert!(stem.publish(0, 11, b"y", ctl, 0, 0).is_some());
-        assert!(stem.publish(0, 12, b"y", ctl, 0, 0).is_none());
+        // Input hasn't consumed any — lag should be 5.
+        assert_eq!(input.lag(), 5);
     }
 }
