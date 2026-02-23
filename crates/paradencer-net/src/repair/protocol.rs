@@ -1,25 +1,6 @@
 use super::*;
 use crate::gossip::NodeId;
-use bytes::{Buf, BufMut, Bytes, BytesMut};
 use serde::{Deserialize, Serialize};
-
-pub const REPAIR_PROTOCOL_VERSION: u16 = 1;
-#[allow(dead_code)]
-pub const MAX_REPAIR_RESPONSE_SIZE: usize = 10 * 1024 * 1024; // 10 MB
-
-/// Repair protocol version
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub struct RepairProtocol(pub u16);
-
-impl RepairProtocol {
-    pub fn current() -> Self {
-        Self(REPAIR_PROTOCOL_VERSION)
-    }
-
-    pub fn is_compatible(&self, other: &Self) -> bool {
-        self.0 == other.0
-    }
-}
 
 /// Type of repair request
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -202,81 +183,9 @@ impl RepairResponse {
     }
 }
 
-/// Repair message envelope
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum RepairMessage {
-    Request(RepairRequest),
-    Response(RepairResponse),
-}
-
-impl RepairMessage {
-    /// Encode message to bytes with version prefix
-    pub fn encode(&self) -> Result<Bytes, IngressError> {
-        let serialized = bincode::serialize(self).map_err(|e| IngressError::Serialization {
-            detail: format!("failed to serialize repair message: {}", e),
-        })?;
-
-        let mut buf = BytesMut::with_capacity(4 + serialized.len());
-        buf.put_u16(REPAIR_PROTOCOL_VERSION);
-        buf.put_u16(serialized.len() as u16);
-        buf.put_slice(&serialized);
-
-        Ok(buf.freeze())
-    }
-
-    /// Decode message from bytes with version check
-    pub fn decode(mut bytes: Bytes) -> Result<Self, IngressError> {
-        if bytes.remaining() < 4 {
-            return Err(IngressError::Deserialization {
-                detail: "repair message too short".to_string(),
-            });
-        }
-
-        let version = bytes.get_u16();
-        if version != REPAIR_PROTOCOL_VERSION {
-            return Err(IngressError::Deserialization {
-                detail: format!(
-                    "incompatible repair protocol version: expected {}, got {}",
-                    REPAIR_PROTOCOL_VERSION, version
-                ),
-            });
-        }
-
-        let len = bytes.get_u16() as usize;
-        if bytes.remaining() < len {
-            return Err(IngressError::Deserialization {
-                detail: "incomplete repair message".to_string(),
-            });
-        }
-
-        let message_bytes = bytes.copy_to_bytes(len);
-        bincode::deserialize(&message_bytes).map_err(|e| IngressError::Deserialization {
-            detail: format!("failed to deserialize repair message: {}", e),
-        })
-    }
-
-    pub fn is_request(&self) -> bool {
-        matches!(self, Self::Request(_))
-    }
-
-    pub fn is_response(&self) -> bool {
-        matches!(self, Self::Response(_))
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn test_repair_protocol_version() {
-        let v1 = RepairProtocol::current();
-        let v2 = RepairProtocol(REPAIR_PROTOCOL_VERSION);
-        assert!(v1.is_compatible(&v2));
-
-        let v3 = RepairProtocol(REPAIR_PROTOCOL_VERSION + 1);
-        assert!(!v1.is_compatible(&v3));
-    }
 
     #[test]
     fn test_request_type_conversion() {
@@ -315,28 +224,6 @@ mod tests {
         assert_eq!(shred.index, 5);
         assert_eq!(shred.data, data);
         assert_eq!(shred.size(), 5);
-    }
-
-    #[test]
-    fn test_repair_message_encode_decode() {
-        let requester = NodeId::new([1u8; 32]);
-        let request = RepairRequest::HighestShred {
-            requester,
-            slot: 100,
-            nonce: 12345,
-        };
-        let message = RepairMessage::Request(request);
-
-        let encoded = message.encode().unwrap();
-        let decoded = RepairMessage::decode(encoded).unwrap();
-
-        assert!(decoded.is_request());
-        if let RepairMessage::Request(RepairRequest::HighestShred { slot, nonce, .. }) = decoded {
-            assert_eq!(slot, 100);
-            assert_eq!(nonce, 12345);
-        } else {
-            panic!("wrong message type");
-        }
     }
 
     #[test]

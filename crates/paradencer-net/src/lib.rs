@@ -38,9 +38,9 @@ pub use gossip::{
 };
 
 pub use repair::{
-    InMemoryShredStore, RepairMessage, RepairRequest, RepairRequester, RepairResponse,
-    RepairServer, RepairServerConfig, RepairService, RepairServiceConfig, ShredData, ShredIndex,
-    ShredProvider, Slot,
+    InMemoryShredStore, RepairRequest, RepairRequester, RepairResponse, RepairServer,
+    RepairServerConfig, RepairService, RepairServiceConfig, ShredData, ShredIndex, ShredProvider,
+    Slot, WireRepairProtocol, WireRepairRequestHeader,
 };
 
 pub use turbine::{

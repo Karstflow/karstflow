@@ -5,6 +5,7 @@ mod protocol;
 mod request;
 mod server;
 mod service;
+pub mod wire;
 
 #[cfg(test)]
 mod tests;
@@ -15,15 +16,13 @@ pub use coordinator::{
 };
 pub use forest::{InsertOutcome, RepairForest, RepairTarget, ShredSource, SlotRepairState};
 pub use policy::{InflightEntry, InflightTracker, PeerId, PeerMetrics, PeerSelector, RequestDedup};
-pub use protocol::{
-    RepairMessage, RepairProtocol, RepairRequest, RepairRequestType, RepairResponse, ShredData,
-    REPAIR_PROTOCOL_VERSION,
-};
+pub use protocol::{RepairRequest, RepairRequestType, RepairResponse, ShredData};
 pub use request::{RepairRequester, RepairRequesterStats};
 pub use server::{
     InMemoryShredStore, RepairServer, RepairServerConfig, RepairServerStats, ShredProvider,
 };
 pub use service::{RepairService, RepairServiceConfig};
+pub use wire::{WireRepairProtocol, WireRepairRequestHeader};
 
 use crate::IngressError;
 

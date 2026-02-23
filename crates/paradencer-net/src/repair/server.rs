@@ -1,12 +1,15 @@
 use super::*;
 use crate::gossip::NodeId;
-use crate::repair::protocol::{RepairMessage, RepairRequest, RepairResponse, ShredData};
+use crate::repair::protocol::{RepairRequest, ShredData};
+use crate::repair::wire::convert;
+use crate::repair::wire::protocol::WireRepairProtocol;
+use crate::repair::wire::response;
 use parking_lot::RwLock;
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokio::net::UdpSocket;
 
 const DEFAULT_RATE_LIMIT_PER_PEER: u64 = 100; // requests per second
@@ -42,6 +45,8 @@ pub struct RepairServerStats {
     pub shreds_served: Arc<AtomicU64>,
     pub bytes_received: Arc<AtomicU64>,
     pub bytes_sent: Arc<AtomicU64>,
+    pub signature_failures: Arc<AtomicU64>,
+    pub timestamp_failures: Arc<AtomicU64>,
 }
 
 impl RepairServerStats {
@@ -54,6 +59,8 @@ impl RepairServerStats {
             shreds_served: Arc::new(AtomicU64::new(0)),
             bytes_received: Arc::new(AtomicU64::new(0)),
             bytes_sent: Arc::new(AtomicU64::new(0)),
+            signature_failures: Arc::new(AtomicU64::new(0)),
+            timestamp_failures: Arc::new(AtomicU64::new(0)),
         }
     }
 }
@@ -178,7 +185,11 @@ impl ShredProvider for InMemoryShredStore {
     }
 }
 
-/// Repair server for serving repair requests
+/// Repair server for serving repair requests.
+///
+/// Decodes wire-format repair requests, verifies Ed25519 signatures and
+/// timestamp freshness, then serves shred data in wire-compatible format
+/// (raw shred bytes + u32 nonce appended).
 pub struct RepairServer {
     node_id: NodeId,
     #[allow(dead_code)]
@@ -262,19 +273,59 @@ impl RepairServer {
                         continue;
                     }
 
-                    let data = bytes::Bytes::copy_from_slice(&buf[..len]);
-                    if let Ok(RepairMessage::Request(request)) = RepairMessage::decode(data) {
-                        stats.requests_received.fetch_add(1, Ordering::Relaxed);
+                    let data = &buf[..len];
 
-                        let response =
-                            Self::handle_request(node_id, request, &shred_provider, &stats);
+                    // Decode wire-format repair request
+                    let wire_msg = match WireRepairProtocol::decode(data) {
+                        Ok(msg) => msg,
+                        Err(_) => continue,
+                    };
 
-                        if let Ok(encoded) = RepairMessage::Response(response).encode() {
-                            let _ = socket.send_to(&encoded, src_addr).await;
-                            stats
-                                .bytes_sent
-                                .fetch_add(encoded.len() as u64, Ordering::Relaxed);
+                    // Verify signature on modern (signed) variants
+                    if wire_msg.sender().is_some() && !wire_msg.verify() {
+                        stats.signature_failures.fetch_add(1, Ordering::Relaxed);
+                        continue;
+                    }
+
+                    // Check timestamp freshness
+                    let now_ms = SystemTime::now()
+                        .duration_since(UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_millis() as u64;
+                    if !wire_msg.is_timestamp_valid(now_ms) {
+                        stats.timestamp_failures.fetch_add(1, Ordering::Relaxed);
+                        continue;
+                    }
+
+                    // Extract nonce for response
+                    let nonce = wire_msg.nonce().unwrap_or(0);
+
+                    // Handle Pong separately (no response needed)
+                    if let WireRepairProtocol::Pong(ref pong) = wire_msg {
+                        if pong.verify() {
+                            tracing::debug!("received valid repair pong from {:?}", src_addr);
                         }
+                        continue;
+                    }
+
+                    // Convert to internal request
+                    let request = match convert::wire_to_request(&wire_msg) {
+                        Some(req) => req,
+                        None => continue,
+                    };
+
+                    stats.requests_received.fetch_add(1, Ordering::Relaxed);
+
+                    // Handle request and encode wire response
+                    let response_bytes =
+                        Self::handle_request_wire(node_id, request, &shred_provider, &stats, nonce);
+
+                    if let Some(bytes) = response_bytes {
+                        let _ = socket.send_to(&bytes, src_addr).await;
+                        stats
+                            .bytes_sent
+                            .fetch_add(bytes.len() as u64, Ordering::Relaxed);
+                        stats.responses_sent.fetch_add(1, Ordering::Relaxed);
                     }
                 }
                 Err(_) => {
@@ -284,79 +335,70 @@ impl RepairServer {
         }
     }
 
-    fn handle_request(
-        node_id: NodeId,
+    /// Handle a repair request and return wire-format response bytes.
+    fn handle_request_wire(
+        _node_id: NodeId,
         request: RepairRequest,
         shred_provider: &Arc<dyn ShredProvider>,
         stats: &RepairServerStats,
-    ) -> RepairResponse {
+        nonce: u32,
+    ) -> Option<Vec<u8>> {
         match request {
-            RepairRequest::Shred {
-                slot, index, nonce, ..
-            } => {
-                let shred = shred_provider.get_shred(slot, index);
-                if shred.is_some() {
+            RepairRequest::Shred { slot, index, .. } => {
+                if let Some(shred) = shred_provider.get_shred(slot, index) {
                     stats.shreds_served.fetch_add(1, Ordering::Relaxed);
-                    stats.responses_sent.fetch_add(1, Ordering::Relaxed);
-                }
-                RepairResponse::Shred {
-                    responder: node_id,
-                    shred,
-                    nonce,
+                    Some(response::encode_shred_response(&shred.data, nonce))
+                } else {
+                    None // No response for missing shreds
                 }
             }
-            RepairRequest::HighestShred { slot, nonce, .. } => {
-                let index = shred_provider.get_highest_shred_index(slot);
-                stats.responses_sent.fetch_add(1, Ordering::Relaxed);
-                RepairResponse::HighestShred {
-                    responder: node_id,
+            RepairRequest::HighestShred { slot, .. } => {
+                // Return the highest shred for this slot
+                if let Some(highest_index) = shred_provider.get_highest_shred_index(slot) {
+                    if let Some(shred) = shred_provider.get_shred(slot, highest_index) {
+                        stats.shreds_served.fetch_add(1, Ordering::Relaxed);
+                        return Some(response::encode_shred_response(&shred.data, nonce));
+                    }
+                }
+                None
+            }
+            RepairRequest::Orphan { slot, .. } => {
+                // Return ancestor shreds (up to MAX_ORPHAN_REPAIR_RESPONSES)
+                let ancestors = shred_provider.get_ancestors(
                     slot,
-                    index,
-                    nonce,
+                    paradencer_constants::repair::MAX_ORPHAN_REPAIR_RESPONSES as u64,
+                );
+                if let Some(first) = ancestors.first() {
+                    stats.shreds_served.fetch_add(1, Ordering::Relaxed);
+                    Some(response::encode_shred_response(&first.data, nonce))
+                } else {
+                    None
                 }
             }
-            RepairRequest::SlotRange {
-                start_slot,
-                end_slot,
-                nonce,
-                ..
-            } => {
-                let shreds = shred_provider.get_shreds_in_range(start_slot, end_slot);
-                stats
-                    .shreds_served
-                    .fetch_add(shreds.len() as u64, Ordering::Relaxed);
-                stats.responses_sent.fetch_add(1, Ordering::Relaxed);
-                RepairResponse::Shreds {
-                    responder: node_id,
-                    shreds,
-                    nonce,
-                }
+            RepairRequest::Ancestor { slot, .. } => {
+                // AncestorHashes: return Vec<(Slot, Hash)>
+                // TODO: Implement proper ancestor hash chain lookup
+                let ancestors = shred_provider.get_ancestors(
+                    slot,
+                    paradencer_constants::repair::MAX_ANCESTOR_HASHES_RESPONSE as u64,
+                );
+                let hashes: Vec<(u64, [u8; 32])> = ancestors
+                    .iter()
+                    .map(|s| {
+                        let mut hash = [0u8; 32];
+                        // Use first 32 bytes of shred data as placeholder hash
+                        let copy_len = s.data.len().min(32);
+                        hash[..copy_len].copy_from_slice(&s.data[..copy_len]);
+                        (s.slot, hash)
+                    })
+                    .collect();
+                let resp = response::WireAncestorHashesResponse::Hashes(hashes);
+                Some(response::encode_ancestor_response(&resp, nonce))
             }
-            RepairRequest::Ancestor {
-                slot,
-                ancestors,
-                nonce,
-                ..
-            } => {
-                let shreds = shred_provider.get_ancestors(slot, ancestors);
-                stats
-                    .shreds_served
-                    .fetch_add(shreds.len() as u64, Ordering::Relaxed);
-                stats.responses_sent.fetch_add(1, Ordering::Relaxed);
-                RepairResponse::Shreds {
-                    responder: node_id,
-                    shreds,
-                    nonce,
-                }
-            }
-            RepairRequest::Orphan { nonce, .. } => {
+            RepairRequest::SlotRange { .. } => {
+                // SlotRange has no Solana wire equivalent
                 stats.errors_sent.fetch_add(1, Ordering::Relaxed);
-                RepairResponse::Error {
-                    responder: node_id,
-                    error_code: 501,
-                    message: "orphan repair not implemented".to_string(),
-                    nonce,
-                }
+                None
             }
         }
     }
@@ -414,5 +456,123 @@ mod tests {
         let shreds = store.get_shreds_in_range(105, 107);
         assert!(!shreds.is_empty());
         assert!(shreds.iter().all(|s| s.slot >= 105 && s.slot <= 107));
+    }
+
+    #[test]
+    fn test_handle_shred_request_wire() {
+        let store = Arc::new(InMemoryShredStore::new());
+        store.insert(ShredData::new(100, 5, vec![0xAB; 64], false));
+
+        let node_id = NodeId::new([1u8; 32]);
+        let stats = RepairServerStats::new();
+
+        let request = RepairRequest::Shred {
+            requester: NodeId::new([2u8; 32]),
+            slot: 100,
+            index: 5,
+            nonce: 42,
+        };
+
+        let response_bytes = RepairServer::handle_request_wire(
+            node_id,
+            request,
+            &(store as Arc<dyn ShredProvider>),
+            &stats,
+            42,
+        );
+
+        let bytes = response_bytes.expect("should have response");
+        let (payload, nonce) = response::decode_shred_response(&bytes).unwrap();
+        assert_eq!(payload, &[0xAB; 64]);
+        assert_eq!(nonce, 42);
+        assert_eq!(stats.shreds_served.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn test_handle_missing_shred_returns_none() {
+        let store = Arc::new(InMemoryShredStore::new());
+        let node_id = NodeId::new([1u8; 32]);
+        let stats = RepairServerStats::new();
+
+        let request = RepairRequest::Shred {
+            requester: NodeId::new([2u8; 32]),
+            slot: 999,
+            index: 0,
+            nonce: 1,
+        };
+
+        let response_bytes = RepairServer::handle_request_wire(
+            node_id,
+            request,
+            &(store as Arc<dyn ShredProvider>),
+            &stats,
+            1,
+        );
+        assert!(response_bytes.is_none());
+    }
+
+    #[test]
+    fn test_handle_highest_shred_wire() {
+        let store = Arc::new(InMemoryShredStore::new());
+        store.insert(ShredData::new(100, 3, vec![0x11; 32], false));
+        store.insert(ShredData::new(100, 7, vec![0x22; 32], false));
+        store.insert(ShredData::new(100, 5, vec![0x33; 32], false));
+
+        let node_id = NodeId::new([1u8; 32]);
+        let stats = RepairServerStats::new();
+
+        let request = RepairRequest::HighestShred {
+            requester: NodeId::new([2u8; 32]),
+            slot: 100,
+            nonce: 99,
+        };
+
+        let response_bytes = RepairServer::handle_request_wire(
+            node_id,
+            request,
+            &(store as Arc<dyn ShredProvider>),
+            &stats,
+            99,
+        );
+
+        let bytes = response_bytes.expect("should have response");
+        let (payload, nonce) = response::decode_shred_response(&bytes).unwrap();
+        assert_eq!(payload, &[0x22; 32]); // highest index = 7, data = 0x22
+        assert_eq!(nonce, 99);
+    }
+
+    #[test]
+    fn test_handle_ancestor_hashes_wire() {
+        let store = Arc::new(InMemoryShredStore::new());
+        store.insert(ShredData::new(99, 0, vec![0xAA; 32], false));
+        store.insert(ShredData::new(98, 0, vec![0xBB; 32], false));
+
+        let node_id = NodeId::new([1u8; 32]);
+        let stats = RepairServerStats::new();
+
+        let request = RepairRequest::Ancestor {
+            requester: NodeId::new([2u8; 32]),
+            slot: 100,
+            ancestors: 5,
+            nonce: 7,
+        };
+
+        let response_bytes = RepairServer::handle_request_wire(
+            node_id,
+            request,
+            &(store as Arc<dyn ShredProvider>),
+            &stats,
+            7,
+        );
+
+        let bytes = response_bytes.expect("should have response");
+        let (resp, nonce) = response::decode_ancestor_response(&bytes).unwrap();
+        assert_eq!(nonce, 7);
+
+        if let response::WireAncestorHashesResponse::Hashes(hashes) = resp {
+            assert!(!hashes.is_empty());
+        } else {
+            panic!("expected Hashes variant");
+        }
     }
 }

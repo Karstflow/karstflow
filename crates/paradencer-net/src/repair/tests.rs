@@ -1,7 +1,10 @@
 use super::*;
 use crate::gossip::{ClusterInfo, ContactInfo, NodeId};
-use crate::repair::protocol::{RepairRequest, RepairResponse, ShredData};
+use crate::repair::protocol::{RepairRequest, ShredData};
 use crate::repair::server::{InMemoryShredStore, RepairServer, RepairServerConfig};
+use crate::repair::wire::convert;
+use crate::repair::wire::protocol::WireRepairProtocol;
+use crate::repair::wire::response;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::Arc;
 use std::time::Duration;
@@ -75,37 +78,38 @@ async fn test_repair_server_creation() {
 }
 
 #[tokio::test]
-async fn test_repair_request_encode_decode() {
-    let requester = NodeId::random();
+async fn test_wire_repair_request_encode_decode() {
+    let (secret, pubkey) = paradencer_crypto::generate_keypair();
+    let (_, recipient) = paradencer_crypto::generate_keypair();
     let request = RepairRequest::Shred {
-        requester,
+        requester: NodeId::new(pubkey),
         slot: 100,
         index: 5,
         nonce: 12345,
     };
 
-    let message = RepairMessage::Request(request);
-    let encoded = message.encode().unwrap();
-    let decoded = RepairMessage::decode(encoded).unwrap();
+    let mut wire = convert::request_to_wire(&request, recipient).unwrap();
+    wire.sign(&secret);
 
-    assert!(decoded.is_request());
+    let encoded = wire.encode().unwrap();
+    let decoded = WireRepairProtocol::decode(&encoded).unwrap();
+    assert!(decoded.verify());
+    assert_eq!(decoded.discriminant(), 8); // WindowIndex
+
+    let internal = convert::wire_to_request(&decoded).unwrap();
+    assert_eq!(internal.requester().0, pubkey);
 }
 
 #[tokio::test]
-async fn test_repair_response_encode_decode() {
-    let responder = NodeId::random();
-    let shred = ShredData::new(100, 5, vec![1, 2, 3], false);
-    let response = RepairResponse::Shred {
-        responder,
-        shred: Some(shred),
-        nonce: 12345,
-    };
+async fn test_wire_shred_response_encode_decode() {
+    let shred_data = vec![1, 2, 3, 4, 5];
+    let nonce = 12345u32;
 
-    let message = RepairMessage::Response(response);
-    let encoded = message.encode().unwrap();
-    let decoded = RepairMessage::decode(encoded).unwrap();
+    let encoded = response::encode_shred_response(&shred_data, nonce);
+    let (payload, decoded_nonce) = response::decode_shred_response(&encoded).unwrap();
 
-    assert!(decoded.is_response());
+    assert_eq!(payload, &shred_data[..]);
+    assert_eq!(decoded_nonce, nonce);
 }
 
 #[tokio::test]

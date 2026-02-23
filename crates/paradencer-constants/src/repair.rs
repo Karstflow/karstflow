@@ -33,3 +33,18 @@ pub const DEFAULT_PEER_RATE_LIMIT: u32 = 100;
 
 /// Protocol version for repair messages.
 pub const PROTOCOL_VERSION: u16 = 1;
+
+/// Maximum timestamp skew allowed for signed repair requests (±10 minutes).
+pub const REPAIR_TIMESTAMP_SKEW_SECS: u64 = 600;
+
+/// Maximum ancestor hash pairs in a single response.
+pub const MAX_ANCESTOR_HASHES_RESPONSE: usize = 30;
+
+/// Size of the nonce field appended to shred responses (u32 = 4 bytes).
+pub const REPAIR_RESPONSE_NONCE_SIZE: usize = 4;
+
+/// Maximum number of orphan ancestors returned in a single repair response.
+pub const MAX_ORPHAN_REPAIR_RESPONSES: usize = 11;
+
+/// Size of the Ed25519 signature in repair request headers.
+pub const REPAIR_SIGNATURE_SIZE: usize = 64;

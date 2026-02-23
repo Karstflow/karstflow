@@ -1,5 +1,6 @@
 use crate::gossip::NodeId;
-use crate::repair::{RepairMessage, RepairRequest};
+use crate::repair::wire::convert;
+use crate::repair::RepairRequest;
 use crate::turbine::transport::ShredTransport;
 use crate::turbine::{RetransmitStats, TurbineConfig, TurbineTree};
 use crate::IngressError;
@@ -360,8 +361,21 @@ impl RetransmitService {
             nonce,
         };
 
-        let message = RepairMessage::Request(repair_request);
-        let encoded = match message.encode() {
+        // Convert to wire format and sign
+        // TODO: Look up recipient pubkey from turbine tree node
+        let recipient = [0u8; 32];
+        let wire_msg = match convert::request_to_wire(&repair_request, recipient) {
+            Some(msg) => msg,
+            None => {
+                error!("Failed to convert repair request to wire format");
+                return;
+            }
+        };
+
+        // TODO: Sign with node's signing key when available
+        // wire_msg.sign(&signing_key);
+
+        let encoded = match wire_msg.encode() {
             Ok(bytes) => bytes,
             Err(e) => {
                 error!("Failed to encode repair request: {}", e);

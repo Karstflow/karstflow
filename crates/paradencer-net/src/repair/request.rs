@@ -1,6 +1,7 @@
 use super::*;
 use crate::gossip::{ClusterInfo, NodeId};
-use crate::repair::protocol::{RepairMessage, RepairRequest, RepairResponse, ShredData};
+use crate::repair::protocol::{RepairRequest, RepairRequestType, RepairResponse, ShredData};
+use crate::repair::wire::convert;
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -46,16 +47,24 @@ impl Default for RepairRequesterStats {
     }
 }
 
-/// Pending repair request
+/// Pending repair request with metadata for response reconstruction.
+///
+/// Wire responses are raw shred bytes + nonce — the requester must remember
+/// what was asked for (slot, index, type) to reconstruct an internal response.
 struct PendingRequest {
     created_at: Instant,
+    request_type: RepairRequestType,
+    slot: Slot,
+    index: ShredIndex,
     response_tx: oneshot::Sender<RepairResponse>,
 }
 
-/// Repair requester for sending repair requests to peers
+/// Repair requester for sending repair requests to peers.
+///
+/// Sends wire-compatible repair requests signed with the node's Ed25519 key.
+/// Responses are raw shred payloads with a u32 nonce appended.
 pub struct RepairRequester {
     node_id: NodeId,
-    #[allow(dead_code)]
     cluster_info: Arc<ClusterInfo>,
     socket: Arc<UdpSocket>,
     stats: RepairRequesterStats,
@@ -106,9 +115,17 @@ impl RepairRequester {
         let send_socket = Arc::clone(&self.socket);
         let send_stats = self.stats.clone();
         let send_pending = Arc::clone(&self.pending_requests);
+        let send_cluster_info = Arc::clone(&self.cluster_info);
 
         tokio::spawn(async move {
-            Self::send_loop(send_socket, send_stats, send_pending, request_rx).await;
+            Self::send_loop(
+                send_socket,
+                send_stats,
+                send_pending,
+                send_cluster_info,
+                request_rx,
+            )
+            .await;
         });
 
         let recv_socket = Arc::clone(&self.socket);
@@ -272,6 +289,7 @@ impl RepairRequester {
         socket: Arc<UdpSocket>,
         stats: RepairRequesterStats,
         pending: Arc<parking_lot::RwLock<HashMap<u64, PendingRequest>>>,
+        cluster_info: Arc<ClusterInfo>,
         mut request_rx: mpsc::Receiver<(
             RepairRequest,
             SocketAddr,
@@ -280,9 +298,22 @@ impl RepairRequester {
     ) {
         while let Some((request, target, response_tx)) = request_rx.recv().await {
             let nonce = request.nonce();
+            let request_type = request.request_type();
+            let (slot, index) = extract_slot_index(&request);
 
-            let message = RepairMessage::Request(request);
-            if let Ok(encoded) = message.encode() {
+            // Convert to wire format and sign
+            // TODO: Look up recipient pubkey from ClusterInfo by SocketAddr
+            let recipient = [0u8; 32];
+            let mut wire_msg = match convert::request_to_wire(&request, recipient) {
+                Some(msg) => msg,
+                None => continue, // SlotRange not representable
+            };
+
+            if let Some(key) = cluster_info.signing_key() {
+                wire_msg.sign(key);
+            }
+
+            if let Ok(encoded) = wire_msg.encode() {
                 if (socket.send_to(&encoded, target).await).is_ok() {
                     stats.requests_sent.fetch_add(1, Ordering::Relaxed);
                     stats
@@ -295,6 +326,9 @@ impl RepairRequester {
                             nonce,
                             PendingRequest {
                                 created_at: Instant::now(),
+                                request_type,
+                                slot,
+                                index,
                                 response_tx,
                             },
                         );
@@ -318,25 +352,20 @@ impl RepairRequester {
                         .bytes_received
                         .fetch_add(len as u64, Ordering::Relaxed);
 
-                    let data = bytes::Bytes::copy_from_slice(&buf[..len]);
-                    if let Ok(RepairMessage::Response(response)) = RepairMessage::decode(data) {
-                        let nonce = response.nonce();
+                    let data = &buf[..len];
+
+                    // Wire responses are raw shred bytes + u32 nonce appended at end.
+                    // Extract nonce, match to pending request, reconstruct response.
+                    if let Some((payload, nonce_u32)) = convert::wire_response_to_shred(data) {
+                        let nonce = nonce_u32 as u64;
 
                         if let Some(pending_req) = pending.write().remove(&nonce) {
-                            if response.is_error() {
-                                stats.errors_received.fetch_add(1, Ordering::Relaxed);
-                            } else {
-                                stats.responses_received.fetch_add(1, Ordering::Relaxed);
+                            stats.responses_received.fetch_add(1, Ordering::Relaxed);
 
-                                if let RepairResponse::Shred { ref shred, .. } = response {
-                                    if shred.is_some() {
-                                        stats.shreds_received.fetch_add(1, Ordering::Relaxed);
-                                    }
-                                } else if let RepairResponse::Shreds { ref shreds, .. } = response {
-                                    stats
-                                        .shreds_received
-                                        .fetch_add(shreds.len() as u64, Ordering::Relaxed);
-                                }
+                            let response = reconstruct_response(&pending_req, payload, nonce);
+
+                            if let RepairResponse::Shred { shred: Some(_), .. } = &response {
+                                stats.shreds_received.fetch_add(1, Ordering::Relaxed);
                             }
 
                             let _ = pending_req.response_tx.send(response);
@@ -376,6 +405,97 @@ impl RepairRequester {
     }
 }
 
+/// Extract slot and shred index from a repair request.
+fn extract_slot_index(request: &RepairRequest) -> (Slot, ShredIndex) {
+    match request {
+        RepairRequest::Shred { slot, index, .. } => (*slot, *index),
+        RepairRequest::HighestShred { slot, .. } => (*slot, 0),
+        RepairRequest::SlotRange { start_slot, .. } => (*start_slot, 0),
+        RepairRequest::Orphan { slot, .. } => (*slot, 0),
+        RepairRequest::Ancestor { slot, .. } => (*slot, 0),
+    }
+}
+
+/// Reconstruct an internal RepairResponse from wire response payload.
+fn reconstruct_response(pending: &PendingRequest, payload: Vec<u8>, nonce: u64) -> RepairResponse {
+    let responder = NodeId::new([0u8; 32]); // Wire responses don't carry responder ID
+
+    match pending.request_type {
+        RepairRequestType::Shred => {
+            if payload.is_empty() {
+                RepairResponse::Shred {
+                    responder,
+                    shred: None,
+                    nonce,
+                }
+            } else {
+                RepairResponse::Shred {
+                    responder,
+                    shred: Some(ShredData::new(
+                        pending.slot,
+                        pending.index,
+                        payload,
+                        false, // TODO: Determine from shred header
+                    )),
+                    nonce,
+                }
+            }
+        }
+        RepairRequestType::HighestShred => {
+            // HighestWindowIndex returns a shred — the highest one
+            if payload.is_empty() {
+                RepairResponse::HighestShred {
+                    responder,
+                    slot: pending.slot,
+                    index: None,
+                    nonce,
+                }
+            } else {
+                // TODO: Parse shred header to extract actual index
+                RepairResponse::Shred {
+                    responder,
+                    shred: Some(ShredData::new(pending.slot, 0, payload, false)),
+                    nonce,
+                }
+            }
+        }
+        RepairRequestType::Orphan => {
+            // Orphan returns ancestor shreds
+            if payload.is_empty() {
+                RepairResponse::Shreds {
+                    responder,
+                    shreds: vec![],
+                    nonce,
+                }
+            } else {
+                RepairResponse::Shreds {
+                    responder,
+                    shreds: vec![ShredData::new(pending.slot, 0, payload, false)],
+                    nonce,
+                }
+            }
+        }
+        RepairRequestType::Ancestor => {
+            // AncestorHashes returns bincode-serialized Vec<(Slot, Hash)> + nonce
+            // For now, wrap as raw shred data
+            RepairResponse::Shreds {
+                responder,
+                shreds: vec![ShredData::new(pending.slot, 0, payload, false)],
+                nonce,
+            }
+        }
+        RepairRequestType::SlotRange => {
+            // SlotRange has no wire equivalent, should not reach here
+            RepairResponse::Error {
+                responder,
+                error_code: 400,
+                message: "SlotRange not supported in wire protocol".to_string(),
+                nonce,
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -407,6 +527,83 @@ mod tests {
         let nonce2 = requester.next_nonce();
 
         assert_eq!(nonce2, nonce1 + 1);
+    }
+
+    #[test]
+    fn test_extract_slot_index() {
+        let node = NodeId::new([1u8; 32]);
+        assert_eq!(
+            extract_slot_index(&RepairRequest::Shred {
+                requester: node,
+                slot: 100,
+                index: 5,
+                nonce: 0,
+            }),
+            (100, 5)
+        );
+        assert_eq!(
+            extract_slot_index(&RepairRequest::HighestShred {
+                requester: node,
+                slot: 200,
+                nonce: 0,
+            }),
+            (200, 0)
+        );
+        assert_eq!(
+            extract_slot_index(&RepairRequest::Orphan {
+                requester: node,
+                slot: 300,
+                nonce: 0,
+            }),
+            (300, 0)
+        );
+    }
+
+    #[test]
+    fn test_reconstruct_shred_response() {
+        let pending = PendingRequest {
+            created_at: Instant::now(),
+            request_type: RepairRequestType::Shred,
+            slot: 100,
+            index: 5,
+            response_tx: oneshot::channel().0,
+        };
+
+        let response = reconstruct_response(&pending, vec![1, 2, 3], 42);
+        if let RepairResponse::Shred {
+            shred: Some(shred),
+            nonce,
+            ..
+        } = response
+        {
+            assert_eq!(shred.slot, 100);
+            assert_eq!(shred.index, 5);
+            assert_eq!(shred.data, vec![1, 2, 3]);
+            assert_eq!(nonce, 42);
+        } else {
+            panic!("expected Shred response");
+        }
+    }
+
+    #[test]
+    fn test_reconstruct_empty_response() {
+        let pending = PendingRequest {
+            created_at: Instant::now(),
+            request_type: RepairRequestType::Shred,
+            slot: 100,
+            index: 5,
+            response_tx: oneshot::channel().0,
+        };
+
+        let response = reconstruct_response(&pending, vec![], 42);
+        if let RepairResponse::Shred {
+            shred: None, nonce, ..
+        } = response
+        {
+            assert_eq!(nonce, 42);
+        } else {
+            panic!("expected Shred None response");
+        }
     }
 
     fn create_test_contact_info(node_id: NodeId) -> crate::gossip::ContactInfo {
