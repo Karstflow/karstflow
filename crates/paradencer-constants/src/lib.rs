@@ -451,6 +451,7 @@ pub mod quic {
 
 pub mod durable_store;
 pub mod gossip;
+pub mod ipc;
 pub mod loader_v4;
 pub mod network;
 pub mod repair;

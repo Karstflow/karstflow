@@ -7,3 +7,4 @@ authors.workspace = true
 
 [dependencies]
 crossbeam-channel.workspace = true
+paradencer-constants = { path = "../paradencer-constants" }
