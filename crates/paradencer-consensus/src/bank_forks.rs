@@ -104,6 +104,14 @@ impl BankForks {
             return Err(BankForksError::BankNotRooted(new_root_slot));
         }
 
+        // Prune transaction dedup cache entries that can no longer be
+        // referenced by any valid transaction. Transactions must use a
+        // recent blockhash within MAX_RECENT_BLOCKHASHES slots of the
+        // current root, so anything older is safe to discard.
+        let purge_below = new_root_slot
+            .saturating_sub(paradencer_constants::sysvars::MAX_RECENT_BLOCKHASHES as u64);
+        new_root_bank.transaction_cache().purge_before_slot(purge_below);
+
         self.banks.retain(|slot, _| *slot >= new_root_slot);
 
         self.root_slot = new_root_slot;
