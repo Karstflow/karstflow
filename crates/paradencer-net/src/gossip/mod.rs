@@ -13,7 +13,7 @@ pub use cluster_info::{
 };
 pub use crds::{
     CrdsContactInfo, CrdsEntry, CrdsKey, CrdsTable, CrdsValue, CrdsValueData, GossipBloomFilter,
-    InsertOutcome, WeightedPeerSampler,
+    InsertOutcome, VoteGossip, WeightedPeerSampler,
 };
 pub use protocol::{
     GossipMessage, GossipMessageType, GossipPullRequest, GossipPullResponse, GossipPushMessage,

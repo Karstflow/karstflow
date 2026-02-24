@@ -659,6 +659,145 @@ pub fn build_repair_service(
 }
 
 // ---------------------------------------------------------------------------
+// Vote broadcast: consensus decisions → gossip network
+// ---------------------------------------------------------------------------
+
+/// Result of building the vote broadcast service.
+pub struct VoteBroadcastBundle {
+    /// The poll-driven service for the node runtime.
+    pub service: Box<dyn Service>,
+}
+
+/// Service adapter that broadcasts new tower votes via gossip.
+///
+/// Mirrors Firedancer's vote flow: tower tile (decision) → txsend tile
+/// (sign + target leaders) → gossip tile (CRDS broadcast). Here the
+/// adapter combines the signing and gossip insertion steps — it polls
+/// the shared Tower for new vote slots, wraps them in signed CrdsValue
+/// entries, and inserts them into ClusterInfo. The gossip service's push
+/// loop then automatically propagates votes to cluster peers.
+struct VoteBroadcastAdapter {
+    tower: Arc<RwLock<paradencer_consensus::Tower>>,
+    cluster_info: Arc<ClusterInfo>,
+    node_pubkey: [u8; 32],
+    /// Last vote slot we broadcast (avoids duplicate broadcasts).
+    last_broadcast_slot: Option<u64>,
+    /// Rotating vote index (0..255) for CRDS key differentiation.
+    vote_index: u8,
+}
+
+impl Service for VoteBroadcastAdapter {
+    fn name(&self) -> &'static str {
+        "vote-broadcast"
+    }
+
+    fn tick_interval(&self) -> std::time::Duration {
+        // Check for new votes every 50ms — fast enough for timely
+        // broadcast without excessive polling.
+        std::time::Duration::from_millis(50)
+    }
+
+    fn on_start(
+        &mut self,
+        _context: &paradencer_runtime::ServiceContext,
+    ) -> paradencer_runtime::RuntimeResult<()> {
+        Ok(())
+    }
+
+    fn tick(
+        &mut self,
+        _context: &paradencer_runtime::ServiceContext,
+    ) -> paradencer_runtime::RuntimeResult<()> {
+        let tower = self.tower.read().map_err(|_| {
+            paradencer_runtime::RuntimeError::service_failure(
+                "vote-broadcast",
+                "tower lock poisoned",
+            )
+        })?;
+
+        let current_vote_slot = tower.last_vote_slot();
+
+        // Only broadcast if there's a new vote we haven't sent yet.
+        if current_vote_slot.is_none() || current_vote_slot == self.last_broadcast_slot {
+            return Ok(());
+        }
+
+        let vote_slot = current_vote_slot.unwrap();
+        self.last_broadcast_slot = Some(vote_slot);
+
+        // Rotate the vote index so each vote gets a unique CRDS key.
+        self.vote_index = self.vote_index.wrapping_add(1);
+
+        let now_nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos() as i64;
+
+        // Build a VoteGossip entry. In production, this should contain
+        // a properly serialized vote transaction. For now the slot and
+        // hash are set directly; the transaction builder will be wired
+        // in a future iteration.
+        let vote_gossip = paradencer_net::CrdsValueData::Vote(paradencer_net::VoteGossip {
+            index: self.vote_index,
+            slot: vote_slot,
+            hash: [0u8; 32],               // TODO: populate with actual bank hash
+            transaction_bytes: Vec::new(), // TODO: build signed vote transaction
+        });
+
+        let crds_value = paradencer_net::CrdsValue {
+            origin: self.node_pubkey,
+            wallclock_nanos: now_nanos,
+            signature: [0u8; 64],
+            data: vote_gossip,
+        };
+
+        // TODO: sign with actual validator keypair
+        // crds_value.sign(&validator_secret_key);
+        let _ = &crds_value.signature; // placeholder until signing is wired
+
+        // Insert into CRDS table — the gossip push loop handles broadcast.
+        self.cluster_info.insert_crds_value(crds_value, 1);
+
+        Ok(())
+    }
+
+    fn on_stop(
+        &mut self,
+        _context: &paradencer_runtime::ServiceContext,
+    ) -> paradencer_runtime::RuntimeResult<()> {
+        Ok(())
+    }
+}
+
+/// Build the vote broadcast service.
+///
+/// Creates a poll-driven service that monitors the shared Tower for new
+/// vote decisions and broadcasts them via gossip. The service reads the
+/// Tower lock on each tick, constructs a VoteGossip CRDS value when a
+/// new vote is detected, and inserts it into ClusterInfo for the gossip
+/// push loop to distribute to the cluster.
+///
+/// This mirrors Firedancer's tower→txsend→gossip pipeline, with the
+/// signing and gossip insertion combined in a single adapter service.
+pub fn build_vote_broadcast_service(
+    node_id: NodeId,
+    tower: Arc<RwLock<paradencer_consensus::Tower>>,
+    cluster_info: Arc<ClusterInfo>,
+) -> VoteBroadcastBundle {
+    let adapter = VoteBroadcastAdapter {
+        tower,
+        cluster_info,
+        node_pubkey: node_id.0,
+        last_broadcast_slot: None,
+        vote_index: 0,
+    };
+
+    VoteBroadcastBundle {
+        service: Box::new(adapter),
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Shred pipeline: ShredCollector → ReplayService
 // ---------------------------------------------------------------------------
 

@@ -33,7 +33,7 @@ pub use filter::{
 pub use gossip::{
     ClusterInfo, ContactInfo, CrdsContactInfo, CrdsEntry, CrdsKey, CrdsTable, CrdsValue,
     CrdsValueData, GossipBloomFilter, GossipConfig, GossipMessage, GossipNode, GossipService,
-    GossipServiceStats, InsertOutcome, NodeId, PullRequestFilter, ValidatorInfo,
+    GossipServiceStats, InsertOutcome, NodeId, PullRequestFilter, ValidatorInfo, VoteGossip,
     WeightedPeerSampler,
 };
 

@@ -1,15 +1,16 @@
 use paradencer_control::{
     build_diagnostics_summary_from_probe, build_pipeline_service, build_repair_service,
-    build_replay_service_with_block_input, build_turbine_service, dispatch_command,
-    ensure_mainnet_readiness, evaluate_mainnet_readiness, materialize_service_pair_from_config,
-    materialize_services_from_config, parse_command, render_diagnostics_cluster_mode_line,
-    render_diagnostics_lane_capacity_line, render_diagnostics_ok_line,
-    render_diagnostics_probe_line, render_diagnostics_readiness_issue_line,
-    render_diagnostics_readiness_line, render_diagnostics_services_line,
-    render_diagnostics_stage_mix_line, render_diagnostics_topology_line,
-    render_preflight_readiness_issue_line, render_preflight_readiness_line,
-    render_readiness_policy_line, run_diagnostics_phase, run_preflight_phase,
-    run_preflight_phase_with_probe_report, run_runtime_phase, start_gossip_service, ServiceBundle,
+    build_replay_service_with_block_input, build_turbine_service, build_vote_broadcast_service,
+    dispatch_command, ensure_mainnet_readiness, evaluate_mainnet_readiness,
+    materialize_service_pair_from_config, materialize_services_from_config, parse_command,
+    render_diagnostics_cluster_mode_line, render_diagnostics_lane_capacity_line,
+    render_diagnostics_ok_line, render_diagnostics_probe_line,
+    render_diagnostics_readiness_issue_line, render_diagnostics_readiness_line,
+    render_diagnostics_services_line, render_diagnostics_stage_mix_line,
+    render_diagnostics_topology_line, render_preflight_readiness_issue_line,
+    render_preflight_readiness_line, render_readiness_policy_line, run_diagnostics_phase,
+    run_preflight_phase, run_preflight_phase_with_probe_report, run_runtime_phase,
+    start_gossip_service, ServiceBundle,
 };
 
 fn main() -> paradencer_control::Result<()> {
@@ -49,7 +50,7 @@ fn run_with_node_config(
         shred_block_input,
         1_000_000, // initial stake for fork choice
     );
-    let _consensus = replay_bundle.consensus;
+    let consensus = replay_bundle.consensus;
 
     // Build the transaction pipeline for block production.
     // Pipeline inputs come directly from the topology — each TxFilter stage
@@ -69,14 +70,21 @@ fn run_with_node_config(
     // Build the repair service for slot recovery from peers.
     // The coordinator runs poll-driven in the node runtime; background I/O
     // handles actual UDP request/response on a dedicated thread.
-    let repair_bundle = build_repair_service(node_id, cluster_info)?;
+    let repair_bundle = build_repair_service(node_id, cluster_info.clone())?;
     let _repair_io = repair_bundle.io_handle;
+
+    // Build the vote broadcast service. Monitors the shared Tower for
+    // new consensus decisions and pushes them to gossip as CrdsValue
+    // entries. Mirrors Firedancer's tower→txsend→gossip pipeline.
+    let vote_broadcast_bundle =
+        build_vote_broadcast_service(node_id, consensus.tower, cluster_info);
 
     let mut services = runtime_topology.services;
     services.push(replay_bundle.service);
     services.push(pipeline_bundle.service);
     services.push(turbine_bundle.service);
     services.push(repair_bundle.service);
+    services.push(vote_broadcast_bundle.service);
 
     // Keep gossip alive until run_runtime_phase returns.
     let _gossip = gossip_handle;
