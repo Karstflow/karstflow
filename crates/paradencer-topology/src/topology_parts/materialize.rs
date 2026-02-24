@@ -7,10 +7,11 @@ use paradencer_mesh::bounded_link;
 use paradencer_net::IngressPolicy;
 use paradencer_runtime::Service;
 use paradencer_stages::{
-    AssembledBlock, BlockAssembler, BlockAssemblyStats, EdgeIntake, InboundPacket,
+    AssembledBlock, BlockAssembler, BlockAssemblyStats, CompletedFecSet, EdgeIntake, InboundPacket,
     IngressFilterStats, LinkTelemetryStats, MetricsOutputFormat, MetricsOutputTarget,
-    MetricsReporter, RawTransaction, SanitizedTransaction, ShredCollector, ShredCollectorConfig,
-    ShredFilter, ShredFilterStats, StageTelemetryStats, StorageRuntimePolicy, TxFilter,
+    MetricsReporter, RawTransaction, SanitizedTransaction, ShredCollector, ShredFilter,
+    ShredFilterStats, ShredNetworkConfig, ShredNetworkService, StageTelemetryStats,
+    StorageRuntimePolicy, TxFilter,
 };
 use paradencer_types::shred::Shred;
 use std::collections::HashMap;
@@ -94,12 +95,19 @@ pub fn materialize_services(
         !transaction_stats.is_empty(),
         "transaction links must exist after topology validation"
     );
-    // Internal shred pipeline: ShredFilter → ShredCollector → block output.
-    // The filtered shred link connects ShredFilter output to ShredCollector input.
+    // Internal shred pipeline:
+    //   ShredFilter → ShredNetworkService (FEC resolution) → ShredCollector → block output.
+    // The filtered shred link connects ShredFilter to ShredNetworkService.
+    // Completed FEC sets flow from ShredNetworkService to ShredCollector.
+    // A direct shred link to ShredCollector is kept for future repair/catch-up paths.
     // The block link carries assembled blocks out of the topology for replay.
     let shred_pipeline_capacity = 2048;
+    let fec_completed_capacity = 256;
     let block_pipeline_capacity = 64;
     let (filtered_shred_tx, filtered_shred_rx) = bounded_link::<Shred>(shred_pipeline_capacity);
+    let (fec_completed_tx, fec_completed_rx) =
+        bounded_link::<CompletedFecSet>(fec_completed_capacity);
+    let (direct_shred_tx, direct_shred_rx) = bounded_link::<Shred>(shred_pipeline_capacity);
     let (assembled_block_tx, assembled_block_rx) =
         bounded_link::<AssembledBlock>(block_pipeline_capacity);
 
@@ -151,12 +159,21 @@ pub fn materialize_services(
                     shred_filter_stats.clone(),
                     filtered_shred_tx.clone(),
                 )));
-                // Add the shred collector once (after the first ShredSanitizer).
+                // Add network service and collector once (after the first ShredSanitizer).
                 if !shred_collector_added {
-                    services.push(Box::new(ShredCollector::with_config(
+                    // ShredNetworkService: FEC set tracking + Reed-Solomon recovery.
+                    services.push(Box::new(ShredNetworkService::new(
+                        ShredNetworkConfig::default(),
                         filtered_shred_rx.clone(),
+                        fec_completed_tx.clone(),
+                    )));
+                    // ShredCollector: accumulates shreds by slot, emits assembled blocks.
+                    // Receives completed FEC sets from the network service, plus a
+                    // direct shred channel for future repair/catch-up paths.
+                    services.push(Box::new(ShredCollector::with_fec_input(
+                        direct_shred_rx.clone(),
+                        fec_completed_rx.clone(),
                         assembled_block_tx.clone(),
-                        ShredCollectorConfig::default(),
                     )));
                     shred_collector_added = true;
                 }
@@ -214,5 +231,10 @@ pub fn materialize_services(
             None
         },
         pipeline_inputs,
+        direct_shred_sender: if shred_collector_added {
+            Some(direct_shred_tx)
+        } else {
+            None
+        },
     })
 }

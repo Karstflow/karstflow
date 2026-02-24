@@ -165,6 +165,47 @@ pub fn build_replay_service(config: ReplayServiceConfig, initial_stake: u64) -> 
     }
 }
 
+/// Build a replay service connected to an external block source.
+///
+/// Uses an existing `InPort<AssembledBlock>` from the topology's shred
+/// pipeline instead of creating a new internal channel. This connects the
+/// TVU receive path (EdgeIntake → ShredFilter → ShredNetworkService →
+/// ShredCollector) directly to the replay service for consensus processing.
+pub fn build_replay_service_with_block_input(
+    config: ReplayServiceConfig,
+    block_input: InPort<paradencer_stages::AssembledBlock>,
+    initial_stake: u64,
+) -> ReplayBundleWithExternalInput {
+    let consensus = build_consensus_infrastructure(initial_stake);
+
+    let service = ReplayService::with_block_input(
+        config,
+        block_input,
+        Arc::clone(&consensus.bank_forks),
+        Arc::clone(&consensus.fork_choice),
+        Arc::clone(&consensus.execution_bridge),
+        Arc::clone(&consensus.vote_processor),
+        Arc::clone(&consensus.tower),
+        Arc::clone(&consensus.commitment_tracker),
+    );
+
+    ReplayBundleWithExternalInput {
+        service: Box::new(service),
+        consensus,
+    }
+}
+
+/// Result of building a replay service with an external block source.
+///
+/// Unlike `ReplayBundle`, this does not expose a `block_input` sender
+/// because the input comes from the topology's shred pipeline.
+pub struct ReplayBundleWithExternalInput {
+    /// The replay service to add to the node runtime.
+    pub service: Box<dyn Service>,
+    /// Shared consensus infrastructure for other services to use.
+    pub consensus: ConsensusBundle,
+}
+
 // ---------------------------------------------------------------------------
 // Shred pipeline: ShredCollector → ReplayService
 // ---------------------------------------------------------------------------
@@ -753,8 +794,8 @@ mod tests {
     fn materialize_services_from_config_builds_default_services() {
         let node_config = NodeConfig::from_profile(None).unwrap();
         let materialized = materialize_services_from_config(&node_config).unwrap();
-        // 5 topology stages + 1 ShredCollector = 6 services.
-        assert_eq!(materialized.services.len(), 6);
+        // 5 topology stages + ShredNetworkService + ShredCollector = 7 services.
+        assert_eq!(materialized.services.len(), 7);
     }
 
     #[test]
@@ -762,7 +803,7 @@ mod tests {
         let node_config = NodeConfig::from_profile(None).unwrap();
         let pair = materialize_service_pair_from_config(&node_config).unwrap();
         assert_eq!(pair.startup.services.len(), pair.runtime.services.len());
-        assert_eq!(pair.runtime.services.len(), 6);
+        assert_eq!(pair.runtime.services.len(), 7);
     }
 
     #[test]
@@ -794,8 +835,8 @@ mod tests {
         let mut services = materialized.services;
         services.push(bundle.service);
 
-        // Topology (6) + pipeline (1) = 7 total services.
-        assert_eq!(services.len(), 7);
+        // Topology (7) + pipeline (1) = 8 total services.
+        assert_eq!(services.len(), 8);
         assert_eq!(services.last().unwrap().name(), "validator-pipeline");
     }
 
@@ -841,8 +882,8 @@ mod tests {
         services.push(replay_bundle.service);
         services.push(pipeline_bundle.service);
 
-        // Topology (6) + replay (1) + pipeline (1) = 8 total services.
-        assert_eq!(services.len(), 8);
+        // Topology (7) + replay (1) + pipeline (1) = 9 total services.
+        assert_eq!(services.len(), 9);
 
         let names: Vec<&str> = services.iter().map(|s| s.name()).collect();
         assert!(names.contains(&"replay-service"));
@@ -883,12 +924,13 @@ mod tests {
         services.push(replay_bundle.service);
         services.push(pipeline_bundle.service);
 
-        // Topology (6, including shred-collector) + replay (1) + pipeline (1) = 8.
-        assert_eq!(services.len(), 8);
+        // Topology (7, including shred-network + shred-collector) + replay (1) + pipeline (1) = 9.
+        assert_eq!(services.len(), 9);
 
         let names: Vec<&str> = services.iter().map(|s| s.name()).collect();
         assert!(names.contains(&"replay-service"));
         assert!(names.contains(&"validator-pipeline"));
+        assert!(names.contains(&"shred-network"));
         assert!(names.contains(&"shred-collector"));
     }
 
@@ -940,10 +982,10 @@ mod tests {
             summary.transaction_stream_capacity,
             expected_transaction_capacity
         );
-        assert_eq!(summary.runtime_service_names.len(), 6);
-        assert_eq!(summary.startup_probe_report.started_ok, 6);
-        assert_eq!(summary.startup_probe_report.ticked_ok, 6);
-        assert_eq!(summary.startup_probe_report.stopped_ok, 6);
+        assert_eq!(summary.runtime_service_names.len(), 7);
+        assert_eq!(summary.startup_probe_report.started_ok, 7);
+        assert_eq!(summary.startup_probe_report.ticked_ok, 7);
+        assert_eq!(summary.startup_probe_report.stopped_ok, 7);
     }
 
     #[test]
@@ -991,7 +1033,7 @@ mod tests {
         let mut node_config = NodeConfig::from_profile(None).unwrap();
         node_config.runtime_spec.mode = paradencer_core::ExecutionMode::Pinned;
         node_config.runtime_spec.pinned_core_policy = paradencer_core::PinnedCorePolicy::Strict;
-        node_config.runtime_spec.pinned_service_core_ids = Some(vec![0, 0, 0, 0, 0, 0]);
+        node_config.runtime_spec.pinned_service_core_ids = Some(vec![0, 0, 0, 0, 0, 0, 0]);
         let mut materialized = materialize_services_from_config(&node_config).unwrap();
         let result = run_diagnostics_phase(
             &node_config,

@@ -46,8 +46,8 @@ mod tests {
             StorageRuntimePolicy::default(),
         )
         .unwrap();
-        // 5 topology stages + 1 ShredCollector = 6 services.
-        assert_eq!(materialized.services.len(), 6);
+        // 5 topology stages + ShredNetworkService + ShredCollector = 7 services.
+        assert_eq!(materialized.services.len(), 7);
     }
 
     #[test]
@@ -61,8 +61,8 @@ mod tests {
             StorageRuntimePolicy::default(),
         )
         .unwrap();
-        // 8 topology stages + 1 ShredCollector = 9 services.
-        assert_eq!(materialized.services.len(), 9);
+        // 8 topology stages + ShredNetworkService + ShredCollector = 10 services.
+        assert_eq!(materialized.services.len(), 10);
     }
 
     #[test]

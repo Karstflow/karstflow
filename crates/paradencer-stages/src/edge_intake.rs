@@ -138,18 +138,36 @@ impl EdgeIntake {
 
     /// Build synthetic shred bytes for gossip-sourced packets.
     ///
-    /// Creates a minimal valid legacy data shred with an empty entry payload
-    /// (num_hashes=1, zero hash, 0 transactions). The slot is derived from
-    /// the packet ID so that shreds from consecutive IDs share the same slot.
+    /// Creates a minimal valid legacy data shred. The first shred in each slot
+    /// (index=0) carries a bincode-serialized entry batch (1 entry, 0 txs).
+    /// Subsequent shreds carry empty payloads (size=0).
+    /// The slot is derived from the packet ID so that shreds from consecutive
+    /// IDs share the same slot (32 shreds per slot).
     fn build_synthetic_shred_data(packet_id: u64) -> Vec<u8> {
         // Derive slot from packet_id: every 32 packets share a slot.
         let slot = packet_id / 32;
         let index = (packet_id % 32) as u32;
         let is_last = index == 31;
 
-        let mut buf = Vec::with_capacity(152);
-        // Signature (64 bytes)
-        buf.extend_from_slice(&[0u8; 64]);
+        // Entry payload: only the first shred carries data.
+        // Bincode format: Vec<PohEntry> with 1 entry (num_hashes=1, zero hash, 0 txs).
+        // Layout: u64 vec_len=1 + u64 num_hashes=1 + [u8;32] hash + u64 tx_count=0 = 56 bytes.
+        let (payload, payload_size) = if index == 0 {
+            let mut p = Vec::with_capacity(56);
+            p.extend_from_slice(&1u64.to_le_bytes()); // vec length: 1 entry
+            p.extend_from_slice(&1u64.to_le_bytes()); // num_hashes: 1
+            p.extend_from_slice(&[0u8; 32]); // hash: zeros
+            p.extend_from_slice(&0u64.to_le_bytes()); // transactions: 0
+            (p, 56u16)
+        } else {
+            (Vec::new(), 0u16)
+        };
+
+        let mut buf = Vec::with_capacity(88 + payload.len());
+        // Signature (64 bytes) — unique per packet to avoid deduplication.
+        let mut sig = [0u8; 64];
+        sig[..8].copy_from_slice(&packet_id.to_le_bytes());
+        buf.extend_from_slice(&sig);
         // Variant: legacy data (0b0101)
         buf.push(0b0101);
         // Slot (8 bytes LE)
@@ -160,15 +178,13 @@ impl EdgeIntake {
         buf.extend_from_slice(&1u16.to_le_bytes());
         // FEC set index (4 bytes LE)
         buf.extend_from_slice(&0u32.to_le_bytes());
-        // Data header: parent_offset=1, flags, size=48
+        // Data header: parent_offset=1, flags, size
         buf.extend_from_slice(&1u16.to_le_bytes());
         let flags = if is_last { 0x80u8 } else { 0u8 };
         buf.push(flags);
-        buf.extend_from_slice(&48u16.to_le_bytes());
-        // Entry payload: num_hashes(8) + hash(32) + num_transactions(8)
-        buf.extend_from_slice(&1u64.to_le_bytes());
-        buf.extend_from_slice(&[0u8; 32]);
-        buf.extend_from_slice(&0u64.to_le_bytes());
+        buf.extend_from_slice(&payload_size.to_le_bytes());
+        // Entry payload
+        buf.extend_from_slice(&payload);
         buf
     }
 

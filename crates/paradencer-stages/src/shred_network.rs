@@ -367,6 +367,43 @@ impl ShredNetworkStage {
         }
     }
 
+    /// Flush unresolved FEC sets for slots where the last shred has been seen.
+    ///
+    /// When all shreds for a slot have arrived but some FEC sets lack coding
+    /// shreds (so FEC params are unknown), emit those data shreds directly.
+    /// This handles data-only streams and ensures block assembly can proceed
+    /// even without coding shreds for Reed-Solomon recovery.
+    pub fn flush_complete_slots(&mut self) {
+        let complete_slots: Vec<u64> = self
+            .slots
+            .iter()
+            .filter(|(_, state)| state.last_shred_seen)
+            .map(|(&slot, _)| slot)
+            .collect();
+
+        for slot in complete_slots {
+            if let Some(slot_state) = self.slots.get_mut(&slot) {
+                let unresolved: Vec<u32> = slot_state
+                    .fec_sets
+                    .iter()
+                    .filter(|(_, fec)| !fec.resolved && !fec.data_shreds.is_empty())
+                    .map(|(&idx, _)| idx)
+                    .collect();
+
+                for fec_set_index in unresolved {
+                    if let Some(fec) = slot_state.fec_sets.get_mut(&fec_set_index) {
+                        self.stats
+                            .fec_sets_completed
+                            .fetch_add(1, Ordering::Relaxed);
+                        let completed =
+                            Self::extract_completed_set(slot, fec_set_index, fec, false);
+                        self.pending_completed.push(completed);
+                    }
+                }
+            }
+        }
+    }
+
     /// Drain pending retransmit decisions.
     pub fn drain_retransmits(&mut self) -> Vec<RetransmitDecision> {
         std::mem::take(&mut self.pending_retransmits)
@@ -691,6 +728,9 @@ impl Service for ShredNetworkService {
                 ));
             }
         }
+
+        // Flush data-only FEC sets for slots where the last shred arrived.
+        self.stage.flush_complete_slots();
 
         self.flush_completed();
         self.flush_retransmits();
@@ -1339,5 +1379,70 @@ mod tests {
         let decision = decision.unwrap();
         assert_eq!(decision.slot, 100);
         assert_eq!(decision.destination_indices.len(), 3);
+    }
+
+    #[test]
+    fn flush_complete_slots_emits_data_only_fec_sets() {
+        let mut stage = ShredNetworkStage::new();
+
+        // Insert data-only shreds (no coding) for slot 200.
+        // The last shred has the last-in-slot flag.
+        for idx in 0..4 {
+            let mut ns = make_data_shred(200, idx, 0);
+            if idx == 3 {
+                // Set last-in-slot flag.
+                if let ShredVariant::LegacyData(ref mut header) = ns.shred.variant {
+                    header.flags |= SHRED_LAST_IN_SLOT;
+                }
+            }
+            stage.insert_shred(ns);
+        }
+
+        // No completed sets yet (params_known=false).
+        assert!(stage.drain_completed_sets().is_empty());
+
+        // Flush complete slots should emit the data-only set.
+        stage.flush_complete_slots();
+        let completed = stage.drain_completed_sets();
+        assert_eq!(completed.len(), 1);
+        assert_eq!(completed[0].slot, 200);
+        assert_eq!(completed[0].data_shreds.len(), 4);
+        assert!(!completed[0].was_recovered);
+    }
+
+    #[test]
+    fn service_flushes_data_only_slots_on_tick() {
+        use paradencer_mesh::bounded_link;
+        use paradencer_runtime::{ServiceContext, ShutdownSwitch};
+
+        let (shred_tx, shred_rx) = bounded_link::<Shred>(64);
+        let (fec_tx, fec_rx) = bounded_link::<CompletedFecSet>(16);
+
+        let config = ShredNetworkConfig {
+            turbine_neighbor_count: 0,
+            ..Default::default()
+        };
+        let mut service = ShredNetworkService::new(config, shred_rx, fec_tx);
+        let context = ServiceContext::new(ShutdownSwitch::new());
+
+        // Send 4 data-only shreds, last one with last-in-slot flag.
+        for idx in 0..4u32 {
+            let mut ns = make_data_shred(300, idx, 0);
+            if idx == 3 {
+                if let ShredVariant::LegacyData(ref mut header) = ns.shred.variant {
+                    header.flags |= SHRED_LAST_IN_SLOT;
+                }
+            }
+            shred_tx.try_send(ns.shred).unwrap();
+        }
+
+        service.tick(&context).unwrap();
+
+        // CompletedFecSet should appear on the output channel.
+        let fec_set = fec_rx.try_recv().unwrap();
+        assert!(fec_set.is_some());
+        let fec_set = fec_set.unwrap();
+        assert_eq!(fec_set.slot, 300);
+        assert_eq!(fec_set.data_shreds.len(), 4);
     }
 }

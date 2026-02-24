@@ -1,7 +1,8 @@
 use paradencer_core::TopologySpec;
-use paradencer_mesh::InPort;
+use paradencer_mesh::{InPort, OutPort};
 use paradencer_runtime::Service;
 use paradencer_stages::{AssembledBlock, RawTransaction};
+use paradencer_types::shred::Shred;
 
 pub struct MaterializedTopology {
     pub topology_spec: TopologySpec,
@@ -12,4 +13,8 @@ pub struct MaterializedTopology {
     /// Input receivers for the validator pipeline (one per TransactionSanitizer worker).
     /// Connect these to PipelineServiceBuilder::add_input() in bootstrap.
     pub pipeline_inputs: Vec<InPort<RawTransaction>>,
+    /// Direct shred injection point for ShredCollector (bypasses FEC resolver).
+    /// Used by repair/catch-up paths to inject already-verified shreds directly.
+    /// Must be kept alive to prevent the ShredCollector's input channel from closing.
+    pub direct_shred_sender: Option<OutPort<Shred>>,
 }
