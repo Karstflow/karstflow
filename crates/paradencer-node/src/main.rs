@@ -10,7 +10,7 @@ use paradencer_control::{
     render_diagnostics_topology_line, render_preflight_readiness_issue_line,
     render_preflight_readiness_line, render_readiness_policy_line, run_diagnostics_phase,
     run_preflight_phase, run_preflight_phase_with_probe_report, run_runtime_phase,
-    start_gossip_service, ServiceBundle,
+    start_gossip_service, BlockstoreShredProvider, ServiceBundle,
 };
 
 fn main() -> paradencer_control::Result<()> {
@@ -70,7 +70,23 @@ fn run_with_node_config(
     // Build the repair service for slot recovery from peers.
     // The coordinator runs poll-driven in the node runtime; background I/O
     // handles actual UDP request/response on a dedicated thread.
-    let repair_bundle = build_repair_service(node_id, cluster_info.clone())?;
+    // When persistent storage is available, serve shreds from the blockstore.
+    let shred_provider: Option<std::sync::Arc<dyn paradencer_net::ShredProvider>> = consensus
+        .storage_engine
+        .as_ref()
+        .and_then(|engine| match engine.open_blockstore() {
+            Ok(bs) => Some(
+                std::sync::Arc::new(BlockstoreShredProvider::new(std::sync::Arc::new(bs)))
+                    as std::sync::Arc<dyn paradencer_net::ShredProvider>,
+            ),
+            Err(e) => {
+                eprintln!(
+                    "warning: failed to open blockstore for repair: {e}, using in-memory fallback"
+                );
+                None
+            }
+        });
+    let repair_bundle = build_repair_service(node_id, cluster_info.clone(), shred_provider)?;
     let _repair_io = repair_bundle.io_handle;
 
     // Build the vote broadcast service. Monitors the shared Tower for

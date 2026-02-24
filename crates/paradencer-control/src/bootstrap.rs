@@ -17,8 +17,8 @@ use paradencer_mesh::{bounded_link, InPort, OutPort};
 use paradencer_net::{
     ClusterInfo, ContactInfo, GossipConfig, GossipService, InMemoryShredStore, IngressMode, NodeId,
     RepairCoordinator, RepairCoordinatorConfig, RepairService, RepairServiceConfig,
-    RetransmitService, RetransmitStats, TurbineConfig, TurbineStats, TurbineTreeBuilder,
-    UdpShredTransport, ValidatorInfo,
+    RetransmitService, RetransmitStats, ShredData, ShredIndex, ShredProvider, Slot, TurbineConfig,
+    TurbineStats, TurbineTreeBuilder, UdpShredTransport, ValidatorInfo,
 };
 use paradencer_observability::spawn_metrics_http_bridge;
 use paradencer_rpc::{metrics_file_provider, spawn_rpc_http_server};
@@ -28,7 +28,7 @@ use paradencer_stages::{
     PipelineServiceConfig, RawTransaction, ReplayService, ReplayServiceConfig, ShredCollector,
     ShredCollectorConfig,
 };
-use paradencer_storage::{AccountDatabase, Pubkey, StorageEngine};
+use paradencer_storage::{AccountDatabase, Blockstore, Pubkey, StorageEngine};
 use paradencer_topology::{materialize_services, MaterializedTopology};
 use std::collections::HashSet;
 use std::path::Path;
@@ -617,6 +617,76 @@ impl RepairServiceAdapter {
     }
 }
 
+/// Adapter that implements `ShredProvider` by reading from a `Blockstore`.
+///
+/// Delegates shred lookups to the blockstore's persistent storage, so the
+/// repair server can serve shreds that survive restarts.
+pub struct BlockstoreShredProvider {
+    blockstore: Arc<Blockstore>,
+}
+
+impl BlockstoreShredProvider {
+    pub fn new(blockstore: Arc<Blockstore>) -> Self {
+        Self { blockstore }
+    }
+}
+
+impl ShredProvider for BlockstoreShredProvider {
+    fn get_shred(&self, slot: Slot, index: ShredIndex) -> Option<ShredData> {
+        let data = self.blockstore.get_data_shred(slot, index).ok()??;
+        let is_last = self
+            .blockstore
+            .get_slot_meta(slot)
+            .ok()
+            .flatten()
+            .and_then(|meta| meta.expected_data_shreds)
+            .map(|expected| index + 1 == expected)
+            .unwrap_or(false);
+        Some(ShredData::new(slot, index, data, is_last))
+    }
+
+    fn get_highest_shred_index(&self, slot: Slot) -> Option<ShredIndex> {
+        let meta = self.blockstore.get_slot_meta(slot).ok()??;
+        if meta.received_data_shreds > 0 {
+            Some(meta.received_data_shreds - 1)
+        } else {
+            None
+        }
+    }
+
+    fn get_shreds_in_range(&self, start_slot: Slot, end_slot: Slot) -> Vec<ShredData> {
+        let mut result = Vec::new();
+        for slot in start_slot..=end_slot {
+            let meta = match self.blockstore.get_slot_meta(slot) {
+                Ok(Some(m)) => m,
+                _ => continue,
+            };
+            for idx in 0..meta.received_data_shreds {
+                if let Some(shred) = self.get_shred(slot, idx) {
+                    result.push(shred);
+                }
+            }
+        }
+        result
+    }
+
+    fn get_ancestors(&self, slot: Slot, count: u64) -> Vec<ShredData> {
+        let mut result = Vec::new();
+        for ancestor_slot in (slot.saturating_sub(count)..slot).rev() {
+            let meta = match self.blockstore.get_slot_meta(ancestor_slot) {
+                Ok(Some(m)) => m,
+                _ => continue,
+            };
+            for idx in 0..meta.received_data_shreds {
+                if let Some(shred) = self.get_shred(ancestor_slot, idx) {
+                    result.push(shred);
+                }
+            }
+        }
+        result
+    }
+}
+
 /// Build the repair coordinator and background I/O service.
 ///
 /// The repair system has two parts:
@@ -626,11 +696,12 @@ impl RepairServiceAdapter {
 /// 2. **I/O service** (async background thread): handles actual UDP
 ///    send/receive for repair requests and responses.
 ///
-/// This follows Firedancer's repair tile architecture where request
-/// generation and network I/O are decoupled for maximum throughput.
+/// When a `shred_provider` is supplied, the repair server serves shreds
+/// from persistent storage. Otherwise falls back to an empty in-memory store.
 pub fn build_repair_service(
     node_id: NodeId,
     cluster_info: Arc<ClusterInfo>,
+    shred_provider: Option<Arc<dyn ShredProvider>>,
 ) -> Result<RepairBundle> {
     let coordinator = RepairCoordinator::new(0, RepairCoordinatorConfig::default());
 
@@ -639,6 +710,9 @@ pub fn build_repair_service(
         cluster_info: Arc::clone(&cluster_info),
         ticks_since_peer_sync: 0,
     };
+
+    let provider: Arc<dyn ShredProvider> =
+        shred_provider.unwrap_or_else(|| Arc::new(InMemoryShredStore::new()));
 
     // Spawn background thread for repair network I/O.
     let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
@@ -653,11 +727,9 @@ pub fn build_repair_service(
 
             rt.block_on(async move {
                 let config = RepairServiceConfig::default();
-                // TODO: replace InMemoryShredStore with blockstore-backed provider
-                let shred_provider = Arc::new(InMemoryShredStore::new());
 
                 let mut service =
-                    match RepairService::new(node_id, cluster_info, config, shred_provider).await {
+                    match RepairService::new(node_id, cluster_info, config, provider).await {
                         Ok(s) => s,
                         Err(e) => {
                             eprintln!("repair service failed to start: {e}");
@@ -1366,11 +1438,12 @@ mod tests {
         build_shred_pipeline, ensure_mainnet_readiness, evaluate_mainnet_readiness,
         load_node_config, materialize_service_pair_from_config, materialize_services_from_config,
         maybe_start_metrics_http_bridge, maybe_start_rpc_http_server, run_diagnostics_phase,
-        start_gossip_service,
+        start_gossip_service, BlockstoreShredProvider,
     };
     use crate::errors::ControlPlaneError;
     use paradencer_config::NodeConfig;
     use paradencer_core::LinkKind;
+    use std::sync::Arc;
 
     #[test]
     fn load_node_config_from_profile_file_path() {
@@ -1772,5 +1845,44 @@ mod tests {
         assert_eq!(handle.cluster_info.size(), 0);
         // Gossip handle drops cleanly (signals shutdown to background thread).
         drop(handle);
+    }
+
+    #[test]
+    fn blockstore_shred_provider_serves_stored_shreds() {
+        use paradencer_net::ShredProvider;
+        use paradencer_storage::Blockstore;
+
+        let bs = Arc::new(Blockstore::in_memory());
+
+        // Insert shreds into blockstore.
+        bs.insert_data_shred(10, 0, &[0xAA; 64]).unwrap();
+        bs.insert_data_shred(10, 1, &[0xBB; 64]).unwrap();
+        bs.insert_data_shred(11, 0, &[0xCC; 64]).unwrap();
+
+        let provider = BlockstoreShredProvider::new(Arc::clone(&bs));
+
+        // get_shred returns matching data.
+        let shred = provider.get_shred(10, 0).unwrap();
+        assert_eq!(shred.slot, 10);
+        assert_eq!(shred.index, 0);
+        assert_eq!(shred.data, vec![0xAA; 64]);
+
+        // Missing shred returns None.
+        assert!(provider.get_shred(10, 99).is_none());
+        assert!(provider.get_shred(999, 0).is_none());
+
+        // get_highest_shred_index returns the count minus one.
+        assert_eq!(provider.get_highest_shred_index(10), Some(1));
+        assert_eq!(provider.get_highest_shred_index(11), Some(0));
+        assert!(provider.get_highest_shred_index(999).is_none());
+
+        // get_shreds_in_range returns shreds across slots.
+        let range_shreds = provider.get_shreds_in_range(10, 11);
+        assert_eq!(range_shreds.len(), 3);
+
+        // get_ancestors returns shreds from prior slots.
+        let ancestors = provider.get_ancestors(11, 2);
+        assert_eq!(ancestors.len(), 2); // slot 10 has 2 shreds
+        assert!(ancestors.iter().all(|s| s.slot == 10));
     }
 }

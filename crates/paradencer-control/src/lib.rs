@@ -15,8 +15,8 @@ pub use bootstrap::{
     maybe_start_metrics_http_bridge, print_preflight_ok, run_diagnostics_phase,
     run_preflight_phase, run_preflight_phase_with_probe_report, run_runtime_phase,
     run_startup_checks, run_startup_checks_with_probe_report, start_gossip_service,
-    ConsensusBundle, DiagnosticsSummary, GossipHandle, MainnetReadinessReport,
-    MaterializedServicePair, PipelineBundle, RepairBundle, ReplayBundle,
+    BlockstoreShredProvider, ConsensusBundle, DiagnosticsSummary, GossipHandle,
+    MainnetReadinessReport, MaterializedServicePair, PipelineBundle, RepairBundle, ReplayBundle,
     ReplayBundleWithExternalInput, ServiceBundle, ShredPipelineBundle, TurbineBundle,
     VoteBroadcastBundle,
 };
