@@ -153,3 +153,19 @@ pub const MAINTENANCE_FLUSH_INTERVAL_SECS: u64 = 30;
 /// for compaction. A conservative default avoids removing data needed
 /// by in-progress consensus.
 pub const MAINTENANCE_DEFAULT_RETAIN_SLOTS: u64 = 1000;
+
+// Recovery defaults
+
+/// Minimum number of accounts per parallel recovery chunk.
+///
+/// Prevents excessive thread overhead when the account set is small.
+/// Below this threshold, recovery runs serially in a single chunk.
+pub const RECOVERY_MIN_CHUNK_SIZE: usize = 1024;
+
+/// Threshold below which recovery uses the serial (cache-populating) path.
+///
+/// For small datasets, serial recovery is faster because it avoids
+/// rayon overhead and populates the LRU cache at startup. Above this
+/// threshold, parallel recovery uses the index-only path where the
+/// cache warms lazily from disk.
+pub const RECOVERY_PARALLEL_THRESHOLD: usize = 10_000;

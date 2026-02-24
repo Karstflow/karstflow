@@ -10,7 +10,7 @@ use std::sync::Arc;
 use crate::accounts::AccountDatabase;
 use crate::blockstore::Blockstore;
 use crate::durable::compaction::{compact_below_slot, CompactionStats};
-use crate::durable::recovery::{recover_accounts, RecoveryStats};
+use crate::durable::recovery::RecoveryStats;
 use crate::durable::{DurableStore, FileDurableStore};
 use crate::StorageError;
 
@@ -74,14 +74,36 @@ impl StorageEngine {
 
     /// Recover all persisted data into the given AccountDatabase.
     ///
-    /// Loads accounts from disk into memory without re-persisting.
+    /// Automatically selects serial or parallel recovery based on account
+    /// count. For large datasets, parallel recovery decodes and updates
+    /// the owner index concurrently using rayon. The LRU cache is populated
+    /// lazily from disk on first access.
+    ///
     /// The Blockstore handles its own recovery in `Blockstore::open()`.
     pub fn recover(&self, account_db: &AccountDatabase) -> Result<FullRecoveryStats, StorageError> {
-        let accounts = recover_accounts(account_db, self.store.as_ref())?;
+        let accounts = crate::durable::recovery::recover_accounts(account_db, self.store.as_ref())?;
 
         // Blockstore roots are recovered during Blockstore::open(), so
         // we report a placeholder here. The caller should read the root
         // count from the blockstore directly.
+        Ok(FullRecoveryStats {
+            accounts,
+            blockstore_roots_recovered: 0,
+        })
+    }
+
+    /// Force parallel recovery regardless of dataset size.
+    ///
+    /// Uses rayon to decode accounts and update the owner index
+    /// concurrently. The LRU cache is NOT populated; accounts are
+    /// loaded from disk lazily on first access.
+    pub fn recover_parallel(
+        &self,
+        account_db: &AccountDatabase,
+    ) -> Result<FullRecoveryStats, StorageError> {
+        let accounts =
+            crate::durable::recovery::recover_accounts_parallel(account_db, self.store.as_ref())?;
+
         Ok(FullRecoveryStats {
             accounts,
             blockstore_roots_recovered: 0,

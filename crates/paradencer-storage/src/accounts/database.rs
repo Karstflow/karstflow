@@ -582,11 +582,28 @@ impl AccountDatabase {
     /// Insert an account from recovery (disk) without re-persisting to disk.
     ///
     /// Used during startup recovery to load accounts from the durable store
-    /// into memory without writing them back out.
+    /// into memory without writing them back out. Populates both the
+    /// in-memory cache and the owner index.
     pub fn insert_recovered_account(&self, pubkey: Pubkey, account: Account) {
         self.published
             .lock()
             .insert_recovered(pubkey, account.clone());
+        self.owner_index
+            .upsert(pubkey, account.meta.owner, account.meta.lamports, 0, None);
+    }
+
+    /// Register a recovered account in the owner index only.
+    ///
+    /// Unlike `insert_recovered_account`, this does NOT populate the
+    /// in-memory LRU cache. The account data lives on disk and will be
+    /// loaded into the cache lazily on first access. This is the preferred
+    /// path for parallel recovery at scale because:
+    /// - The owner index uses DashMap (sharded, lock-free reads) and atomics,
+    ///   so concurrent updates from multiple threads have minimal contention.
+    /// - Skipping the PublishedStore Mutex avoids a serial bottleneck.
+    /// - The LRU cache warms naturally during normal operation; pre-warming
+    ///   it at startup wastes memory for accounts that won't be accessed soon.
+    pub fn insert_recovered_index_only(&self, pubkey: Pubkey, account: &Account) {
         self.owner_index
             .upsert(pubkey, account.meta.owner, account.meta.lamports, 0, None);
     }

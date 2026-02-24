@@ -949,6 +949,66 @@ impl DurableStore for FileDurableStore {
     }
 }
 
+impl FileDurableStore {
+    /// Iterate all entries in a column family without allocating a result Vec.
+    ///
+    /// Calls `callback(key, value)` for each active record in the column family.
+    /// The iteration order is unspecified (hash map iteration order).
+    /// Returns the number of entries visited.
+    ///
+    /// Designed for recovery and bulk operations where collecting all entries
+    /// into a Vec would cause excessive memory allocation.
+    pub fn for_each_in_cf<F>(&self, cf: &str, mut callback: F) -> Result<u64, StorageError>
+    where
+        F: FnMut(&[u8], &[u8]) -> Result<(), StorageError>,
+    {
+        let mutex = self.cf(cf)?;
+        let state = mutex.lock().unwrap();
+        let mut count = 0u64;
+
+        for (key, loc) in &state.index {
+            let value = Self::read_value_from_state(&state, loc)?;
+            callback(key, &value)?;
+            count += 1;
+        }
+
+        Ok(count)
+    }
+
+    /// Collect all entries from a column family into partitioned groups.
+    ///
+    /// Returns entries split into `partition_count` groups by the first byte
+    /// of each key. This enables parallel processing where each partition can
+    /// be handled by a separate thread. Entries with keys shorter than 1 byte
+    /// go into partition 0.
+    ///
+    /// Within each partition, entries are unsorted.
+    pub fn collect_partitioned(
+        &self,
+        cf: &str,
+        partition_count: usize,
+    ) -> Result<Vec<Vec<ScanEntry>>, StorageError> {
+        let mutex = self.cf(cf)?;
+        let state = mutex.lock().unwrap();
+
+        let partition_count = partition_count.max(1);
+        let mut partitions: Vec<Vec<ScanEntry>> =
+            (0..partition_count).map(|_| Vec::new()).collect();
+
+        for (key, loc) in &state.index {
+            let value = Self::read_value_from_state(&state, loc)?;
+            let bucket = if key.is_empty() {
+                0
+            } else {
+                key[0] as usize % partition_count
+            };
+            partitions[bucket].push((key.clone(), value));
+        }
+
+        Ok(partitions)
+    }
+}
+
 impl Drop for FileDurableStore {
     fn drop(&mut self) {
         if self.is_temporary {
@@ -1822,5 +1882,87 @@ mod tests {
             let actual = store2.get(cf, key.as_bytes()).unwrap().unwrap();
             assert_eq!(actual, expected, "post-compact mismatch at key {i}");
         }
+    }
+
+    #[test]
+    fn for_each_in_cf_iterates_all_entries() {
+        let store = temp_store();
+        let cf = CF_ACCOUNTS;
+
+        store.put(cf, b"a", b"alpha").unwrap();
+        store.put(cf, b"b", b"bravo").unwrap();
+        store.put(cf, b"c", b"charlie").unwrap();
+
+        let mut collected = Vec::new();
+        let count = store
+            .for_each_in_cf(cf, |key, value| {
+                collected.push((key.to_vec(), value.to_vec()));
+                Ok(())
+            })
+            .unwrap();
+
+        assert_eq!(count, 3);
+        collected.sort_by(|a, b| a.0.cmp(&b.0));
+        assert_eq!(collected[0], (b"a".to_vec(), b"alpha".to_vec()));
+        assert_eq!(collected[1], (b"b".to_vec(), b"bravo".to_vec()));
+        assert_eq!(collected[2], (b"c".to_vec(), b"charlie".to_vec()));
+    }
+
+    #[test]
+    fn for_each_in_cf_empty() {
+        let store = temp_store();
+        let count = store.for_each_in_cf(CF_ACCOUNTS, |_, _| Ok(())).unwrap();
+        assert_eq!(count, 0);
+    }
+
+    #[test]
+    fn for_each_in_cf_skips_deleted() {
+        let store = temp_store();
+        let cf = CF_ACCOUNTS;
+
+        store.put(cf, b"a", b"1").unwrap();
+        store.put(cf, b"b", b"2").unwrap();
+        store.delete(cf, b"a").unwrap();
+
+        let mut count = 0u64;
+        store
+            .for_each_in_cf(cf, |_, _| {
+                count += 1;
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn collect_partitioned_distributes_by_first_byte() {
+        let store = temp_store();
+        let cf = CF_ACCOUNTS;
+
+        // Keys with different first bytes.
+        store.put(cf, &[0x00, 0x01], b"v0").unwrap();
+        store.put(cf, &[0x01, 0x01], b"v1").unwrap();
+        store.put(cf, &[0x02, 0x01], b"v2").unwrap();
+        store.put(cf, &[0x03, 0x01], b"v3").unwrap();
+
+        let partitions = store.collect_partitioned(cf, 4).unwrap();
+        assert_eq!(partitions.len(), 4);
+
+        // Each key lands in partition = first_byte % 4.
+        let total: usize = partitions.iter().map(|p| p.len()).sum();
+        assert_eq!(total, 4);
+    }
+
+    #[test]
+    fn collect_partitioned_single_partition() {
+        let store = temp_store();
+        let cf = CF_ACCOUNTS;
+
+        store.put(cf, b"x", b"1").unwrap();
+        store.put(cf, b"y", b"2").unwrap();
+
+        let partitions = store.collect_partitioned(cf, 1).unwrap();
+        assert_eq!(partitions.len(), 1);
+        assert_eq!(partitions[0].len(), 2);
     }
 }
