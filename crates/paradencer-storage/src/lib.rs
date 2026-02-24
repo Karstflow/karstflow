@@ -5,6 +5,7 @@ pub mod durable;
 mod errors;
 pub mod genesis;
 mod hot_state;
+pub mod maintenance;
 pub mod program_cache;
 mod runtime_state;
 mod shred_window;
@@ -35,6 +36,7 @@ pub use genesis::{
     GenesisError, GenesisInflation, GenesisRent,
 };
 pub use hot_state::HotStateStore;
+pub use maintenance::{MaintenanceConfig, MaintenanceReport, StorageMaintenanceService};
 pub use program_cache::{CacheStats, CachedProgram, ProgramCache, ProgramType};
 pub use runtime_state::{
     RuntimeStateApplyReceipt, RuntimeStateApplyRequest, RuntimeStateSnapshot, RuntimeStateStore,

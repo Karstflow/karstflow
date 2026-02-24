@@ -138,3 +138,18 @@ pub const AUTO_COMPACTION_INTERVAL_MS: u64 = 60_000;
 /// With average ~200 bytes per account, 1M entries ≈ 200 MB of cached
 /// account data in memory. Accounts beyond this limit are served from disk.
 pub const DEFAULT_PUBLISHED_CACHE_MAX_ENTRIES: usize = 1_000_000;
+
+// Background maintenance defaults
+
+/// Default interval between auto-compaction checks (5 minutes).
+pub const MAINTENANCE_COMPACT_INTERVAL_SECS: u64 = 300;
+
+/// Default interval between durability flushes (30 seconds).
+pub const MAINTENANCE_FLUSH_INTERVAL_SECS: u64 = 30;
+
+/// Default minimum slot age for blockstore data compaction.
+///
+/// Slots older than the current root minus this many slots are eligible
+/// for compaction. A conservative default avoids removing data needed
+/// by in-progress consensus.
+pub const MAINTENANCE_DEFAULT_RETAIN_SLOTS: u64 = 1000;

@@ -28,7 +28,10 @@ use paradencer_stages::{
     PipelineServiceConfig, RawTransaction, ReplayService, ReplayServiceConfig, ShredCollector,
     ShredCollectorConfig,
 };
-use paradencer_storage::{AccountDatabase, Blockstore, Pubkey, StorageEngine};
+use paradencer_storage::{
+    AccountDatabase, Blockstore, MaintenanceConfig, Pubkey, StorageEngine,
+    StorageMaintenanceService,
+};
 use paradencer_topology::{materialize_services, MaterializedTopology};
 use std::collections::HashSet;
 use std::path::Path;
@@ -899,6 +902,86 @@ pub fn build_vote_broadcast_service(
 }
 
 // ---------------------------------------------------------------------------
+// Storage maintenance: background compaction and flush
+// ---------------------------------------------------------------------------
+
+/// Result of building the storage maintenance service.
+pub struct StorageMaintenanceBundle {
+    /// The service adapter to add to the node runtime.
+    pub service: Box<dyn Service>,
+}
+
+/// Service adapter that wraps the poll-driven StorageMaintenanceService.
+///
+/// Runs periodic compaction and flush operations on the persistent storage
+/// engine. The adapter bridges the maintenance service's `tick()` method
+/// to the node runtime's Service trait.
+struct StorageMaintenanceAdapter {
+    inner: StorageMaintenanceService,
+}
+
+impl Service for StorageMaintenanceAdapter {
+    fn name(&self) -> &'static str {
+        "storage-maintenance"
+    }
+
+    fn tick_interval(&self) -> std::time::Duration {
+        // Check every 5 seconds — the inner service manages its own timers
+        // for compaction and flush intervals. This tick rate is fast enough
+        // to be responsive while adding negligible overhead (timer checks only).
+        std::time::Duration::from_secs(5)
+    }
+
+    fn on_start(
+        &mut self,
+        _context: &paradencer_runtime::ServiceContext,
+    ) -> paradencer_runtime::RuntimeResult<()> {
+        Ok(())
+    }
+
+    fn tick(
+        &mut self,
+        _context: &paradencer_runtime::ServiceContext,
+    ) -> paradencer_runtime::RuntimeResult<()> {
+        let _report = self.inner.tick().map_err(|e| {
+            paradencer_runtime::RuntimeError::service_failure(
+                "storage-maintenance",
+                &format!("maintenance tick failed: {e}"),
+            )
+        })?;
+        Ok(())
+    }
+
+    fn on_stop(
+        &mut self,
+        _context: &paradencer_runtime::ServiceContext,
+    ) -> paradencer_runtime::RuntimeResult<()> {
+        // Final flush on shutdown to ensure durability.
+        let _ = self.inner.force_flush();
+        Ok(())
+    }
+}
+
+/// Build the storage maintenance service for background housekeeping.
+///
+/// Creates a poll-driven service that periodically compacts column families
+/// with accumulated dead space and flushes pending writes to disk. The
+/// service runs as part of the node runtime's service loop.
+///
+/// Use `set_root_slot()` on the inner service (via the returned bundle)
+/// to enable blockstore slot compaction as consensus advances.
+pub fn build_storage_maintenance_service(
+    engine: Arc<StorageEngine>,
+    config: MaintenanceConfig,
+) -> StorageMaintenanceBundle {
+    let inner = StorageMaintenanceService::with_config(engine, config);
+    let adapter = StorageMaintenanceAdapter { inner };
+    StorageMaintenanceBundle {
+        service: Box::new(adapter),
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Shred pipeline: ShredCollector → ReplayService
 // ---------------------------------------------------------------------------
 
@@ -1435,10 +1518,11 @@ pub fn ensure_mainnet_readiness(report: &MainnetReadinessReport) -> Result<()> {
 mod tests {
     use super::{
         build_consensus_infrastructure, build_pipeline_service, build_replay_service,
-        build_shred_pipeline, ensure_mainnet_readiness, evaluate_mainnet_readiness,
-        load_node_config, materialize_service_pair_from_config, materialize_services_from_config,
-        maybe_start_metrics_http_bridge, maybe_start_rpc_http_server, run_diagnostics_phase,
-        start_gossip_service, BlockstoreShredProvider,
+        build_shred_pipeline, build_storage_maintenance_service, ensure_mainnet_readiness,
+        evaluate_mainnet_readiness, load_node_config, materialize_service_pair_from_config,
+        materialize_services_from_config, maybe_start_metrics_http_bridge,
+        maybe_start_rpc_http_server, run_diagnostics_phase, start_gossip_service,
+        BlockstoreShredProvider,
     };
     use crate::errors::ControlPlaneError;
     use paradencer_config::NodeConfig;
@@ -1845,6 +1929,22 @@ mod tests {
         assert_eq!(handle.cluster_info.size(), 0);
         // Gossip handle drops cleanly (signals shutdown to background thread).
         drop(handle);
+    }
+
+    #[test]
+    fn build_storage_maintenance_creates_service() {
+        use paradencer_runtime::{ServiceContext, ShutdownSwitch};
+        use paradencer_storage::{MaintenanceConfig, StorageEngine};
+
+        let dir = tempfile::tempdir().expect("tmpdir");
+        let engine = Arc::new(StorageEngine::open(dir.path()).expect("open"));
+        let bundle = build_storage_maintenance_service(engine, MaintenanceConfig::default());
+        assert_eq!(bundle.service.name(), "storage-maintenance");
+
+        // Service ticks without error.
+        let ctx = ServiceContext::new(ShutdownSwitch::new());
+        let mut service = bundle.service;
+        service.tick(&ctx).unwrap();
     }
 
     #[test]
