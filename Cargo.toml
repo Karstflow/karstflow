@@ -72,6 +72,7 @@ tracing = "0.1"
 parking_lot = "0.12"
 dashmap = "6.1"
 tempfile = "3.8"
+memmap2 = "0.9"
 
 # Internal crates
 paradencer-constants = { path = "crates/paradencer-constants" }

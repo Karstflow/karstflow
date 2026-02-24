@@ -29,6 +29,8 @@ use std::sync::Mutex;
 #[cfg(unix)]
 use std::os::unix::fs::FileExt;
 
+use memmap2::Mmap;
+
 use paradencer_constants::durable_store::{
     CF_FILE_FORMAT_VERSION, CF_FILE_HEADER_SIZE, CF_FILE_MAGIC, RECORD_HEADER_SIZE,
     RECORD_STATUS_ACTIVE, RECORD_STATUS_DELETED, STANDARD_COLUMN_FAMILIES,
@@ -73,6 +75,12 @@ struct CfState {
     file_end: u64,
     /// Accumulated dead space from overwrites and deletes (bytes).
     dead_bytes: u64,
+    /// Memory-mapped view for zero-copy reads. Covers bytes [0..mmap_len).
+    /// Records appended after the mmap was created fall back to pread.
+    /// Refreshed after compaction.
+    mmap: Option<Mmap>,
+    /// Length of the mmap at creation time. Reads beyond this use pread.
+    mmap_len: u64,
 }
 
 impl CfState {
@@ -219,6 +227,8 @@ impl FileDurableStore {
                 index: HashMap::new(),
                 file_end: CF_FILE_HEADER_SIZE as u64,
                 dead_bytes: 0,
+                mmap: None,
+                mmap_len: 0,
             });
         }
 
@@ -234,6 +244,8 @@ impl FileDurableStore {
                 index: HashMap::new(),
                 file_end: CF_FILE_HEADER_SIZE as u64,
                 dead_bytes: 0,
+                mmap: None,
+                mmap_len: 0,
             });
         }
 
@@ -258,6 +270,8 @@ impl FileDurableStore {
                 index: HashMap::new(),
                 file_end: CF_FILE_HEADER_SIZE as u64,
                 dead_bytes: 0,
+                mmap: None,
+                mmap_len: 0,
             });
         }
 
@@ -275,10 +289,15 @@ impl FileDurableStore {
             index: HashMap::new(),
             file_end: file_len,
             dead_bytes: 0,
+            mmap: None,
+            mmap_len: 0,
         };
 
         // Rebuild index by scanning records with CRC verification.
         Self::rebuild_index(&mut state)?;
+
+        // Create mmap for zero-copy reads of existing data.
+        Self::refresh_mmap(&mut state);
 
         Ok(state)
     }
@@ -433,11 +452,59 @@ impl FileDurableStore {
         Ok(())
     }
 
-    /// Read value bytes at a known location via positional read.
+    /// Read value bytes at a known location.
+    ///
+    /// Prefers the mmap path when the record falls within the mapped region.
+    /// Falls back to positional I/O (pread) for data appended after the mmap
+    /// was created.
+    fn read_value_from_state(state: &CfState, loc: &RecordLoc) -> Result<Vec<u8>, StorageError> {
+        let value_start = loc.value_offset() as usize;
+        let value_end = value_start + loc.value_len as usize;
+
+        // Try mmap zero-copy read first.
+        if let Some(ref mmap) = state.mmap {
+            if value_end <= state.mmap_len as usize {
+                return Ok(mmap[value_start..value_end].to_vec());
+            }
+        }
+
+        // Fallback: positional I/O for data beyond mmap range.
+        let mut buf = vec![0u8; loc.value_len as usize];
+        read_at_checked(&state.file, &mut buf, loc.value_offset())?;
+        Ok(buf)
+    }
+
+    /// Read value bytes via positional I/O only (for compaction reads).
     fn read_value_at(file: &File, loc: &RecordLoc) -> Result<Vec<u8>, StorageError> {
         let mut buf = vec![0u8; loc.value_len as usize];
         read_at_checked(file, &mut buf, loc.value_offset())?;
         Ok(buf)
+    }
+
+    /// Refresh the memory-mapped view for a column family state.
+    ///
+    /// Creates a read-only mmap covering all data currently on disk.
+    /// Called after open and after compaction. Silently falls back to
+    /// pread-only mode if mmap fails (e.g., empty file, permission issue).
+    fn refresh_mmap(state: &mut CfState) {
+        if state.file_end <= CF_FILE_HEADER_SIZE as u64 {
+            state.mmap = None;
+            state.mmap_len = 0;
+            return;
+        }
+        // SAFETY: We hold the CfState mutex, so no concurrent truncation.
+        // The file is only extended (append-only) or replaced atomically
+        // during compaction (which also calls refresh_mmap afterwards).
+        match unsafe { Mmap::map(&state.file) } {
+            Ok(m) => {
+                state.mmap_len = m.len() as u64;
+                state.mmap = Some(m);
+            }
+            Err(_) => {
+                state.mmap = None;
+                state.mmap_len = 0;
+            }
+        }
     }
 
     /// Open a custom column family (not in the standard set).
@@ -628,6 +695,9 @@ impl FileDurableStore {
         state.file_end = write_offset;
         state.dead_bytes = 0;
 
+        // Refresh mmap for the compacted file.
+        Self::refresh_mmap(&mut state);
+
         // Invalidate cache for this CF — record offsets have all changed.
         self.cache.lock().unwrap().invalidate_cf(cf);
 
@@ -696,7 +766,7 @@ impl DurableStore for FileDurableStore {
         let state = mutex.lock().unwrap();
         match state.index.get(key) {
             Some(loc) => {
-                let value = Self::read_value_at(&state.file, loc)?;
+                let value = Self::read_value_from_state(&state, loc)?;
                 self.metrics.record_read(value.len() as u64);
                 // Populate cache on miss.
                 self.cache.lock().unwrap().insert(cf, key, &value);
@@ -823,7 +893,7 @@ impl DurableStore for FileDurableStore {
         let mut results = Vec::new();
         for (key, loc) in &state.index {
             if key.starts_with(prefix) {
-                let value = Self::read_value_at(&state.file, loc)?;
+                let value = Self::read_value_from_state(&state, loc)?;
                 results.push((key.clone(), value));
             }
         }
@@ -842,7 +912,7 @@ impl DurableStore for FileDurableStore {
         let mut results = Vec::new();
         for (key, loc) in &state.index {
             if key.as_slice() >= start && key.as_slice() < end {
-                let value = Self::read_value_at(&state.file, loc)?;
+                let value = Self::read_value_from_state(&state, loc)?;
                 results.push((key.clone(), value));
             }
         }
@@ -1691,6 +1761,66 @@ mod tests {
             let m = store.metrics();
             assert!(m.compactions > 0, "compaction count should be recorded");
             assert!(m.bytes_compacted > 0, "compacted bytes should be recorded");
+        }
+    }
+
+    #[test]
+    fn mmap_reads_match_pread_reads() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = FileDurableStore::open(dir.path()).unwrap();
+        let cf = STANDARD_COLUMN_FAMILIES[0];
+
+        // Write several records.
+        for i in 0u32..50 {
+            let key = format!("mmap-key-{i:04}");
+            let value = vec![i as u8; 128];
+            store.put(cf, key.as_bytes(), &value).unwrap();
+        }
+
+        // Reopen to create mmap covering all written data.
+        drop(store);
+        let store2 = FileDurableStore::open(dir.path()).unwrap();
+
+        // Verify the mmap is populated.
+        {
+            let mutex = store2.cf(cf).unwrap();
+            let state = mutex.lock().unwrap();
+            assert!(state.mmap.is_some(), "mmap should be created on open");
+            assert!(state.mmap_len > 0);
+        }
+
+        // Verify all reads return correct data.
+        for i in 0u32..50 {
+            let key = format!("mmap-key-{i:04}");
+            let expected = vec![i as u8; 128];
+            let actual = store2.get(cf, key.as_bytes()).unwrap().unwrap();
+            assert_eq!(actual, expected, "mismatch at key {i}");
+        }
+
+        // Write new data beyond mmap range — should fall back to pread.
+        store2
+            .put(cf, b"mmap-new-key", b"new-value-beyond-mmap")
+            .unwrap();
+        let val = store2.get(cf, b"mmap-new-key").unwrap().unwrap();
+        assert_eq!(val, b"new-value-beyond-mmap");
+
+        // Compaction refreshes the mmap to cover all data.
+        store2.compact_cf(cf).unwrap();
+        {
+            let mutex = store2.cf(cf).unwrap();
+            let state = mutex.lock().unwrap();
+            assert!(
+                state.mmap.is_some(),
+                "mmap should be refreshed after compact"
+            );
+        }
+
+        // All data still readable after compaction.
+        for i in 0u32..50 {
+            let key = format!("mmap-key-{i:04}");
+            let expected = vec![i as u8; 128];
+            let actual = store2.get(cf, key.as_bytes()).unwrap().unwrap();
+            assert_eq!(actual, expected, "post-compact mismatch at key {i}");
         }
     }
 }
