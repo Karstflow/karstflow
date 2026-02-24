@@ -14,10 +14,12 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use paradencer_constants::durable_store::{CF_ACCOUNTS, DEFAULT_PUBLISHED_CACHE_MAX_ENTRIES};
+use paradencer_constants::durable_store::{
+    CF_ACCOUNTS, CF_ACCOUNT_META, DEFAULT_PUBLISHED_CACHE_MAX_ENTRIES,
+};
 
 use super::primitives::{Account, Pubkey};
-use crate::durable::account_encoding::{decode_account, encode_account};
+use crate::durable::account_encoding::{decode_account, encode_account, encode_account_meta};
 use crate::durable::{DurableStore, WriteBatch};
 
 /// A node in the intrusive LRU doubly-linked list.
@@ -116,15 +118,17 @@ impl PublishedStore {
     // -----------------------------------------------------------------------
 
     /// Insert a published account into the cache and persist to disk.
-    pub fn insert(&mut self, pubkey: Pubkey, account: Account) {
-        self.persist_account(&pubkey, &account);
+    pub fn insert(&mut self, pubkey: Pubkey, account: Account, slot: u64) {
+        self.persist_account(&pubkey, &account, slot);
         self.insert_into_cache(pubkey, account);
     }
 
     /// Insert a batch of published accounts with a single WriteBatch.
     ///
+    /// Persists both the full account data (CF_ACCOUNTS) and compact
+    /// metadata (CF_ACCOUNT_META) in the same atomic write batch.
     /// Returns the number of accounts written.
-    pub fn insert_batch(&mut self, accounts: &HashMap<Pubkey, Account>) -> usize {
+    pub fn insert_batch(&mut self, accounts: &HashMap<Pubkey, Account>, slot: u64) -> usize {
         if accounts.is_empty() {
             return 0;
         }
@@ -135,6 +139,8 @@ impl PublishedStore {
             for (pubkey, account) in accounts {
                 let encoded = encode_account(account);
                 let _ = batch.put(CF_ACCOUNTS, pubkey.as_bytes(), &encoded);
+                let meta = encode_account_meta(&account.meta.owner, account.meta.lamports, slot);
+                let _ = batch.put(CF_ACCOUNT_META, pubkey.as_bytes(), &meta);
             }
             if !batch.is_empty() {
                 if let Err(e) = store.write_batch(&batch) {
@@ -165,6 +171,7 @@ impl PublishedStore {
         self.remove_from_cache(pubkey);
         if let Some(ref store) = self.store {
             let _ = store.delete(CF_ACCOUNTS, pubkey.as_bytes());
+            let _ = store.delete(CF_ACCOUNT_META, pubkey.as_bytes());
         }
     }
 
@@ -328,12 +335,16 @@ impl PublishedStore {
         self.cache.remove(pubkey);
     }
 
-    /// Persist a single account to disk (best-effort).
-    fn persist_account(&self, pubkey: &Pubkey, account: &Account) {
+    /// Persist a single account and its metadata to disk (best-effort).
+    fn persist_account(&self, pubkey: &Pubkey, account: &Account, slot: u64) {
         if let Some(ref store) = self.store {
             let encoded = encode_account(account);
             if let Err(e) = store.put(CF_ACCOUNTS, pubkey.as_bytes(), &encoded) {
                 eprintln!("durable store put error: {e}");
+            }
+            let meta = encode_account_meta(&account.meta.owner, account.meta.lamports, slot);
+            if let Err(e) = store.put(CF_ACCOUNT_META, pubkey.as_bytes(), &meta) {
+                eprintln!("durable store meta put error: {e}");
             }
         }
     }
@@ -378,7 +389,7 @@ mod tests {
     #[test]
     fn insert_and_get() {
         let mut ps = PublishedStore::new();
-        ps.insert(pk(1), acct(100));
+        ps.insert(pk(1), acct(100), 0);
         let a = ps.get(&pk(1)).expect("should exist");
         assert_eq!(a.meta.lamports, 100);
     }
@@ -386,8 +397,8 @@ mod tests {
     #[test]
     fn overwrite_updates_value() {
         let mut ps = PublishedStore::new();
-        ps.insert(pk(1), acct(100));
-        ps.insert(pk(1), acct(200));
+        ps.insert(pk(1), acct(100), 0);
+        ps.insert(pk(1), acct(200), 0);
         let a = ps.get(&pk(1)).expect("should exist");
         assert_eq!(a.meta.lamports, 200);
         assert_eq!(ps.cache_len(), 1);
@@ -396,7 +407,7 @@ mod tests {
     #[test]
     fn remove_from_store() {
         let mut ps = PublishedStore::new();
-        ps.insert(pk(1), acct(100));
+        ps.insert(pk(1), acct(100), 0);
         ps.remove(&pk(1));
         assert!(ps.get(&pk(1)).is_none());
         assert_eq!(ps.cache_len(), 0);
@@ -408,12 +419,12 @@ mod tests {
     fn lru_eviction_removes_oldest() {
         let mut ps = PublishedStore::with_capacity(3);
 
-        ps.insert(pk(1), acct(100)); // oldest
-        ps.insert(pk(2), acct(200));
-        ps.insert(pk(3), acct(300)); // newest
+        ps.insert(pk(1), acct(100), 0); // oldest
+        ps.insert(pk(2), acct(200), 0);
+        ps.insert(pk(3), acct(300), 0); // newest
 
         // Cache is full (3/3). Insert a 4th entry.
-        ps.insert(pk(4), acct(400));
+        ps.insert(pk(4), acct(400), 0);
 
         assert_eq!(ps.cache_len(), 3);
         assert!(ps.get(&pk(1)).is_none(), "pk(1) should be evicted");
@@ -426,15 +437,15 @@ mod tests {
     fn lru_access_promotes_entry() {
         let mut ps = PublishedStore::with_capacity(3);
 
-        ps.insert(pk(1), acct(100)); // oldest initially
-        ps.insert(pk(2), acct(200));
-        ps.insert(pk(3), acct(300));
+        ps.insert(pk(1), acct(100), 0); // oldest initially
+        ps.insert(pk(2), acct(200), 0);
+        ps.insert(pk(3), acct(300), 0);
 
         // Access pk(1) to promote it to MRU.
         ps.get(&pk(1));
 
         // Insert pk(4) — should evict pk(2) (now the LRU).
-        ps.insert(pk(4), acct(400));
+        ps.insert(pk(4), acct(400), 0);
 
         assert_eq!(ps.cache_len(), 3);
         assert!(ps.get(&pk(1)).is_some(), "pk(1) was accessed recently");
@@ -451,7 +462,7 @@ mod tests {
         let mut ps = PublishedStore::with_durable_store(store);
 
         // Insert and then clear cache to force disk fallback.
-        ps.insert(pk(1), acct(500));
+        ps.insert(pk(1), acct(500), 0);
         ps.clear_cache();
 
         // Should load from disk.
@@ -471,9 +482,9 @@ mod tests {
             store: Some(store),
         };
 
-        ps.insert(pk(1), acct(100));
-        ps.insert(pk(2), acct(200));
-        ps.insert(pk(3), acct(300)); // evicts pk(1) from cache
+        ps.insert(pk(1), acct(100), 0);
+        ps.insert(pk(2), acct(200), 0);
+        ps.insert(pk(3), acct(300), 0); // evicts pk(1) from cache
 
         assert_eq!(ps.cache_len(), 2);
         assert!(!ps.cache.contains_key(&pk(1)));
@@ -493,7 +504,7 @@ mod tests {
             batch.insert(pk(i), acct(i as u64 * 100));
         }
 
-        let count = ps.insert_batch(&batch);
+        let count = ps.insert_batch(&batch, 0);
         assert_eq!(count, 10);
 
         // Clear cache and verify all persist on disk.
@@ -525,7 +536,7 @@ mod tests {
         let mut ps = PublishedStore::with_durable_store(store);
 
         for i in 0u8..5 {
-            ps.insert(pk(i), acct(i as u64 * 10));
+            ps.insert(pk(i), acct(i as u64 * 10), 0);
         }
 
         // iter_all should return everything from disk, not just cache.
@@ -539,7 +550,7 @@ mod tests {
         let mut ps = PublishedStore::new();
 
         for i in 0u8..5 {
-            ps.insert(pk(i), acct(i as u64 * 10));
+            ps.insert(pk(i), acct(i as u64 * 10), 0);
         }
 
         let all = ps.iter_all();
@@ -557,7 +568,7 @@ mod tests {
     #[test]
     fn clear_cache_and_get_without_disk() {
         let mut ps = PublishedStore::new();
-        ps.insert(pk(1), acct(100));
+        ps.insert(pk(1), acct(100), 0);
         ps.clear_cache();
         assert!(ps.get(&pk(1)).is_none(), "no disk → data lost after clear");
     }
@@ -566,10 +577,10 @@ mod tests {
     fn single_entry_cache() {
         let mut ps = PublishedStore::with_capacity(1);
 
-        ps.insert(pk(1), acct(100));
+        ps.insert(pk(1), acct(100), 0);
         assert_eq!(ps.cache_len(), 1);
 
-        ps.insert(pk(2), acct(200));
+        ps.insert(pk(2), acct(200), 0);
         assert_eq!(ps.cache_len(), 1);
         assert!(ps.cache.contains_key(&pk(2)));
         assert!(!ps.cache.contains_key(&pk(1)));
@@ -579,9 +590,9 @@ mod tests {
     fn overwrite_doesnt_increase_count() {
         let mut ps = PublishedStore::with_capacity(3);
 
-        ps.insert(pk(1), acct(100));
-        ps.insert(pk(2), acct(200));
-        ps.insert(pk(1), acct(300)); // overwrite, not new entry
+        ps.insert(pk(1), acct(100), 0);
+        ps.insert(pk(2), acct(200), 0);
+        ps.insert(pk(1), acct(300), 0); // overwrite, not new entry
 
         assert_eq!(ps.cache_len(), 2);
         assert_eq!(ps.get(&pk(1)).unwrap().meta.lamports, 300);
@@ -600,7 +611,7 @@ mod tests {
 
         // Insert 5 entries. LRU order (MRU→LRU): 4, 3, 2, 1, 0.
         for i in 0u8..5 {
-            ps.insert(pk(i), acct(i as u64));
+            ps.insert(pk(i), acct(i as u64), 0);
         }
 
         // Access pk(0) to promote it to MRU.
@@ -608,8 +619,8 @@ mod tests {
         ps.get(&pk(0));
 
         // Insert 2 new entries — should evict pk(1) and pk(2) (LRU).
-        ps.insert(pk(10), acct(10));
-        ps.insert(pk(11), acct(11));
+        ps.insert(pk(10), acct(10), 0);
+        ps.insert(pk(11), acct(11), 0);
 
         assert_eq!(ps.cache_len(), 5);
         // pk(0) was accessed recently → should survive.

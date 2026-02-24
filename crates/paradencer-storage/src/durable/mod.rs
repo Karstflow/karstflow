@@ -18,7 +18,7 @@ pub use engine::{FullRecoveryStats, StorageEngine};
 pub use file_store::{CfCompactionStats, FileDurableStore};
 pub use metrics::MetricsSnapshot;
 pub use read_cache::CacheStats;
-pub use recovery::{recover_accounts, recover_accounts_parallel, RecoveryStats};
+pub use recovery::{backfill_metadata, recover_accounts, recover_accounts_parallel, RecoveryStats};
 
 use crate::StorageError;
 

@@ -1,13 +1,20 @@
 // Startup recovery: reload persisted accounts from disk into memory.
 //
-// Two modes:
-// - **Serial**: scans accounts from disk, decodes each, and inserts into the
-//   AccountDatabase with cache population. Best for small datasets (<10K).
-// - **Parallel**: scans accounts from disk, then uses rayon to decode and
-//   update the owner index concurrently. The LRU cache is NOT populated;
-//   accounts are loaded lazily on first access. Best for large datasets.
+// Three strategies, tried in order of preference:
 //
-// The engine selects the mode automatically based on account count.
+// 1. **Metadata index**: scans CF_ACCOUNT_META (48-byte compact records:
+//    owner + lamports + slot). Fastest path — no LZ4 decompression, no
+//    full account decoding. Used when the metadata index is populated.
+//
+// 2. **Parallel full scan**: scans CF_ACCOUNTS with rayon. Decodes each
+//    account (including LZ4 decompression) to extract owner and lamports.
+//    Falls back to this when metadata index is empty (old database).
+//
+// 3. **Serial full scan**: single-threaded CF_ACCOUNTS scan that also
+//    populates the LRU cache. Used for small datasets (<10K accounts).
+//
+// After any full-scan recovery, a one-time migration populates
+// CF_ACCOUNT_META so subsequent startups use the fast metadata path.
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
@@ -15,11 +22,11 @@ use std::time::Instant;
 use rayon::prelude::*;
 
 use paradencer_constants::durable_store::{
-    CF_ACCOUNTS, RECOVERY_MIN_CHUNK_SIZE, RECOVERY_PARALLEL_THRESHOLD,
+    CF_ACCOUNTS, CF_ACCOUNT_META, RECOVERY_MIN_CHUNK_SIZE, RECOVERY_PARALLEL_THRESHOLD,
 };
 use paradencer_types::Pubkey;
 
-use super::account_encoding::decode_account;
+use super::account_encoding::{decode_account, decode_account_meta, encode_account_meta};
 use super::DurableStore;
 use crate::accounts::AccountDatabase;
 use crate::StorageError;
@@ -37,28 +44,160 @@ pub struct RecoveryStats {
     pub elapsed_ms: u64,
     /// Whether the parallel recovery path was used.
     pub parallel: bool,
+    /// Whether the fast metadata index path was used.
+    pub from_metadata: bool,
 }
 
 /// Recover all published accounts from the durable store into the database.
 ///
-/// Automatically selects serial or parallel mode based on account count.
-/// For small datasets, serial mode populates the LRU cache for immediate
-/// access. For large datasets, parallel mode updates only the owner index
-/// and lets the cache warm lazily from disk.
+/// Tries the fast metadata index path first (CF_ACCOUNT_META). Falls back
+/// to full account scan (CF_ACCOUNTS) if the metadata index is empty.
+/// After a full-scan fallback, backfills the metadata index for future
+/// fast recovery.
 pub fn recover_accounts(
     db: &AccountDatabase,
     store: &dyn DurableStore,
 ) -> Result<RecoveryStats, StorageError> {
     let start = Instant::now();
 
-    // Scan all records in the accounts column family.
+    // Try fast path: metadata index.
+    let meta_count = store.count(CF_ACCOUNT_META)?;
+    if meta_count > 0 {
+        let entries = store.prefix_scan(CF_ACCOUNT_META, &[])?;
+        if !entries.is_empty() {
+            return recover_from_metadata(db, entries, start);
+        }
+    }
+
+    // Fallback: full account scan.
     let entries = store.prefix_scan(CF_ACCOUNTS, &[])?;
 
-    if entries.len() >= RECOVERY_PARALLEL_THRESHOLD {
-        recover_parallel(db, entries, start)
+    let stats = if entries.len() >= RECOVERY_PARALLEL_THRESHOLD {
+        recover_parallel(db, entries, start)?
     } else {
-        recover_serial(db, entries, start)
+        recover_serial(db, entries, start)?
+    };
+
+    // Backfill metadata index for future fast recovery.
+    if stats.accounts_loaded > 0 {
+        let _ = backfill_metadata(db, store);
     }
+
+    Ok(stats)
+}
+
+/// Recover the owner index from compact metadata records.
+///
+/// Each CF_ACCOUNT_META record is 48 bytes: owner(32) + lamports(8) + slot(8).
+/// No LZ4 decompression or full account decoding needed — just direct byte
+/// extraction. For large datasets, uses rayon for parallel processing.
+fn recover_from_metadata(
+    db: &AccountDatabase,
+    entries: Vec<(Vec<u8>, Vec<u8>)>,
+    start: Instant,
+) -> Result<RecoveryStats, StorageError> {
+    if entries.len() >= RECOVERY_PARALLEL_THRESHOLD {
+        recover_metadata_parallel(db, entries, start)
+    } else {
+        recover_metadata_serial(db, entries, start)
+    }
+}
+
+/// Serial metadata recovery for small datasets.
+fn recover_metadata_serial(
+    db: &AccountDatabase,
+    entries: Vec<(Vec<u8>, Vec<u8>)>,
+    start: Instant,
+) -> Result<RecoveryStats, StorageError> {
+    let mut accounts_loaded: u64 = 0;
+    let mut total_lamports: u64 = 0;
+    let mut decode_errors: u64 = 0;
+
+    for (key_bytes, value_bytes) in entries {
+        if key_bytes.len() != 32 {
+            decode_errors += 1;
+            continue;
+        }
+
+        let pubkey = Pubkey::from(
+            <[u8; 32]>::try_from(key_bytes.as_slice()).unwrap_or_else(|_| unreachable!()),
+        );
+
+        match decode_account_meta(&value_bytes) {
+            Some((owner, lamports, _slot)) => {
+                total_lamports = total_lamports.saturating_add(lamports);
+                db.insert_recovered_meta(pubkey, owner, lamports);
+                accounts_loaded += 1;
+            }
+            None => {
+                decode_errors += 1;
+            }
+        }
+    }
+
+    Ok(RecoveryStats {
+        accounts_loaded,
+        total_lamports,
+        decode_errors,
+        elapsed_ms: start.elapsed().as_millis() as u64,
+        parallel: false,
+        from_metadata: true,
+    })
+}
+
+/// Parallel metadata recovery for large datasets.
+fn recover_metadata_parallel(
+    db: &AccountDatabase,
+    entries: Vec<(Vec<u8>, Vec<u8>)>,
+    start: Instant,
+) -> Result<RecoveryStats, StorageError> {
+    let loaded = AtomicU64::new(0);
+    let lamports = AtomicU64::new(0);
+    let errors = AtomicU64::new(0);
+
+    let num_threads = rayon::current_num_threads().max(1);
+    let chunk_size = (entries.len() / num_threads).max(RECOVERY_MIN_CHUNK_SIZE);
+
+    entries.par_chunks(chunk_size).for_each(|chunk| {
+        let mut local_loaded = 0u64;
+        let mut local_lamports = 0u64;
+        let mut local_errors = 0u64;
+
+        for (key_bytes, value_bytes) in chunk {
+            if key_bytes.len() != 32 {
+                local_errors += 1;
+                continue;
+            }
+
+            let pubkey = Pubkey::from(
+                <[u8; 32]>::try_from(key_bytes.as_slice()).unwrap_or_else(|_| unreachable!()),
+            );
+
+            match decode_account_meta(value_bytes) {
+                Some((owner, lamps, _slot)) => {
+                    local_lamports = local_lamports.saturating_add(lamps);
+                    db.insert_recovered_meta(pubkey, owner, lamps);
+                    local_loaded += 1;
+                }
+                None => {
+                    local_errors += 1;
+                }
+            }
+        }
+
+        loaded.fetch_add(local_loaded, Ordering::Relaxed);
+        lamports.fetch_add(local_lamports, Ordering::Relaxed);
+        errors.fetch_add(local_errors, Ordering::Relaxed);
+    });
+
+    Ok(RecoveryStats {
+        accounts_loaded: loaded.load(Ordering::Relaxed),
+        total_lamports: lamports.load(Ordering::Relaxed),
+        decode_errors: errors.load(Ordering::Relaxed),
+        elapsed_ms: start.elapsed().as_millis() as u64,
+        parallel: true,
+        from_metadata: true,
+    })
 }
 
 /// Serial recovery: decode and insert with cache population.
@@ -103,6 +242,7 @@ fn recover_serial(
         decode_errors,
         elapsed_ms: start.elapsed().as_millis() as u64,
         parallel: false,
+        from_metadata: false,
     })
 }
 
@@ -164,6 +304,7 @@ fn recover_parallel(
         decode_errors: errors.load(Ordering::Relaxed),
         elapsed_ms: start.elapsed().as_millis() as u64,
         parallel: true,
+        from_metadata: false,
     })
 }
 
@@ -178,6 +319,52 @@ pub fn recover_accounts_parallel(
     let start = Instant::now();
     let entries = store.prefix_scan(CF_ACCOUNTS, &[])?;
     recover_parallel(db, entries, start)
+}
+
+/// Backfill the metadata index from existing account data.
+///
+/// Scans CF_ACCOUNTS and writes a compact metadata record to CF_ACCOUNT_META
+/// for each account. This is a one-time migration for databases created before
+/// the metadata index was introduced. The function is idempotent — existing
+/// metadata records are overwritten with fresh data.
+pub fn backfill_metadata(
+    db: &AccountDatabase,
+    store: &dyn DurableStore,
+) -> Result<u64, StorageError> {
+    use super::account_encoding::decode_account_header;
+    use super::WriteBatch;
+
+    let entries = store.prefix_scan(CF_ACCOUNTS, &[])?;
+    let mut written = 0u64;
+    let mut batch = WriteBatch::new();
+
+    for (key_bytes, value_bytes) in &entries {
+        if key_bytes.len() != 32 {
+            continue;
+        }
+
+        if let Some((lamports, owner)) = decode_account_header(value_bytes) {
+            let slot = db
+                .last_updated_slot(&Pubkey::from(
+                    <[u8; 32]>::try_from(key_bytes.as_slice()).unwrap_or_else(|_| unreachable!()),
+                ))
+                .unwrap_or(0);
+            let meta = encode_account_meta(&owner, lamports, slot);
+            if batch.put(CF_ACCOUNT_META, key_bytes, &meta).is_err() {
+                // Batch full — flush and start a new one.
+                store.write_batch(&batch)?;
+                batch = WriteBatch::new();
+                let _ = batch.put(CF_ACCOUNT_META, key_bytes, &meta);
+            }
+            written += 1;
+        }
+    }
+
+    if !batch.is_empty() {
+        store.write_batch(&batch)?;
+    }
+
+    Ok(written)
 }
 
 #[cfg(test)]
@@ -221,6 +408,7 @@ mod tests {
         assert_eq!(stats.total_lamports, 1_000_000);
         assert_eq!(stats.decode_errors, 0);
         assert!(!stats.parallel); // Below threshold
+        assert!(!stats.from_metadata); // No metadata yet
 
         let recovered = db.get_published_account(&pubkey).expect("should exist");
         assert_eq!(recovered.meta.lamports, 1_000_000);
@@ -315,8 +503,9 @@ mod tests {
         let db = AccountDatabase::new();
         recover_accounts(&db, store.as_ref()).expect("recover");
 
+        // Backfill writes metadata, so disk should grow slightly.
         let disk_after = store.disk_usage().expect("usage");
-        assert_eq!(disk_before, disk_after);
+        assert!(disk_after >= disk_before);
 
         let recovered = db.get_published_account(&pubkey).expect("should exist");
         assert_eq!(recovered.meta.lamports, 999);
@@ -524,5 +713,159 @@ mod tests {
             db_serial.accounts_owned_by(&owner),
             db_parallel.accounts_owned_by(&owner)
         );
+    }
+
+    // --- Metadata index recovery tests ---
+
+    #[test]
+    fn metadata_recovery_uses_fast_path() {
+        let store = test_store();
+        let owner = Pubkey::from([0xAA; 32]);
+
+        // Populate both CF_ACCOUNTS and CF_ACCOUNT_META.
+        for i in 0u8..5 {
+            let pubkey = Pubkey::from([i; 32]);
+            let account = Account::new((i as u64 + 1) * 100, vec![i; 8], owner);
+            store
+                .put(CF_ACCOUNTS, pubkey.as_bytes(), &encode_account(&account))
+                .expect("put");
+            let meta = encode_account_meta(&owner, (i as u64 + 1) * 100, 42);
+            store
+                .put(CF_ACCOUNT_META, pubkey.as_bytes(), &meta)
+                .expect("put meta");
+        }
+
+        let db = AccountDatabase::new();
+        let stats = recover_accounts(&db, store.as_ref()).expect("recover");
+
+        assert!(stats.from_metadata, "should use metadata path");
+        assert_eq!(stats.accounts_loaded, 5);
+        assert_eq!(stats.total_lamports, 1500);
+        assert_eq!(db.get_account_count(), 5);
+        assert_eq!(db.accounts_owned_by(&owner), 5);
+    }
+
+    #[test]
+    fn metadata_recovery_matches_full_recovery() {
+        let store = test_store();
+        let owner = Pubkey::from([0xBB; 32]);
+
+        // Populate both CFs.
+        for i in 0u8..10 {
+            let pubkey = Pubkey::from([i; 32]);
+            let lamports = (i as u64 + 1) * 50;
+            let account = Account::new(lamports, vec![i; 16], owner);
+            store
+                .put(CF_ACCOUNTS, pubkey.as_bytes(), &encode_account(&account))
+                .expect("put");
+            let meta = encode_account_meta(&owner, lamports, 0);
+            store
+                .put(CF_ACCOUNT_META, pubkey.as_bytes(), &meta)
+                .expect("put meta");
+        }
+
+        // Recover via metadata.
+        let db_meta = AccountDatabase::new();
+        let stats_meta = recover_accounts(&db_meta, store.as_ref()).expect("recover");
+
+        // Recover via full scan (force parallel).
+        let db_full = AccountDatabase::new();
+        let stats_full = recover_accounts_parallel(&db_full, store.as_ref()).expect("recover");
+
+        assert!(stats_meta.from_metadata);
+        assert!(!stats_full.from_metadata);
+
+        // Same index state.
+        assert_eq!(db_meta.get_account_count(), db_full.get_account_count());
+        assert_eq!(db_meta.get_total_lamports(), db_full.get_total_lamports());
+        assert_eq!(
+            db_meta.accounts_owned_by(&owner),
+            db_full.accounts_owned_by(&owner)
+        );
+    }
+
+    #[test]
+    fn backfill_populates_metadata_index() {
+        let store = test_store();
+        let owner = Pubkey::from([0xCC; 32]);
+
+        // Populate ONLY CF_ACCOUNTS (simulating old database).
+        for i in 0u8..5 {
+            let pubkey = Pubkey::from([i; 32]);
+            let account = Account::new((i as u64 + 1) * 100, vec![], owner);
+            store
+                .put(CF_ACCOUNTS, pubkey.as_bytes(), &encode_account(&account))
+                .expect("put");
+        }
+
+        // Metadata should be empty.
+        assert_eq!(store.count(CF_ACCOUNT_META).unwrap(), 0);
+
+        // Run recovery — should use full scan and then backfill.
+        let db = AccountDatabase::new();
+        let stats = recover_accounts(&db, store.as_ref()).expect("recover");
+        assert!(!stats.from_metadata, "first recovery uses full scan");
+
+        // Metadata should now be populated.
+        assert_eq!(store.count(CF_ACCOUNT_META).unwrap(), 5);
+
+        // Second recovery should use metadata path.
+        let db2 = AccountDatabase::new();
+        let stats2 = recover_accounts(&db2, store.as_ref()).expect("recover");
+        assert!(stats2.from_metadata, "second recovery uses metadata");
+        assert_eq!(stats2.accounts_loaded, 5);
+    }
+
+    #[test]
+    fn backfill_is_idempotent() {
+        let store = test_store();
+        let owner = Pubkey::from([0xDD; 32]);
+
+        for i in 0u8..3 {
+            let pubkey = Pubkey::from([i; 32]);
+            let account = Account::new((i as u64 + 1) * 100, vec![], owner);
+            store
+                .put(CF_ACCOUNTS, pubkey.as_bytes(), &encode_account(&account))
+                .expect("put");
+        }
+
+        let db = AccountDatabase::new();
+        let first = backfill_metadata(&db, store.as_ref()).expect("backfill 1");
+        let second = backfill_metadata(&db, store.as_ref()).expect("backfill 2");
+
+        assert_eq!(first, 3);
+        assert_eq!(second, 3);
+        assert_eq!(store.count(CF_ACCOUNT_META).unwrap(), 3);
+    }
+
+    #[test]
+    fn metadata_recovery_skips_invalid_records() {
+        let store = test_store();
+
+        // Valid metadata record.
+        let pubkey = Pubkey::from([0x01; 32]);
+        let meta = encode_account_meta(&Pubkey::from([0xAA; 32]), 1000, 5);
+        store
+            .put(CF_ACCOUNT_META, pubkey.as_bytes(), &meta)
+            .expect("put");
+
+        // Invalid: key too short.
+        store.put(CF_ACCOUNT_META, &[0xFF; 16], &meta).expect("put");
+
+        // Invalid: value too short.
+        store
+            .put(
+                CF_ACCOUNT_META,
+                Pubkey::from([0x02; 32]).as_bytes(),
+                &[0; 10],
+            )
+            .expect("put");
+
+        let db = AccountDatabase::new();
+        let stats = recover_accounts(&db, store.as_ref()).expect("recover");
+
+        assert!(stats.from_metadata);
+        assert_eq!(stats.accounts_loaded, 1);
+        assert_eq!(stats.decode_errors, 2);
     }
 }

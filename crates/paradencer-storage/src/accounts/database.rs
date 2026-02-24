@@ -252,7 +252,7 @@ impl AccountDatabase {
                     old_lamports,
                 );
             }
-            published.insert_batch(&published_updates);
+            published.insert_batch(&published_updates, slot);
         }
 
         // Mark all published pubkeys as dirty at this slot.
@@ -361,7 +361,7 @@ impl AccountDatabase {
         let old_lamports = {
             let mut published = self.published.lock();
             let old = published.get(&pubkey).map(|a| a.meta.lamports);
-            published.insert(pubkey, account.clone());
+            published.insert(pubkey, account.clone(), slot);
             old
         };
         self.owner_index.upsert(
@@ -427,7 +427,7 @@ impl AccountDatabase {
                     None,
                 );
             }
-            published.insert_batch(&accounts);
+            published.insert_batch(&accounts, slot);
         }
 
         // Mark all inserted pubkeys as dirty at this slot.
@@ -606,6 +606,21 @@ impl AccountDatabase {
     pub fn insert_recovered_index_only(&self, pubkey: Pubkey, account: &Account) {
         self.owner_index
             .upsert(pubkey, account.meta.owner, account.meta.lamports, 0, None);
+    }
+
+    /// Register a recovered account from compact metadata (owner + lamports).
+    ///
+    /// Used by the fast metadata recovery path. Does not populate the LRU
+    /// cache or touch full account data — only the owner index is updated.
+    pub fn insert_recovered_meta(&self, pubkey: Pubkey, owner: Pubkey, lamports: u64) {
+        self.owner_index.upsert(pubkey, owner, lamports, 0, None);
+    }
+
+    /// Get the slot at which an account was last modified.
+    ///
+    /// Returns `None` if the account is not tracked in the owner index.
+    pub fn last_updated_slot(&self, pubkey: &Pubkey) -> Option<u64> {
+        self.owner_index.last_updated_slot(pubkey)
     }
 
     pub fn compute_state_hash(&self) -> u64 {

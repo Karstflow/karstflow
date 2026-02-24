@@ -147,6 +147,56 @@ pub fn encode_account_raw(account: &Account) -> Vec<u8> {
     encode_raw(account, account.data.as_slice())
 }
 
+// ---------------------------------------------------------------------------
+// Compact metadata encoding for the persistent account index
+// ---------------------------------------------------------------------------
+
+/// Size of a compact account metadata record: owner(32) + lamports(8) + slot(8).
+const META_RECORD_SIZE: usize = 48;
+
+/// Encode compact account metadata for the persistent index.
+///
+/// The metadata record contains only the fields needed to rebuild the
+/// owner index at startup: owner, lamports, and last-modified slot.
+/// No data payload, no compression — just 48 fixed bytes.
+#[inline]
+pub fn encode_account_meta(owner: &Pubkey, lamports: u64, slot: u64) -> [u8; 48] {
+    let mut buf = [0u8; META_RECORD_SIZE];
+    buf[0..PUBKEY_BYTES].copy_from_slice(owner.as_bytes());
+    buf[PUBKEY_BYTES..PUBKEY_BYTES + 8].copy_from_slice(&lamports.to_le_bytes());
+    buf[PUBKEY_BYTES + 8..META_RECORD_SIZE].copy_from_slice(&slot.to_le_bytes());
+    buf
+}
+
+/// Decode compact account metadata from the persistent index.
+///
+/// Returns `(owner, lamports, slot)` or `None` if the buffer is too short.
+#[inline]
+pub fn decode_account_meta(buf: &[u8]) -> Option<(Pubkey, u64, u64)> {
+    if buf.len() < META_RECORD_SIZE {
+        return None;
+    }
+    let owner = Pubkey::from(<[u8; PUBKEY_BYTES]>::try_from(&buf[0..PUBKEY_BYTES]).ok()?);
+    let lamports = u64::from_le_bytes(buf[PUBKEY_BYTES..PUBKEY_BYTES + 8].try_into().ok()?);
+    let slot = u64::from_le_bytes(buf[PUBKEY_BYTES + 8..META_RECORD_SIZE].try_into().ok()?);
+    Some((owner, lamports, slot))
+}
+
+/// Extract just the lamports and owner from a full account encoding.
+///
+/// Reads only the first 40 bytes of the account header — no LZ4
+/// decompression needed. This is the fast path for index rebuilds
+/// when the metadata column family is not available.
+#[inline]
+pub fn decode_account_header(buf: &[u8]) -> Option<(u64, Pubkey)> {
+    if buf.len() < 8 + PUBKEY_BYTES {
+        return None;
+    }
+    let lamports = u64::from_le_bytes(buf[0..8].try_into().ok()?);
+    let owner = Pubkey::from(<[u8; PUBKEY_BYTES]>::try_from(&buf[8..8 + PUBKEY_BYTES]).ok()?);
+    Some((lamports, owner))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -366,5 +416,81 @@ mod tests {
         assert_eq!(field & ACCOUNT_ENCODING_COMPRESSION_FLAG, 0);
         let decoded_below = decode_account(&encoded_below).expect("decode");
         assert_eq!(decoded_below, account_below);
+    }
+
+    // --- Compact metadata encoding tests ---
+
+    #[test]
+    fn meta_roundtrip() {
+        let owner = Pubkey::from([0xAA; 32]);
+        let lamports = 1_000_000u64;
+        let slot = 42u64;
+
+        let encoded = encode_account_meta(&owner, lamports, slot);
+        assert_eq!(encoded.len(), 48);
+
+        let (dec_owner, dec_lamports, dec_slot) = decode_account_meta(&encoded).expect("decode");
+        assert_eq!(dec_owner, owner);
+        assert_eq!(dec_lamports, lamports);
+        assert_eq!(dec_slot, slot);
+    }
+
+    #[test]
+    fn meta_zero_values() {
+        let encoded = encode_account_meta(&Pubkey::from([0; 32]), 0, 0);
+        let (owner, lamports, slot) = decode_account_meta(&encoded).expect("decode");
+        assert_eq!(owner, Pubkey::from([0; 32]));
+        assert_eq!(lamports, 0);
+        assert_eq!(slot, 0);
+    }
+
+    #[test]
+    fn meta_max_values() {
+        let owner = Pubkey::from([0xFF; 32]);
+        let encoded = encode_account_meta(&owner, u64::MAX, u64::MAX);
+        let (dec_owner, dec_lamports, dec_slot) = decode_account_meta(&encoded).expect("decode");
+        assert_eq!(dec_owner, owner);
+        assert_eq!(dec_lamports, u64::MAX);
+        assert_eq!(dec_slot, u64::MAX);
+    }
+
+    #[test]
+    fn meta_truncated_returns_none() {
+        let encoded = encode_account_meta(&Pubkey::from([1; 32]), 100, 5);
+        assert!(decode_account_meta(&encoded[..47]).is_none());
+        assert!(decode_account_meta(&encoded[..20]).is_none());
+        assert!(decode_account_meta(&[]).is_none());
+    }
+
+    // --- Header extraction tests ---
+
+    #[test]
+    fn header_extraction_from_raw_account() {
+        let owner = Pubkey::from([0xBB; 32]);
+        let account = Account::new(999, vec![1, 2, 3, 4], owner);
+        let encoded = encode_account(&account);
+
+        let (lamports, dec_owner) = decode_account_header(&encoded).expect("decode header");
+        assert_eq!(lamports, 999);
+        assert_eq!(dec_owner, owner);
+    }
+
+    #[test]
+    fn header_extraction_from_compressed_account() {
+        // Compressed accounts still have lamports+owner uncompressed in the header.
+        let owner = Pubkey::from([0xCC; 32]);
+        let data = vec![0x00; 4096]; // compressible
+        let account = Account::new(12345, data, owner);
+        let encoded = encode_account(&account);
+
+        let (lamports, dec_owner) = decode_account_header(&encoded).expect("decode header");
+        assert_eq!(lamports, 12345);
+        assert_eq!(dec_owner, owner);
+    }
+
+    #[test]
+    fn header_extraction_truncated_returns_none() {
+        assert!(decode_account_header(&[0; 39]).is_none());
+        assert!(decode_account_header(&[]).is_none());
     }
 }
