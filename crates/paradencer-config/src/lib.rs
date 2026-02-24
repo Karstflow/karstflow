@@ -57,6 +57,7 @@ pub struct NodeConfig {
     pub expected_genesis_hash: Option<String>,
     pub expected_shred_version: Option<u16>,
     pub live_entrypoints: Vec<SocketAddr>,
+    pub gossip_bind_addr: SocketAddr,
     pub runtime_spec: RuntimeSpec,
     pub topology_spec: TopologySpec,
     pub ingress_policy: IngressPolicy,
@@ -141,6 +142,7 @@ impl NodeConfig {
         let expected_shred_version = parse_expected_shred_version_from_env()?;
         let live_entrypoints =
             parse_live_entrypoints(std::env::var("PARADENCER_LIVE_ENTRYPOINTS").ok())?;
+        let gossip_bind_addr = parse_gossip_bind_addr_from_env()?;
 
         Ok(Self {
             cluster_mode,
@@ -148,6 +150,7 @@ impl NodeConfig {
             expected_genesis_hash,
             expected_shred_version,
             live_entrypoints,
+            gossip_bind_addr,
             runtime_spec: build_runtime_spec(profile)?,
             topology_spec: build_topology_spec(profile)?,
             ingress_policy: build_ingress_policy(profile)?,
@@ -233,6 +236,15 @@ impl NodeConfig {
         }
 
         Ok(())
+    }
+}
+
+fn parse_gossip_bind_addr_from_env() -> Result<SocketAddr> {
+    match std::env::var("PARADENCER_GOSSIP_BIND_ADDR").ok() {
+        Some(raw) => raw
+            .parse::<SocketAddr>()
+            .map_err(|source| ConfigError::InvalidGossipBindAddr { value: raw, source }),
+        None => Ok("0.0.0.0:8001".parse().unwrap()),
     }
 }
 

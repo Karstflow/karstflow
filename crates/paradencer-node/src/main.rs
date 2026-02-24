@@ -9,7 +9,7 @@ use paradencer_control::{
     render_diagnostics_stage_mix_line, render_diagnostics_topology_line,
     render_preflight_readiness_issue_line, render_preflight_readiness_line,
     render_readiness_policy_line, run_diagnostics_phase, run_preflight_phase,
-    run_preflight_phase_with_probe_report, run_runtime_phase, ServiceBundle,
+    run_preflight_phase_with_probe_report, run_runtime_phase, start_gossip_service, ServiceBundle,
 };
 
 fn main() -> paradencer_control::Result<()> {
@@ -25,6 +25,12 @@ fn main() -> paradencer_control::Result<()> {
 fn run_with_node_config(
     node_config: paradencer_config::NodeConfig,
 ) -> paradencer_control::Result<()> {
+    // Start gossip for cluster peer discovery. The service runs on a
+    // dedicated background thread and must stay alive for the entire
+    // node lifetime.
+    let gossip_handle = start_gossip_service(&node_config)?;
+    let _cluster_info = gossip_handle.cluster_info.clone();
+
     let mut topology_pair = materialize_service_pair_from_config(&node_config)?;
     let runtime_topology = topology_pair.runtime;
 
@@ -56,6 +62,9 @@ fn run_with_node_config(
     let mut services = runtime_topology.services;
     services.push(replay_bundle.service);
     services.push(pipeline_bundle.service);
+
+    // Keep gossip alive until run_runtime_phase returns.
+    let _gossip = gossip_handle;
 
     run_runtime_phase(
         &node_config,

@@ -1453,6 +1453,7 @@ dependencies = [
  "paradencer-topology",
  "paradencer-types",
  "thiserror 2.0.18",
+ "tokio",
 ]
 
 [[package]]

@@ -60,4 +60,6 @@ pub enum ControlPlaneError {
     KeysCommandRequiresIdentityPath,
     #[error("mainnet readiness checks failed: {reasons}")]
     MainnetReadinessFailed { reasons: String },
+    #[error("gossip service failed to start: {detail}")]
+    GossipServiceStartFailed { detail: String },
 }

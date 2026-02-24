@@ -14,7 +14,7 @@ use paradencer_consensus::{
 use paradencer_core::{ExecutionMode, LinkKind, PinnedCorePolicy, StageKind};
 use paradencer_execution::ExecutionBridge;
 use paradencer_mesh::{bounded_link, InPort, OutPort};
-use paradencer_net::IngressMode;
+use paradencer_net::{ClusterInfo, ContactInfo, GossipConfig, GossipService, IngressMode, NodeId};
 use paradencer_observability::spawn_metrics_http_bridge;
 use paradencer_rpc::{metrics_file_provider, spawn_rpc_http_server};
 use paradencer_runtime::{build_pinned_affinity_plan, run_services, Service, ServiceProbeReport};
@@ -204,6 +204,129 @@ pub struct ReplayBundleWithExternalInput {
     pub service: Box<dyn Service>,
     /// Shared consensus infrastructure for other services to use.
     pub consensus: ConsensusBundle,
+}
+
+// ---------------------------------------------------------------------------
+// Gossip service: cluster peer discovery and state propagation
+// ---------------------------------------------------------------------------
+
+/// Handle for the running gossip service.
+///
+/// Holds a reference to the shared cluster information and manages
+/// the background thread that runs the gossip protocol loops. Dropping
+/// this handle signals the gossip service to shut down.
+pub struct GossipHandle {
+    /// Shared cluster state — provides other subsystems with peer data.
+    pub cluster_info: Arc<ClusterInfo>,
+    /// Sends shutdown signal to the gossip background thread.
+    shutdown_tx: Option<tokio::sync::oneshot::Sender<()>>,
+    /// Background thread running the gossip tokio runtime.
+    _thread_handle: std::thread::JoinHandle<()>,
+}
+
+impl Drop for GossipHandle {
+    fn drop(&mut self) {
+        if let Some(tx) = self.shutdown_tx.take() {
+            let _ = tx.send(());
+        }
+    }
+}
+
+/// Start the gossip service for cluster peer discovery.
+///
+/// Spawns a background thread with a dedicated tokio runtime that runs
+/// the gossip protocol (push, pull, receive, prune loops). The returned
+/// handle provides shared access to cluster information and manages the
+/// service lifecycle.
+///
+/// Configured entrypoints from `node_config.live_entrypoints` are seeded
+/// into the cluster table so the gossip service can bootstrap peer
+/// discovery.
+pub fn start_gossip_service(node_config: &NodeConfig) -> Result<GossipHandle> {
+    // TODO: derive node_id from identity keypair in live mode
+    let node_id = NodeId::random();
+
+    let gossip_bind_addr = node_config.gossip_bind_addr;
+    let shred_version = node_config.expected_shred_version.unwrap_or(0);
+
+    let contact_info = ContactInfo::new(
+        node_id,
+        gossip_bind_addr,
+        gossip_bind_addr, // TODO: separate TPU address
+        gossip_bind_addr, // TODO: separate TPU QUIC address
+        gossip_bind_addr, // TODO: separate repair address
+        shred_version,
+    );
+
+    let gossip_config = GossipConfig {
+        bind_addr: gossip_bind_addr,
+        ..GossipConfig::default()
+    };
+
+    let entrypoints: Vec<ContactInfo> = node_config
+        .live_entrypoints
+        .iter()
+        .map(|&addr| ContactInfo::new(NodeId::random(), addr, addr, addr, addr, shred_version))
+        .collect();
+
+    let (cluster_tx, cluster_rx) =
+        std::sync::mpsc::sync_channel::<std::result::Result<Arc<ClusterInfo>, String>>(1);
+    let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+
+    let thread_handle = std::thread::Builder::new()
+        .name("gossip".to_string())
+        .spawn(move || {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("failed to build gossip tokio runtime");
+
+            rt.block_on(async move {
+                let mut service =
+                    match GossipService::new(node_id, contact_info, gossip_config).await {
+                        Ok(s) => s,
+                        Err(e) => {
+                            let _ = cluster_tx.send(Err(format!("{e}")));
+                            return;
+                        }
+                    };
+
+                let cluster_info = service.cluster_info();
+
+                for ep in entrypoints {
+                    cluster_info.insert(ep);
+                }
+
+                if let Err(e) = service.start().await {
+                    let _ = cluster_tx.send(Err(format!("{e}")));
+                    return;
+                }
+
+                let _ = cluster_tx.send(Ok(cluster_info));
+
+                // Park until shutdown signal arrives. The spawned gossip
+                // tasks (push/pull/receive/prune) run cooperatively on
+                // this single-threaded runtime while we await.
+                let _ = shutdown_rx.await;
+                service.stop().await;
+            });
+        })
+        .map_err(|e| ControlPlaneError::GossipServiceStartFailed {
+            detail: format!("thread spawn failed: {e}"),
+        })?;
+
+    let cluster_info = cluster_rx
+        .recv()
+        .map_err(|_| ControlPlaneError::GossipServiceStartFailed {
+            detail: "gossip thread exited before reporting ready".to_string(),
+        })?
+        .map_err(|detail| ControlPlaneError::GossipServiceStartFailed { detail })?;
+
+    Ok(GossipHandle {
+        cluster_info,
+        shutdown_tx: Some(shutdown_tx),
+        _thread_handle: thread_handle,
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -746,6 +869,7 @@ mod tests {
         build_shred_pipeline, ensure_mainnet_readiness, evaluate_mainnet_readiness,
         load_node_config, materialize_service_pair_from_config, materialize_services_from_config,
         maybe_start_metrics_http_bridge, maybe_start_rpc_http_server, run_diagnostics_phase,
+        start_gossip_service,
     };
     use crate::errors::ControlPlaneError;
     use paradencer_config::NodeConfig;
@@ -1130,5 +1254,15 @@ mod tests {
         assert!(readiness.failed_checks.iter().any(|check| {
             check.contains("storage.execution_error_fail_open_max_consecutive is 0")
         }));
+    }
+
+    #[test]
+    fn start_gossip_service_creates_handle_with_cluster_info() {
+        let node_config = NodeConfig::from_profile(None).unwrap();
+        let handle = start_gossip_service(&node_config).unwrap();
+        // Cluster info is accessible and starts with zero peers.
+        assert_eq!(handle.cluster_info.size(), 0);
+        // Gossip handle drops cleanly (signals shutdown to background thread).
+        drop(handle);
     }
 }

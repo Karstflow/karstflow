@@ -124,4 +124,9 @@ pub enum ConfigError {
     },
     #[error("live mode rejects default topology '{topology_name}'")]
     LiveModeRejectsDefaultTopologyName { topology_name: String },
+    #[error("invalid gossip bind address '{value}': {source}")]
+    InvalidGossipBindAddr {
+        value: String,
+        source: std::net::AddrParseError,
+    },
 }
