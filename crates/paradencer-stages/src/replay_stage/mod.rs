@@ -93,6 +93,10 @@ impl ReplayStats {
 pub struct ReplayConfig {
     /// Enable strict ancestry verification
     pub strict_ancestry_check: bool,
+    /// Enable PoH entry chain verification during block replay.
+    /// Should be true in production. Can be disabled during
+    /// initial snapshot catchup or in test scenarios.
+    pub verify_poh: bool,
     /// Enable vote processing
     pub process_votes: bool,
     /// Enable automatic bank freezing
@@ -107,6 +111,7 @@ impl Default for ReplayConfig {
     fn default() -> Self {
         Self {
             strict_ancestry_check: true,
+            verify_poh: true,
             process_votes: true,
             auto_freeze_banks: true,
             enable_root_progression: true,
@@ -169,7 +174,8 @@ impl ReplayStage {
         commitment_tracker: Arc<Mutex<CommitmentTracker>>,
     ) -> Self {
         let bank_transition = BankTransition::new(bank_forks.clone(), fork_choice.clone());
-        let block_processor = BlockProcessor::new(execution_bridge, commitment_tracker);
+        let mut block_processor = BlockProcessor::new(execution_bridge, commitment_tracker);
+        block_processor.verify_poh = config.verify_poh;
         let vote_integration = VoteIntegration::new(vote_processor, tower, fork_choice);
 
         Self {
@@ -194,8 +200,9 @@ impl ReplayStage {
         commitment_tracker: Arc<Mutex<CommitmentTracker>>,
     ) -> Self {
         let bank_transition = BankTransition::new(bank_forks.clone(), fork_choice.clone());
-        let block_processor =
+        let mut block_processor =
             BlockProcessor::with_backend(execution_bridge, commitment_tracker, backend);
+        block_processor.verify_poh = config.verify_poh;
         let vote_integration = VoteIntegration::new(vote_processor, tower, fork_choice);
 
         Self {

@@ -559,6 +559,11 @@ impl Bank {
         self.signature_count.load(Ordering::Relaxed)
     }
 
+    /// Get the last PoH blockhash for this slot.
+    pub fn last_blockhash(&self) -> [u8; 32] {
+        *self.last_blockhash.read().unwrap()
+    }
+
     /// Set the last PoH blockhash for this slot.
     pub fn set_last_blockhash(&self, hash: [u8; 32]) {
         *self.last_blockhash.write().unwrap() = hash;
@@ -684,6 +689,31 @@ impl Bank {
         }
     }
 
+    /// Register a tick using the actual PoH hash from the entry.
+    ///
+    /// During block replay, tick entries carry a PoH hash that has been
+    /// verified against the entry chain. This method updates the bank's
+    /// last blockhash with that verified hash and advances the tick height.
+    pub fn register_tick_with_hash(&self, poh_hash: [u8; 32]) -> Result<(), BankTickError> {
+        if self.is_frozen() {
+            return Err(BankTickError::BankFrozen);
+        }
+
+        if self.is_complete() {
+            return Err(BankTickError::MaxTickHeightReached);
+        }
+
+        self.tick_height.fetch_add(1, Ordering::Relaxed);
+        *self.last_blockhash.write().unwrap() = poh_hash;
+
+        Ok(())
+    }
+
+    /// Register a tick with a synthetic PoH hash derived from tick height.
+    ///
+    /// Used in testing and genesis initialization where no real PoH chain
+    /// is available. Production replay should use `register_tick_with_hash()`
+    /// with the verified entry hash.
     pub fn register_tick(&self) -> Result<(), BankTickError> {
         if self.is_frozen() {
             return Err(BankTickError::BankFrozen);
@@ -695,9 +725,7 @@ impl Bank {
 
         let new_height = self.tick_height.fetch_add(1, Ordering::Relaxed) + 1;
 
-        // Update last_blockhash with a hash derived from the tick.
-        // In production this comes from the PoH chain; here we derive
-        // a deterministic placeholder from the previous blockhash and tick height.
+        // Derive a deterministic placeholder from previous blockhash and tick height.
         use paradencer_crypto::sha256::Sha256Hasher;
         let prev = *self.last_blockhash.read().unwrap();
         let mut data = [0u8; 40]; // 32 bytes hash + 8 bytes tick height

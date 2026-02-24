@@ -166,9 +166,10 @@ pub enum BlockProcessorError {
 /// Processes blocks by applying transactions and managing state
 ///
 /// Orchestrates:
+/// - PoH entry chain verification
 /// - Entry processing
 /// - Transaction execution via Bank + ExecutionBackend
-/// - Tick registration
+/// - Tick registration with verified PoH hashes
 /// - Commitment tracking updates
 pub struct BlockProcessor {
     /// Execution bridge for batch-level execution policies
@@ -177,6 +178,10 @@ pub struct BlockProcessor {
     backend: Arc<dyn ExecutionBackend>,
     /// Commitment tracker for finality
     pub commitment_tracker: Arc<Mutex<CommitmentTracker>>,
+    /// Whether to verify PoH entry chain during block processing.
+    /// Should be true in production; can be disabled during
+    /// initial snapshot replay or testing.
+    pub verify_poh: bool,
 }
 
 impl BlockProcessor {
@@ -196,6 +201,7 @@ impl BlockProcessor {
             execution_bridge,
             backend,
             commitment_tracker,
+            verify_poh: true,
         }
     }
 
@@ -211,6 +217,14 @@ impl BlockProcessor {
         // Verify bank is in processing state
         if bank.is_frozen() {
             return Err(BlockProcessorError::BankFrozen(block.slot));
+        }
+
+        // Verify PoH entry chain before processing any entries.
+        // The chain starts from the bank's current last blockhash (which is
+        // the parent bank's hash for a freshly created child bank).
+        if self.verify_poh {
+            let initial_hash = bank.last_blockhash();
+            self.verify_entry_chain(&block.entries, initial_hash)?;
         }
 
         let mut outcome = BlockOutcome::new(block.slot, [0u8; 32]);
@@ -233,26 +247,30 @@ impl BlockProcessor {
         Ok(outcome)
     }
 
-    /// Process a single entry
+    /// Process a single entry.
+    ///
+    /// Tick entries (no transactions) register a single tick with the
+    /// entry's verified PoH hash. Transaction entries execute the
+    /// transactions without advancing the tick counter. The `num_hashes`
+    /// field is only used for PoH chain verification (already done in
+    /// `process_block`), not for tick counting.
     fn process_entry(
         &mut self,
         entry: &Entry,
-        entry_index: usize,
+        _entry_index: usize,
         bank: &Arc<Bank>,
         outcome: &mut BlockOutcome,
     ) -> Result<(), BlockProcessorError> {
-        // Register ticks for this entry
-        for _ in 0..entry.num_hashes {
-            if let Err(e) = bank.register_tick() {
+        if entry.transactions.is_empty() {
+            // Tick entry — register one tick with the verified PoH hash.
+            if let Err(e) = bank.register_tick_with_hash(entry.hash) {
                 return Err(BlockProcessorError::TickRegistrationFailed {
                     slot: bank.slot(),
                     error: format!("{:?}", e),
                 });
             }
-        }
-
-        // Process transactions in this entry
-        if !entry.transactions.is_empty() {
+        } else {
+            // Transaction entry — execute transactions, no tick registration.
             let tx_results = self.apply_transactions(
                 &entry.transactions,
                 bank,
@@ -752,6 +770,41 @@ mod tests {
         }
     }
 
+    /// Create a block with a valid PoH entry chain starting from `initial_hash`.
+    fn create_poh_block(slot: u64, initial_hash: [u8; 32], tick_count: usize) -> AssembledBlock {
+        let entries = make_entry_chain(initial_hash, tick_count);
+        AssembledBlock {
+            slot,
+            parent_slot: 0,
+            entries,
+            transaction_count: 0,
+            total_bytes: 100,
+            shred_count: 1,
+        }
+    }
+
+    /// Create a BlockProcessor with PoH verification disabled (for tests
+    /// that use blocks with arbitrary hashes).
+    fn test_processor_no_poh() -> BlockProcessor {
+        let mut p = BlockProcessor::new(
+            Arc::new(ExecutionBridge::new()),
+            Arc::new(Mutex::new(CommitmentTracker::default())),
+        );
+        p.verify_poh = false;
+        p
+    }
+
+    /// Create a BlockProcessor with a backend and PoH verification disabled.
+    fn test_processor_with_backend_no_poh(backend: Arc<dyn ExecutionBackend>) -> BlockProcessor {
+        let mut p = BlockProcessor::with_backend(
+            Arc::new(ExecutionBridge::new()),
+            Arc::new(Mutex::new(CommitmentTracker::default())),
+            backend,
+        );
+        p.verify_poh = false;
+        p
+    }
+
     #[test]
     fn block_processor_initializes() {
         let execution_bridge = Arc::new(ExecutionBridge::new());
@@ -1240,11 +1293,7 @@ mod tests {
         store_test_account(&bank, &payer, &payer_account);
 
         let backend: Arc<dyn ConsensusExecutionBackend> = Arc::new(TestPassthroughBackend);
-        let mut processor = BlockProcessor::with_backend(
-            Arc::new(ExecutionBridge::new()),
-            Arc::new(Mutex::new(CommitmentTracker::default())),
-            backend,
-        );
+        let mut processor = test_processor_with_backend_no_poh(backend);
 
         let wire_tx = build_signed_wire_tx(&signing_key, &program, blockhash, vec![1, 2, 3]);
         let block = AssembledBlock {
@@ -1252,7 +1301,7 @@ mod tests {
             parent_slot: 0,
             entries: vec![Entry {
                 num_hashes: 1,
-                hash: [1u8; 32], // skip PoH verification for this test
+                hash: [1u8; 32],
                 transactions: vec![wire_tx],
             }],
             transaction_count: 1,
@@ -1304,11 +1353,7 @@ mod tests {
         store_test_account(&bank, &payer, &payer_account);
 
         let backend: Arc<dyn ConsensusExecutionBackend> = Arc::new(TestPassthroughBackend);
-        let mut processor = BlockProcessor::with_backend(
-            Arc::new(ExecutionBridge::new()),
-            Arc::new(Mutex::new(CommitmentTracker::default())),
-            backend,
-        );
+        let mut processor = test_processor_with_backend_no_poh(backend);
 
         // Build a vote transaction (instruction type 2 = Vote)
         let mut vote_data = Vec::new();
@@ -1355,5 +1400,136 @@ mod tests {
         );
         assert_eq!(outcome.vote_updates[0].vote_account, vote_account);
         assert_eq!(outcome.vote_updates[0].voted_slot, Some(42));
+    }
+
+    // --- PoH verification integration tests ---
+
+    #[test]
+    fn process_block_verifies_poh_chain() {
+        let bank = create_test_bank();
+        let initial_hash = bank.last_blockhash();
+
+        // Create a block with valid PoH chain
+        let block = create_poh_block(0, initial_hash, 3);
+
+        let mut processor = BlockProcessor::new(
+            Arc::new(ExecutionBridge::new()),
+            Arc::new(Mutex::new(CommitmentTracker::default())),
+        );
+        assert!(processor.verify_poh); // verify enabled by default
+
+        let outcome = processor.process_block(block, bank).unwrap();
+        assert_eq!(outcome.entry_count, 3);
+    }
+
+    #[test]
+    fn process_block_rejects_broken_poh_chain() {
+        let bank = create_test_bank();
+
+        // Create a block with INVALID PoH hashes
+        let block = AssembledBlock {
+            slot: 0,
+            parent_slot: 0,
+            entries: vec![Entry {
+                num_hashes: 1,
+                hash: [0xAA; 32], // wrong hash
+                transactions: vec![],
+            }],
+            transaction_count: 0,
+            total_bytes: 100,
+            shred_count: 1,
+        };
+
+        let mut processor = BlockProcessor::new(
+            Arc::new(ExecutionBridge::new()),
+            Arc::new(Mutex::new(CommitmentTracker::default())),
+        );
+
+        let result = processor.process_block(block, bank);
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            BlockProcessorError::EntryHashMismatch { entry_index, .. } => {
+                assert_eq!(entry_index, 0);
+            }
+            other => panic!("expected EntryHashMismatch, got: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn process_block_skips_poh_when_disabled() {
+        let bank = create_test_bank();
+
+        // Block with fake hashes — should fail with PoH enabled
+        let block = AssembledBlock {
+            slot: 0,
+            parent_slot: 0,
+            entries: vec![Entry {
+                num_hashes: 1,
+                hash: [0xFF; 32],
+                transactions: vec![],
+            }],
+            transaction_count: 0,
+            total_bytes: 100,
+            shred_count: 1,
+        };
+
+        let mut processor = test_processor_no_poh();
+
+        // Should succeed because PoH is disabled
+        let outcome = processor.process_block(block, bank).unwrap();
+        assert_eq!(outcome.entry_count, 1);
+    }
+
+    #[test]
+    fn tick_entry_updates_bank_last_blockhash() {
+        let bank = create_test_bank();
+        let initial_hash = bank.last_blockhash();
+
+        // Create a valid PoH chain of tick entries
+        let entries = make_entry_chain(initial_hash, 2);
+        let second_entry_hash = entries[1].hash;
+
+        // Process entries directly (not full block, to avoid complete_slot_ticks)
+        let mut processor = BlockProcessor::new(
+            Arc::new(ExecutionBridge::new()),
+            Arc::new(Mutex::new(CommitmentTracker::default())),
+        );
+        let mut outcome = BlockOutcome::new(0, [0u8; 32]);
+
+        // Verify PoH chain passes
+        assert!(processor.verify_entry_chain(&entries, initial_hash).is_ok());
+
+        // Process each tick entry
+        for (i, entry) in entries.iter().enumerate() {
+            processor
+                .process_entry(entry, i, &bank, &mut outcome)
+                .unwrap();
+        }
+
+        // Bank's last blockhash should match the second entry's PoH hash
+        assert_eq!(bank.last_blockhash(), second_entry_hash);
+        assert_eq!(bank.tick_height(), 2);
+    }
+
+    #[test]
+    fn transaction_entry_does_not_advance_tick_height() {
+        let bank = create_test_bank();
+        let initial_tick_height = bank.tick_height();
+
+        // Transaction entry (non-empty transactions) should not advance tick
+        let entry = Entry {
+            num_hashes: 1,
+            hash: [0xFF; 32],
+            transactions: vec![vec![1, 2, 3]],
+        };
+
+        let mut processor = test_processor_no_poh();
+        let mut outcome = BlockOutcome::new(0, [0u8; 32]);
+
+        // Process a single transaction entry (not full block)
+        let _ = processor.process_entry(&entry, 0, &bank, &mut outcome);
+
+        // Tick height unchanged because it was a transaction entry
+        assert_eq!(bank.tick_height(), initial_tick_height);
     }
 }

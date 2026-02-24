@@ -89,7 +89,12 @@ mod test_utils {
     }
 
     pub fn create_replay_stage() -> ReplayStage {
-        ReplayStage::new(
+        // Disable PoH verification for tests using blocks with fake hashes.
+        ReplayStage::with_config(
+            ReplayConfig {
+                verify_poh: false,
+                ..Default::default()
+            },
             create_test_bank_forks(),
             create_test_fork_choice(),
             create_test_execution_bridge(),
@@ -108,8 +113,17 @@ mod replay_stage_tests {
 
     #[test]
     fn replay_stage_initializes_with_default_config() {
-        let stage = create_replay_stage();
+        // Use explicit default config (not the test helper which disables PoH).
+        let stage = ReplayStage::new(
+            create_test_bank_forks(),
+            create_test_fork_choice(),
+            create_test_execution_bridge(),
+            create_test_vote_processor(),
+            create_test_tower(),
+            create_test_commitment_tracker(),
+        );
         assert!(stage.config().strict_ancestry_check);
+        assert!(stage.config().verify_poh);
         assert!(stage.config().process_votes);
         assert!(stage.config().auto_freeze_banks);
         assert!(stage.config().enable_root_progression);
@@ -119,6 +133,7 @@ mod replay_stage_tests {
     fn replay_stage_initializes_with_custom_config() {
         let config = ReplayConfig {
             strict_ancestry_check: false,
+            verify_poh: false,
             process_votes: false,
             auto_freeze_banks: false,
             enable_root_progression: false,
@@ -207,6 +222,7 @@ mod block_processor_integration_tests {
         let execution_bridge = create_test_execution_bridge();
         let commitment_tracker = create_test_commitment_tracker();
         let mut processor = BlockProcessor::new(execution_bridge, commitment_tracker);
+        processor.verify_poh = false; // test block uses fake hashes
 
         let block = create_test_block(1, 0);
         let bank = create_test_bank();
@@ -543,6 +559,7 @@ mod configuration_tests {
         let config = ReplayConfig::default();
 
         assert!(config.strict_ancestry_check);
+        assert!(config.verify_poh);
         assert!(config.process_votes);
         assert!(config.auto_freeze_banks);
         assert!(config.enable_root_progression);
@@ -553,6 +570,7 @@ mod configuration_tests {
     fn replay_config_can_be_customized() {
         let config = ReplayConfig {
             strict_ancestry_check: false,
+            verify_poh: false,
             process_votes: true,
             auto_freeze_banks: false,
             enable_root_progression: true,
@@ -560,6 +578,7 @@ mod configuration_tests {
         };
 
         assert!(!config.strict_ancestry_check);
+        assert!(!config.verify_poh);
         assert!(config.process_votes);
         assert!(!config.auto_freeze_banks);
         assert!(config.enable_root_progression);
