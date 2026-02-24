@@ -1,5 +1,5 @@
 use paradencer_control::{
-    build_diagnostics_summary_from_probe, build_pipeline_service,
+    build_diagnostics_summary_from_probe, build_pipeline_service, build_repair_service,
     build_replay_service_with_block_input, build_turbine_service, dispatch_command,
     ensure_mainnet_readiness, evaluate_mainnet_readiness, materialize_service_pair_from_config,
     materialize_services_from_config, parse_command, render_diagnostics_cluster_mode_line,
@@ -63,13 +63,20 @@ fn run_with_node_config(
     // Build the turbine retransmit service for shred propagation.
     // Uses the gossip-derived identity and cluster state to route shreds
     // through the turbine tree.
-    let turbine_bundle = build_turbine_service(node_id, cluster_info)?;
+    let turbine_bundle = build_turbine_service(node_id, cluster_info.clone())?;
     let _retransmit = turbine_bundle.retransmit;
+
+    // Build the repair service for slot recovery from peers.
+    // The coordinator runs poll-driven in the node runtime; background I/O
+    // handles actual UDP request/response on a dedicated thread.
+    let repair_bundle = build_repair_service(node_id, cluster_info)?;
+    let _repair_io = repair_bundle.io_handle;
 
     let mut services = runtime_topology.services;
     services.push(replay_bundle.service);
     services.push(pipeline_bundle.service);
     services.push(turbine_bundle.service);
+    services.push(repair_bundle.service);
 
     // Keep gossip alive until run_runtime_phase returns.
     let _gossip = gossip_handle;
