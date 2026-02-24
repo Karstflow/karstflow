@@ -347,11 +347,7 @@ pub fn start_gossip_service(
         ..GossipConfig::default()
     };
 
-    let entrypoints: Vec<ContactInfo> = node_config
-        .live_entrypoints
-        .iter()
-        .map(|&addr| ContactInfo::new(NodeId::random(), addr, addr, addr, addr, shred_version))
-        .collect();
+    let entrypoint_addrs: Vec<std::net::SocketAddr> = node_config.live_entrypoints.to_vec();
 
     let (cluster_tx, cluster_rx) =
         std::sync::mpsc::sync_channel::<std::result::Result<Arc<ClusterInfo>, String>>(1);
@@ -377,9 +373,8 @@ pub fn start_gossip_service(
 
                 let cluster_info = service.cluster_info();
 
-                for ep in entrypoints {
-                    cluster_info.insert(ep);
-                }
+                // Seed entrypoints for bootstrap peer discovery.
+                cluster_info.add_entrypoints(&entrypoint_addrs);
 
                 if let Err(e) = service.start().await {
                     let _ = cluster_tx.send(Err(format!("{e}")));

@@ -116,6 +116,13 @@ pub struct CrdsTable {
     // --- State tracking ---
     /// Whether any staked node has been observed (affects unstaked expiry).
     has_seen_staked_node: bool,
+
+    // --- Cursor tracking for push ---
+    /// Next ordinal to assign to inserted/updated entries.
+    next_ordinal: u64,
+    /// Ordinal-ordered index: ordinal → entry index. Enables efficient
+    /// "values since cursor N" queries for the push gossip loop.
+    ordinal_index: BTreeMap<u64, usize>,
 }
 
 impl CrdsTable {
@@ -146,6 +153,8 @@ impl CrdsTable {
             bucket_samplers,
             metrics: CrdsMetrics::default(),
             has_seen_staked_node: false,
+            next_ordinal: 0,
+            ordinal_index: BTreeMap::new(),
         }
     }
 
@@ -397,6 +406,29 @@ impl CrdsTable {
             .and_then(|s| s.sample(random_value))
     }
 
+    /// Return the current ordinal cursor.
+    ///
+    /// A caller that wants to receive all future inserts/updates should
+    /// save this value and later pass it to `values_since()`.
+    pub fn cursor(&self) -> u64 {
+        self.next_ordinal
+    }
+
+    /// Return values inserted or updated since the given ordinal cursor.
+    ///
+    /// Returns a Vec of references to CrdsValues and the new cursor to
+    /// use in subsequent calls. Only entries with ordinal >= `since` are
+    /// included.
+    pub fn values_since(&self, since: u64) -> (Vec<&CrdsValue>, u64) {
+        let mut values = Vec::new();
+        for (&_ordinal, &idx) in self.ordinal_index.range(since..) {
+            if let Some(entry) = &self.entries[idx] {
+                values.push(&entry.value);
+            }
+        }
+        (values, self.next_ordinal)
+    }
+
     /// Update metrics snapshot.
     pub fn update_metrics(&mut self) {
         self.metrics.entry_counts = [0; gossip::VALUE_TYPE_COUNT];
@@ -433,13 +465,18 @@ impl CrdsTable {
         }
     }
 
-    fn insert_entry(&mut self, entry: CrdsEntry) {
+    fn insert_entry(&mut self, mut entry: CrdsEntry) {
         let idx = self.allocate_slot();
         let key = entry.key;
         let stake = entry.stake;
         let hash_prefix = entry.hash_prefix;
         let is_staked = entry.is_staked();
         let is_contact_info = entry.value.data.is_contact_info();
+
+        // Assign monotonically increasing ordinal for push cursor tracking.
+        let ordinal = self.next_ordinal;
+        self.next_ordinal += 1;
+        entry.ordinal = ordinal;
 
         // Update peer samplers for contact info entries
         if is_contact_info {
@@ -453,6 +490,7 @@ impl CrdsTable {
 
         self.entries[idx] = Some(entry);
         self.lookup.insert(key, idx);
+        self.ordinal_index.insert(ordinal, idx);
         self.eviction_order.insert((stake, idx), idx);
 
         // Add to hash-prefix index
@@ -466,10 +504,11 @@ impl CrdsTable {
         }
     }
 
-    fn replace_entry(&mut self, idx: usize, new_entry: CrdsEntry) {
+    fn replace_entry(&mut self, idx: usize, mut new_entry: CrdsEntry) {
         if let Some(old_entry) = &self.entries[idx] {
             let old_stake = old_entry.stake;
             let old_hash_prefix = old_entry.hash_prefix;
+            let old_ordinal = old_entry.ordinal;
 
             // Remove from eviction order
             self.eviction_order.remove(&(old_stake, idx));
@@ -481,7 +520,15 @@ impl CrdsTable {
                     self.hash_index.remove(&old_hash_prefix);
                 }
             }
+
+            // Remove old ordinal from ordinal index
+            self.ordinal_index.remove(&old_ordinal);
         }
+
+        // Assign new ordinal for cursor tracking.
+        let ordinal = self.next_ordinal;
+        self.next_ordinal += 1;
+        new_entry.ordinal = ordinal;
 
         let new_stake = new_entry.stake;
         let new_hash_prefix = new_entry.hash_prefix;
@@ -505,6 +552,7 @@ impl CrdsTable {
             .entry(new_hash_prefix)
             .or_default()
             .push(idx);
+        self.ordinal_index.insert(ordinal, idx);
     }
 
     fn remove_entry(&mut self, idx: usize) {
@@ -519,6 +567,9 @@ impl CrdsTable {
                     self.hash_index.remove(&entry.hash_prefix);
                 }
             }
+
+            // Remove from ordinal index
+            self.ordinal_index.remove(&entry.ordinal);
 
             // Remove from samplers if contact info
             if entry.value.data.is_contact_info() {

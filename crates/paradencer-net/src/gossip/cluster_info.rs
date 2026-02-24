@@ -493,6 +493,25 @@ impl ClusterInfo {
         }
     }
 
+    /// Return the current CRDS table cursor.
+    ///
+    /// Use with `values_since_cursor()` to efficiently retrieve only
+    /// new or updated values for the push gossip loop.
+    pub fn cursor(&self) -> u64 {
+        self.table.read().cursor()
+    }
+
+    /// Return CRDS values inserted/updated since the given cursor.
+    ///
+    /// Returns cloned values and the new cursor position. Callers should
+    /// store the returned cursor for subsequent calls.
+    pub fn values_since_cursor(&self, since: u64) -> (Vec<CrdsValue>, u64) {
+        let table = self.table.read();
+        let (refs, new_cursor) = table.values_since(since);
+        let values = refs.into_iter().cloned().collect();
+        (values, new_cursor)
+    }
+
     /// Get cluster size.
     pub fn size(&self) -> usize {
         let table = self.table.read();

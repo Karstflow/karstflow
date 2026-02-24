@@ -55,6 +55,10 @@ pub struct CrdsEntry {
     pub sampler_index: Option<usize>,
     /// Whether this contact info is in the fresh list (updated within threshold).
     pub is_fresh: bool,
+    /// Monotonically increasing insertion ordinal assigned by the table.
+    /// Used by the push loop to efficiently find new/updated entries since
+    /// a given cursor without scanning the entire table.
+    pub ordinal: u64,
 }
 
 impl CrdsEntry {
@@ -77,6 +81,7 @@ impl CrdsEntry {
             is_active: false,
             sampler_index: None,
             is_fresh: true,
+            ordinal: 0, // assigned by CrdsTable on insert
         }
     }
 

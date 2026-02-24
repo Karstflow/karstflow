@@ -396,6 +396,10 @@ impl GossipService {
     }
 
     /// Push gossip loop.
+    ///
+    /// Tracks a cursor into the CRDS table so each push cycle only sends
+    /// values that were inserted or updated since the previous cycle,
+    /// plus our own self-value (always included for freshness).
     async fn push_loop(
         socket: Arc<UdpSocket>,
         cluster_info: Arc<ClusterInfo>,
@@ -404,11 +408,14 @@ impl GossipService {
         shutdown_rx: &mut broadcast::Receiver<()>,
     ) {
         let mut ticker = interval(config.push_interval);
+        let mut push_cursor: u64 = cluster_info.cursor();
 
         loop {
             tokio::select! {
                 _ = ticker.tick() => {
-                    Self::do_push_gossip(&socket, &cluster_info, &stats, &config).await;
+                    push_cursor = Self::do_push_gossip(
+                        &socket, &cluster_info, &stats, &config, push_cursor
+                    ).await;
                 }
                 _ = shutdown_rx.recv() => {
                     break;
@@ -417,33 +424,35 @@ impl GossipService {
         }
     }
 
+    /// Execute one push gossip cycle. Returns the new cursor position.
     async fn do_push_gossip(
         socket: &Arc<UdpSocket>,
         cluster_info: &Arc<ClusterInfo>,
         stats: &GossipServiceStats,
         config: &GossipConfig,
-    ) {
-        let self_info = cluster_info.self_contact_info();
-        let all_infos = cluster_info.get_all();
+        push_cursor: u64,
+    ) -> u64 {
+        // Collect only new/updated values since our last push.
+        let (new_values, new_cursor) = cluster_info.values_since_cursor(push_cursor);
 
-        // Build wire values for all known contact infos
         let signing_key = cluster_info.signing_key().copied();
-        let mut wire_values = Vec::with_capacity(all_infos.len() + 1);
 
-        // Our own contact info first
-        let mut self_wire = convert::contact_info_to_wire_value(&self_info);
+        // Always include our own self-value for freshness.
+        let mut wire_values = Vec::with_capacity(new_values.len() + 1);
+        let mut self_wire = convert::contact_info_to_wire_value(&cluster_info.self_contact_info());
         if let Some(ref key) = signing_key {
             self_wire.sign(key);
         }
         wire_values.push(self_wire);
 
-        // Other known contact infos
-        for ci in &all_infos {
-            let mut wv = convert::contact_info_to_wire_value(ci);
-            if let Some(ref key) = signing_key {
-                wv.sign(key);
+        // Convert new/updated CRDS values to wire format.
+        for value in &new_values {
+            if let Some(mut wv) = convert::internal_to_wire_value(value) {
+                if let Some(ref key) = signing_key {
+                    wv.sign(key);
+                }
+                wire_values.push(wv);
             }
-            wire_values.push(wv);
         }
 
         let mut exclude = HashSet::new();
@@ -452,7 +461,7 @@ impl GossipService {
         let targets = cluster_info.get_random_nodes(config.push_fanout, &exclude);
 
         if targets.is_empty() {
-            return;
+            return new_cursor;
         }
 
         let message = WireProtocol::PushMessage(cluster_info.node_id().0, wire_values);
@@ -472,6 +481,8 @@ impl GossipService {
                 }
             }
         }
+
+        new_cursor
     }
 
     /// Pull gossip loop.
