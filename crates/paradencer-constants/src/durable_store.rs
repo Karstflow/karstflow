@@ -132,3 +132,9 @@ pub const COMPACTION_MIN_DEAD_BYTES: u64 = 1024 * 1024;
 
 /// Default auto-compaction check interval in milliseconds (60 seconds).
 pub const AUTO_COMPACTION_INTERVAL_MS: u64 = 60_000;
+
+/// Default maximum entries in the published account LRU cache.
+///
+/// With average ~200 bytes per account, 1M entries ≈ 200 MB of cached
+/// account data in memory. Accounts beyond this limit are served from disk.
+pub const DEFAULT_PUBLISHED_CACHE_MAX_ENTRIES: usize = 1_000_000;

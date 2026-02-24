@@ -3,6 +3,7 @@ mod fork_tree;
 mod owner_index;
 pub(crate) mod primitives;
 mod processor;
+pub(crate) mod published_store;
 mod record;
 mod transaction;
 

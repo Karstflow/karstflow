@@ -1,13 +1,14 @@
 use super::fork_tree::ForkTree;
 use super::owner_index::OwnerIndex;
 use super::primitives::{Account, Pubkey};
+use super::published_store::PublishedStore;
 use super::record::{AccountRecord, RecordKey, TransactionId, VersionCounter};
-use crate::durable::account_encoding::{decode_account, encode_account};
-use crate::durable::{DurableStore, WriteBatch};
+use crate::durable::DurableStore;
 use crate::StorageError;
 use ahash::AHasher;
 use dashmap::DashMap;
-use paradencer_constants::durable_store::{ACCOUNTS_HASH_FANOUT, CF_ACCOUNTS};
+use paradencer_constants::durable_store::ACCOUNTS_HASH_FANOUT;
+use parking_lot::Mutex;
 use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
 use std::sync::{Arc, RwLock};
@@ -22,13 +23,19 @@ use std::sync::{Arc, RwLock};
 /// Publishing a transaction linearizes its entire ancestry chain,
 /// merging all ancestor records into root and cancelling all
 /// competing branches.
+///
+/// Published (root) accounts live in a bounded LRU cache backed by
+/// persistent storage. Only transaction (in-preparation) records are
+/// kept in the in-memory DashMap. This design scales to hundreds of
+/// millions of accounts without proportional memory growth.
 pub struct AccountDatabase {
+    /// In-preparation transaction records only (no published records).
     records: Arc<DashMap<RecordKey, AccountRecord>>,
     versions: Arc<VersionCounter>,
-    account_cache: Arc<DashMap<Pubkey, (Account, u64)>>,
+    /// Bounded LRU cache + disk backend for published (root) accounts.
+    published: Arc<Mutex<PublishedStore>>,
     fork_tree: Arc<RwLock<ForkTree>>,
     owner_index: Arc<OwnerIndex>,
-    durable_store: Option<Arc<dyn DurableStore>>,
     /// Tracks which pubkeys were modified at each slot (for incremental snapshots).
     dirty_set: Arc<RwLock<HashMap<u64, HashSet<Pubkey>>>>,
     /// Per-transaction record index: maps transaction ID → set of pubkeys
@@ -46,10 +53,9 @@ impl AccountDatabase {
         Self {
             records: Arc::new(DashMap::new()),
             versions: Arc::new(VersionCounter::new()),
-            account_cache: Arc::new(DashMap::new()),
+            published: Arc::new(Mutex::new(PublishedStore::new())),
             fork_tree: Arc::new(RwLock::new(ForkTree::new())),
             owner_index: Arc::new(OwnerIndex::new()),
-            durable_store: None,
             dirty_set: Arc::new(RwLock::new(HashMap::new())),
             txn_records: Arc::new(DashMap::new()),
             ancestor_cache: Arc::new(DashMap::new()),
@@ -60,10 +66,9 @@ impl AccountDatabase {
         Self {
             records: Arc::new(DashMap::with_capacity(capacity)),
             versions: Arc::new(VersionCounter::new()),
-            account_cache: Arc::new(DashMap::with_capacity(capacity / 10)),
+            published: Arc::new(Mutex::new(PublishedStore::with_capacity(capacity))),
             fork_tree: Arc::new(RwLock::new(ForkTree::new())),
             owner_index: Arc::new(OwnerIndex::new()),
-            durable_store: None,
             dirty_set: Arc::new(RwLock::new(HashMap::new())),
             txn_records: Arc::new(DashMap::new()),
             ancestor_cache: Arc::new(DashMap::new()),
@@ -74,16 +79,15 @@ impl AccountDatabase {
     ///
     /// Published account records are written to disk when transactions
     /// are published or accounts are stored directly. On read, if an
-    /// account is not found in memory, the durable store is queried
+    /// account is not found in the cache, the durable store is queried
     /// as fallback.
     pub fn with_durable_store(store: Arc<dyn DurableStore>) -> Self {
         Self {
             records: Arc::new(DashMap::new()),
             versions: Arc::new(VersionCounter::new()),
-            account_cache: Arc::new(DashMap::new()),
+            published: Arc::new(Mutex::new(PublishedStore::with_durable_store(store))),
             fork_tree: Arc::new(RwLock::new(ForkTree::new())),
             owner_index: Arc::new(OwnerIndex::new()),
-            durable_store: Some(store),
             dirty_set: Arc::new(RwLock::new(HashMap::new())),
             txn_records: Arc::new(DashMap::new()),
             ancestor_cache: Arc::new(DashMap::new()),
@@ -99,27 +103,6 @@ impl AccountDatabase {
             .entry(slot)
             .or_default()
             .insert(pubkey);
-    }
-
-    /// Persist a single account to the durable store (if configured).
-    #[inline]
-    fn persist_account(&self, pubkey: &Pubkey, account: &Account) {
-        if let Some(ref store) = self.durable_store {
-            let encoded = encode_account(account);
-            // Best-effort persist — log errors but don't propagate to callers.
-            if let Err(e) = store.put(CF_ACCOUNTS, pubkey.as_bytes(), &encoded) {
-                eprintln!("durable store put error: {e}");
-            }
-        }
-    }
-
-    /// Load an account from the durable store (if configured).
-    fn load_from_disk(&self, pubkey: &Pubkey) -> Option<Account> {
-        let store = self.durable_store.as_ref()?;
-        match store.get(CF_ACCOUNTS, pubkey.as_bytes()) {
-            Ok(Some(bytes)) => decode_account(&bytes),
-            _ => None,
-        }
     }
 
     // -----------------------------------------------------------------------
@@ -157,27 +140,9 @@ impl AccountDatabase {
         xid: TransactionId,
         pubkey: &Pubkey,
     ) -> Result<Option<Account>, StorageError> {
-        // Fast path: published (root) reads go through cache first.
+        // Root reads go directly through the published store (cache + disk).
         if xid.is_root() {
-            if let Some(entry) = self.account_cache.get(pubkey) {
-                return Ok(Some(entry.0.clone()));
-            }
-            let key = RecordKey::published(*pubkey);
-            if let Some(entry) = self.records.get(&key) {
-                return Ok(Some(entry.account.clone()));
-            }
-            // Disk fallback for root reads.
-            if let Some(account) = self.load_from_disk(pubkey) {
-                let version = self.versions.next();
-                let published_key = RecordKey::published(*pubkey);
-                let record =
-                    AccountRecord::new(TransactionId::root(), *pubkey, account.clone(), version);
-                self.records.insert(published_key, record);
-                self.account_cache
-                    .insert(*pubkey, (account.clone(), version));
-                return Ok(Some(account));
-            }
-            return Ok(None);
+            return Ok(self.published.lock().get(pubkey));
         }
 
         // Walk ancestor chain: check xid, then parent, grandparent, etc.
@@ -199,27 +164,8 @@ impl AccountDatabase {
             }
         }
 
-        // Fall back to published (root) state.
-        let published_key = RecordKey::published(*pubkey);
-        if let Some(entry) = self.records.get(&published_key) {
-            let account = entry.account.clone();
-            self.account_cache
-                .insert(*pubkey, (account.clone(), entry.version));
-            return Ok(Some(account));
-        }
-
-        // Final fallback: durable store (disk).
-        if let Some(account) = self.load_from_disk(pubkey) {
-            let version = self.versions.next();
-            let record =
-                AccountRecord::new(TransactionId::root(), *pubkey, account.clone(), version);
-            self.records.insert(published_key, record);
-            self.account_cache
-                .insert(*pubkey, (account.clone(), version));
-            return Ok(Some(account));
-        }
-
-        Ok(None)
+        // Fall back to published (root) state (cache + disk).
+        Ok(self.published.lock().get(pubkey))
     }
 
     /// Write an account within a transaction context.
@@ -281,51 +227,32 @@ impl AccountDatabase {
 
         // Merge records from chain into published state.
         // Walk from oldest ancestor to newest (xid) so child overrides parent.
-        let mut published_updates: HashMap<Pubkey, (Account, u64)> = HashMap::new();
+        let mut published_updates: HashMap<Pubkey, Account> = HashMap::new();
         for &ancestor in chain.iter().rev() {
             if let Some(pubkeys) = self.txn_records.get(&ancestor) {
                 for pubkey in pubkeys.value() {
                     let key = RecordKey::new(ancestor, *pubkey);
                     if let Some(entry) = self.records.get(&key) {
-                        let version = self.versions.next();
-                        published_updates.insert(*pubkey, (entry.account.clone(), version));
+                        published_updates.insert(*pubkey, entry.account.clone());
                     }
                 }
             }
         }
 
-        // Write merged records to published state and update owner index.
-        // Build a durable write batch for all published updates.
-        let mut batch = if self.durable_store.is_some() {
-            Some(WriteBatch::new())
-        } else {
-            None
-        };
-
-        for (pubkey, (account, version)) in &published_updates {
-            let old_lamports = self
-                .records
-                .get(&RecordKey::published(*pubkey))
-                .map(|e| e.account.meta.lamports);
-            let published_key = RecordKey::published(*pubkey);
-            let record =
-                AccountRecord::new(TransactionId::root(), *pubkey, account.clone(), *version);
-            self.records.insert(published_key, record);
-            self.account_cache
-                .insert(*pubkey, (account.clone(), *version));
-            self.owner_index.upsert(
-                *pubkey,
-                account.meta.owner,
-                account.meta.lamports,
-                0,
-                old_lamports,
-            );
-
-            if let Some(ref mut b) = batch {
-                let encoded = encode_account(account);
-                // Silently drop if batch is full — extremely unlikely with 10k limit.
-                let _ = b.put(CF_ACCOUNTS, pubkey.as_bytes(), &encoded);
+        // Update owner index and merge into published store.
+        {
+            let mut published = self.published.lock();
+            for (pubkey, account) in &published_updates {
+                let old_lamports = published.get(pubkey).map(|a| a.meta.lamports);
+                self.owner_index.upsert(
+                    *pubkey,
+                    account.meta.owner,
+                    account.meta.lamports,
+                    0,
+                    old_lamports,
+                );
             }
+            published.insert_batch(&published_updates);
         }
 
         // Mark all published pubkeys as dirty at this slot.
@@ -334,15 +261,6 @@ impl AccountDatabase {
             let set = dirty.entry(slot).or_default();
             for pubkey in published_updates.keys() {
                 set.insert(*pubkey);
-            }
-        }
-
-        // Flush batch to durable store.
-        if let (Some(b), Some(ref store)) = (batch, &self.durable_store) {
-            if !b.is_empty() {
-                if let Err(e) = store.write_batch(&b) {
-                    eprintln!("durable store batch write error: {e}");
-                }
             }
         }
 
@@ -427,21 +345,7 @@ impl AccountDatabase {
     // -----------------------------------------------------------------------
 
     pub fn get_published_account(&self, pubkey: &Pubkey) -> Option<Account> {
-        let key = RecordKey::published(*pubkey);
-        if let Some(entry) = self.records.get(&key) {
-            return Some(entry.account.clone());
-        }
-        // Disk fallback: load from durable store and cache in memory.
-        if let Some(account) = self.load_from_disk(pubkey) {
-            let version = self.versions.next();
-            let record =
-                AccountRecord::new(TransactionId::root(), *pubkey, account.clone(), version);
-            self.records.insert(key, record);
-            self.account_cache
-                .insert(*pubkey, (account.clone(), version));
-            return Some(account);
-        }
-        None
+        self.published.lock().get(pubkey)
     }
 
     /// Store an account directly into published state.
@@ -454,13 +358,12 @@ impl AccountDatabase {
 
     /// Store an account into published state with slot tracking.
     pub fn store_published_account_at_slot(&self, pubkey: Pubkey, account: Account, slot: u64) {
-        let old_lamports = self.get_published_account(&pubkey).map(|a| a.meta.lamports);
-        let version = self.versions.next();
-        let key = RecordKey::published(pubkey);
-        let record = AccountRecord::new(TransactionId::root(), pubkey, account.clone(), version);
-        self.records.insert(key, record);
-        self.account_cache
-            .insert(pubkey, (account.clone(), version));
+        let old_lamports = {
+            let mut published = self.published.lock();
+            let old = published.get(&pubkey).map(|a| a.meta.lamports);
+            published.insert(pubkey, account.clone());
+            old
+        };
         self.owner_index.upsert(
             pubkey,
             account.meta.owner,
@@ -468,10 +371,10 @@ impl AccountDatabase {
             slot,
             old_lamports,
         );
-        self.persist_account(&pubkey, &account);
         self.mark_dirty(pubkey, slot);
     }
 
+    /// Number of in-preparation transaction records in the DashMap.
     pub fn count_records(&self) -> usize {
         self.records.len()
     }
@@ -484,13 +387,7 @@ impl AccountDatabase {
     }
 
     pub fn get_all_published_accounts(&self) -> HashMap<Pubkey, Account> {
-        let mut accounts = HashMap::new();
-        for entry in self.records.iter() {
-            if entry.key().xid.is_root() {
-                accounts.insert(entry.key().pubkey, entry.value().account.clone());
-            }
-        }
-        accounts
+        self.published.lock().iter_all().into_iter().collect()
     }
 
     pub fn bulk_insert_published_accounts(
@@ -506,32 +403,18 @@ impl AccountDatabase {
         accounts: HashMap<Pubkey, Account>,
         slot: u64,
     ) -> Result<(), StorageError> {
-        let mut batch = if self.durable_store.is_some() {
-            Some(WriteBatch::new())
-        } else {
-            None
-        };
-
-        for (pubkey, account) in &accounts {
-            let version = self.versions.next();
-            let published_key = RecordKey::published(*pubkey);
-            let record =
-                AccountRecord::new(TransactionId::root(), *pubkey, account.clone(), version);
-            self.records.insert(published_key, record);
-            self.account_cache
-                .insert(*pubkey, (account.clone(), version));
-            self.owner_index.upsert(
-                *pubkey,
-                account.meta.owner,
-                account.meta.lamports,
-                slot,
-                None,
-            );
-
-            if let Some(ref mut b) = batch {
-                let encoded = encode_account(account);
-                let _ = b.put(CF_ACCOUNTS, pubkey.as_bytes(), &encoded);
+        {
+            let mut published = self.published.lock();
+            for (pubkey, account) in &accounts {
+                self.owner_index.upsert(
+                    *pubkey,
+                    account.meta.owner,
+                    account.meta.lamports,
+                    slot,
+                    None,
+                );
             }
+            published.insert_batch(&accounts);
         }
 
         // Mark all inserted pubkeys as dirty at this slot.
@@ -543,21 +426,12 @@ impl AccountDatabase {
             }
         }
 
-        // Flush batch to durable store.
-        if let (Some(b), Some(ref store)) = (batch, &self.durable_store) {
-            if !b.is_empty() {
-                if let Err(e) = store.write_batch(&b) {
-                    eprintln!("durable store batch write error: {e}");
-                }
-            }
-        }
-
         Ok(())
     }
 
     pub fn clear_all_accounts(&self) {
         self.records.clear();
-        self.account_cache.clear();
+        self.published.lock().clear_all();
         *self.fork_tree.write().unwrap() = ForkTree::new();
         self.owner_index.clear();
         self.dirty_set.write().unwrap().clear();
@@ -680,16 +554,16 @@ impl AccountDatabase {
     }
 
     pub fn invalidate_cache(&self) {
-        self.account_cache.clear();
+        self.published.lock().clear_cache();
     }
 
     pub fn cache_size(&self) -> usize {
-        self.account_cache.len()
+        self.published.lock().cache_len()
     }
 
     /// Returns true if this database is backed by persistent storage.
     pub fn has_durable_store(&self) -> bool {
-        self.durable_store.is_some()
+        self.published.lock().has_durable_store()
     }
 
     /// Insert an account from recovery (disk) without re-persisting to disk.
@@ -697,12 +571,9 @@ impl AccountDatabase {
     /// Used during startup recovery to load accounts from the durable store
     /// into memory without writing them back out.
     pub fn insert_recovered_account(&self, pubkey: Pubkey, account: Account) {
-        let version = self.versions.next();
-        let key = RecordKey::published(pubkey);
-        let record = AccountRecord::new(TransactionId::root(), pubkey, account.clone(), version);
-        self.records.insert(key, record);
-        self.account_cache
-            .insert(pubkey, (account.clone(), version));
+        self.published
+            .lock()
+            .insert_recovered(pubkey, account.clone());
         self.owner_index
             .upsert(pubkey, account.meta.owner, account.meta.lamports, 0, None);
     }
@@ -710,19 +581,14 @@ impl AccountDatabase {
     pub fn compute_state_hash(&self) -> u64 {
         let mut hasher = AHasher::default();
 
-        let mut published_accounts: Vec<_> = self
-            .records
-            .iter()
-            .filter(|entry| entry.key().xid.is_root())
-            .collect();
+        let mut published_accounts = self.published.lock().iter_all();
+        published_accounts.sort_by(|a, b| a.0.as_bytes().cmp(b.0.as_bytes()));
 
-        published_accounts.sort_by(|a, b| a.key().pubkey.as_bytes().cmp(b.key().pubkey.as_bytes()));
-
-        for entry in published_accounts {
-            entry.key().pubkey.hash(&mut hasher);
-            entry.value().account.meta.lamports.hash(&mut hasher);
-            entry.value().account.meta.owner.hash(&mut hasher);
-            entry.value().account.data.as_slice().hash(&mut hasher);
+        for (pubkey, account) in &published_accounts {
+            pubkey.hash(&mut hasher);
+            account.meta.lamports.hash(&mut hasher);
+            account.meta.owner.hash(&mut hasher);
+            account.data.as_slice().hash(&mut hasher);
         }
 
         hasher.finish()
@@ -803,10 +669,9 @@ impl Clone for AccountDatabase {
         Self {
             records: Arc::clone(&self.records),
             versions: Arc::clone(&self.versions),
-            account_cache: Arc::clone(&self.account_cache),
+            published: Arc::clone(&self.published),
             fork_tree: Arc::clone(&self.fork_tree),
             owner_index: Arc::clone(&self.owner_index),
-            durable_store: self.durable_store.clone(),
             dirty_set: Arc::clone(&self.dirty_set),
             txn_records: Arc::clone(&self.txn_records),
             ancestor_cache: Arc::clone(&self.ancestor_cache),
@@ -931,8 +796,8 @@ mod tests {
         assert_eq!(read.meta.lamports, 777);
         assert_eq!(read.data.as_slice(), &[42]);
 
-        // After fallback, should be in memory cache too.
-        assert!(db.account_cache.contains_key(&pk));
+        // After fallback, should be in the published store's cache.
+        assert!(db.cache_size() > 0);
     }
 
     // -----------------------------------------------------------------------
@@ -1574,14 +1439,14 @@ mod tests {
         )
         .unwrap();
 
-        // Total records: 50 published + 2 in-flight.
-        assert_eq!(db.count_records(), 52);
+        // Only transaction records in the DashMap (published are in the store).
+        assert_eq!(db.count_records(), 2);
 
         // Cancel the fork.
         db.cancel_transaction(xid).unwrap();
 
-        // Only the 2 fork records should be removed.
-        assert_eq!(db.count_records(), 50);
+        // All fork records removed.
+        assert_eq!(db.count_records(), 0);
         assert_eq!(db.count_transaction_records(xid), 0);
 
         // Published accounts are intact.
