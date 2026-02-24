@@ -202,15 +202,20 @@ mod tests {
     }
 
     #[test]
-    fn bank_without_sysvar_cache_still_works() {
+    fn genesis_bank_has_sysvar_cache() {
         let accounts = Arc::new(AccountDatabase::new());
         let epoch_schedule = Arc::new(EpochSchedule::default());
         let leader_schedule = create_test_leader_schedule(0);
 
         let bank = Bank::new_genesis(accounts, epoch_schedule, leader_schedule);
-        assert!(bank.sysvar_cache().is_none());
+        assert!(bank.sysvar_cache().is_some());
 
-        // finish_slot should still work without sysvar cache
+        // Clock should reflect genesis slot/epoch
+        let clock = bank.sysvar_cache().unwrap().clock();
+        assert_eq!(clock.slot, 0);
+        assert_eq!(clock.epoch, 0);
+
+        // finish_slot should still work
         for _ in 0..TICKS_PER_SLOT {
             bank.register_tick().unwrap();
         }

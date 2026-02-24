@@ -1,4 +1,4 @@
-use super::{EpochSchedule, Inflation, LeaderSchedule, Rent};
+use super::{Clock, EpochSchedule, Inflation, LeaderSchedule, Rent};
 use crate::blockhash_queue::{BlockhashInfo, BlockhashQueue};
 use crate::epoch_processing::{AccountDatabaseVoteReader, EpochProcessor};
 use crate::epoch_schedule::EpochScheduleConfig;
@@ -137,6 +137,21 @@ impl Bank {
         let tick_height = 0;
         let max_tick_height = TICKS_PER_SLOT;
 
+        // Build sysvar cache from genesis configuration so that programs
+        // executed in the genesis slot see accurate clock, rent, and epoch
+        // schedule values instead of zeros.
+        let sysvar_cache = SysvarCache::new(
+            Clock {
+                slot,
+                epoch,
+                unix_timestamp: 0,
+                epoch_start_timestamp: 0,
+                leader_schedule_epoch: epoch.saturating_add(1),
+            },
+            *epoch_schedule,
+            rent,
+        );
+
         Self {
             slot,
             parent_slot: None,
@@ -155,7 +170,7 @@ impl Bank {
             capitalization: AtomicU64::new(capitalization),
             rent,
             inflation,
-            sysvars: None,
+            sysvars: Some(Arc::new(sysvar_cache)),
             lthash: RwLock::new(LatticeHashValue::zero()),
             signature_count: AtomicU64::new(0),
             last_blockhash: RwLock::new([0u8; 32]),
