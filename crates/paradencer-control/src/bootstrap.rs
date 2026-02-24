@@ -14,7 +14,11 @@ use paradencer_consensus::{
 use paradencer_core::{ExecutionMode, LinkKind, PinnedCorePolicy, StageKind};
 use paradencer_execution::ExecutionBridge;
 use paradencer_mesh::{bounded_link, InPort, OutPort};
-use paradencer_net::{ClusterInfo, ContactInfo, GossipConfig, GossipService, IngressMode, NodeId};
+use paradencer_net::{
+    ClusterInfo, ContactInfo, GossipConfig, GossipService, IngressMode, NodeId, RetransmitService,
+    RetransmitStats, TurbineConfig, TurbineStats, TurbineTreeBuilder, UdpShredTransport,
+    ValidatorInfo,
+};
 use paradencer_observability::spawn_metrics_http_bridge;
 use paradencer_rpc::{metrics_file_provider, spawn_rpc_http_server};
 use paradencer_runtime::{build_pinned_affinity_plan, run_services, Service, ServiceProbeReport};
@@ -216,6 +220,8 @@ pub struct ReplayBundleWithExternalInput {
 /// the background thread that runs the gossip protocol loops. Dropping
 /// this handle signals the gossip service to shut down.
 pub struct GossipHandle {
+    /// The node identity used by gossip (needed by turbine, repair, etc.).
+    pub node_id: NodeId,
     /// Shared cluster state — provides other subsystems with peer data.
     pub cluster_info: Arc<ClusterInfo>,
     /// Sends shutdown signal to the gossip background thread.
@@ -323,9 +329,150 @@ pub fn start_gossip_service(node_config: &NodeConfig) -> Result<GossipHandle> {
         .map_err(|detail| ControlPlaneError::GossipServiceStartFailed { detail })?;
 
     Ok(GossipHandle {
+        node_id,
         cluster_info,
         shutdown_tx: Some(shutdown_tx),
         _thread_handle: thread_handle,
+    })
+}
+
+// ---------------------------------------------------------------------------
+// Turbine: shred retransmit and broadcast
+// ---------------------------------------------------------------------------
+
+/// Result of building the turbine retransmit service.
+///
+/// Contains the Service adapter (for the node runtime) and a reference
+/// to the underlying retransmit service for cross-service interaction
+/// (e.g., submitting shreds for retransmission, requesting missing shreds).
+pub struct TurbineBundle {
+    /// The service adapter to add to the node runtime.
+    pub service: Box<dyn Service>,
+    /// Direct access to the retransmit service for cross-service use.
+    pub retransmit: Arc<RetransmitService>,
+}
+
+/// Service adapter that wraps the poll-driven RetransmitService.
+///
+/// The retransmit service uses a `service()` call pattern rather than
+/// the Service trait. This adapter bridges the two models by calling
+/// `service()` on each tick and managing the start/stop lifecycle.
+///
+/// Periodically rebuilds the turbine tree from gossip ClusterInfo so
+/// that retransmit routing reflects current cluster membership.
+struct TurbineServiceAdapter {
+    retransmit: Arc<RetransmitService>,
+    cluster_info: Arc<ClusterInfo>,
+    node_id: NodeId,
+    turbine_config: TurbineConfig,
+    ticks_since_tree_rebuild: u32,
+}
+
+impl Service for TurbineServiceAdapter {
+    fn name(&self) -> &'static str {
+        "turbine-retransmit"
+    }
+
+    fn tick_interval(&self) -> std::time::Duration {
+        std::time::Duration::from_millis(2)
+    }
+
+    fn on_start(
+        &mut self,
+        _context: &paradencer_runtime::ServiceContext,
+    ) -> paradencer_runtime::RuntimeResult<()> {
+        self.retransmit.start();
+        self.rebuild_tree();
+        Ok(())
+    }
+
+    fn tick(
+        &mut self,
+        _context: &paradencer_runtime::ServiceContext,
+    ) -> paradencer_runtime::RuntimeResult<()> {
+        self.retransmit.service();
+
+        // Rebuild the turbine tree every ~500 ticks (~1 second at 2ms tick).
+        self.ticks_since_tree_rebuild += 1;
+        if self.ticks_since_tree_rebuild >= 500 {
+            self.ticks_since_tree_rebuild = 0;
+            self.rebuild_tree();
+        }
+
+        Ok(())
+    }
+
+    fn on_stop(
+        &mut self,
+        _context: &paradencer_runtime::ServiceContext,
+    ) -> paradencer_runtime::RuntimeResult<()> {
+        self.retransmit.stop();
+        Ok(())
+    }
+}
+
+impl TurbineServiceAdapter {
+    fn rebuild_tree(&self) {
+        let peers = self.cluster_info.get_all();
+        if peers.is_empty() {
+            return;
+        }
+
+        let validators: Vec<ValidatorInfo> = peers
+            .into_iter()
+            .map(|ci| ValidatorInfo::new(ci, 1))
+            .collect();
+
+        let self_contact_info = self.cluster_info.self_contact_info();
+        let builder = TurbineTreeBuilder::new(self.turbine_config.clone());
+        let tree = builder.build(self.node_id, self_contact_info, validators, 0);
+        self.retransmit.update_tree(tree);
+    }
+}
+
+/// Build the turbine retransmit service for shred propagation.
+///
+/// Creates a UDP transport for sending shreds and wraps the retransmit
+/// service in a Service adapter. The turbine tree is periodically rebuilt
+/// from the gossip ClusterInfo so routing stays current.
+///
+/// The returned `TurbineBundle` provides both the runtime Service and
+/// direct access to the retransmit service for cross-service use
+/// (e.g., the shred pipeline can submit received shreds for retransmit).
+pub fn build_turbine_service(
+    node_id: NodeId,
+    cluster_info: Arc<ClusterInfo>,
+) -> Result<TurbineBundle> {
+    let transport = Arc::new(
+        UdpShredTransport::new("0.0.0.0:0".parse().unwrap()).map_err(|e| {
+            ControlPlaneError::GossipServiceStartFailed {
+                detail: format!("failed to bind turbine UDP socket: {e}"),
+            }
+        })?,
+    );
+
+    let turbine_config = TurbineConfig::default();
+    let turbine_stats = Arc::new(TurbineStats::new());
+    let retransmit_stats = RetransmitStats::new(turbine_stats);
+
+    let retransmit = Arc::new(RetransmitService::new(
+        node_id,
+        transport,
+        turbine_config.clone(),
+        retransmit_stats,
+    ));
+
+    let adapter = TurbineServiceAdapter {
+        retransmit: Arc::clone(&retransmit),
+        cluster_info,
+        node_id,
+        turbine_config,
+        ticks_since_tree_rebuild: 0,
+    };
+
+    Ok(TurbineBundle {
+        service: Box::new(adapter),
+        retransmit,
     })
 }
 

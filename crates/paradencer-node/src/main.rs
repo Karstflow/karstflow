@@ -1,7 +1,7 @@
 use paradencer_control::{
     build_diagnostics_summary_from_probe, build_pipeline_service,
-    build_replay_service_with_block_input, dispatch_command, ensure_mainnet_readiness,
-    evaluate_mainnet_readiness, materialize_service_pair_from_config,
+    build_replay_service_with_block_input, build_turbine_service, dispatch_command,
+    ensure_mainnet_readiness, evaluate_mainnet_readiness, materialize_service_pair_from_config,
     materialize_services_from_config, parse_command, render_diagnostics_cluster_mode_line,
     render_diagnostics_lane_capacity_line, render_diagnostics_ok_line,
     render_diagnostics_probe_line, render_diagnostics_readiness_issue_line,
@@ -29,7 +29,8 @@ fn run_with_node_config(
     // dedicated background thread and must stay alive for the entire
     // node lifetime.
     let gossip_handle = start_gossip_service(&node_config)?;
-    let _cluster_info = gossip_handle.cluster_info.clone();
+    let cluster_info = gossip_handle.cluster_info.clone();
+    let node_id = gossip_handle.node_id;
 
     let mut topology_pair = materialize_service_pair_from_config(&node_config)?;
     let runtime_topology = topology_pair.runtime;
@@ -59,9 +60,16 @@ fn run_with_node_config(
     );
     let _pipeline_handle = pipeline_bundle.handle;
 
+    // Build the turbine retransmit service for shred propagation.
+    // Uses the gossip-derived identity and cluster state to route shreds
+    // through the turbine tree.
+    let turbine_bundle = build_turbine_service(node_id, cluster_info)?;
+    let _retransmit = turbine_bundle.retransmit;
+
     let mut services = runtime_topology.services;
     services.push(replay_bundle.service);
     services.push(pipeline_bundle.service);
+    services.push(turbine_bundle.service);
 
     // Keep gossip alive until run_runtime_phase returns.
     let _gossip = gossip_handle;

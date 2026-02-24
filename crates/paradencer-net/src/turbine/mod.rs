@@ -14,7 +14,7 @@ pub use config::{TurbineConfig, DEFAULT_FANOUT, DEFAULT_NEIGHBORHOOD_SIZE};
 pub use neighborhood::{Neighborhood, NetworkProximity, ProximityEstimator, ProximityScore};
 pub use retransmit::{RetransmitRequest, RetransmitService, RetransmitShred};
 pub use stats::{BroadcastStats, PropagationMetrics, RetransmitStats, TurbineStats};
-pub use transport::{NullTransport, ShredTransport, TransportError};
+pub use transport::{NullTransport, ShredTransport, TransportError, UdpShredTransport};
 pub use tree::{TurbineNode, TurbineTree, TurbineTreeBuilder};
 
 use crate::IngressError;

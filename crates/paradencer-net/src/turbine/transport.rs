@@ -21,6 +21,40 @@ pub enum TransportError {
     Unreachable { addr: SocketAddr },
 }
 
+/// UDP transport for sending shreds over the network.
+///
+/// Binds a non-blocking UDP socket and sends raw bytes to peer
+/// addresses. Used by the retransmit and broadcast services for
+/// turbine tree propagation.
+pub struct UdpShredTransport {
+    socket: std::net::UdpSocket,
+}
+
+impl UdpShredTransport {
+    /// Create a new UDP transport bound to the given address.
+    pub fn new(bind_addr: SocketAddr) -> std::io::Result<Self> {
+        let socket = std::net::UdpSocket::bind(bind_addr)?;
+        socket.set_nonblocking(true)?;
+        Ok(Self { socket })
+    }
+
+    /// Return the local address of the bound socket.
+    pub fn local_addr(&self) -> std::io::Result<SocketAddr> {
+        self.socket.local_addr()
+    }
+}
+
+impl ShredTransport for UdpShredTransport {
+    fn send_to(&self, data: &[u8], addr: SocketAddr) -> Result<(), TransportError> {
+        self.socket
+            .send_to(data, addr)
+            .map_err(|e| TransportError::SendFailed {
+                detail: e.to_string(),
+            })?;
+        Ok(())
+    }
+}
+
 /// No-op transport for testing and development.
 pub struct NullTransport;
 
@@ -80,5 +114,16 @@ mod tests {
 
         assert_eq!(transport.send_count.load(Ordering::Relaxed), 2);
         assert_eq!(transport.byte_count.load(Ordering::Relaxed), 11);
+    }
+
+    #[test]
+    fn test_udp_transport_bind_and_send() {
+        let transport = UdpShredTransport::new("127.0.0.1:0".parse().unwrap()).unwrap();
+        let local = transport.local_addr().unwrap();
+        assert_ne!(local.port(), 0);
+
+        // Send to self — non-blocking send should succeed even if nobody reads.
+        let result = transport.send_to(b"test-shred", local);
+        assert!(result.is_ok());
     }
 }
