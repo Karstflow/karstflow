@@ -110,7 +110,9 @@ impl BankForks {
         // current root, so anything older is safe to discard.
         let purge_below = new_root_slot
             .saturating_sub(paradencer_constants::sysvars::MAX_RECENT_BLOCKHASHES as u64);
-        new_root_bank.transaction_cache().purge_before_slot(purge_below);
+        new_root_bank
+            .transaction_cache()
+            .purge_before_slot(purge_below);
 
         self.banks.retain(|slot, _| *slot >= new_root_slot);
 

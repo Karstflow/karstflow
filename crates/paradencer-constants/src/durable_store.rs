@@ -154,6 +154,24 @@ pub const MAINTENANCE_FLUSH_INTERVAL_SECS: u64 = 30;
 /// by in-progress consensus.
 pub const MAINTENANCE_DEFAULT_RETAIN_SLOTS: u64 = 1000;
 
+// Account encoding / compression
+
+/// Bit flag in the `data_len` header field indicating LZ4-compressed payload.
+///
+/// When set, the lower 31 bits hold the uncompressed data length and the
+/// payload is preceded by a 4-byte LE compressed length.
+pub const ACCOUNT_ENCODING_COMPRESSION_FLAG: u32 = 0x8000_0000;
+
+/// Mask extracting the actual uncompressed data length from the `data_len` field.
+pub const ACCOUNT_ENCODING_DATA_LEN_MASK: u32 = 0x7FFF_FFFF;
+
+/// Minimum account data size in bytes to attempt LZ4 compression.
+///
+/// Below this threshold, the compression ratio is poor and the CPU cost
+/// outweighs the I/O savings. Accounts with data smaller than this are
+/// always stored uncompressed.
+pub const COMPRESSION_MIN_DATA_SIZE: usize = 128;
+
 // Recovery defaults
 
 /// Minimum number of accounts per parallel recovery chunk.
