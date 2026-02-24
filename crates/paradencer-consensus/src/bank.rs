@@ -512,7 +512,7 @@ impl Bank {
     ///
     /// Returns the number of accounts contributing to the hash (non-zero lamports).
     pub fn initialize_lthash_from_accounts(&self) -> usize {
-        let all_accounts = self.accounts.get_all_published_accounts();
+        let all_accounts = self.accounts.iter_published_accounts();
         let mut accumulator = LatticeHashValue::zero();
         let mut count = 0;
 
@@ -798,7 +798,7 @@ impl Bank {
     fn collect_rent_for_epoch(&self) {
         let collector = crate::rent::RentCollector::default_for_epoch(self.epoch);
 
-        let all_accounts = self.accounts.get_all_published_accounts();
+        let all_accounts = self.accounts.iter_published_accounts();
         let mut total_rent_collected: u64 = 0;
 
         for (pubkey, account) in &all_accounts {

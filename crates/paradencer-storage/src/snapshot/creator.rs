@@ -471,7 +471,7 @@ impl SnapshotCreator {
         &self,
         db: &AccountDatabase,
     ) -> Result<HashMap<Pubkey, Account>, StorageError> {
-        Ok(db.get_all_published_accounts())
+        Ok(db.iter_published_accounts().into_iter().collect())
     }
 
     fn compute_delta(

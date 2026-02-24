@@ -69,7 +69,7 @@ impl Bank {
         );
 
         let db = self.accounts();
-        let all_accounts = db.get_all_published_accounts();
+        let all_accounts = db.iter_published_accounts();
 
         let mut result = RentCollectionResult {
             accounts_examined: all_accounts.len(),

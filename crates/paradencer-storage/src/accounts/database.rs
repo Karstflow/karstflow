@@ -386,6 +386,19 @@ impl AccountDatabase {
             .unwrap_or(0)
     }
 
+    /// Iterate all published accounts from persistent storage.
+    ///
+    /// Streams accounts from the durable store without building a HashMap.
+    /// Falls back to in-memory cache iteration when no durable store is configured.
+    /// Prefer this over `get_all_published_accounts()` when key lookup is not needed.
+    pub fn iter_published_accounts(&self) -> Vec<(Pubkey, Account)> {
+        self.published.lock().iter_all()
+    }
+
+    /// Get all published accounts as a HashMap.
+    ///
+    /// Use `iter_published_accounts()` when key-based lookup is not needed,
+    /// as it avoids building the HashMap.
     pub fn get_all_published_accounts(&self) -> HashMap<Pubkey, Account> {
         self.published.lock().iter_all().into_iter().collect()
     }
@@ -608,7 +621,7 @@ impl AccountDatabase {
     pub fn compute_accounts_hash(&self) -> ([u8; 32], usize) {
         use paradencer_crypto::sha256::Sha256StreamingHasher;
 
-        let published_accounts = self.get_all_published_accounts();
+        let published_accounts = self.iter_published_accounts();
 
         // Compute per-account hashes, sorted by pubkey.
         let mut account_hashes: Vec<([u8; 32], [u8; 32])> = Vec::new();
