@@ -457,6 +457,42 @@ impl ClusterInfo {
         // Push health is tracked externally by the service stats.
     }
 
+    /// Add an entrypoint peer to bootstrap gossip discovery.
+    ///
+    /// Creates a minimal ContactInfo for the peer using a placeholder
+    /// NodeId (all-zeros) and the given gossip socket address. Once the
+    /// peer responds to a pull request, its real ContactInfo (with actual
+    /// NodeId, TPU, repair addresses, etc.) will replace this stub entry.
+    ///
+    /// This must be called before starting the gossip service so that the
+    /// push/pull loops have at least one target to talk to.
+    pub fn add_entrypoint(&self, gossip_addr: SocketAddr) {
+        // Use a synthetic NodeId derived from the address so that each
+        // entrypoint gets its own CRDS slot and doesn't clobber others.
+        let mut node_bytes = [0u8; 32];
+        let addr_str = gossip_addr.to_string();
+        let addr_hash = paradencer_crypto::sha256::Sha256Hasher::hash(addr_str.as_bytes());
+        node_bytes.copy_from_slice(&addr_hash);
+        let entrypoint_id = NodeId::new(node_bytes);
+
+        let info = ContactInfo::new(
+            entrypoint_id,
+            gossip_addr,
+            gossip_addr, // placeholder TPU
+            gossip_addr, // placeholder QUIC
+            gossip_addr, // placeholder repair
+            0,           // shred_version unknown until handshake
+        );
+        self.insert(info);
+    }
+
+    /// Add multiple entrypoint peers for bootstrap gossip discovery.
+    pub fn add_entrypoints(&self, addrs: &[SocketAddr]) {
+        for addr in addrs {
+            self.add_entrypoint(*addr);
+        }
+    }
+
     /// Get cluster size.
     pub fn size(&self) -> usize {
         let table = self.table.read();
@@ -691,6 +727,70 @@ mod tests {
         let value = cluster.signed_self_value();
         // Without a signing key, signature should be zeros (unverifiable)
         assert_eq!(value.signature, [0u8; 64]);
+    }
+
+    #[test]
+    fn test_add_entrypoint() {
+        let self_node_id = NodeId::new([0u8; 32]);
+        let self_info = create_test_contact_info(self_node_id, 8000);
+        let cluster = ClusterInfo::new(
+            self_node_id,
+            self_info,
+            Duration::from_secs(30),
+            MAX_CLUSTER_SIZE,
+        );
+
+        let ep_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)), 8001);
+        cluster.add_entrypoint(ep_addr);
+
+        // The entrypoint should appear as a peer
+        assert_eq!(cluster.size(), 1);
+
+        // The peer's gossip address should match the entrypoint
+        let peers = cluster.get_all();
+        assert_eq!(peers.len(), 1);
+        assert_eq!(peers[0].gossip_addr, ep_addr);
+    }
+
+    #[test]
+    fn test_add_multiple_entrypoints() {
+        let self_node_id = NodeId::new([0u8; 32]);
+        let self_info = create_test_contact_info(self_node_id, 8000);
+        let cluster = ClusterInfo::new(
+            self_node_id,
+            self_info,
+            Duration::from_secs(30),
+            MAX_CLUSTER_SIZE,
+        );
+
+        let addrs = vec![
+            SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)), 8001),
+            SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)), 8002),
+            SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 3)), 8003),
+        ];
+        cluster.add_entrypoints(&addrs);
+
+        // Each entrypoint gets a unique synthetic NodeId so all 3 appear
+        assert_eq!(cluster.size(), 3);
+    }
+
+    #[test]
+    fn test_add_entrypoint_idempotent() {
+        let self_node_id = NodeId::new([0u8; 32]);
+        let self_info = create_test_contact_info(self_node_id, 8000);
+        let cluster = ClusterInfo::new(
+            self_node_id,
+            self_info,
+            Duration::from_secs(30),
+            MAX_CLUSTER_SIZE,
+        );
+
+        let ep_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)), 8001);
+        cluster.add_entrypoint(ep_addr);
+        cluster.add_entrypoint(ep_addr);
+
+        // Same address produces the same synthetic NodeId, so it's an update
+        assert_eq!(cluster.size(), 1);
     }
 
     #[test]

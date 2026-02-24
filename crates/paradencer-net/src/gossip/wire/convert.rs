@@ -88,8 +88,39 @@ pub fn wire_value_to_contact_info(wv: &WireCrdsValue) -> Option<ContactInfo> {
                 shred_version: lci.shred_version,
             })
         }
-        // TODO: Handle WireCrdsData::ContactInfo (v2 format) when varint
-        // deserialization for ContactInfo v2 is fully implemented.
+        WireCrdsData::ContactInfo(ci) => {
+            // Resolve sockets from the v2 address/port encoding.
+            // Port is accumulated: each entry's offset is relative to the
+            // previous entry's resolved port (starting from 0).
+            let mut resolved_sockets = vec![None; gossip::CONTACT_INFO_SOCKET_COUNT];
+            let mut port_accumulator: u16 = 0;
+            for entry in &ci.sockets {
+                let ip = ci.addrs.get(entry.index as usize)?;
+                port_accumulator = port_accumulator.wrapping_add(entry.offset);
+                let addr = std::net::SocketAddr::new(*ip, port_accumulator);
+                let key = entry.key as usize;
+                if key < resolved_sockets.len() {
+                    resolved_sockets[key] = Some(addr);
+                }
+            }
+
+            let gossip_addr = resolved_sockets[gossip::SOCKET_GOSSIP]?;
+            if gossip_addr.ip().is_unspecified() && gossip_addr.port() == 0 {
+                return None;
+            }
+
+            Some(ContactInfo {
+                node_id: crate::gossip::cluster_info::NodeId(ci.pubkey),
+                gossip_addr,
+                tpu_addr: resolved_sockets[gossip::SOCKET_TPU].unwrap_or(gossip_addr),
+                tpu_quic_addr: resolved_sockets[gossip::SOCKET_TPU_QUIC].unwrap_or(gossip_addr),
+                repair_addr: resolved_sockets[gossip::SOCKET_SERVE_REPAIR].unwrap_or(gossip_addr),
+                rpc_addr: resolved_sockets[gossip::SOCKET_RPC],
+                version: ci.version.major as u64,
+                wallclock: ci.wallclock,
+                shred_version: ci.shred_version,
+            })
+        }
         _ => None,
     }
 }
@@ -197,10 +228,42 @@ pub fn wire_to_internal_value(wv: &WireCrdsValue) -> Option<CrdsValue> {
                 version: VersionInfo::default(),
             })
         }
+        WireCrdsData::ContactInfo(ci) => {
+            // Resolve v2 socket entries into the internal array format.
+            // Port offsets accumulate: each entry's offset is added to the
+            // previous resolved port (starting from zero).
+            let mut sockets: [Option<SocketAddr>; gossip::CONTACT_INFO_SOCKET_COUNT] =
+                Default::default();
+            let mut port_accumulator: u16 = 0;
+            for entry in &ci.sockets {
+                let ip = ci.addrs.get(entry.index as usize)?;
+                port_accumulator = port_accumulator.wrapping_add(entry.offset);
+                let addr = SocketAddr::new(*ip, port_accumulator);
+                let key = entry.key as usize;
+                if key < sockets.len() {
+                    sockets[key] = Some(addr);
+                }
+            }
+
+            CrdsValueData::ContactInfo(CrdsContactInfo {
+                pubkey: ci.pubkey,
+                shred_version: ci.shred_version,
+                instance_creation_nanos: (ci.outset as i64) * 1_000_000,
+                wallclock_nanos,
+                sockets,
+                version: VersionInfo {
+                    client: ci.version.client,
+                    major: ci.version.major,
+                    minor: ci.version.minor,
+                    patch: ci.version.patch,
+                    commit: ci.version.commit,
+                    feature_set: ci.version.feature_set,
+                },
+            })
+        }
         WireCrdsData::NodeInstance(ni) => {
             CrdsValueData::NodeInstance(NodeInstanceToken { token: ni.token })
         }
-        // TODO: Add conversion for other WireCrdsData variants as needed.
         _ => return None,
     };
 
@@ -381,6 +444,137 @@ mod tests {
             }),
         };
         assert!(wire_value_to_contact_info(&wire).is_none());
+    }
+
+    #[test]
+    fn contact_info_v2_to_internal_round_trip() {
+        use super::super::contact_info::{WireContactInfo, WireSocketEntry};
+        use super::super::crds_data::WireSolanaVersion;
+
+        let pubkey = [7u8; 32];
+        let wallclock_ms: u64 = 1_700_000_000_000;
+        let outset_ms: u64 = 1_699_000_000_000;
+        let ip = std::net::IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+
+        // Socket entries: gossip=8000, tpu=8001, serve_repair=8003
+        let wire_ci = WireContactInfo {
+            pubkey,
+            wallclock: wallclock_ms,
+            outset: outset_ms,
+            shred_version: 55,
+            version: WireSolanaVersion {
+                major: 2,
+                minor: 1,
+                patch: 7,
+                commit: 0xDEAD,
+                feature_set: 0xBEEF,
+                client: 1,
+            },
+            addrs: vec![ip],
+            sockets: vec![
+                WireSocketEntry {
+                    key: gossip::SOCKET_GOSSIP as u8,
+                    index: 0,
+                    offset: 8000,
+                },
+                WireSocketEntry {
+                    key: gossip::SOCKET_TPU as u8,
+                    index: 0,
+                    offset: 1, // 8000 + 1 = 8001
+                },
+                WireSocketEntry {
+                    key: gossip::SOCKET_SERVE_REPAIR as u8,
+                    index: 0,
+                    offset: 2, // 8001 + 2 = 8003
+                },
+            ],
+            extensions: vec![],
+        };
+
+        let wire_value = WireCrdsValue {
+            signature: [0u8; 64],
+            data: WireCrdsData::ContactInfo(wire_ci),
+        };
+
+        // Test wire_value_to_contact_info (high-level)
+        let ci = wire_value_to_contact_info(&wire_value).unwrap();
+        assert_eq!(ci.node_id.0, pubkey);
+        assert_eq!(ci.gossip_addr, SocketAddr::new(ip, 8000));
+        assert_eq!(ci.tpu_addr, SocketAddr::new(ip, 8001));
+        assert_eq!(ci.repair_addr, SocketAddr::new(ip, 8003));
+        assert_eq!(ci.shred_version, 55);
+        assert_eq!(ci.version, 2); // major version
+
+        // Test wire_to_internal_value (CRDS-level)
+        let internal = wire_to_internal_value(&wire_value).unwrap();
+        assert_eq!(internal.origin, pubkey);
+        let expected_wallclock_nanos = (wallclock_ms as i64) * 1_000_000;
+        assert_eq!(internal.wallclock_nanos, expected_wallclock_nanos);
+
+        if let CrdsValueData::ContactInfo(ref crds_ci) = internal.data {
+            assert_eq!(crds_ci.pubkey, pubkey);
+            assert_eq!(crds_ci.shred_version, 55);
+            assert_eq!(
+                crds_ci.sockets[gossip::SOCKET_GOSSIP],
+                Some(SocketAddr::new(ip, 8000))
+            );
+            assert_eq!(
+                crds_ci.sockets[gossip::SOCKET_TPU],
+                Some(SocketAddr::new(ip, 8001))
+            );
+            assert_eq!(
+                crds_ci.sockets[gossip::SOCKET_SERVE_REPAIR],
+                Some(SocketAddr::new(ip, 8003))
+            );
+            assert_eq!(crds_ci.version.major, 2);
+            assert_eq!(crds_ci.version.minor, 1);
+            assert_eq!(crds_ci.version.patch, 7);
+            assert_eq!(crds_ci.version.client, 1);
+            // outset is milliseconds → nanos
+            assert_eq!(
+                crds_ci.instance_creation_nanos,
+                (outset_ms as i64) * 1_000_000
+            );
+        } else {
+            panic!("expected ContactInfo variant");
+        }
+    }
+
+    #[test]
+    fn contact_info_v2_unspecified_gossip_returns_none() {
+        use super::super::contact_info::{WireContactInfo, WireSocketEntry};
+        use super::super::crds_data::WireSolanaVersion;
+
+        // No gossip socket entry → None
+        let wire_ci = WireContactInfo {
+            pubkey: [8u8; 32],
+            wallclock: 1_700_000_000_000,
+            outset: 0,
+            shred_version: 0,
+            version: WireSolanaVersion {
+                major: 0,
+                minor: 0,
+                patch: 0,
+                commit: 0,
+                feature_set: 0,
+                client: 0,
+            },
+            addrs: vec![std::net::IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1))],
+            sockets: vec![
+                // Only TPU, no gossip
+                WireSocketEntry {
+                    key: gossip::SOCKET_TPU as u8,
+                    index: 0,
+                    offset: 9000,
+                },
+            ],
+            extensions: vec![],
+        };
+        let wire_value = WireCrdsValue {
+            signature: [0u8; 64],
+            data: WireCrdsData::ContactInfo(wire_ci),
+        };
+        assert!(wire_value_to_contact_info(&wire_value).is_none());
     }
 
     #[test]
