@@ -9,6 +9,7 @@ authors.workspace = true
 thiserror.workspace = true
 paradencer-config = { path = "../paradencer-config" }
 paradencer-consensus = { path = "../paradencer-consensus" }
+paradencer-crypto = { path = "../paradencer-crypto" }
 paradencer-core = { path = "../paradencer-core" }
 paradencer-execution = { path = "../paradencer-execution" }
 paradencer-mesh = { path = "../paradencer-mesh" }

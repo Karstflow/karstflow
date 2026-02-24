@@ -1460,6 +1460,7 @@ dependencies = [
  "paradencer-config",
  "paradencer-consensus",
  "paradencer-core",
+ "paradencer-crypto",
  "paradencer-execution",
  "paradencer-mesh",
  "paradencer-net",

@@ -8,9 +8,9 @@ use paradencer_control::{
     render_diagnostics_readiness_issue_line, render_diagnostics_readiness_line,
     render_diagnostics_services_line, render_diagnostics_stage_mix_line,
     render_diagnostics_topology_line, render_preflight_readiness_issue_line,
-    render_preflight_readiness_line, render_readiness_policy_line, run_diagnostics_phase,
-    run_preflight_phase, run_preflight_phase_with_probe_report, run_runtime_phase,
-    start_gossip_service, BlockstoreShredProvider, ServiceBundle,
+    render_preflight_readiness_line, render_readiness_policy_line, resolve_validator_identity,
+    run_diagnostics_phase, run_preflight_phase, run_preflight_phase_with_probe_report,
+    run_runtime_phase, start_gossip_service, BlockstoreShredProvider, ServiceBundle,
 };
 
 fn main() -> paradencer_control::Result<()> {
@@ -26,10 +26,14 @@ fn main() -> paradencer_control::Result<()> {
 fn run_with_node_config(
     node_config: paradencer_config::NodeConfig,
 ) -> paradencer_control::Result<()> {
+    // Resolve the validator identity — loads from file in Live mode,
+    // generates ephemeral keypair in Dev mode.
+    let identity = resolve_validator_identity(&node_config)?;
+
     // Start gossip for cluster peer discovery. The service runs on a
     // dedicated background thread and must stay alive for the entire
     // node lifetime.
-    let gossip_handle = start_gossip_service(&node_config)?;
+    let gossip_handle = start_gossip_service(&node_config, &identity)?;
     let cluster_info = gossip_handle.cluster_info.clone();
     let node_id = gossip_handle.node_id;
 
@@ -93,7 +97,7 @@ fn run_with_node_config(
     // new consensus decisions and pushes them to gossip as CrdsValue
     // entries. Mirrors Firedancer's tower→txsend→gossip pipeline.
     let vote_broadcast_bundle =
-        build_vote_broadcast_service(node_id, consensus.tower, cluster_info);
+        build_vote_broadcast_service(&identity, consensus.tower, cluster_info);
 
     let mut services = runtime_topology.services;
     services.push(replay_bundle.service);

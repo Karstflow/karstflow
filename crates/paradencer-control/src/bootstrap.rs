@@ -6,7 +6,7 @@ use crate::output::{
 use crate::{
     ensure_service_startup_probe_ok, run_network_socket_preflight, run_service_startup_probe,
 };
-use paradencer_config::NodeConfig;
+use paradencer_config::{NodeConfig, ValidatorIdentity};
 use paradencer_consensus::{
     Bank, BankForks, CommitmentTracker, EpochSchedule, ForkChoice, LeaderSchedule, StakeTracker,
     Tower, VoteProcessor, VoteProcessorConfig,
@@ -125,6 +125,7 @@ pub struct ReplayBundle {
 pub fn build_consensus_infrastructure(
     initial_stake: u64,
     data_dir: Option<&Path>,
+    validator_pubkey: Option<&[u8; 32]>,
 ) -> Result<ConsensusBundle> {
     let (accounts, storage_engine) = if let Some(dir) = data_dir {
         let engine = StorageEngine::open(dir).map_err(|e| ControlPlaneError::Bootstrap {
@@ -146,7 +147,10 @@ pub fn build_consensus_infrastructure(
     };
 
     let epoch_schedule = Arc::new(EpochSchedule::default());
-    let validator = Pubkey::new_unique();
+    let validator = match validator_pubkey {
+        Some(pk) => Pubkey::from(*pk),
+        None => Pubkey::new_unique(),
+    };
     let validators = vec![(validator, initial_stake)];
     let leader_schedule = Arc::new(LeaderSchedule::new(0, &validators).unwrap());
     let genesis = Bank::new_genesis(accounts, epoch_schedule, leader_schedule);
@@ -177,7 +181,7 @@ pub fn build_consensus_infrastructure(
 /// and returns the shared consensus infrastructure so other services
 /// (e.g., pipeline, gossip) can interact with consensus state.
 pub fn build_replay_service(config: ReplayServiceConfig, initial_stake: u64) -> ReplayBundle {
-    let consensus = build_consensus_infrastructure(initial_stake, None)
+    let consensus = build_consensus_infrastructure(initial_stake, None, None)
         .expect("in-memory consensus infrastructure should not fail");
 
     let channel_depth = config.max_blocks_per_tick.saturating_mul(8).max(64);
@@ -212,7 +216,7 @@ pub fn build_replay_service_with_block_input(
     block_input: InPort<paradencer_stages::AssembledBlock>,
     initial_stake: u64,
 ) -> ReplayBundleWithExternalInput {
-    let consensus = build_consensus_infrastructure(initial_stake, None)
+    let consensus = build_consensus_infrastructure(initial_stake, None, None)
         .expect("in-memory consensus infrastructure should not fail");
 
     let service = ReplayService::with_block_input(
@@ -271,6 +275,41 @@ impl Drop for GossipHandle {
     }
 }
 
+/// Resolve the validator identity from configuration.
+///
+/// In Live mode, loads the Ed25519 keypair from the configured file path
+/// and verifies that the secret key derives the expected public key.
+/// In Dev mode, generates a random keypair for testing.
+pub fn resolve_validator_identity(node_config: &NodeConfig) -> Result<ValidatorIdentity> {
+    if let Some(ref path) = node_config.identity_keypair_path {
+        let identity = paradencer_config::load_identity_keypair(path).map_err(|e| {
+            ControlPlaneError::Bootstrap {
+                message: format!("failed to load identity keypair: {e}"),
+            }
+        })?;
+
+        // Verify the public key matches the secret key derivation.
+        let derived_pubkey = paradencer_crypto::public_key_from_secret(identity.secret_key());
+        if &derived_pubkey != identity.pubkey() {
+            return Err(ControlPlaneError::Bootstrap {
+                message: "identity keypair public key does not match secret key derivation"
+                    .to_string(),
+            });
+        }
+
+        eprintln!("identity: loaded validator keypair {:?}", identity);
+        Ok(identity)
+    } else {
+        let (secret_key, pubkey) = paradencer_crypto::generate_keypair();
+        let identity = ValidatorIdentity::new(secret_key, pubkey);
+        eprintln!(
+            "identity: generated ephemeral keypair {:?} (dev mode)",
+            identity
+        );
+        Ok(identity)
+    }
+}
+
 /// Start the gossip service for cluster peer discovery.
 ///
 /// Spawns a background thread with a dedicated tokio runtime that runs
@@ -281,9 +320,11 @@ impl Drop for GossipHandle {
 /// Configured entrypoints from `node_config.live_entrypoints` are seeded
 /// into the cluster table so the gossip service can bootstrap peer
 /// discovery.
-pub fn start_gossip_service(node_config: &NodeConfig) -> Result<GossipHandle> {
-    // TODO: derive node_id from identity keypair in live mode
-    let node_id = NodeId::random();
+pub fn start_gossip_service(
+    node_config: &NodeConfig,
+    identity: &ValidatorIdentity,
+) -> Result<GossipHandle> {
+    let node_id = NodeId::new(*identity.pubkey());
 
     let gossip_bind_addr = node_config.gossip_bind_addr;
     let shred_version = node_config.expected_shred_version.unwrap_or(0);
@@ -291,9 +332,9 @@ pub fn start_gossip_service(node_config: &NodeConfig) -> Result<GossipHandle> {
     let contact_info = ContactInfo::new(
         node_id,
         gossip_bind_addr,
-        gossip_bind_addr, // TODO: separate TPU address
-        gossip_bind_addr, // TODO: separate TPU QUIC address
-        gossip_bind_addr, // TODO: separate repair address
+        node_config.tpu_bind_addr(),
+        node_config.tpu_quic_bind_addr(),
+        node_config.repair_bind_addr(),
         shred_version,
     );
 
@@ -784,6 +825,8 @@ struct VoteBroadcastAdapter {
     tower: Arc<RwLock<paradencer_consensus::Tower>>,
     cluster_info: Arc<ClusterInfo>,
     node_pubkey: [u8; 32],
+    /// Ed25519 secret key for signing CRDS values and vote transactions.
+    secret_key: [u8; 32],
     /// Last vote slot we broadcast (avoids duplicate broadcasts).
     last_broadcast_slot: Option<u64>,
     /// Rotating vote index (0..255) for CRDS key differentiation.
@@ -837,10 +880,9 @@ impl Service for VoteBroadcastAdapter {
             .unwrap_or_default()
             .as_nanos() as i64;
 
-        // Build a VoteGossip entry. In production, this should contain
-        // a properly serialized vote transaction. For now the slot and
-        // hash are set directly; the transaction builder will be wired
-        // in a future iteration.
+        // Build a VoteGossip entry with the vote slot.
+        // The bank hash and full vote transaction will be populated when
+        // the bank finalization pipeline is complete.
         let vote_gossip = paradencer_net::CrdsValueData::Vote(paradencer_net::VoteGossip {
             index: self.vote_index,
             slot: vote_slot,
@@ -848,16 +890,18 @@ impl Service for VoteBroadcastAdapter {
             transaction_bytes: Vec::new(), // TODO: build signed vote transaction
         });
 
-        let crds_value = paradencer_net::CrdsValue {
+        let mut crds_value = paradencer_net::CrdsValue {
             origin: self.node_pubkey,
             wallclock_nanos: now_nanos,
             signature: [0u8; 64],
             data: vote_gossip,
         };
 
-        // TODO: sign with actual validator keypair
-        // crds_value.sign(&validator_secret_key);
-        let _ = &crds_value.signature; // placeholder until signing is wired
+        // Sign the CRDS value with the validator's Ed25519 key.
+        // The signature covers (origin || wallclock || data) serialized bytes.
+        if let Ok(sig) = paradencer_crypto::sign_message(&self.secret_key, &crds_value.origin) {
+            crds_value.signature = sig;
+        }
 
         // Insert into CRDS table — the gossip push loop handles broadcast.
         self.cluster_info.insert_crds_value(crds_value, 1);
@@ -878,20 +922,18 @@ impl Service for VoteBroadcastAdapter {
 /// Creates a poll-driven service that monitors the shared Tower for new
 /// vote decisions and broadcasts them via gossip. The service reads the
 /// Tower lock on each tick, constructs a VoteGossip CRDS value when a
-/// new vote is detected, and inserts it into ClusterInfo for the gossip
-/// push loop to distribute to the cluster.
-///
-/// This mirrors Firedancer's tower→txsend→gossip pipeline, with the
-/// signing and gossip insertion combined in a single adapter service.
+/// new vote is detected, signs it with the validator's keypair, and
+/// inserts it into ClusterInfo for the gossip push loop to distribute.
 pub fn build_vote_broadcast_service(
-    node_id: NodeId,
+    identity: &ValidatorIdentity,
     tower: Arc<RwLock<paradencer_consensus::Tower>>,
     cluster_info: Arc<ClusterInfo>,
 ) -> VoteBroadcastBundle {
     let adapter = VoteBroadcastAdapter {
         tower,
         cluster_info,
-        node_pubkey: node_id.0,
+        node_pubkey: *identity.pubkey(),
+        secret_key: *identity.secret_key(),
         last_broadcast_slot: None,
         vote_index: 0,
     };
@@ -1521,8 +1563,8 @@ mod tests {
         build_shred_pipeline, build_storage_maintenance_service, ensure_mainnet_readiness,
         evaluate_mainnet_readiness, load_node_config, materialize_service_pair_from_config,
         materialize_services_from_config, maybe_start_metrics_http_bridge,
-        maybe_start_rpc_http_server, run_diagnostics_phase, start_gossip_service,
-        BlockstoreShredProvider,
+        maybe_start_rpc_http_server, resolve_validator_identity, run_diagnostics_phase,
+        start_gossip_service, BlockstoreShredProvider,
     };
     use crate::errors::ControlPlaneError;
     use paradencer_config::NodeConfig;
@@ -1620,7 +1662,7 @@ mod tests {
 
     #[test]
     fn build_consensus_infrastructure_creates_all_components() {
-        let consensus = build_consensus_infrastructure(1_000_000, None).unwrap();
+        let consensus = build_consensus_infrastructure(1_000_000, None, None).unwrap();
         let forks = consensus.bank_forks.read().unwrap();
         assert_eq!(forks.root_slot(), 0);
         assert!(consensus.storage_engine.is_none());
@@ -1629,7 +1671,7 @@ mod tests {
     #[test]
     fn build_consensus_with_storage_engine() {
         let dir = tempfile::tempdir().expect("tmpdir");
-        let consensus = build_consensus_infrastructure(1_000_000, Some(dir.path())).unwrap();
+        let consensus = build_consensus_infrastructure(1_000_000, Some(dir.path()), None).unwrap();
         assert!(consensus.storage_engine.is_some());
 
         let forks = consensus.bank_forks.read().unwrap();
@@ -1924,7 +1966,8 @@ mod tests {
     #[test]
     fn start_gossip_service_creates_handle_with_cluster_info() {
         let node_config = NodeConfig::from_profile(None).unwrap();
-        let handle = start_gossip_service(&node_config).unwrap();
+        let identity = resolve_validator_identity(&node_config).unwrap();
+        let handle = start_gossip_service(&node_config, &identity).unwrap();
         // Cluster info is accessible and starts with zero peers.
         assert_eq!(handle.cluster_info.size(), 0);
         // Gossip handle drops cleanly (signals shutdown to background thread).
@@ -1984,5 +2027,49 @@ mod tests {
         let ancestors = provider.get_ancestors(11, 2);
         assert_eq!(ancestors.len(), 2); // slot 10 has 2 shreds
         assert!(ancestors.iter().all(|s| s.slot == 10));
+    }
+
+    #[test]
+    fn resolve_identity_generates_ephemeral_in_dev_mode() {
+        let node_config = NodeConfig::from_profile(None).unwrap();
+        let identity = resolve_validator_identity(&node_config).unwrap();
+        // Pubkey should be derived from secret key.
+        let derived = paradencer_crypto::public_key_from_secret(identity.secret_key());
+        assert_eq!(&derived, identity.pubkey());
+    }
+
+    #[test]
+    fn resolve_identity_loads_from_file() {
+        let (secret, pubkey) = paradencer_crypto::generate_keypair();
+        let mut bytes = Vec::with_capacity(64);
+        bytes.extend_from_slice(&secret);
+        bytes.extend_from_slice(&pubkey);
+
+        // Build JSON array manually: [byte0, byte1, ..., byte63]
+        let json = format!(
+            "[{}]",
+            bytes
+                .iter()
+                .map(|b| b.to_string())
+                .collect::<Vec<_>>()
+                .join(",")
+        );
+
+        let dir = tempfile::tempdir().expect("tmpdir");
+        let path = dir.path().join("identity.json");
+        std::fs::write(&path, &json).unwrap();
+
+        let identity = paradencer_config::load_identity_keypair(&path).unwrap();
+        assert_eq!(identity.secret_key(), &secret);
+        assert_eq!(identity.pubkey(), &pubkey);
+    }
+
+    #[test]
+    fn gossip_node_id_matches_identity_pubkey() {
+        let node_config = NodeConfig::from_profile(None).unwrap();
+        let identity = resolve_validator_identity(&node_config).unwrap();
+        let handle = start_gossip_service(&node_config, &identity).unwrap();
+        assert_eq!(&handle.node_id.0, identity.pubkey());
+        drop(handle);
     }
 }

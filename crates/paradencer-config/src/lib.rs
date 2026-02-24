@@ -172,6 +172,36 @@ impl NodeConfig {
         })
     }
 
+    /// TPU (transaction processing unit) bind address.
+    ///
+    /// Defaults to gossip port + 2, following Solana port conventions.
+    pub fn tpu_bind_addr(&self) -> SocketAddr {
+        SocketAddr::new(
+            self.gossip_bind_addr.ip(),
+            self.gossip_bind_addr.port().wrapping_add(2),
+        )
+    }
+
+    /// TPU QUIC bind address for client connections.
+    ///
+    /// Defaults to gossip port + 4, following Solana port conventions.
+    pub fn tpu_quic_bind_addr(&self) -> SocketAddr {
+        SocketAddr::new(
+            self.gossip_bind_addr.ip(),
+            self.gossip_bind_addr.port().wrapping_add(4),
+        )
+    }
+
+    /// Repair protocol bind address.
+    ///
+    /// Defaults to gossip port + 6, following Solana port conventions.
+    pub fn repair_bind_addr(&self) -> SocketAddr {
+        SocketAddr::new(
+            self.gossip_bind_addr.ip(),
+            self.gossip_bind_addr.port().wrapping_add(6),
+        )
+    }
+
     fn validate_preflight(&self) -> Result<()> {
         validate_metrics_target_preflight(&self.metrics_output_target)?;
         validate_storage_startup_preflight(&self.storage_runtime_policy)?;
@@ -333,6 +363,79 @@ pub fn validate_identity_keypair_file(path: &Path) -> Result<()> {
     }
 
     Ok(())
+}
+
+/// Validator identity holding the Ed25519 secret key and derived public key.
+///
+/// The 64-byte Solana keypair format stores `[secret_key(32) || public_key(32)]`.
+/// The secret key is the Ed25519 seed; the public key is derived from it.
+#[derive(Clone)]
+pub struct ValidatorIdentity {
+    /// Ed25519 secret key (32-byte seed).
+    secret_key: [u8; 32],
+    /// Ed25519 public key (derived from secret key).
+    pubkey: [u8; 32],
+}
+
+impl ValidatorIdentity {
+    /// Create an identity from raw key components.
+    pub fn new(secret_key: [u8; 32], pubkey: [u8; 32]) -> Self {
+        Self { secret_key, pubkey }
+    }
+
+    /// The 32-byte Ed25519 secret key (seed).
+    pub fn secret_key(&self) -> &[u8; 32] {
+        &self.secret_key
+    }
+
+    /// The 32-byte Ed25519 public key.
+    pub fn pubkey(&self) -> &[u8; 32] {
+        &self.pubkey
+    }
+}
+
+impl std::fmt::Debug for ValidatorIdentity {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Never print the secret key.
+        write!(
+            f,
+            "ValidatorIdentity({:02x}{:02x}{:02x}{:02x}..)",
+            self.pubkey[0], self.pubkey[1], self.pubkey[2], self.pubkey[3]
+        )
+    }
+}
+
+/// Load a validator identity keypair from a Solana-format JSON file.
+///
+/// The file contains a JSON array of 64 bytes: `[secret_key(32), public_key(32)]`.
+/// Returns the parsed identity with both secret and public key components.
+pub fn load_identity_keypair(path: &Path) -> Result<ValidatorIdentity> {
+    let raw = fs::read_to_string(path).map_err(|source| ConfigError::FileRead {
+        kind: "identity keypair",
+        path: path.to_path_buf(),
+        source,
+    })?;
+
+    let bytes: Vec<u8> = serde_json::from_str(&raw).map_err(|source| {
+        ConfigError::LiveModeIdentityKeypairInvalidFormat {
+            path: path.to_path_buf(),
+            message: source.to_string(),
+        }
+    })?;
+    if bytes.len() != 64 {
+        return Err(ConfigError::LiveModeIdentityKeypairInvalidLength {
+            path: path.to_path_buf(),
+            found: bytes.len(),
+            expected: 64,
+        });
+    }
+
+    let mut secret_key = [0u8; 32];
+    let mut pubkey = [0u8; 32];
+    secret_key.copy_from_slice(&bytes[..32]);
+    pubkey.copy_from_slice(&bytes[32..]);
+
+    Ok(ValidatorIdentity::new(secret_key, pubkey))
 }
 
 pub fn validate_live_runtime_spec(runtime_spec: &RuntimeSpec) -> Result<()> {
