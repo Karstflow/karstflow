@@ -25,8 +25,8 @@ use paradencer_rpc::{metrics_file_provider, spawn_rpc_http_server};
 use paradencer_runtime::{build_pinned_affinity_plan, run_services, Service, ServiceProbeReport};
 use paradencer_stages::{
     ExecutionErrorHandlingPolicy, MetricsOutputTarget, PipelineHandle, PipelineServiceBuilder,
-    PipelineServiceConfig, RawTransaction, ReplayService, ReplayServiceConfig, ShredCollector,
-    ShredCollectorConfig,
+    PipelineServiceConfig, RawTransaction, ReplayService, ReplayServiceConfig,
+    SbpfExecutionAdapter, ShredCollector, ShredCollectorConfig,
 };
 use paradencer_storage::{
     AccountDatabase, Blockstore, MaintenanceConfig, Pubkey, StorageEngine,
@@ -187,12 +187,14 @@ pub fn build_replay_service(config: ReplayServiceConfig, initial_stake: u64) -> 
     let channel_depth = config.max_blocks_per_tick.saturating_mul(8).max(64);
     let (block_tx, block_rx) = bounded_link::<paradencer_stages::AssembledBlock>(channel_depth);
 
-    let service = ReplayService::with_block_input(
+    let backend = Arc::new(SbpfExecutionAdapter::with_defaults());
+    let service = ReplayService::with_backend(
         config,
         block_rx,
         Arc::clone(&consensus.bank_forks),
         Arc::clone(&consensus.fork_choice),
         Arc::clone(&consensus.execution_bridge),
+        backend,
         Arc::clone(&consensus.vote_processor),
         Arc::clone(&consensus.tower),
         Arc::clone(&consensus.commitment_tracker),
@@ -219,12 +221,14 @@ pub fn build_replay_service_with_block_input(
     let consensus = build_consensus_infrastructure(initial_stake, None, None)
         .expect("in-memory consensus infrastructure should not fail");
 
-    let service = ReplayService::with_block_input(
+    let backend = Arc::new(SbpfExecutionAdapter::with_defaults());
+    let service = ReplayService::with_backend(
         config,
         block_input,
         Arc::clone(&consensus.bank_forks),
         Arc::clone(&consensus.fork_choice),
         Arc::clone(&consensus.execution_bridge),
+        backend,
         Arc::clone(&consensus.vote_processor),
         Arc::clone(&consensus.tower),
         Arc::clone(&consensus.commitment_tracker),
