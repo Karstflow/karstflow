@@ -96,8 +96,12 @@ fn run_with_node_config(
     // Build the vote broadcast service. Monitors the shared Tower for
     // new consensus decisions and pushes them to gossip as CrdsValue
     // entries. Mirrors Firedancer's tower→txsend→gossip pipeline.
-    let vote_broadcast_bundle =
-        build_vote_broadcast_service(&identity, consensus.tower, cluster_info);
+    let vote_broadcast_bundle = build_vote_broadcast_service(
+        &identity,
+        consensus.tower,
+        consensus.bank_forks,
+        cluster_info,
+    );
 
     let mut services = runtime_topology.services;
     services.push(replay_bundle.service);

@@ -827,10 +827,13 @@ pub struct VoteBroadcastBundle {
 /// loop then automatically propagates votes to cluster peers.
 struct VoteBroadcastAdapter {
     tower: Arc<RwLock<paradencer_consensus::Tower>>,
+    bank_forks: Arc<RwLock<paradencer_consensus::BankForks>>,
     cluster_info: Arc<ClusterInfo>,
     node_pubkey: [u8; 32],
     /// Ed25519 secret key for signing CRDS values and vote transactions.
     secret_key: [u8; 32],
+    /// Vote account address (derived from identity pubkey by convention).
+    vote_account: [u8; 32],
     /// Last vote slot we broadcast (avoids duplicate broadcasts).
     last_broadcast_slot: Option<u64>,
     /// Rotating vote index (0..255) for CRDS key differentiation.
@@ -874,6 +877,35 @@ impl Service for VoteBroadcastAdapter {
         }
 
         let vote_slot = current_vote_slot.unwrap();
+
+        // Get the bank hash for the voted slot from BankForks.
+        let bank_hash = {
+            let forks = self.bank_forks.read().map_err(|_| {
+                paradencer_runtime::RuntimeError::service_failure(
+                    "vote-broadcast",
+                    "bank_forks lock poisoned",
+                )
+            })?;
+            forks.get(vote_slot).map(|b| b.hash())
+        };
+        let bank_hash = bank_hash.unwrap_or([0u8; 32]);
+
+        // Build a signed TowerSync vote transaction.
+        // The tower provides the full vote stack (slots + confirmation counts)
+        // and optional root slot.
+        let votes = tower.votes();
+        let root = tower.root();
+        let recent_blockhash = bank_hash; // Use bank hash as the recent blockhash
+
+        let transaction_bytes = build_vote_transaction(
+            &self.secret_key,
+            &self.node_pubkey,
+            &self.vote_account,
+            votes,
+            root,
+            &recent_blockhash,
+        );
+
         self.last_broadcast_slot = Some(vote_slot);
 
         // Rotate the vote index so each vote gets a unique CRDS key.
@@ -884,14 +916,11 @@ impl Service for VoteBroadcastAdapter {
             .unwrap_or_default()
             .as_nanos() as i64;
 
-        // Build a VoteGossip entry with the vote slot.
-        // The bank hash and full vote transaction will be populated when
-        // the bank finalization pipeline is complete.
         let vote_gossip = paradencer_net::CrdsValueData::Vote(paradencer_net::VoteGossip {
             index: self.vote_index,
             slot: vote_slot,
-            hash: [0u8; 32],               // TODO: populate with actual bank hash
-            transaction_bytes: Vec::new(), // TODO: build signed vote transaction
+            hash: bank_hash,
+            transaction_bytes,
         });
 
         let mut crds_value = paradencer_net::CrdsValue {
@@ -921,6 +950,91 @@ impl Service for VoteBroadcastAdapter {
     }
 }
 
+/// Build a signed TowerSync vote transaction in Solana wire format.
+///
+/// The transaction contains a single TowerSync instruction targeting the
+/// vote program. It is signed with the validator's Ed25519 identity key.
+///
+/// Wire format: `[sig_count(1)] [signature(64)] [message]`
+/// Message: `[num_required_sigs(1)] [num_readonly_signed(0)] [num_readonly_unsigned(1)]`
+///          `[account_keys] [recent_blockhash(32)] [instructions]`
+fn build_vote_transaction(
+    secret_key: &[u8; 32],
+    node_pubkey: &[u8; 32],
+    vote_account: &[u8; 32],
+    votes: &[paradencer_consensus::TowerVote],
+    root: Option<u64>,
+    recent_blockhash: &[u8; 32],
+) -> Vec<u8> {
+    // TowerSync instruction discriminant (vote program instruction type 12).
+    const TOWER_SYNC_DISCRIMINANT: u32 = 12;
+
+    // Build TowerSync instruction data
+    let mut instr_data = Vec::with_capacity(5 + 9 + votes.len() * 12 + 1);
+    instr_data.extend_from_slice(&TOWER_SYNC_DISCRIMINANT.to_le_bytes());
+    match root {
+        Some(slot) => {
+            instr_data.push(1);
+            instr_data.extend_from_slice(&slot.to_le_bytes());
+        }
+        None => instr_data.push(0),
+    }
+    instr_data.extend_from_slice(&(votes.len() as u32).to_le_bytes());
+    for vote in votes {
+        instr_data.extend_from_slice(&vote.slot.to_le_bytes());
+        instr_data.extend_from_slice(&vote.confirmation_count.to_le_bytes());
+    }
+    instr_data.push(0); // no timestamp
+
+    // Account keys: [node_pubkey (signer+writable), vote_account (writable), vote_program (readonly)]
+    // Vote program address: Vote111111111111111111111111111111111111111
+    let vote_program_id: [u8; 32] = [
+        7, 97, 72, 29, 53, 116, 116, 187, 124, 77, 118, 36, 235, 211, 189, 179, 216, 53, 94, 115,
+        209, 16, 67, 252, 13, 163, 83, 128, 0, 0, 0, 0,
+    ];
+
+    // Build legacy message
+    let mut message = Vec::with_capacity(128 + instr_data.len());
+    // Header: num_required_signatures, num_readonly_signed_accounts, num_readonly_unsigned_accounts
+    message.push(1); // 1 signature required (the validator identity)
+    message.push(0); // 0 readonly signed accounts
+    message.push(1); // 1 readonly unsigned account (vote program)
+                     // Account keys (3 accounts)
+    message.push(3); // compact-u16 for 3 accounts
+    message.extend_from_slice(node_pubkey); // index 0: signer + writable
+    message.extend_from_slice(vote_account); // index 1: writable
+    message.extend_from_slice(&vote_program_id); // index 2: readonly
+                                                 // Recent blockhash
+    message.extend_from_slice(recent_blockhash);
+    // Instructions (1 instruction)
+    message.push(1); // compact-u16: 1 instruction
+                     // Instruction: program_id_index, accounts, data
+    message.push(2); // program_id_index = 2 (vote program)
+    message.push(2); // compact-u16: 2 account indexes
+    message.push(0); // account index 0 (node_pubkey)
+    message.push(1); // account index 1 (vote_account)
+                     // Instruction data length (compact-u16)
+    let data_len = instr_data.len();
+    if data_len < 128 {
+        message.push(data_len as u8);
+    } else {
+        message.push(((data_len & 0x7F) | 0x80) as u8);
+        message.push((data_len >> 7) as u8);
+    }
+    message.extend_from_slice(&instr_data);
+
+    // Sign the message
+    let signature = paradencer_crypto::sign_message(secret_key, &message).unwrap_or([0u8; 64]);
+
+    // Build the full transaction: [sig_count] [signatures] [message]
+    let mut tx = Vec::with_capacity(1 + 64 + message.len());
+    tx.push(1); // compact-u16: 1 signature
+    tx.extend_from_slice(&signature);
+    tx.extend_from_slice(&message);
+
+    tx
+}
+
 /// Build the vote broadcast service.
 ///
 /// Creates a poll-driven service that monitors the shared Tower for new
@@ -931,13 +1045,21 @@ impl Service for VoteBroadcastAdapter {
 pub fn build_vote_broadcast_service(
     identity: &ValidatorIdentity,
     tower: Arc<RwLock<paradencer_consensus::Tower>>,
+    bank_forks: Arc<RwLock<paradencer_consensus::BankForks>>,
     cluster_info: Arc<ClusterInfo>,
 ) -> VoteBroadcastBundle {
+    // By convention, use the identity pubkey as the vote account address.
+    // In a full deployment the vote account would be a separate key
+    // registered on-chain, but for devnet testing the identity suffices.
+    let vote_account = *identity.pubkey();
+
     let adapter = VoteBroadcastAdapter {
         tower,
+        bank_forks,
         cluster_info,
         node_pubkey: *identity.pubkey(),
         secret_key: *identity.secret_key(),
+        vote_account,
         last_broadcast_slot: None,
         vote_index: 0,
     };
