@@ -5,6 +5,7 @@
 /// Manages FEC set completion, triggers Reed-Solomon reconstruction when
 /// enough coding shreds arrive, and makes retransmit decisions based on
 /// the turbine tree structure.
+use crate::shred_verifier::{self, LeaderLookup, ShredVerifyResult};
 use paradencer_crypto::reed_solomon::FecReconstructor;
 use paradencer_mesh::{InPort, OutPort, ReceiveError, SendError};
 use paradencer_runtime::{RuntimeError, RuntimeResult, Service, ServiceContext};
@@ -51,6 +52,8 @@ pub enum ShredInsertOutcome {
     Ignored,
     /// Shred is from a slot that's already been finalized/pruned.
     TooOld,
+    /// Shred has an invalid or zero Ed25519 signature.
+    InvalidSignature,
 }
 
 /// A retransmit decision for a shred.
@@ -183,6 +186,7 @@ pub struct ShredNetworkStats {
     pub shreds_from_repair: AtomicU64,
     pub shreds_local: AtomicU64,
     pub shreds_duplicate: AtomicU64,
+    pub shreds_signature_invalid: AtomicU64,
     pub fec_sets_completed: AtomicU64,
     pub fec_sets_recovered: AtomicU64,
     pub retransmits_sent: AtomicU64,
@@ -197,6 +201,7 @@ impl ShredNetworkStats {
             shreds_from_repair: self.shreds_from_repair.load(Ordering::Relaxed),
             shreds_local: self.shreds_local.load(Ordering::Relaxed),
             shreds_duplicate: self.shreds_duplicate.load(Ordering::Relaxed),
+            shreds_signature_invalid: self.shreds_signature_invalid.load(Ordering::Relaxed),
             fec_sets_completed: self.fec_sets_completed.load(Ordering::Relaxed),
             fec_sets_recovered: self.fec_sets_recovered.load(Ordering::Relaxed),
             retransmits_sent: self.retransmits_sent.load(Ordering::Relaxed),
@@ -213,6 +218,7 @@ pub struct ShredNetworkStatsSnapshot {
     pub shreds_from_repair: u64,
     pub shreds_local: u64,
     pub shreds_duplicate: u64,
+    pub shreds_signature_invalid: u64,
     pub fec_sets_completed: u64,
     pub fec_sets_recovered: u64,
     pub retransmits_sent: u64,
@@ -230,6 +236,9 @@ pub struct ShredNetworkStage {
     pending_retransmits: Vec<RetransmitDecision>,
     /// Completed FEC sets waiting to be drained.
     pending_completed: Vec<CompletedFecSet>,
+    /// Optional leader pubkey lookup for signature verification.
+    /// When `None`, signature verification is skipped.
+    leader_lookup: Option<Arc<dyn LeaderLookup>>,
     /// Statistics.
     stats: Arc<ShredNetworkStats>,
 }
@@ -247,9 +256,15 @@ impl ShredNetworkStage {
             slot_order: VecDeque::new(),
             pending_retransmits: Vec::new(),
             pending_completed: Vec::new(),
+            leader_lookup: None,
             config,
             stats: Arc::new(ShredNetworkStats::default()),
         }
+    }
+
+    /// Set the leader lookup for signature verification.
+    pub fn set_leader_lookup(&mut self, lookup: Arc<dyn LeaderLookup>) {
+        self.leader_lookup = Some(lookup);
     }
 
     /// Get a shared reference to the statistics.
@@ -283,6 +298,33 @@ impl ShredNetworkStage {
         // Check minimum slot.
         if slot < self.config.min_slot {
             return ShredInsertOutcome::TooOld;
+        }
+
+        // Verify Ed25519 signature when a leader lookup is available.
+        // Local shreds (self-produced) skip verification.
+        if net_shred.source != ShredSource::Local {
+            if let Some(ref lookup) = self.leader_lookup {
+                match lookup.leader_for_slot(slot) {
+                    Some(leader_pubkey) => {
+                        let result = shred_verifier::verify_shred(&net_shred.shred, &leader_pubkey);
+                        match result {
+                            ShredVerifyResult::Valid | ShredVerifyResult::Deferred => {}
+                            ShredVerifyResult::Invalid
+                            | ShredVerifyResult::ZeroSignature
+                            | ShredVerifyResult::UnknownLeader => {
+                                self.stats
+                                    .shreds_signature_invalid
+                                    .fetch_add(1, Ordering::Relaxed);
+                                return ShredInsertOutcome::InvalidSignature;
+                            }
+                        }
+                    }
+                    None => {
+                        // Leader unknown — skip verification for this slot.
+                        // This can happen for slots far in the future.
+                    }
+                }
+            }
         }
 
         // Ensure slot state exists.
@@ -1444,5 +1486,137 @@ mod tests {
         let fec_set = fec_set.unwrap();
         assert_eq!(fec_set.slot, 300);
         assert_eq!(fec_set.data_shreds.len(), 4);
+    }
+
+    // -----------------------------------------------------------------------
+    // Signature verification integration tests
+    // -----------------------------------------------------------------------
+
+    /// Test leader lookup that returns a fixed pubkey for all slots.
+    struct FixedLeaderLookup {
+        pubkey: [u8; 32],
+    }
+
+    impl LeaderLookup for FixedLeaderLookup {
+        fn leader_for_slot(&self, _slot: u64) -> Option<[u8; 32]> {
+            Some(self.pubkey)
+        }
+    }
+
+    /// Build a properly signed NetworkShred for testing.
+    fn make_signed_network_shred(
+        secret_key: &[u8; 32],
+        slot: u64,
+        index: u32,
+        fec_set_index: u32,
+        source: ShredSource,
+    ) -> NetworkShred {
+        let payload = vec![(index as u8).wrapping_mul(13); DATA_SHRED_PAYLOAD_SIZE];
+        let shred = crate::shred_verifier::make_signed_data_shred(
+            secret_key,
+            slot,
+            index,
+            fec_set_index,
+            &payload,
+        );
+        NetworkShred { shred, source }
+    }
+
+    #[test]
+    fn valid_signed_shred_accepted_with_leader_lookup() {
+        use paradencer_crypto::ed25519_batch::generate_keypair;
+
+        let (secret, pubkey) = generate_keypair();
+        let lookup = Arc::new(FixedLeaderLookup { pubkey });
+
+        let mut stage = ShredNetworkStage::new();
+        stage.set_leader_lookup(lookup);
+
+        let ns = make_signed_network_shred(&secret, 100, 0, 0, ShredSource::Turbine);
+        let outcome = stage.insert_shred(ns);
+        assert_eq!(outcome, ShredInsertOutcome::Accepted);
+    }
+
+    #[test]
+    fn invalid_signed_shred_rejected_with_leader_lookup() {
+        use paradencer_crypto::ed25519_batch::generate_keypair;
+
+        let (_secret, pubkey) = generate_keypair();
+        let lookup = Arc::new(FixedLeaderLookup { pubkey });
+
+        let mut stage = ShredNetworkStage::new();
+        stage.set_leader_lookup(lookup);
+
+        // Use a shred with fake (non-zero) signature — not signed by the leader.
+        let ns = make_data_shred(100, 0, 0); // fake signature
+        let outcome = stage.insert_shred(ns);
+        assert_eq!(outcome, ShredInsertOutcome::InvalidSignature);
+
+        let snap = stage.stats().snapshot();
+        assert_eq!(snap.shreds_signature_invalid, 1);
+    }
+
+    #[test]
+    fn zero_signature_shred_rejected_with_leader_lookup() {
+        use paradencer_crypto::ed25519_batch::generate_keypair;
+
+        let (_, pubkey) = generate_keypair();
+        let lookup = Arc::new(FixedLeaderLookup { pubkey });
+
+        let mut stage = ShredNetworkStage::new();
+        stage.set_leader_lookup(lookup);
+
+        let shred = Shred::new(
+            ShredCommonHeader {
+                signature: [0u8; 64],
+                variant: SHRED_DATA_FLAG,
+                slot: 100,
+                index: 0,
+                version: 1,
+                fec_set_index: 0,
+            },
+            ShredVariant::LegacyData(DataShredHeader {
+                parent_offset: 1,
+                flags: 0,
+                size: 64,
+            }),
+            vec![0u8; 64],
+        );
+        let ns = NetworkShred {
+            shred,
+            source: ShredSource::Turbine,
+        };
+        let outcome = stage.insert_shred(ns);
+        assert_eq!(outcome, ShredInsertOutcome::InvalidSignature);
+    }
+
+    #[test]
+    fn local_shreds_skip_verification() {
+        use paradencer_crypto::ed25519_batch::generate_keypair;
+
+        let (_, pubkey) = generate_keypair();
+        let lookup = Arc::new(FixedLeaderLookup { pubkey });
+
+        let mut stage = ShredNetworkStage::new();
+        stage.set_leader_lookup(lookup);
+
+        // Local shred with fake signature should still be accepted.
+        let mut ns = make_data_shred(100, 0, 0);
+        ns.source = ShredSource::Local;
+        let outcome = stage.insert_shred(ns);
+        assert_eq!(outcome, ShredInsertOutcome::Accepted);
+
+        let snap = stage.stats().snapshot();
+        assert_eq!(snap.shreds_signature_invalid, 0);
+    }
+
+    #[test]
+    fn no_leader_lookup_skips_verification() {
+        // Without a leader lookup configured, all shreds pass (backward compat).
+        let mut stage = ShredNetworkStage::new();
+
+        let ns = make_data_shred(100, 0, 0); // fake signature
+        let outcome = stage.insert_shred(ns);
+        assert_eq!(outcome, ShredInsertOutcome::Accepted);
     }
 }

@@ -37,6 +37,7 @@ mod shred_assembler;
 mod shred_collector;
 mod shred_filter;
 mod shred_network;
+pub mod shred_verifier;
 mod stats;
 #[cfg(test)]
 mod testsuite;
@@ -101,6 +102,7 @@ pub use shred_network::{
     ShredNetworkService, ShredNetworkStage, ShredNetworkStats, ShredNetworkStatsSnapshot,
     ShredSource,
 };
+pub use shred_verifier::{LeaderLookup, ShredVerifyResult};
 pub use tile_pipeline::{
     PipelineConfig, ResolvTile, TransactionPipeline, ValidatorPipeline, ValidatorPipelineResult,
     VerifyTile,
