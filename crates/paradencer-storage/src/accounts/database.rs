@@ -31,6 +31,10 @@ pub struct AccountDatabase {
     durable_store: Option<Arc<dyn DurableStore>>,
     /// Tracks which pubkeys were modified at each slot (for incremental snapshots).
     dirty_set: Arc<RwLock<HashMap<u64, HashSet<Pubkey>>>>,
+    /// Per-transaction record index: maps transaction ID → set of pubkeys
+    /// modified in that transaction. Enables O(n_changed) publish/cancel
+    /// instead of scanning the entire record map.
+    txn_records: Arc<DashMap<TransactionId, HashSet<Pubkey>>>,
 }
 
 impl AccountDatabase {
@@ -43,6 +47,7 @@ impl AccountDatabase {
             owner_index: Arc::new(OwnerIndex::new()),
             durable_store: None,
             dirty_set: Arc::new(RwLock::new(HashMap::new())),
+            txn_records: Arc::new(DashMap::new()),
         }
     }
 
@@ -55,6 +60,7 @@ impl AccountDatabase {
             owner_index: Arc::new(OwnerIndex::new()),
             durable_store: None,
             dirty_set: Arc::new(RwLock::new(HashMap::new())),
+            txn_records: Arc::new(DashMap::new()),
         }
     }
 
@@ -73,6 +79,7 @@ impl AccountDatabase {
             owner_index: Arc::new(OwnerIndex::new()),
             durable_store: Some(store),
             dirty_set: Arc::new(RwLock::new(HashMap::new())),
+            txn_records: Arc::new(DashMap::new()),
         }
     }
 
@@ -222,6 +229,7 @@ impl AccountDatabase {
         let key = RecordKey::new(xid, pubkey);
         let record = AccountRecord::new(xid, pubkey, account, version);
         self.records.insert(key, record);
+        self.txn_records.entry(xid).or_default().insert(pubkey);
         Ok(())
     }
 
@@ -257,12 +265,13 @@ impl AccountDatabase {
         // Walk from oldest ancestor to newest (xid) so child overrides parent.
         let mut published_updates: HashMap<Pubkey, (Account, u64)> = HashMap::new();
         for &ancestor in chain.iter().rev() {
-            for entry in self.records.iter() {
-                if entry.key().xid == ancestor {
-                    let pubkey = entry.key().pubkey;
-                    let account = entry.value().account.clone();
-                    let version = self.versions.next();
-                    published_updates.insert(pubkey, (account, version));
+            if let Some(pubkeys) = self.txn_records.get(&ancestor) {
+                for pubkey in pubkeys.value() {
+                    let key = RecordKey::new(ancestor, *pubkey);
+                    if let Some(entry) = self.records.get(&key) {
+                        let version = self.versions.next();
+                        published_updates.insert(*pubkey, (entry.account.clone(), version));
+                    }
                 }
             }
         }
@@ -319,14 +328,20 @@ impl AccountDatabase {
             }
         }
 
-        // Remove all records from the published chain.
-        let chain_set: std::collections::HashSet<TransactionId> = chain.iter().copied().collect();
-        // Remove all records from competitors.
-        let competitor_set: std::collections::HashSet<TransactionId> =
-            competitors.iter().copied().collect();
-
-        self.records
-            .retain(|key, _| !chain_set.contains(&key.xid) && !competitor_set.contains(&key.xid));
+        // Remove records from published chain and competitors using targeted lookup.
+        // O(n_changed) instead of O(total_records).
+        let all_txns_to_remove: Vec<TransactionId> = chain
+            .iter()
+            .copied()
+            .chain(competitors.iter().copied())
+            .collect();
+        for txn_id in &all_txns_to_remove {
+            if let Some((_, pubkeys)) = self.txn_records.remove(txn_id) {
+                for pubkey in pubkeys {
+                    self.records.remove(&RecordKey::new(*txn_id, pubkey));
+                }
+            }
+        }
 
         // Clean up tree.
         for &c in &competitors {
@@ -349,11 +364,17 @@ impl AccountDatabase {
         let descendants = tree.descendants(xid);
 
         // Collect all xids to remove: xid + descendants.
-        let mut to_remove: std::collections::HashSet<TransactionId> =
-            descendants.into_iter().collect();
-        to_remove.insert(xid);
+        let mut to_remove: Vec<TransactionId> = descendants;
+        to_remove.push(xid);
 
-        self.records.retain(|key, _| !to_remove.contains(&key.xid));
+        // Targeted removal: O(n_changed) instead of scanning entire record map.
+        for txn_id in &to_remove {
+            if let Some((_, pubkeys)) = self.txn_records.remove(txn_id) {
+                for pubkey in pubkeys {
+                    self.records.remove(&RecordKey::new(*txn_id, pubkey));
+                }
+            }
+        }
 
         tree.remove(xid);
 
@@ -430,10 +451,10 @@ impl AccountDatabase {
     }
 
     pub fn count_transaction_records(&self, xid: TransactionId) -> usize {
-        self.records
-            .iter()
-            .filter(|entry| entry.key().xid == xid)
-            .count()
+        self.txn_records
+            .get(&xid)
+            .map(|entry| entry.value().len())
+            .unwrap_or(0)
     }
 
     pub fn get_all_published_accounts(&self) -> HashMap<Pubkey, Account> {
@@ -514,6 +535,7 @@ impl AccountDatabase {
         *self.fork_tree.write().unwrap() = ForkTree::new();
         self.owner_index.clear();
         self.dirty_set.write().unwrap().clear();
+        self.txn_records.clear();
     }
 
     /// Get the set of pubkeys modified at a specific slot.
@@ -764,6 +786,7 @@ impl Clone for AccountDatabase {
             owner_index: Arc::clone(&self.owner_index),
             durable_store: self.durable_store.clone(),
             dirty_set: Arc::clone(&self.dirty_set),
+            txn_records: Arc::clone(&self.txn_records),
         }
     }
 }
@@ -1433,5 +1456,148 @@ mod tests {
 
         db.clear_all_accounts();
         assert_eq!(db.dirty_account_count(), 0);
+    }
+
+    // ── per-transaction record index tests ───────────────────────────
+
+    #[test]
+    fn publish_only_touches_changed_records() {
+        let db = AccountDatabase::new();
+
+        // Pre-populate 100 published accounts.
+        for i in 0u8..100 {
+            let pk = Pubkey::from([i; 32]);
+            let acct = Account::new(i as u64 * 100, vec![], Pubkey::from([0xFF; 32]));
+            db.store_published_account(pk, acct);
+        }
+        assert_eq!(db.get_account_count(), 100);
+
+        // Create a fork that modifies only 3 accounts.
+        let xid = TransactionId::from_slot(1);
+        db.prepare_transaction(TransactionId::root(), xid).unwrap();
+
+        let pk_a = Pubkey::from([0x01; 32]);
+        let pk_b = Pubkey::from([0x02; 32]);
+        let pk_c = Pubkey::from([0x03; 32]);
+        db.write_account(
+            xid,
+            pk_a,
+            Account::new(9999, vec![], Pubkey::from([0xAA; 32])),
+        )
+        .unwrap();
+        db.write_account(
+            xid,
+            pk_b,
+            Account::new(8888, vec![], Pubkey::from([0xBB; 32])),
+        )
+        .unwrap();
+        db.write_account(
+            xid,
+            pk_c,
+            Account::new(7777, vec![], Pubkey::from([0xCC; 32])),
+        )
+        .unwrap();
+
+        assert_eq!(db.count_transaction_records(xid), 3);
+
+        // Publish — should update only the 3 changed accounts.
+        db.publish_transaction(xid).unwrap();
+
+        // Verify the 3 changed accounts are updated.
+        let a = db.get_published_account(&pk_a).unwrap();
+        assert_eq!(a.meta.lamports, 9999);
+        let b = db.get_published_account(&pk_b).unwrap();
+        assert_eq!(b.meta.lamports, 8888);
+        let c = db.get_published_account(&pk_c).unwrap();
+        assert_eq!(c.meta.lamports, 7777);
+
+        // Verify all other accounts are untouched.
+        for i in 4u8..100 {
+            let pk = Pubkey::from([i; 32]);
+            let acct = db.get_published_account(&pk).unwrap();
+            assert_eq!(acct.meta.lamports, i as u64 * 100);
+        }
+
+        // txn_records should be empty after publish.
+        assert_eq!(db.count_transaction_records(xid), 0);
+    }
+
+    #[test]
+    fn cancel_only_removes_changed_records() {
+        let db = AccountDatabase::new();
+
+        // Pre-populate 50 published accounts.
+        for i in 0u8..50 {
+            let pk = Pubkey::from([i; 32]);
+            let acct = Account::new(i as u64 * 10, vec![], Pubkey::from([0xFF; 32]));
+            db.store_published_account(pk, acct);
+        }
+
+        // Create a fork with 2 modified accounts.
+        let xid = TransactionId::from_slot(1);
+        db.prepare_transaction(TransactionId::root(), xid).unwrap();
+        let pk_x = Pubkey::from([0xA0; 32]);
+        let pk_y = Pubkey::from([0xB0; 32]);
+        db.write_account(
+            xid,
+            pk_x,
+            Account::new(111, vec![], Pubkey::from([0x01; 32])),
+        )
+        .unwrap();
+        db.write_account(
+            xid,
+            pk_y,
+            Account::new(222, vec![], Pubkey::from([0x02; 32])),
+        )
+        .unwrap();
+
+        // Total records: 50 published + 2 in-flight.
+        assert_eq!(db.count_records(), 52);
+
+        // Cancel the fork.
+        db.cancel_transaction(xid).unwrap();
+
+        // Only the 2 fork records should be removed.
+        assert_eq!(db.count_records(), 50);
+        assert_eq!(db.count_transaction_records(xid), 0);
+
+        // Published accounts are intact.
+        for i in 0u8..50 {
+            let pk = Pubkey::from([i; 32]);
+            assert!(db.get_published_account(&pk).is_some());
+        }
+    }
+
+    #[test]
+    fn publish_chain_with_overrides() {
+        let db = AccountDatabase::new();
+        let pk = Pubkey::from([0x42; 32]);
+
+        // Root → slot 1: write before creating child.
+        let xid1 = TransactionId::from_slot(1);
+        db.prepare_transaction(TransactionId::root(), xid1).unwrap();
+        db.write_account(
+            xid1,
+            pk,
+            Account::new(100, vec![], Pubkey::from([0x01; 32])),
+        )
+        .unwrap();
+
+        // slot 1 → slot 2: child overrides the same account.
+        let xid2 = TransactionId::from_slot(2);
+        db.prepare_transaction(xid1, xid2).unwrap();
+        db.write_account(
+            xid2,
+            pk,
+            Account::new(200, vec![], Pubkey::from([0x02; 32])),
+        )
+        .unwrap();
+
+        // Publishing xid2 linearizes xid1→xid2; child (xid2) wins.
+        db.publish_transaction(xid2).unwrap();
+
+        let acct = db.get_published_account(&pk).unwrap();
+        assert_eq!(acct.meta.lamports, 200);
+        assert_eq!(acct.meta.owner, Pubkey::from([0x02; 32]));
     }
 }

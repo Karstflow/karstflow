@@ -25,7 +25,7 @@ crc32fast = "1.4"
 
 [dev-dependencies]
 criterion = "0.5"
-tempfile = "3.8"
+tempfile.workspace = true
 
 [[bench]]
 name = "snapshot_bench"
