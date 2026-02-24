@@ -35,6 +35,10 @@ pub struct AccountDatabase {
     /// modified in that transaction. Enables O(n_changed) publish/cancel
     /// instead of scanning the entire record map.
     txn_records: Arc<DashMap<TransactionId, HashSet<Pubkey>>>,
+    /// Cached ancestor chains per transaction. Avoids repeated fork tree lock
+    /// acquisitions when reading accounts from the same fork. Invalidated
+    /// whenever the fork tree structure changes (prepare/publish/cancel).
+    ancestor_cache: Arc<DashMap<TransactionId, Vec<TransactionId>>>,
 }
 
 impl AccountDatabase {
@@ -48,6 +52,7 @@ impl AccountDatabase {
             durable_store: None,
             dirty_set: Arc::new(RwLock::new(HashMap::new())),
             txn_records: Arc::new(DashMap::new()),
+            ancestor_cache: Arc::new(DashMap::new()),
         }
     }
 
@@ -61,6 +66,7 @@ impl AccountDatabase {
             durable_store: None,
             dirty_set: Arc::new(RwLock::new(HashMap::new())),
             txn_records: Arc::new(DashMap::new()),
+            ancestor_cache: Arc::new(DashMap::new()),
         }
     }
 
@@ -80,6 +86,7 @@ impl AccountDatabase {
             durable_store: Some(store),
             dirty_set: Arc::new(RwLock::new(HashMap::new())),
             txn_records: Arc::new(DashMap::new()),
+            ancestor_cache: Arc::new(DashMap::new()),
         }
     }
 
@@ -133,7 +140,11 @@ impl AccountDatabase {
         tree.prepare(parent, child)
             .map_err(|e| StorageError::AccountDatabaseError {
                 details: e.to_string(),
-            })
+            })?;
+        drop(tree);
+        // Invalidate ancestor cache — tree structure changed.
+        self.ancestor_cache.clear();
+        Ok(())
     }
 
     /// Read an account, walking the ancestor chain.
@@ -170,9 +181,16 @@ impl AccountDatabase {
         }
 
         // Walk ancestor chain: check xid, then parent, grandparent, etc.
-        let tree = self.fork_tree.read().unwrap();
-        let ancestors = tree.ancestors(xid);
-        drop(tree);
+        // Use cached chain when available to avoid fork tree lock acquisition.
+        let ancestors = if let Some(cached) = self.ancestor_cache.get(&xid) {
+            cached.clone()
+        } else {
+            let tree = self.fork_tree.read().unwrap();
+            let chain = tree.ancestors(xid);
+            drop(tree);
+            self.ancestor_cache.insert(xid, chain.clone());
+            chain
+        };
 
         for ancestor in &ancestors {
             let key = RecordKey::new(*ancestor, *pubkey);
@@ -348,6 +366,10 @@ impl AccountDatabase {
             tree.remove(c);
         }
         tree.remove_chain(&chain);
+        drop(tree);
+
+        // Invalidate ancestor cache — tree structure changed.
+        self.ancestor_cache.clear();
 
         Ok(())
     }
@@ -377,6 +399,10 @@ impl AccountDatabase {
         }
 
         tree.remove(xid);
+        drop(tree);
+
+        // Invalidate ancestor cache — tree structure changed.
+        self.ancestor_cache.clear();
 
         Ok(())
     }
@@ -536,6 +562,7 @@ impl AccountDatabase {
         self.owner_index.clear();
         self.dirty_set.write().unwrap().clear();
         self.txn_records.clear();
+        self.ancestor_cache.clear();
     }
 
     /// Get the set of pubkeys modified at a specific slot.
@@ -787,6 +814,7 @@ impl Clone for AccountDatabase {
             durable_store: self.durable_store.clone(),
             dirty_set: Arc::clone(&self.dirty_set),
             txn_records: Arc::clone(&self.txn_records),
+            ancestor_cache: Arc::clone(&self.ancestor_cache),
         }
     }
 }
@@ -1599,5 +1627,38 @@ mod tests {
         let acct = db.get_published_account(&pk).unwrap();
         assert_eq!(acct.meta.lamports, 200);
         assert_eq!(acct.meta.owner, Pubkey::from([0x02; 32]));
+    }
+
+    #[test]
+    fn ancestor_cache_avoids_repeated_fork_tree_lock() {
+        let db = AccountDatabase::new();
+        let pk = Pubkey::from([0x55; 32]);
+
+        // Build chain: root → xid1 → xid2.
+        let xid1 = TransactionId::from_slot(1);
+        let xid2 = TransactionId::from_slot(2);
+        db.prepare_transaction(TransactionId::root(), xid1).unwrap();
+        db.write_account(
+            xid1,
+            pk,
+            Account::new(100, vec![], Pubkey::from([0x01; 32])),
+        )
+        .unwrap();
+        db.prepare_transaction(xid1, xid2).unwrap();
+
+        // First read populates ancestor cache.
+        let result = db.read_account(xid2, &pk).unwrap();
+        assert_eq!(result.unwrap().meta.lamports, 100);
+
+        // Verify cache is populated.
+        assert!(db.ancestor_cache.get(&xid2).is_some());
+
+        // Second read uses cache (no fork tree lock needed).
+        let result2 = db.read_account(xid2, &pk).unwrap();
+        assert_eq!(result2.unwrap().meta.lamports, 100);
+
+        // Publishing invalidates cache.
+        db.publish_transaction(xid2).unwrap();
+        assert!(db.ancestor_cache.is_empty());
     }
 }
