@@ -62,4 +62,6 @@ pub enum ControlPlaneError {
     MainnetReadinessFailed { reasons: String },
     #[error("gossip service failed to start: {detail}")]
     GossipServiceStartFailed { detail: String },
+    #[error("bootstrap failed: {message}")]
+    Bootstrap { message: String },
 }

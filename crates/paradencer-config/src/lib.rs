@@ -71,6 +71,9 @@ pub struct NodeConfig {
     pub storage_runtime_policy: StorageRuntimePolicy,
     pub mainnet_readiness_policy: MainnetReadinessPolicy,
     pub network_config: NetworkConfig,
+    /// Base directory for persistent storage (accounts, blockstore, snapshots).
+    /// When `None`, the node runs in-memory only (no persistence across restarts).
+    pub data_dir: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone)]
@@ -143,6 +146,7 @@ impl NodeConfig {
         let live_entrypoints =
             parse_live_entrypoints(std::env::var("PARADENCER_LIVE_ENTRYPOINTS").ok())?;
         let gossip_bind_addr = parse_gossip_bind_addr_from_env()?;
+        let data_dir = std::env::var("PARADENCER_DATA_DIR").ok().map(PathBuf::from);
 
         Ok(Self {
             cluster_mode,
@@ -164,6 +168,7 @@ impl NodeConfig {
             storage_runtime_policy: build_storage_runtime_policy(profile)?,
             mainnet_readiness_policy: build_mainnet_readiness_policy(profile)?,
             network_config: build_network_config(profile.and_then(|p| p.network.as_ref())),
+            data_dir,
         })
     }
 

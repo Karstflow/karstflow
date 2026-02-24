@@ -28,7 +28,7 @@ use paradencer_stages::{
     PipelineServiceConfig, RawTransaction, ReplayService, ReplayServiceConfig, ShredCollector,
     ShredCollectorConfig,
 };
-use paradencer_storage::{AccountDatabase, Pubkey};
+use paradencer_storage::{AccountDatabase, Pubkey, StorageEngine};
 use paradencer_topology::{materialize_services, MaterializedTopology};
 use std::collections::HashSet;
 use std::path::Path;
@@ -97,6 +97,8 @@ pub struct ConsensusBundle {
     pub vote_processor: Arc<Mutex<VoteProcessor>>,
     pub tower: Arc<RwLock<Tower>>,
     pub commitment_tracker: Arc<Mutex<CommitmentTracker>>,
+    /// Persistent storage engine. `None` when running in-memory only.
+    pub storage_engine: Option<Arc<StorageEngine>>,
 }
 
 /// Result of building the replay service.
@@ -114,8 +116,32 @@ pub struct ReplayBundle {
 /// Creates all shared consensus components (BankForks, ForkChoice, Tower,
 /// VoteProcessor, CommitmentTracker) initialized from a genesis bank.
 /// The initial stake is used for fork choice weight calculations.
-pub fn build_consensus_infrastructure(initial_stake: u64) -> ConsensusBundle {
-    let accounts = Arc::new(AccountDatabase::new());
+///
+/// When `data_dir` is provided, accounts are backed by persistent storage
+/// and recovered from disk on startup. Otherwise runs in-memory only.
+pub fn build_consensus_infrastructure(
+    initial_stake: u64,
+    data_dir: Option<&Path>,
+) -> Result<ConsensusBundle> {
+    let (accounts, storage_engine) = if let Some(dir) = data_dir {
+        let engine = StorageEngine::open(dir).map_err(|e| ControlPlaneError::Bootstrap {
+            message: format!("failed to open storage engine at {}: {e}", dir.display()),
+        })?;
+        let db = engine.create_account_database();
+        let stats = engine
+            .recover(&db)
+            .map_err(|e| ControlPlaneError::Bootstrap {
+                message: format!("account recovery failed: {e}"),
+            })?;
+        eprintln!(
+            "storage: recovered {} accounts ({} total lamports) from persistent storage",
+            stats.accounts.accounts_loaded, stats.accounts.total_lamports,
+        );
+        (Arc::new(db), Some(Arc::new(engine)))
+    } else {
+        (Arc::new(AccountDatabase::new()), None)
+    };
+
     let epoch_schedule = Arc::new(EpochSchedule::default());
     let validator = Pubkey::new_unique();
     let validators = vec![(validator, initial_stake)];
@@ -131,14 +157,15 @@ pub fn build_consensus_infrastructure(initial_stake: u64) -> ConsensusBundle {
     let tower = Arc::new(RwLock::new(Tower::new()));
     let commitment_tracker = Arc::new(Mutex::new(CommitmentTracker::default()));
 
-    ConsensusBundle {
+    Ok(ConsensusBundle {
         bank_forks,
         fork_choice,
         execution_bridge,
         vote_processor,
         tower,
         commitment_tracker,
-    }
+        storage_engine,
+    })
 }
 
 /// Build the replay service for processing assembled blocks through consensus.
@@ -147,7 +174,8 @@ pub fn build_consensus_infrastructure(initial_stake: u64) -> ConsensusBundle {
 /// and returns the shared consensus infrastructure so other services
 /// (e.g., pipeline, gossip) can interact with consensus state.
 pub fn build_replay_service(config: ReplayServiceConfig, initial_stake: u64) -> ReplayBundle {
-    let consensus = build_consensus_infrastructure(initial_stake);
+    let consensus = build_consensus_infrastructure(initial_stake, None)
+        .expect("in-memory consensus infrastructure should not fail");
 
     let channel_depth = config.max_blocks_per_tick.saturating_mul(8).max(64);
     let (block_tx, block_rx) = bounded_link::<paradencer_stages::AssembledBlock>(channel_depth);
@@ -181,7 +209,8 @@ pub fn build_replay_service_with_block_input(
     block_input: InPort<paradencer_stages::AssembledBlock>,
     initial_stake: u64,
 ) -> ReplayBundleWithExternalInput {
-    let consensus = build_consensus_infrastructure(initial_stake);
+    let consensus = build_consensus_infrastructure(initial_stake, None)
+        .expect("in-memory consensus infrastructure should not fail");
 
     let service = ReplayService::with_block_input(
         config,
@@ -1434,7 +1463,18 @@ mod tests {
 
     #[test]
     fn build_consensus_infrastructure_creates_all_components() {
-        let consensus = build_consensus_infrastructure(1_000_000);
+        let consensus = build_consensus_infrastructure(1_000_000, None).unwrap();
+        let forks = consensus.bank_forks.read().unwrap();
+        assert_eq!(forks.root_slot(), 0);
+        assert!(consensus.storage_engine.is_none());
+    }
+
+    #[test]
+    fn build_consensus_with_storage_engine() {
+        let dir = tempfile::tempdir().expect("tmpdir");
+        let consensus = build_consensus_infrastructure(1_000_000, Some(dir.path())).unwrap();
+        assert!(consensus.storage_engine.is_some());
+
         let forks = consensus.bank_forks.read().unwrap();
         assert_eq!(forks.root_slot(), 0);
     }
