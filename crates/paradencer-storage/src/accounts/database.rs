@@ -613,19 +613,14 @@ impl AccountDatabase {
         Some((min, max))
     }
 
+    /// Number of published accounts (O(1) via atomic counter).
     pub fn get_account_count(&self) -> usize {
-        self.records
-            .iter()
-            .filter(|entry| entry.key().xid.is_root())
-            .count()
+        self.owner_index.total_accounts() as usize
     }
 
+    /// Sum of lamports across all published accounts (O(1) via atomic counter).
     pub fn get_total_lamports(&self) -> u64 {
-        self.records
-            .iter()
-            .filter(|entry| entry.key().xid.is_root())
-            .map(|entry| entry.value().account.meta.lamports)
-            .sum()
+        self.owner_index.total_lamports()
     }
 
     // -----------------------------------------------------------------------
