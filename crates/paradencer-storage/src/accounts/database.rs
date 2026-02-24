@@ -11,6 +11,7 @@ use paradencer_constants::durable_store::ACCOUNTS_HASH_FANOUT;
 use parking_lot::Mutex;
 use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
 
 /// Account database with fork-aware transaction tree.
@@ -46,6 +47,9 @@ pub struct AccountDatabase {
     /// acquisitions when reading accounts from the same fork. Invalidated
     /// whenever the fork tree structure changes (prepare/publish/cancel).
     ancestor_cache: Arc<DashMap<TransactionId, Vec<TransactionId>>>,
+    /// Current root slot (updated on root advancement).
+    /// Used for durability checkpoints and diagnostics.
+    root_slot: Arc<AtomicU64>,
 }
 
 impl AccountDatabase {
@@ -59,6 +63,7 @@ impl AccountDatabase {
             dirty_set: Arc::new(RwLock::new(HashMap::new())),
             txn_records: Arc::new(DashMap::new()),
             ancestor_cache: Arc::new(DashMap::new()),
+            root_slot: Arc::new(AtomicU64::new(0)),
         }
     }
 
@@ -72,6 +77,7 @@ impl AccountDatabase {
             dirty_set: Arc::new(RwLock::new(HashMap::new())),
             txn_records: Arc::new(DashMap::new()),
             ancestor_cache: Arc::new(DashMap::new()),
+            root_slot: Arc::new(AtomicU64::new(0)),
         }
     }
 
@@ -91,6 +97,7 @@ impl AccountDatabase {
             dirty_set: Arc::new(RwLock::new(HashMap::new())),
             txn_records: Arc::new(DashMap::new()),
             ancestor_cache: Arc::new(DashMap::new()),
+            root_slot: Arc::new(AtomicU64::new(0)),
         }
     }
 
@@ -593,6 +600,34 @@ impl AccountDatabase {
         self.published.lock().has_durable_store()
     }
 
+    /// Notify the database that the consensus root has advanced.
+    ///
+    /// Records the new root slot and flushes the durable store to ensure
+    /// all account data written up to this point is fully consistent on
+    /// disk. Individual `write_batch` calls already fsync data, but this
+    /// explicit flush at root boundaries ensures file metadata (sizes,
+    /// directory entries) is also durable — defense-in-depth for crash
+    /// recovery.
+    ///
+    /// Returns the previous root slot.
+    pub fn notify_root_advanced(&self, new_root: u64) -> Result<u64, StorageError> {
+        let prev = self.root_slot.swap(new_root, Ordering::Release);
+        self.published.lock().flush()?;
+        Ok(prev)
+    }
+
+    /// Flush the durable store backing published accounts.
+    ///
+    /// No-op if no durable store is configured.
+    pub fn flush_durable(&self) -> Result<(), StorageError> {
+        self.published.lock().flush()
+    }
+
+    /// Current root slot as last reported via `notify_root_advanced`.
+    pub fn root_slot(&self) -> u64 {
+        self.root_slot.load(Ordering::Acquire)
+    }
+
     /// Insert an account from recovery (disk) without re-persisting to disk.
     ///
     /// Used during startup recovery to load accounts from the durable store
@@ -774,6 +809,7 @@ impl Clone for AccountDatabase {
             dirty_set: Arc::clone(&self.dirty_set),
             txn_records: Arc::clone(&self.txn_records),
             ancestor_cache: Arc::clone(&self.ancestor_cache),
+            root_slot: Arc::clone(&self.root_slot),
         }
     }
 }
@@ -1653,5 +1689,68 @@ mod tests {
         let db = AccountDatabase::new();
         let expected = [0u8; 32]; // Empty hash.
         assert!(db.verify_accounts_hash(&expected).is_ok());
+    }
+
+    // ── root advancement tests ──────────────────────────────────────
+
+    #[test]
+    fn root_slot_starts_at_zero() {
+        let db = AccountDatabase::new();
+        assert_eq!(db.root_slot(), 0);
+    }
+
+    #[test]
+    fn notify_root_advanced_updates_root_slot() {
+        let db = AccountDatabase::new();
+        let prev = db.notify_root_advanced(100).unwrap();
+        assert_eq!(prev, 0);
+        assert_eq!(db.root_slot(), 100);
+
+        let prev = db.notify_root_advanced(200).unwrap();
+        assert_eq!(prev, 100);
+        assert_eq!(db.root_slot(), 200);
+    }
+
+    #[test]
+    fn notify_root_advanced_with_durable_store() {
+        let store = test_store();
+        let db = AccountDatabase::with_durable_store(store);
+
+        let pk = Pubkey::from([0xCC; 32]);
+        let acct = Account::new(1000, vec![0xDD; 16], Pubkey::from([0xEE; 32]));
+        db.store_published_account_at_slot(pk, acct, 50);
+
+        // Root advancement should flush without error.
+        let prev = db.notify_root_advanced(50).unwrap();
+        assert_eq!(prev, 0);
+        assert_eq!(db.root_slot(), 50);
+    }
+
+    #[test]
+    fn flush_durable_no_store() {
+        let db = AccountDatabase::new();
+        // No-op flush should succeed.
+        assert!(db.flush_durable().is_ok());
+    }
+
+    #[test]
+    fn flush_durable_with_store() {
+        let store = test_store();
+        let db = AccountDatabase::with_durable_store(store);
+
+        let pk = Pubkey::from([0x11; 32]);
+        let acct = Account::new(500, vec![], Pubkey::from([0x22; 32]));
+        db.store_published_account(pk, acct);
+
+        assert!(db.flush_durable().is_ok());
+    }
+
+    #[test]
+    fn cloned_db_shares_root_slot() {
+        let db = AccountDatabase::new();
+        let db2 = db.clone();
+
+        db.notify_root_advanced(42).unwrap();
+        assert_eq!(db2.root_slot(), 42);
     }
 }

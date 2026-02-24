@@ -166,6 +166,21 @@ impl PublishedStore {
         self.insert_into_cache(pubkey, account);
     }
 
+    /// Flush the underlying durable store to disk.
+    ///
+    /// Ensures all file metadata (sizes, directory entries) is consistent
+    /// on disk. Individual write_batch calls already fsync data, but this
+    /// additional flush guarantees full durability at checkpoint boundaries
+    /// such as root advancement.
+    ///
+    /// No-op when no durable store is configured.
+    pub fn flush(&self) -> Result<(), StorageError> {
+        if let Some(ref store) = self.store {
+            store.flush()?;
+        }
+        Ok(())
+    }
+
     /// Remove a published account from cache and disk.
     #[allow(dead_code)]
     pub fn remove(&mut self, pubkey: &Pubkey) {

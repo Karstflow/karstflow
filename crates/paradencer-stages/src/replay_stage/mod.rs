@@ -320,6 +320,22 @@ impl ReplayStage {
                                         .unwrap()
                                         .update_root(new_root);
 
+                                    // Flush account storage at root boundary for
+                                    // crash-consistent durability checkpoint.
+                                    let bank_forks_r =
+                                        self.bank_transition.bank_forks.read().unwrap();
+                                    if let Some(root_bank) = bank_forks_r.root_bank() {
+                                        if let Err(e) =
+                                            root_bank.accounts().notify_root_advanced(new_root)
+                                        {
+                                            eprintln!(
+                                                "Storage flush at root {} failed: {:?}",
+                                                new_root, e
+                                            );
+                                        }
+                                    }
+                                    drop(bank_forks_r);
+
                                     self.stats.lock().unwrap().record_root_progression();
                                     println!("Root progressed to slot {}", new_root);
                                 }
