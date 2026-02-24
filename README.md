@@ -4,7 +4,7 @@
 
 Paradencer is a ground-up Solana validator built for maximum throughput and minimal latency. It features a custom network stack, pre-allocated data structures, zero-copy I/O patterns, and a modular tile-based architecture designed for predictable performance at scale.
 
-**188K+ lines of Rust | 3,660+ tests | 19 crates**
+**197K+ lines of Rust | 3,855+ tests | 19 crates**
 
 ## Design Principles
 
@@ -40,27 +40,27 @@ paradencer-types          (core types: Pubkey, Account, Hash, Shred)
 
 ### Crate Overview
 
-| Crate | Tests | Purpose |
-|-------|-------|---------|
-| `paradencer-consensus` | 734 | Tower BFT, GHOST fork choice, leader schedule, epoch processing, Bank lifecycle, multi-threshold confirmation |
-| `paradencer-net` | 602 | Custom QUIC engine, TLS 1.3, gossip with 14-type CRDS, turbine broadcast, repair, XDP |
-| `paradencer-sbpf` | 596 | sBPF interpreter, 14 builtin programs, ELF loader, CPI, syscalls, transaction processor |
-| `paradencer-storage` | 450 | MVCC account database, blockstore, full snapshot pipeline, persistent storage, compaction |
-| `paradencer-stages` | 436 | Replay with fork tracking, block production, PoH state machine, pack scheduler, shred pipeline |
-| `paradencer-rpc` | 374 | 60+ JSON-RPC methods, 9 WebSocket subscription types, transaction simulation |
-| `paradencer-crypto` | 145 | Ed25519 batch verification, Blake3/SHA-256/Keccak, secp256k1/r1, BN254, Reed-Solomon FEC, LtHash |
-| `paradencer-config` | 87 | TOML configuration with env override, live-mode preflight checks |
-| `paradencer-execution` | 72 | SVM backend adapter, batch execution orchestration, retry policies |
-| `paradencer-mesh` | 57 | Typed bounded channels for inter-tile communication |
-| `paradencer-types` | 52 | Core types: Account, Pubkey, Hash, Transaction, Shred, compact-u16 codec |
-| `paradencer-control` | 44 | Control plane: startup checks, preflight validation, diagnostics |
-| `paradencer-runtime` | 14 | Execution substrate: tokio/pinned modes, CPU affinity, lifecycle |
-| `paradencer-topology` | 10 | Service topology planning and materialization |
-| `paradencer-core` | 2 | Shared vocabulary types |
-| `paradencer-constants` | -- | Protocol constants: fees, timing, compute limits, program parameters |
-| `paradencer-ids` | -- | Well-known program and sysvar addresses |
-| `paradencer-observability` | -- | Metrics HTTP endpoint |
-| `paradencer-node` | -- | Binary entry point |
+| Crate | LOC | Tests | Purpose |
+|-------|-----|-------|---------|
+| `paradencer-sbpf` | 35,646 | 600 | sBPF interpreter (126 opcodes), 12 builtin programs, ELF loader, CPI, 40+ syscalls, program cache |
+| `paradencer-net` | 34,754 | 721 | Custom QUIC engine, TLS 1.3, gossip with 14-type CRDS, turbine broadcast, repair, AF_XDP |
+| `paradencer-consensus` | 33,156 | 763 | Tower BFT, GHOST fork choice, leader schedule, epoch processing, Bank lifecycle, multi-threshold confirmation |
+| `paradencer-stages` | 26,034 | 454 | Replay with fork tracking, block production, PoH state machine, pack scheduler, shred pipeline |
+| `paradencer-storage` | 23,896 | 496 | Disk-primary account database, blockstore, full+incremental snapshots, persistent backend, LZ4 compression |
+| `paradencer-rpc` | 13,912 | 330 | 60+ JSON-RPC methods, 9 WebSocket subscription types, transaction simulation |
+| `paradencer-config` | 5,820 | 87 | TOML configuration with env override, live-mode preflight checks, schema migration |
+| `paradencer-crypto` | 5,003 | 141 | Ed25519 batch verification, Blake3/SHA-256/Keccak, secp256k1/r1, BN254, Reed-Solomon FEC, LtHash |
+| `paradencer-execution` | 4,849 | 72 | SVM backend adapter, batch execution orchestration, retry policies |
+| `paradencer-control` | 3,111 | 48 | Control plane: bootstrap, preflight validation, diagnostics |
+| `paradencer-types` | 3,082 | 60 | Core types: Account, Pubkey, Hash, Transaction, Shred, compact-u16 codec |
+| `paradencer-mesh` | 2,805 | 57 | Typed bounded channels for inter-tile communication |
+| `paradencer-constants` | 2,535 | -- | Protocol constants: fees, timing, compute limits, program parameters (22 modules) |
+| `paradencer-topology` | 976 | 10 | Service topology planning and materialization |
+| `paradencer-runtime` | 728 | 14 | Execution substrate: tokio/pinned modes, CPU affinity, lifecycle |
+| `paradencer-node` | 243 | -- | Validator orchestration and entry point |
+| `paradencer-core` | 211 | 2 | Shared vocabulary types |
+| `paradencer-ids` | 199 | -- | Well-known program and sysvar addresses |
+| `paradencer-observability` | 58 | -- | Metrics HTTP endpoint |
 
 ## Key Features
 
@@ -82,12 +82,15 @@ paradencer-types          (core types: Pubkey, Account, Hash, Shred)
 
 ### Storage
 
-- **MVCC account database**: Fork-aware with DashMap, copy-on-write ancestor chains
-- **Persistent backend**: Column-family key-value store with WAL, compaction, CRC32 checksums
+- **Disk-primary account database**: Fork-aware MVCC with bounded LRU cache, copy-on-write ancestor chains, O(1) owner index
+- **Custom file-backed store**: Column-family key-value store with WAL, CRC32 checksums, auto-compaction, mmap reads
+- **LZ4 account compression**: Transparent compression for persisted accounts (backward-compatible, configurable threshold)
+- **Parallel recovery**: Rayon-based parallel account loading with automatic serial/parallel mode selection
 - **Full snapshot pipeline**: Create, load, and restore from Solana-compatible tar.zst archives
 - **Incremental snapshots**: Dirty-set tracking for efficient delta snapshots
-- **Blockstore**: Shred windowing with FEC reconstruction and slot metadata
+- **Blockstore**: Shred windowing with FEC reconstruction, slot metadata, persistent backend
 - **Genesis bootstrap**: Full initialization from snapshot (stakes, sysvars, features, history, transaction cache)
+- **Background maintenance**: Periodic auto-compaction, flush, blockstore cleanup via poll-driven service
 
 ### Network
 
@@ -165,7 +168,7 @@ Environment variables override TOML values. Live mode includes preflight safety 
 
 ```
 paradencer/
-+-- crates/                        # 20 Rust crates
++-- crates/                        # 19 Rust crates
 |   +-- paradencer-consensus/      # Consensus (Tower BFT, Bank, Economics)
 |   +-- paradencer-crypto/         # Cryptography (Ed25519, FEC, Hashing)
 |   +-- paradencer-sbpf/           # sBPF VM + Builtin programs

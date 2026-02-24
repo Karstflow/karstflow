@@ -222,8 +222,9 @@ impl SnapshotCreator {
         output_dir: &Path,
     ) -> Result<SnapshotManifest, StorageError> {
         let accounts = self.collect_all_accounts(db)?;
+        let accounts_hash = db.compute_accounts_hash().0;
         let snapshot_data = self.serialize_accounts(accounts, slot)?;
-        self.write_snapshot(snapshot_data, None, output_dir)
+        self.write_snapshot(snapshot_data, None, output_dir, accounts_hash)
     }
 
     pub fn create_incremental_snapshot(
@@ -235,9 +236,11 @@ impl SnapshotCreator {
         output_dir: &Path,
     ) -> Result<SnapshotManifest, StorageError> {
         let current_accounts = self.collect_all_accounts(db)?;
+        // Accounts hash covers the full state at this slot.
+        let accounts_hash = db.compute_accounts_hash().0;
         let delta_accounts = self.compute_delta(current_accounts, base_accounts);
         let snapshot_data = self.serialize_accounts(delta_accounts, slot)?;
-        self.write_snapshot(snapshot_data, Some(base_slot), output_dir)
+        self.write_snapshot(snapshot_data, Some(base_slot), output_dir, accounts_hash)
     }
 
     /// Create an incremental snapshot using the dirty-set tracker.
@@ -267,9 +270,12 @@ impl SnapshotCreator {
             // A full snapshot will capture the correct final state.
         }
 
+        // Accounts hash covers the full state at this slot.
+        let accounts_hash = db.compute_accounts_hash().0;
         let accounts_included = delta_accounts.len();
         let snapshot_data = self.serialize_accounts(delta_accounts, slot)?;
-        let manifest = self.write_snapshot(snapshot_data, Some(base_slot), output_dir)?;
+        let manifest =
+            self.write_snapshot(snapshot_data, Some(base_slot), output_dir, accounts_hash)?;
 
         let stats = IncrementalStats {
             dirty_pubkeys_tracked: dirty_count,
@@ -300,7 +306,15 @@ impl SnapshotCreator {
         output_dir: &Path,
         max_accounts_per_vec: usize,
     ) -> Result<SolanaArchiveStats, StorageError> {
-        self.create_solana_archive_with_state(db, slot, output_dir, max_accounts_per_vec, None)
+        let accounts_hash = db.compute_accounts_hash().0;
+        self.create_solana_archive_inner(
+            db,
+            slot,
+            output_dir,
+            max_accounts_per_vec,
+            None,
+            accounts_hash,
+        )
     }
 
     /// Create a Solana-compatible snapshot archive with an explicit bank state manifest.
@@ -313,6 +327,26 @@ impl SnapshotCreator {
         max_accounts_per_vec: usize,
         bank_state: Option<&SnapshotBankState>,
     ) -> Result<SolanaArchiveStats, StorageError> {
+        let accounts_hash = db.compute_accounts_hash().0;
+        self.create_solana_archive_inner(
+            db,
+            slot,
+            output_dir,
+            max_accounts_per_vec,
+            bank_state,
+            accounts_hash,
+        )
+    }
+
+    fn create_solana_archive_inner(
+        &self,
+        db: &AccountDatabase,
+        slot: u64,
+        output_dir: &Path,
+        max_accounts_per_vec: usize,
+        bank_state: Option<&SnapshotBankState>,
+        accounts_hash: [u8; 32],
+    ) -> Result<SolanaArchiveStats, StorageError> {
         let accounts = self.collect_all_accounts(db)?;
         self.build_solana_archive(
             accounts,
@@ -321,6 +355,7 @@ impl SnapshotCreator {
             output_dir,
             max_accounts_per_vec,
             bank_state,
+            accounts_hash,
         )
     }
 
@@ -349,6 +384,8 @@ impl SnapshotCreator {
             }
         }
 
+        // Accounts hash covers the full state at this slot.
+        let accounts_hash = db.compute_accounts_hash().0;
         let accounts_included = delta_accounts.len();
         let archive_stats = self.build_solana_archive(
             delta_accounts,
@@ -357,6 +394,7 @@ impl SnapshotCreator {
             output_dir,
             max_accounts_per_vec,
             bank_state,
+            accounts_hash,
         )?;
 
         let incr_stats = IncrementalStats {
@@ -373,6 +411,7 @@ impl SnapshotCreator {
     ///
     /// Used by both full and incremental archive creation. When `base_slot` is
     /// `Some`, the filename includes both snapshot and base slot.
+    #[allow(clippy::too_many_arguments)]
     fn build_solana_archive(
         &self,
         accounts: HashMap<Pubkey, Account>,
@@ -381,6 +420,7 @@ impl SnapshotCreator {
         output_dir: &Path,
         max_accounts_per_vec: usize,
         bank_state: Option<&SnapshotBankState>,
+        accounts_hash: [u8; 32],
     ) -> Result<SolanaArchiveStats, StorageError> {
         let total_accounts = accounts.len();
         let total_lamports: u64 = accounts.values().map(|a| a.meta.lamports).sum();
@@ -423,7 +463,7 @@ impl SnapshotCreator {
                         vec![(slot, storage_entries)]
                     },
                     slot,
-                    bank_hash: [0u8; 32],
+                    bank_hash: accounts_hash,
                     lamports_per_signature: state.fee_rate_governor.target_lamports_per_signature,
                 };
                 serialize_full_manifest(state, &layout)
@@ -533,6 +573,7 @@ impl SnapshotCreator {
         snapshot_data: SnapshotData,
         base_slot: Option<u64>,
         output_dir: &Path,
+        accounts_hash: [u8; 32],
     ) -> Result<SnapshotManifest, StorageError> {
         std::fs::create_dir_all(output_dir).map_err(|e| StorageError::AccountDatabaseError {
             details: format!("Failed to create snapshot directory: {}", e),
@@ -560,6 +601,7 @@ impl SnapshotCreator {
 
         let hash = SnapshotMetadata::compute_content_hash(&compressed);
         metadata.update_hash(hash);
+        metadata.update_accounts_hash(accounts_hash);
 
         let mut manifest = SnapshotManifest::new(metadata.clone());
 
@@ -1070,6 +1112,88 @@ mod tests {
         assert_eq!(incr.accounts_included, 0);
         assert_eq!(stats.total_accounts, 0);
         assert!(stats.archive_path.exists());
+    }
+
+    // ── accounts hash in snapshots ──────────────────────────────────
+
+    #[test]
+    fn full_snapshot_stores_accounts_hash() {
+        let db = AccountDatabase::new();
+        let config = SnapshotConfig::new();
+        let creator = SnapshotCreator::new(config);
+        let dir = tempfile::tempdir().unwrap();
+
+        let pk1 = Pubkey::new_unique();
+        let pk2 = Pubkey::new_unique();
+        db.store_published_account(pk1, Account::new(1_000, vec![1], Pubkey::zeroed()));
+        db.store_published_account(pk2, Account::new(2_000, vec![2], Pubkey::zeroed()));
+
+        let manifest = creator.create_full_snapshot(&db, 100, dir.path()).unwrap();
+
+        // Accounts hash should be non-zero.
+        assert_ne!(manifest.metadata.accounts_hash, [0u8; 32]);
+        assert!(manifest.metadata.has_accounts_hash());
+
+        // Should match directly computed hash.
+        let (expected_hash, _) = db.compute_accounts_hash();
+        assert_eq!(manifest.metadata.accounts_hash, expected_hash);
+    }
+
+    #[test]
+    fn incremental_from_dirty_set_stores_full_state_hash() {
+        let db = AccountDatabase::new();
+        let config = SnapshotConfig::new();
+        let creator = SnapshotCreator::new(config);
+        let dir = tempfile::tempdir().unwrap();
+
+        let pk1 = Pubkey::new_unique();
+        let pk2 = Pubkey::new_unique();
+        db.store_published_account_at_slot(pk1, Account::new(1_000, vec![], Pubkey::zeroed()), 10);
+        db.store_published_account_at_slot(pk2, Account::new(2_000, vec![], Pubkey::zeroed()), 11);
+
+        let (manifest, _stats) = creator
+            .create_incremental_from_dirty_set(&db, 11, 0, dir.path())
+            .unwrap();
+
+        // Incremental snapshots also store the full-state accounts hash.
+        let (expected_hash, _) = db.compute_accounts_hash();
+        assert_eq!(manifest.metadata.accounts_hash, expected_hash);
+        assert!(manifest.metadata.has_accounts_hash());
+    }
+
+    #[test]
+    fn snapshot_roundtrip_verifies_accounts_hash() {
+        use crate::snapshot::loader::SnapshotLoader;
+
+        let db = AccountDatabase::new();
+        let config = SnapshotConfig::new();
+        let creator = SnapshotCreator::new(config);
+        let dir = tempfile::tempdir().unwrap();
+
+        let pk1 = Pubkey::new_unique();
+        let pk2 = Pubkey::new_unique();
+        let owner = Pubkey::new([10u8; 32]);
+        db.store_published_account(pk1, Account::new(1_000, vec![1, 2], owner));
+        db.store_published_account(pk2, Account::new(2_000, vec![3], owner));
+
+        creator.create_full_snapshot(&db, 50, dir.path()).unwrap();
+
+        // Load into fresh DB — should compute and verify hash.
+        let db2 = AccountDatabase::new();
+        let loader = SnapshotLoader::new();
+        let result = loader
+            .load_snapshot(
+                &dir.path().join("full-50.snapshot"),
+                &dir.path().join("full-50.snapshot.manifest"),
+                &db2,
+            )
+            .unwrap();
+
+        // Hash should match the one computed from restored state.
+        assert_ne!(result.accounts_hash, [0u8; 32]);
+
+        let (recomputed, _) = db2.compute_accounts_hash();
+        assert_eq!(result.accounts_hash, recomputed);
     }
 
     #[test]

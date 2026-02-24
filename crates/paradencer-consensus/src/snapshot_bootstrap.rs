@@ -526,6 +526,7 @@ mod tests {
             validation_errors: 0,
             bank_state: Some(make_bank_state(slot)),
             status_cache: None,
+            expected_accounts_hash: [0u8; 32],
         }
     }
 

@@ -7,7 +7,8 @@ pub(crate) mod published_store;
 mod record;
 mod transaction;
 
-pub use database::AccountDatabase;
+#[allow(unused_imports)]
+pub use database::{AccountDatabase, AccountsHashMismatch};
 pub use primitives::{Account, AccountData, AccountMeta, Pubkey, PUBKEY_BYTES};
 pub use processor::{LoadedAccounts, TransactionProcessor};
 pub use record::{AccountRecord, RecordKey, TransactionId, VersionCounter, XID_BYTES};

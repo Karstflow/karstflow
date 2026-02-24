@@ -36,6 +36,9 @@ pub struct RestoreResult {
     pub bank_state: Option<SnapshotBankState>,
     /// Parsed status cache entries (if present).
     pub status_cache: Option<StatusCacheParseResult>,
+    /// Bank hash from the manifest (accounts hash expected value).
+    /// Zeroed if not present in the snapshot manifest.
+    pub expected_accounts_hash: [u8; 32],
 }
 
 /// Progress tracking for snapshot restoration.
@@ -210,6 +213,12 @@ impl SnapshotRestorer {
             }
         }
 
+        // Extract the bank hash (accounts hash) from the parsed manifest.
+        let expected_accounts_hash = bank_state
+            .as_ref()
+            .map(|state| state.hash)
+            .unwrap_or([0u8; 32]);
+
         let info = self.progress.current();
         Ok(RestoreResult {
             slot,
@@ -220,7 +229,36 @@ impl SnapshotRestorer {
             validation_errors: info.validation_errors,
             bank_state,
             status_cache,
+            expected_accounts_hash,
         })
+    }
+
+    /// Verify accounts hash after a restore completes.
+    ///
+    /// Computes the current accounts hash from the database and compares
+    /// against the expected hash from the snapshot. Returns `Ok` on match
+    /// or when the expected hash is zeroed (not available in the snapshot).
+    /// Returns `Err` on mismatch.
+    pub fn verify_restore(
+        &self,
+        db: &AccountDatabase,
+        result: &RestoreResult,
+    ) -> Result<[u8; 32], StorageError> {
+        let expected = &result.expected_accounts_hash;
+
+        // Skip verification if no hash was provided.
+        if *expected == [0u8; 32] {
+            let (computed, _) = db.compute_accounts_hash();
+            return Ok(computed);
+        }
+
+        db.verify_accounts_hash(expected)
+            .map_err(|mismatch| StorageError::AccountDatabaseError {
+                details: format!(
+                    "Snapshot accounts hash verification failed at slot {}: {}",
+                    result.slot, mismatch
+                ),
+            })
     }
 
     fn process_append_vec(
@@ -487,6 +525,27 @@ mod tests {
         assert_eq!(db.indexed_account_count(), 1);
         assert_eq!(db.indexed_total_lamports(), 100);
         assert_eq!(db.accounts_owned_by(&Pubkey::new([10u8; 32])), 1);
+    }
+
+    #[test]
+    fn verify_restore_with_zero_expected_hash_returns_computed() {
+        let av_data = make_append_vec_record([1u8; 32], 500, [2u8; 32], &[10, 20]);
+        let tar = make_tar(&[("version", b"1.2.0"), ("accounts/100.0", &av_data)]);
+
+        let db = AccountDatabase::new();
+        let restorer = SnapshotRestorer::new();
+        let result = restorer.restore_tar_bytes(&tar, &db).unwrap();
+
+        // expected_accounts_hash is zero (no manifest with bank hash).
+        assert_eq!(result.expected_accounts_hash, [0u8; 32]);
+
+        // verify_restore should succeed and return computed hash.
+        let computed = restorer.verify_restore(&db, &result).unwrap();
+        assert_ne!(computed, [0u8; 32]);
+
+        // Matches directly computed hash from DB.
+        let (direct, _) = db.compute_accounts_hash();
+        assert_eq!(computed, direct);
     }
 
     #[test]

@@ -686,6 +686,44 @@ impl AccountDatabase {
 
         (final_hash.finalize(), count)
     }
+
+    /// Verify that the current account state matches an expected hash.
+    ///
+    /// Computes the accounts hash over all published accounts and compares
+    /// against the expected hash. Returns `Ok(computed_hash)` on match,
+    /// `Err` with both hashes on mismatch.
+    pub fn verify_accounts_hash(
+        &self,
+        expected: &[u8; 32],
+    ) -> Result<[u8; 32], AccountsHashMismatch> {
+        let (computed, _count) = self.compute_accounts_hash();
+        if &computed == expected {
+            Ok(computed)
+        } else {
+            Err(AccountsHashMismatch {
+                expected: *expected,
+                computed,
+            })
+        }
+    }
+}
+
+/// Accounts hash verification mismatch details.
+#[derive(Debug, Clone)]
+pub struct AccountsHashMismatch {
+    pub expected: [u8; 32],
+    pub computed: [u8; 32],
+}
+
+impl std::fmt::Display for AccountsHashMismatch {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "accounts hash mismatch: expected {:02x?}, computed {:02x?}",
+            &self.expected[..8],
+            &self.computed[..8]
+        )
+    }
 }
 
 impl Default for AccountDatabase {
@@ -1550,5 +1588,39 @@ mod tests {
         // Publishing invalidates cache.
         db.publish_transaction(xid2).unwrap();
         assert!(db.ancestor_cache.is_empty());
+    }
+
+    // ── accounts hash verification tests ──────────────────────────────
+
+    #[test]
+    fn verify_accounts_hash_succeeds_on_match() {
+        let db = AccountDatabase::new();
+        let pk = Pubkey::from([0x42; 32]);
+        db.store_published_account(pk, Account::new(1000, vec![1, 2], Pubkey::from([0xFF; 32])));
+
+        let (expected, _) = db.compute_accounts_hash();
+        assert!(db.verify_accounts_hash(&expected).is_ok());
+    }
+
+    #[test]
+    fn verify_accounts_hash_fails_on_mismatch() {
+        let db = AccountDatabase::new();
+        let pk = Pubkey::from([0x42; 32]);
+        db.store_published_account(pk, Account::new(1000, vec![1, 2], Pubkey::from([0xFF; 32])));
+
+        let wrong_hash = [0xDE; 32];
+        let result = db.verify_accounts_hash(&wrong_hash);
+        assert!(result.is_err());
+
+        let mismatch = result.unwrap_err();
+        assert_eq!(mismatch.expected, wrong_hash);
+        assert_ne!(mismatch.computed, wrong_hash);
+    }
+
+    #[test]
+    fn verify_accounts_hash_empty_db() {
+        let db = AccountDatabase::new();
+        let expected = [0u8; 32]; // Empty hash.
+        assert!(db.verify_accounts_hash(&expected).is_ok());
     }
 }

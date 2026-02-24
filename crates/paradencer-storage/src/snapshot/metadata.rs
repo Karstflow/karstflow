@@ -28,6 +28,10 @@ pub struct SnapshotMetadata {
     pub version: u32,
     pub created_at: u64,
     pub account_data_size: u64,
+    /// SHA-256 Merkle hash of all accounts state at the snapshot slot.
+    /// Zeroed if not computed (backward-compatible with older snapshots).
+    #[serde(default)]
+    pub accounts_hash: [u8; 32],
 }
 
 impl SnapshotMetadata {
@@ -56,6 +60,7 @@ impl SnapshotMetadata {
             version,
             created_at,
             account_data_size,
+            accounts_hash: [0u8; 32],
         }
     }
 
@@ -69,6 +74,15 @@ impl SnapshotMetadata {
 
     pub fn update_hash(&mut self, hash: [u8; 32]) {
         self.hash = hash;
+    }
+
+    pub fn update_accounts_hash(&mut self, accounts_hash: [u8; 32]) {
+        self.accounts_hash = accounts_hash;
+    }
+
+    /// Whether this snapshot has a non-zero accounts hash for verification.
+    pub fn has_accounts_hash(&self) -> bool {
+        self.accounts_hash != [0u8; 32]
     }
 
     pub fn compute_content_hash(data: &[u8]) -> [u8; 32] {

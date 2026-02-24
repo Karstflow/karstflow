@@ -137,11 +137,26 @@ impl SnapshotLoader {
 
         let accounts = self.load_accounts(db, &snapshot_data)?;
 
+        // Compute accounts hash for verification.
+        let (computed_hash, _) = db.compute_accounts_hash();
+
+        // Verify against the stored accounts hash if available.
+        if manifest.metadata.has_accounts_hash() {
+            db.verify_accounts_hash(&manifest.metadata.accounts_hash)
+                .map_err(|mismatch| StorageError::AccountDatabaseError {
+                    details: format!(
+                        "Snapshot accounts hash verification failed at slot {}: {}",
+                        snapshot_data.slot, mismatch
+                    ),
+                })?;
+        }
+
         Ok(LoadedSnapshot {
             slot: snapshot_data.slot,
             total_accounts: accounts.len() as u64,
             total_lamports: snapshot_data.total_lamports(),
             metadata: manifest.metadata,
+            accounts_hash: computed_hash,
         })
     }
 
@@ -291,6 +306,8 @@ impl SnapshotLoader {
             total_accounts: base_accounts.len() as u64,
             total_lamports,
             metadata,
+            // No DB available for in-memory incremental apply — hash not computed.
+            accounts_hash: [0u8; 32],
         })
     }
 
@@ -299,11 +316,31 @@ impl SnapshotLoader {
     /// Delta accounts override existing accounts in the database. Accounts
     /// not present in the increment remain unchanged. This avoids the
     /// intermediate HashMap step when the caller already has a live database.
+    ///
+    /// Validates that:
+    /// - The snapshot is marked as incremental.
+    /// - The database is not empty (base state must exist).
+    /// - If `expected_base_slot` is provided, the metadata's base slot matches.
     pub fn apply_incremental_to_db(
         &self,
         db: &AccountDatabase,
         snapshot_path: &Path,
         manifest_path: &Path,
+    ) -> Result<LoadedSnapshot, StorageError> {
+        self.apply_incremental_to_db_checked(db, snapshot_path, manifest_path, None)
+    }
+
+    /// Apply an incremental snapshot with explicit base slot validation.
+    ///
+    /// If `expected_base_slot` is `Some`, validates that the incremental
+    /// snapshot's declared base matches. This prevents applying an
+    /// incremental from the wrong chain.
+    pub fn apply_incremental_to_db_checked(
+        &self,
+        db: &AccountDatabase,
+        snapshot_path: &Path,
+        manifest_path: &Path,
+        expected_base_slot: Option<u64>,
     ) -> Result<LoadedSnapshot, StorageError> {
         let (delta_accounts, metadata) = self.load_snapshot_to_map(snapshot_path, manifest_path)?;
 
@@ -313,14 +350,53 @@ impl SnapshotLoader {
             });
         }
 
+        // Validate chain: DB must have existing state.
+        if db.get_account_count() == 0 {
+            return Err(StorageError::AccountDatabaseError {
+                details: format!(
+                    "Cannot apply incremental snapshot at slot {} to empty database; \
+                     base snapshot (slot {:?}) must be loaded first",
+                    metadata.slot, metadata.incremental_base,
+                ),
+            });
+        }
+
+        // Validate base slot if the caller provides an expected value.
+        if let Some(expected) = expected_base_slot {
+            if metadata.incremental_base != Some(expected) {
+                return Err(StorageError::AccountDatabaseError {
+                    details: format!(
+                        "Incremental chain mismatch: expected base slot {}, \
+                         but snapshot declares base {:?}",
+                        expected, metadata.incremental_base,
+                    ),
+                });
+            }
+        }
+
         let delta_count = delta_accounts.len() as u64;
         db.bulk_insert_published_accounts_at_slot(delta_accounts, metadata.slot)?;
+
+        // Compute accounts hash of the full state after applying increment.
+        let (computed_hash, _) = db.compute_accounts_hash();
+
+        // Verify against stored hash if available.
+        if metadata.has_accounts_hash() {
+            db.verify_accounts_hash(&metadata.accounts_hash)
+                .map_err(|mismatch| StorageError::AccountDatabaseError {
+                    details: format!(
+                        "Incremental snapshot accounts hash verification failed at slot {}: {}",
+                        metadata.slot, mismatch
+                    ),
+                })?;
+        }
 
         Ok(LoadedSnapshot {
             slot: metadata.slot,
             total_accounts: delta_count,
             total_lamports: 0, // Caller can query db for accurate total.
             metadata,
+            accounts_hash: computed_hash,
         })
     }
 }
@@ -337,6 +413,8 @@ pub struct LoadedSnapshot {
     pub total_accounts: u64,
     pub total_lamports: u64,
     pub metadata: SnapshotMetadata,
+    /// Accounts hash computed after loading (for verification).
+    pub accounts_hash: [u8; 32],
 }
 
 #[cfg(test)]
@@ -704,5 +782,163 @@ mod tests {
 
         assert_eq!(result.total_accounts, 0);
         assert_eq!(db2.get_account_count(), 0);
+    }
+
+    // ── incremental chain validation tests ────────────────────────────
+
+    #[test]
+    fn apply_incremental_to_empty_db_rejected() {
+        let db_src = AccountDatabase::new();
+        let config = SnapshotConfig::new();
+        let creator = SnapshotCreator::new(config);
+        let dir = tempfile::tempdir().unwrap();
+        let owner = Pubkey::new([10u8; 32]);
+
+        // Create base state and full snapshot.
+        let pk = Pubkey::new_unique();
+        db_src.store_published_account_at_slot(pk, make_account(1_000, vec![1], owner), 100);
+        creator
+            .create_full_snapshot(&db_src, 100, dir.path())
+            .unwrap();
+        db_src.drain_dirty_slots_through(100);
+
+        // Modify and create incremental.
+        db_src.store_published_account_at_slot(pk, make_account(2_000, vec![1, 2], owner), 200);
+        creator
+            .create_incremental_from_dirty_set(&db_src, 200, 100, dir.path())
+            .unwrap();
+
+        // Try to apply incremental to an EMPTY database → should fail.
+        let empty_db = AccountDatabase::new();
+        let loader = SnapshotLoader::new();
+        let result = loader.apply_incremental_to_db(
+            &empty_db,
+            &dir.path().join("incremental-200.snapshot"),
+            &dir.path().join("incremental-200.snapshot.manifest"),
+        );
+        assert!(result.is_err());
+        let err_msg = format!("{:?}", result.unwrap_err());
+        assert!(err_msg.contains("empty database"));
+    }
+
+    #[test]
+    fn apply_incremental_checked_rejects_wrong_base_slot() {
+        let db_src = AccountDatabase::new();
+        let config = SnapshotConfig::new();
+        let creator = SnapshotCreator::new(config);
+        let dir = tempfile::tempdir().unwrap();
+        let owner = Pubkey::new([10u8; 32]);
+
+        // Create base and incremental.
+        let pk = Pubkey::new_unique();
+        db_src.store_published_account_at_slot(pk, make_account(1_000, vec![1], owner), 100);
+        creator
+            .create_full_snapshot(&db_src, 100, dir.path())
+            .unwrap();
+        db_src.drain_dirty_slots_through(100);
+
+        db_src.store_published_account_at_slot(pk, make_account(2_000, vec![1, 2], owner), 200);
+        creator
+            .create_incremental_from_dirty_set(&db_src, 200, 100, dir.path())
+            .unwrap();
+
+        // Load full snapshot into fresh DB.
+        let db2 = AccountDatabase::new();
+        let loader = SnapshotLoader::new();
+        loader
+            .load_snapshot(
+                &dir.path().join("full-100.snapshot"),
+                &dir.path().join("full-100.snapshot.manifest"),
+                &db2,
+            )
+            .unwrap();
+
+        // Apply incremental with WRONG expected base slot → should fail.
+        let result = loader.apply_incremental_to_db_checked(
+            &db2,
+            &dir.path().join("incremental-200.snapshot"),
+            &dir.path().join("incremental-200.snapshot.manifest"),
+            Some(50), // Wrong! Snapshot declares base_slot=100.
+        );
+        assert!(result.is_err());
+        let err_msg = format!("{:?}", result.unwrap_err());
+        assert!(err_msg.contains("chain mismatch"));
+    }
+
+    #[test]
+    fn apply_incremental_checked_succeeds_with_correct_base() {
+        let db_src = AccountDatabase::new();
+        let config = SnapshotConfig::new();
+        let creator = SnapshotCreator::new(config);
+        let dir = tempfile::tempdir().unwrap();
+        let owner = Pubkey::new([10u8; 32]);
+
+        // Create base + incremental.
+        let pk = Pubkey::new_unique();
+        db_src.store_published_account_at_slot(pk, make_account(1_000, vec![1], owner), 100);
+        creator
+            .create_full_snapshot(&db_src, 100, dir.path())
+            .unwrap();
+        db_src.drain_dirty_slots_through(100);
+
+        db_src.store_published_account_at_slot(pk, make_account(5_000, vec![1, 2, 3], owner), 200);
+        creator
+            .create_incremental_from_dirty_set(&db_src, 200, 100, dir.path())
+            .unwrap();
+
+        // Load full, then apply incremental with correct base.
+        let db2 = AccountDatabase::new();
+        let loader = SnapshotLoader::new();
+        loader
+            .load_snapshot(
+                &dir.path().join("full-100.snapshot"),
+                &dir.path().join("full-100.snapshot.manifest"),
+                &db2,
+            )
+            .unwrap();
+
+        let result = loader.apply_incremental_to_db_checked(
+            &db2,
+            &dir.path().join("incremental-200.snapshot"),
+            &dir.path().join("incremental-200.snapshot.manifest"),
+            Some(100), // Correct base slot.
+        );
+        assert!(result.is_ok());
+
+        // Verify accounts are correct.
+        let account = db2.get_published_account(&pk).unwrap();
+        assert_eq!(account.meta.lamports, 5_000);
+    }
+
+    // ── accounts hash verification tests ──────────────────────────────
+
+    #[test]
+    fn loaded_snapshot_has_accounts_hash() {
+        let db = AccountDatabase::new();
+        let config = SnapshotConfig::new();
+        let creator = SnapshotCreator::new(config);
+        let dir = tempfile::tempdir().unwrap();
+
+        let pk = Pubkey::new_unique();
+        db.store_published_account(pk, make_account(1_000, vec![1, 2, 3], Pubkey::zeroed()));
+        creator.create_full_snapshot(&db, 42, dir.path()).unwrap();
+
+        let db2 = AccountDatabase::new();
+        let loader = SnapshotLoader::new();
+        let result = loader
+            .load_snapshot(
+                &dir.path().join("full-42.snapshot"),
+                &dir.path().join("full-42.snapshot.manifest"),
+                &db2,
+            )
+            .unwrap();
+
+        // Non-zero accounts hash stored from creation.
+        assert_ne!(result.accounts_hash, [0u8; 32]);
+        assert!(result.metadata.has_accounts_hash());
+
+        // Hash matches what we compute from restored DB.
+        let (recomputed, _) = db2.compute_accounts_hash();
+        assert_eq!(result.accounts_hash, recomputed);
     }
 }
