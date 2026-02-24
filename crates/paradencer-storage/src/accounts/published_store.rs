@@ -21,6 +21,7 @@ use paradencer_constants::durable_store::{
 use super::primitives::{Account, Pubkey};
 use crate::durable::account_encoding::{decode_account, encode_account, encode_account_meta};
 use crate::durable::{DurableStore, WriteBatch};
+use crate::StorageError;
 
 /// A node in the intrusive LRU doubly-linked list.
 struct CacheNode {
@@ -209,6 +210,43 @@ impl PublishedStore {
                 .iter()
                 .map(|(pk, node)| (*pk, node.account.clone()))
                 .collect()
+        }
+    }
+
+    /// Iterate all published accounts via callback without collecting into memory.
+    ///
+    /// When a durable store is configured, streams from disk (handles 100M+
+    /// accounts at constant memory). Without a durable store, iterates the
+    /// in-memory cache.
+    ///
+    /// Returns the number of accounts visited.
+    pub fn for_each_account(
+        &self,
+        mut callback: impl FnMut(&Pubkey, &Account) -> Result<(), StorageError>,
+    ) -> Result<u64, StorageError> {
+        if let Some(ref store) = self.store {
+            let mut count = 0u64;
+            store.for_each(CF_ACCOUNTS, &mut |key_bytes, value_bytes| {
+                if key_bytes.len() != 32 {
+                    return Ok(());
+                }
+                let pubkey = Pubkey::from(
+                    <[u8; 32]>::try_from(key_bytes).unwrap_or_else(|_| unreachable!()),
+                );
+                if let Some(account) = decode_account(value_bytes) {
+                    callback(&pubkey, &account)?;
+                    count += 1;
+                }
+                Ok(())
+            })?;
+            Ok(count)
+        } else {
+            let mut count = 0u64;
+            for (pk, node) in &self.cache {
+                callback(pk, &node.account)?;
+                count += 1;
+            }
+            Ok(count)
         }
     }
 
@@ -642,5 +680,111 @@ mod tests {
         assert!(ps.cache.contains_key(&pk(4)));
         assert!(ps.cache.contains_key(&pk(10)));
         assert!(ps.cache.contains_key(&pk(11)));
+    }
+
+    // --- Streaming iteration ---
+
+    #[test]
+    fn for_each_account_visits_all_in_memory() {
+        let mut ps = PublishedStore::new();
+        for i in 0u8..5 {
+            ps.insert(pk(i), acct(i as u64 * 10), 0);
+        }
+
+        let mut visited = Vec::new();
+        ps.for_each_account(|pubkey, account| {
+            visited.push((*pubkey, account.meta.lamports));
+            Ok(())
+        })
+        .unwrap();
+
+        assert_eq!(visited.len(), 5);
+    }
+
+    #[test]
+    fn for_each_account_visits_all_from_disk() {
+        let store = test_store();
+        let mut ps = PublishedStore::with_durable_store(store);
+
+        for i in 0u8..5 {
+            ps.insert(pk(i), acct(i as u64 * 10), 0);
+        }
+
+        // Clear cache to force disk reads.
+        ps.clear_cache();
+
+        let mut visited = Vec::new();
+        ps.for_each_account(|pubkey, account| {
+            visited.push((*pubkey, account.meta.lamports));
+            Ok(())
+        })
+        .unwrap();
+
+        assert_eq!(visited.len(), 5);
+    }
+
+    #[test]
+    fn for_each_account_matches_iter_all() {
+        let store = test_store();
+        let mut ps = PublishedStore::with_durable_store(store);
+
+        for i in 0u8..10 {
+            ps.insert(pk(i), acct(i as u64 * 100), 0);
+        }
+
+        let iter_all_result = ps.iter_all();
+        let mut streaming_result = Vec::new();
+        ps.for_each_account(|pubkey, account| {
+            streaming_result.push((*pubkey, account.clone()));
+            Ok(())
+        })
+        .unwrap();
+
+        // Both should have same entries (order may differ).
+        assert_eq!(iter_all_result.len(), streaming_result.len());
+        for (pk, acct) in &iter_all_result {
+            assert!(
+                streaming_result
+                    .iter()
+                    .any(|(p, a)| p == pk && a.meta.lamports == acct.meta.lamports),
+                "Missing account {pk:?} in streaming result"
+            );
+        }
+    }
+
+    #[test]
+    fn for_each_account_empty_store() {
+        let ps = PublishedStore::new();
+        let mut count = 0u64;
+        let visited = ps
+            .for_each_account(|_, _| {
+                count += 1;
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(visited, 0);
+        assert_eq!(count, 0);
+    }
+
+    #[test]
+    fn for_each_account_stops_on_error() {
+        let mut ps = PublishedStore::new();
+        for i in 0u8..10 {
+            ps.insert(pk(i), acct(i as u64), 0);
+        }
+
+        let mut count = 0u64;
+        let result = ps.for_each_account(|_, _| {
+            count += 1;
+            if count >= 3 {
+                return Err(StorageError::DurableStoreError {
+                    details: "stop".to_string(),
+                });
+            }
+            Ok(())
+        });
+
+        assert!(result.is_err());
+        assert_eq!(count, 3);
     }
 }

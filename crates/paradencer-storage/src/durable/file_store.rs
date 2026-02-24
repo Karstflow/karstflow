@@ -947,6 +947,24 @@ impl DurableStore for FileDurableStore {
         let state = mutex.lock().unwrap();
         Ok(state.index.len() as u64)
     }
+
+    fn for_each(
+        &self,
+        cf: &str,
+        callback: super::ForEachCallback<'_>,
+    ) -> Result<u64, StorageError> {
+        let mutex = self.cf(cf)?;
+        let state = mutex.lock().unwrap();
+        let mut count = 0u64;
+
+        for (key, loc) in &state.index {
+            let value = Self::read_value_from_state(&state, loc)?;
+            callback(key, &value)?;
+            count += 1;
+        }
+
+        Ok(count)
+    }
 }
 
 impl FileDurableStore {
@@ -1964,5 +1982,38 @@ mod tests {
         let partitions = store.collect_partitioned(cf, 1).unwrap();
         assert_eq!(partitions.len(), 1);
         assert_eq!(partitions[0].len(), 2);
+    }
+
+    #[test]
+    fn trait_for_each_matches_for_each_in_cf() {
+        let store = temp_store();
+        let cf = CF_ACCOUNTS;
+
+        store.put(cf, b"a", b"alpha").unwrap();
+        store.put(cf, b"b", b"bravo").unwrap();
+        store.put(cf, b"c", b"charlie").unwrap();
+
+        // Collect via the generic for_each_in_cf method.
+        let mut generic_entries = Vec::new();
+        store
+            .for_each_in_cf(cf, |key, value| {
+                generic_entries.push((key.to_vec(), value.to_vec()));
+                Ok(())
+            })
+            .unwrap();
+
+        // Collect via the trait for_each method (dyn FnMut).
+        let mut trait_entries = Vec::new();
+        let trait_store: &dyn DurableStore = &store;
+        trait_store
+            .for_each(cf, &mut |key, value| {
+                trait_entries.push((key.to_vec(), value.to_vec()));
+                Ok(())
+            })
+            .unwrap();
+
+        generic_entries.sort_by(|a, b| a.0.cmp(&b.0));
+        trait_entries.sort_by(|a, b| a.0.cmp(&b.0));
+        assert_eq!(generic_entries, trait_entries);
     }
 }

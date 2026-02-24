@@ -25,6 +25,9 @@ use crate::StorageError;
 /// Key-value pair from a scan operation.
 pub type ScanEntry = (Vec<u8>, Vec<u8>);
 
+/// Callback for iterating key-value entries without collecting.
+pub type ForEachCallback<'a> = &'a mut dyn FnMut(&[u8], &[u8]) -> Result<(), StorageError>;
+
 /// Backend for persisting key-value data to disk.
 ///
 /// Implementations organize data into named column families (logical namespaces).
@@ -64,4 +67,13 @@ pub trait DurableStore: Send + Sync {
 
     /// Number of keys in a column family.
     fn count(&self, cf: &str) -> Result<u64, StorageError>;
+
+    /// Iterate all entries in a column family via callback.
+    ///
+    /// Calls `callback(key, value)` for each active record. Returns the
+    /// number of entries visited. The iteration order is unspecified.
+    ///
+    /// More memory-efficient than `prefix_scan` for large column families
+    /// because entries are not collected into a Vec.
+    fn for_each(&self, cf: &str, callback: ForEachCallback<'_>) -> Result<u64, StorageError>;
 }

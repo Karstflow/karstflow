@@ -512,11 +512,10 @@ impl Bank {
     ///
     /// Returns the number of accounts contributing to the hash (non-zero lamports).
     pub fn initialize_lthash_from_accounts(&self) -> usize {
-        let all_accounts = self.accounts.iter_published_accounts();
         let mut accumulator = LatticeHashValue::zero();
-        let mut count = 0;
+        let mut count = 0usize;
 
-        for (pubkey, account) in &all_accounts {
+        let _ = self.accounts.for_each_published_account(|pubkey, account| {
             let h = lthash::hash_account(
                 &pubkey.to_bytes(),
                 &account.meta.owner.to_bytes(),
@@ -528,7 +527,8 @@ impl Bank {
                 accumulator.add(&h);
                 count += 1;
             }
-        }
+            Ok(())
+        });
 
         *self.lthash.write().unwrap() = accumulator;
         count
@@ -798,31 +798,35 @@ impl Bank {
     fn collect_rent_for_epoch(&self) {
         let collector = crate::rent::RentCollector::default_for_epoch(self.epoch);
 
-        let all_accounts = self.accounts.iter_published_accounts();
-        let mut total_rent_collected: u64 = 0;
+        // Stream accounts and collect only those owing rent. Most accounts are
+        // rent-exempt, so this subset is small even at mainnet scale.
+        let mut rent_updates: Vec<(Pubkey, Account, u64)> = Vec::new();
 
-        for (pubkey, account) in &all_accounts {
-            let data_len = account.data.len();
-            let collected = collector.collect_from_account(account.meta.lamports, data_len);
-
+        let _ = self.accounts.for_each_published_account(|pubkey, account| {
+            let collected =
+                collector.collect_from_account(account.meta.lamports, account.data.len());
             if collected.rent_collected > 0 {
                 let mut updated = account.clone();
                 updated.meta.lamports = updated
                     .meta
                     .lamports
                     .saturating_sub(collected.rent_collected);
-
-                // If account drops to zero lamports with empty data, it becomes
-                // a tombstone (effectively deleted). Otherwise persist the update.
-                self.update_account_hash(pubkey, Some(account), &updated);
-                self.accounts.store_published_account(*pubkey, updated);
-
-                total_rent_collected =
-                    total_rent_collected.saturating_add(collected.rent_collected);
+                rent_updates.push((*pubkey, updated, collected.rent_collected));
             }
+            Ok(())
+        });
+
+        // Apply collected rent updates (lock is released from streaming above).
+        let mut total_rent_collected: u64 = 0;
+        for (pubkey, updated, rent) in &rent_updates {
+            let original = self.accounts.get_published_account(pubkey);
+            self.update_account_hash(pubkey, original.as_ref(), updated);
+            self.accounts
+                .store_published_account(*pubkey, updated.clone());
+            total_rent_collected = total_rent_collected.saturating_add(*rent);
         }
 
-        // Burn collected rent by reducing capitalization
+        // Burn collected rent by reducing capitalization.
         if total_rent_collected > 0 {
             self.capitalization
                 .fetch_sub(total_rent_collected, Ordering::Relaxed);

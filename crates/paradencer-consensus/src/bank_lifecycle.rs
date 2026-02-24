@@ -69,47 +69,47 @@ impl Bank {
         );
 
         let db = self.accounts();
-        let all_accounts = db.iter_published_accounts();
 
-        let mut result = RentCollectionResult {
-            accounts_examined: all_accounts.len(),
-            ..Default::default()
-        };
-
+        let mut result = RentCollectionResult::default();
         let burn_percent = self.rent().burn_percent as u64;
 
-        for (pubkey, account) in &all_accounts {
-            let data_len = account.data.len();
-            let collected = collector.collect_from_account(account.meta.lamports, data_len);
+        // Stream accounts and collect only those that need rent deduction.
+        let mut rent_updates: Vec<(Pubkey, Account, u64)> = Vec::new();
 
-            if collected.is_exempt {
-                result.exempt_accounts += 1;
-                continue;
-            }
+        let _ = db.for_each_published_account(|pubkey, account| {
+            result.accounts_examined += 1;
+            let collected =
+                collector.collect_from_account(account.meta.lamports, account.data.len());
 
-            if collected.rent_collected == 0 {
+            if collected.is_exempt || collected.rent_collected == 0 {
                 result.exempt_accounts += 1;
-                continue;
+                return Ok(());
             }
 
             result.rent_paying_accounts += 1;
             result.total_rent_collected += collected.rent_collected;
 
-            // Debit rent from account
             let new_lamports = account
                 .meta
                 .lamports
                 .saturating_sub(collected.rent_collected);
             let mut updated = account.clone();
             updated.meta.lamports = new_lamports;
-            db.store(pubkey, &updated);
 
             if new_lamports == 0 {
                 result.accounts_drained += 1;
             }
+
+            rent_updates.push((*pubkey, updated, collected.rent_collected));
+            Ok(())
+        });
+
+        // Apply rent deductions after streaming is complete.
+        for (pubkey, updated, _) in &rent_updates {
+            db.store(pubkey, updated);
         }
 
-        // Calculate burned portion
+        // Calculate burned portion.
         result.rent_burned = result
             .total_rent_collected
             .saturating_mul(burn_percent)
