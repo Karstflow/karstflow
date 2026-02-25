@@ -591,9 +591,10 @@ impl TransactionPipeline {
 /// the pack scheduler.
 ///
 /// Parses the wire-format transaction to extract account keys (for lock
-/// detection), blockhash, and metadata. If parsing fails, the transaction
-/// is still packable with default metadata (the execution engine will
-/// handle the parse failure gracefully).
+/// detection), blockhash, and metadata. Uses the consensus cost model to
+/// compute accurate compute unit estimates and priority fees. If parsing
+/// fails, the transaction is still packable with default metadata (the
+/// execution engine will handle the parse failure gracefully).
 fn resolved_to_packed(payload: Vec<u8>) -> PackedTransaction {
     let blockhash = extract_blockhash(&payload);
 
@@ -613,10 +614,8 @@ fn resolved_to_packed(payload: Vec<u8>) -> PackedTransaction {
 
             for (i, key) in parsed.message.account_keys.iter().enumerate() {
                 let is_writable = if i < header.num_required_signatures as usize {
-                    // Signed accounts: writable if in the first num_writable_signed
                     i < num_writable_signed
                 } else {
-                    // Unsigned accounts: writable if in the writable-unsigned range
                     let unsigned_idx = i - header.num_required_signatures as usize;
                     unsigned_idx < num_writable_unsigned
                 };
@@ -628,14 +627,49 @@ fn resolved_to_packed(payload: Vec<u8>) -> PackedTransaction {
                 }
             }
 
+            // Detect vote transactions by checking for the vote program ID
+            // in any instruction's program account.
+            let is_vote = parsed.message.instructions.iter().any(|ix| {
+                let idx = ix.program_id_index as usize;
+                idx < parsed.message.account_keys.len()
+                    && parsed.message.account_keys[idx] == paradencer_ids::VOTE_PROGRAM_ID
+            });
+
+            // Build instruction views for the cost model.
+            let instruction_views: Vec<
+                paradencer_consensus::pack::cost_model::InstructionView<'_>,
+            > = parsed
+                .message
+                .instructions
+                .iter()
+                .filter_map(|ix| {
+                    let idx = ix.program_id_index as usize;
+                    if idx < parsed.message.account_keys.len() {
+                        Some(paradencer_consensus::pack::cost_model::InstructionView {
+                            program_id: &parsed.message.account_keys[idx],
+                            data: &ix.data,
+                        })
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+
+            // Compute consensus-accurate transaction cost.
+            let cost = paradencer_consensus::pack::cost_model::compute_transaction_cost(
+                &instruction_views,
+                header.num_required_signatures as u64,
+                write_accounts.len(),
+                is_vote,
+            );
+
             let data_size = payload.len();
-            let is_vote = false; // TODO: detect vote transactions by program ID
 
             PackedTransaction {
                 payload,
                 blockhash,
-                priority_fee: 0,
-                compute_units: paradencer_constants::execution::MAX_COMPUTE_UNITS,
+                priority_fee: cost.compute_unit_price,
+                compute_units: cost.execution_cost,
                 is_vote,
                 expires_at_slot: u64::MAX,
                 write_accounts,
@@ -1030,5 +1064,125 @@ mod tests {
 
         // The transaction should have been verified, resolved, packed, and executed.
         assert!(pipeline.microblocks_executed() >= 1);
+    }
+
+    /// Build a signed vote transaction payload in Solana wire format.
+    fn make_vote_transaction(key: &SigningKey) -> Vec<u8> {
+        let pubkey = key.verifying_key().to_bytes();
+        let blockhash = [0xBB; 32];
+
+        // Message with vote program instruction.
+        // header: 1 required sig, 0 readonly signed, 1 readonly unsigned
+        // accounts: [signer, vote_program_id]
+        // 1 instruction targeting program index 1 (vote program)
+        let mut message = vec![
+            1, // num_required_signatures
+            0, // num_readonly_signed_accounts
+            1, // num_readonly_unsigned_accounts (vote program is readonly)
+            2, // num_accounts (compact-u16)
+        ];
+        message.extend_from_slice(&pubkey); // account 0: signer (writable)
+        message.extend_from_slice(&paradencer_ids::VOTE_PROGRAM_ID.to_bytes()); // account 1: vote program
+        message.extend_from_slice(&blockhash); // recent blockhash
+        message.push(1); // num_instructions (compact-u16)
+                         // Instruction: program_id_index=1, 1 account, 4 bytes data
+        message.push(1); // program_id_index
+        message.push(1); // num_accounts in instruction (compact-u16)
+        message.push(0); // account index 0 (signer)
+        message.push(4); // data length (compact-u16)
+        message.extend_from_slice(&[2, 0, 0, 0]); // vote instruction type 2
+
+        let signature = key.sign(&message);
+
+        let mut payload = Vec::new();
+        payload.push(1); // num_signatures (compact-u16)
+        payload.extend_from_slice(&signature.to_bytes());
+        payload.extend_from_slice(&message);
+        payload
+    }
+
+    /// Build a signed transaction with ComputeBudget instructions.
+    fn make_transaction_with_compute_budget(key: &SigningKey) -> Vec<u8> {
+        let pubkey = key.verifying_key().to_bytes();
+        let blockhash = [0xBB; 32];
+
+        // header: 1 required sig, 0 readonly signed, 2 readonly unsigned
+        // accounts: [signer, compute_budget_program, system_program]
+        // 2 instructions: SetComputeUnitLimit + SetComputeUnitPrice on compute budget
+        let mut message = vec![
+            1, // num_required_signatures
+            0, // num_readonly_signed_accounts
+            2, // num_readonly_unsigned_accounts
+            3, // num_accounts (compact-u16)
+        ];
+        message.extend_from_slice(&pubkey); // account 0: signer
+        message.extend_from_slice(&paradencer_ids::COMPUTE_BUDGET_PROGRAM_ID.to_bytes()); // account 1
+        message.extend_from_slice(&paradencer_ids::SYSTEM_PROGRAM_ID.to_bytes()); // account 2
+        message.extend_from_slice(&blockhash);
+        message.push(3); // num_instructions
+
+        // Instruction 1: SetComputeUnitLimit(300_000) on ComputeBudget program
+        message.push(1); // program_id_index = 1 (compute budget)
+        message.push(0); // num_accounts = 0
+        message.push(5); // data length
+        message
+            .push(paradencer_constants::compute_budget_program::INSTRUCTION_SET_COMPUTE_UNIT_LIMIT);
+        message.extend_from_slice(&300_000u32.to_le_bytes());
+
+        // Instruction 2: SetComputeUnitPrice(5000) on ComputeBudget program
+        message.push(1); // program_id_index = 1
+        message.push(0); // num_accounts = 0
+        message.push(9); // data length
+        message
+            .push(paradencer_constants::compute_budget_program::INSTRUCTION_SET_COMPUTE_UNIT_PRICE);
+        message.extend_from_slice(&5000u64.to_le_bytes());
+
+        // Instruction 3: System program transfer
+        message.push(2); // program_id_index = 2 (system program)
+        message.push(1); // num_accounts = 1
+        message.push(0); // account 0
+        message.push(4); // data length
+        message.extend_from_slice(&[0, 0, 0, 0]);
+
+        let signature = key.sign(&message);
+
+        let mut payload = Vec::new();
+        payload.push(1);
+        payload.extend_from_slice(&signature.to_bytes());
+        payload.extend_from_slice(&message);
+        payload
+    }
+
+    #[test]
+    fn resolved_to_packed_detects_vote_transaction() {
+        let key = SigningKey::from_bytes(&[42u8; 32]);
+        let payload = make_vote_transaction(&key);
+        let packed = resolved_to_packed(payload);
+
+        assert!(packed.is_vote, "Vote transaction should be detected");
+    }
+
+    #[test]
+    fn resolved_to_packed_non_vote_not_flagged() {
+        let key = SigningKey::from_bytes(&[42u8; 32]);
+        let payload = make_signed_transaction(&key);
+        let packed = resolved_to_packed(payload);
+
+        assert!(
+            !packed.is_vote,
+            "Non-vote transaction should not be flagged"
+        );
+    }
+
+    #[test]
+    fn resolved_to_packed_parses_compute_budget() {
+        let key = SigningKey::from_bytes(&[42u8; 32]);
+        let payload = make_transaction_with_compute_budget(&key);
+        let packed = resolved_to_packed(payload);
+
+        // ComputeBudget sets CU limit to 300_000 and price to 5000.
+        assert_eq!(packed.compute_units, 300_000);
+        assert_eq!(packed.priority_fee, 5000);
+        assert!(!packed.is_vote);
     }
 }
