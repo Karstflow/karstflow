@@ -6,6 +6,7 @@
 /// data size limits.
 use super::conflict_detector::{AccountLock, ConflictDetector, LockKind};
 use super::priority_queue::{PackedTransaction, TransactionQueue};
+use paradencer_constants::block_limits;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
@@ -25,10 +26,10 @@ pub struct PackLimits {
 impl Default for PackLimits {
     fn default() -> Self {
         Self {
-            max_cost_per_block: 48_000_000,
-            max_vote_cost_per_block: 36_000_000,
-            max_data_bytes_per_block: 27_995_136, // ~32K data shreds
-            max_write_cost_per_account: 12_000_000,
+            max_cost_per_block: block_limits::MAX_BLOCK_COMPUTE_UNITS,
+            max_vote_cost_per_block: block_limits::MAX_VOTE_COMPUTE_UNITS,
+            max_data_bytes_per_block: block_limits::MAX_DATA_BYTES_PER_BLOCK,
+            max_write_cost_per_account: block_limits::MAX_WRITABLE_ACCOUNT_COMPUTE_UNITS,
         }
     }
 }
@@ -52,7 +53,7 @@ impl Default for PackConfig {
     fn default() -> Self {
         Self {
             max_txns_per_microblock: 64,
-            max_cus_per_microblock: 1_600_000,
+            max_cus_per_microblock: block_limits::MAX_CUS_PER_MICROBLOCK,
             vote_fraction: 0.75,
             limits: PackLimits::default(),
             execution_tile_count: 1,
@@ -214,21 +215,23 @@ impl PackScheduler {
                 continue;
             }
 
+            let tx_cost = tx.block_cost();
+
             // Check microblock limits.
             if transactions.len() >= self.config.max_txns_per_microblock {
                 deferred.push(tx);
                 break;
             }
-            if total_cu.saturating_add(tx.compute_units) > self.config.max_cus_per_microblock {
+            if total_cu.saturating_add(tx_cost) > self.config.max_cus_per_microblock {
                 deferred.push(tx);
                 break;
             }
 
-            // Check block-level limits.
+            // Check block-level limits using total cost.
             if self
                 .block_cost_units
                 .saturating_add(total_cu)
-                .saturating_add(tx.compute_units)
+                .saturating_add(tx_cost)
                 > self.config.limits.max_cost_per_block
             {
                 deferred.push(tx);
@@ -237,7 +240,7 @@ impl PackScheduler {
 
             // Check vote cost limit.
             if tx.is_vote
-                && self.block_vote_cost_units.saturating_add(tx.compute_units)
+                && self.block_vote_cost_units.saturating_add(tx_cost)
                     > self.config.limits.max_vote_cost_per_block
             {
                 deferred.push(tx);
@@ -247,7 +250,7 @@ impl PackScheduler {
             // Check per-account write cost.
             if self
                 .conflict_detector
-                .would_exceed_write_cost(&tx.write_accounts, tx.compute_units)
+                .would_exceed_write_cost(&tx.write_accounts, tx_cost)
             {
                 self.stats
                     .transactions_conflicted
@@ -267,14 +270,14 @@ impl PackScheduler {
             }
 
             // Transaction fits — add to microblock.
-            total_cu += tx.compute_units;
+            total_cu += tx_cost;
             total_data += tx.data_size as u64;
             if !tx.is_vote {
                 all_votes = false;
             }
 
             self.conflict_detector
-                .record_write_cost(&tx.write_accounts, tx.compute_units);
+                .record_write_cost(&tx.write_accounts, tx_cost);
 
             transactions.push(tx);
         }
@@ -404,6 +407,7 @@ mod tests {
             blockhash: [0u8; 32],
             priority_fee: priority,
             compute_units: cus,
+            total_cost: 0, // 0 = use compute_units for block cost
             is_vote,
             expires_at_slot: u64::MAX,
             write_accounts: write_accts,

@@ -266,6 +266,7 @@ mod tests {
             blockhash: [0u8; 32],
             priority_fee: fee,
             compute_units: cu,
+            total_cost: 0,
             is_vote: false,
             expires_at_slot: u64::MAX,
             write_accounts: vec![],

@@ -125,6 +125,7 @@ impl ResolvService {
             blockhash: resolved.blockhash,
             priority_fee: resolved.priority_fee,
             compute_units: resolved.compute_units,
+            total_cost: 0,
             is_vote: resolved.is_vote,
             expires_at_slot,
             write_accounts,

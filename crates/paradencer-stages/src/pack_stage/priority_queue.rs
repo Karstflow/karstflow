@@ -14,10 +14,14 @@ pub struct PackedTransaction {
     pub payload: Vec<u8>,
     /// The blockhash referenced by this transaction.
     pub blockhash: [u8; 32],
-    /// Priority fee in lamports.
+    /// Priority fee in micro-lamports per CU (from ComputeBudget).
     pub priority_fee: u64,
-    /// Estimated compute units requested.
+    /// Execution compute units (from ComputeBudget or per-instruction defaults).
     pub compute_units: u64,
+    /// Total transaction cost in CU (signatures + writable locks +
+    /// instruction data + execution + precompiles + loaded data).
+    /// Used for block-level limit checking.
+    pub total_cost: u64,
     /// Whether this is a simple vote transaction.
     pub is_vote: bool,
     /// Slot at which this transaction expires.
@@ -33,12 +37,22 @@ pub struct PackedTransaction {
 }
 
 impl PackedTransaction {
-    /// Priority fee per compute unit (in lamports / CU).
+    /// Priority fee rate (micro-lamports per CU).
+    ///
+    /// This is the `compute_unit_price` from the ComputeBudget program,
+    /// used directly for scheduling priority. Higher price = higher priority.
     pub fn fee_rate(&self) -> u64 {
-        if self.compute_units == 0 {
-            return self.priority_fee;
+        self.priority_fee
+    }
+
+    /// Total cost for block limit accounting. Falls back to `compute_units`
+    /// when `total_cost` is zero (e.g., in tests that don't set it).
+    pub fn block_cost(&self) -> u64 {
+        if self.total_cost > 0 {
+            self.total_cost
+        } else {
+            self.compute_units
         }
-        self.priority_fee / self.compute_units.max(1)
     }
 }
 
@@ -119,7 +133,7 @@ impl TransactionQueue {
     pub fn insert(&mut self, mut tx: PackedTransaction) {
         tx.insertion_order = self.insertion_counter;
         self.insertion_counter += 1;
-        self.total_compute_units += tx.compute_units;
+        self.total_compute_units += tx.block_cost();
         self.total_data_bytes += tx.data_size as u64;
         self.heap.push(PriorityEntry(tx));
     }
@@ -129,7 +143,7 @@ impl TransactionQueue {
         self.heap.pop().map(|entry| {
             self.total_compute_units = self
                 .total_compute_units
-                .saturating_sub(entry.0.compute_units);
+                .saturating_sub(entry.0.block_cost());
             self.total_data_bytes = self
                 .total_data_bytes
                 .saturating_sub(entry.0.data_size as u64);
@@ -174,7 +188,7 @@ impl TransactionQueue {
             } else {
                 self.total_compute_units = self
                     .total_compute_units
-                    .saturating_sub(entry.0.compute_units);
+                    .saturating_sub(entry.0.block_cost());
                 self.total_data_bytes = self
                     .total_data_bytes
                     .saturating_sub(entry.0.data_size as u64);
@@ -203,6 +217,7 @@ mod tests {
             blockhash: [0u8; 32],
             priority_fee,
             compute_units,
+            total_cost: 0, // 0 = use compute_units for block cost
             is_vote,
             expires_at_slot: u64::MAX,
             write_accounts: vec![],

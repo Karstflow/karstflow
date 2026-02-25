@@ -329,6 +329,7 @@ mod tests {
             blockhash: [0u8; 32],
             priority_fee: priority,
             compute_units: cu,
+            total_cost: 0,
             is_vote: false,
             expires_at_slot: u64::MAX,
             write_accounts: vec![{
@@ -475,6 +476,7 @@ mod tests {
             blockhash: [0u8; 32],
             priority_fee: 0,
             compute_units: 100_000,
+            total_cost: 0,
             is_vote: false,
             expires_at_slot: u64::MAX,
             write_accounts: vec![],

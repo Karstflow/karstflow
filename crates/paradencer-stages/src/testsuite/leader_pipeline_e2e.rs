@@ -122,6 +122,7 @@ fn leader_pipeline_produces_entries() {
             blockhash: [0u8; 32],
             priority_fee: (4 - i) as u64 * 100,
             compute_units: 50_000,
+            total_cost: 0,
             is_vote: false,
             expires_at_slot: 200,
             write_accounts: vec![{
@@ -246,6 +247,7 @@ fn full_pipeline_verify_resolv_pack_exec_poh() {
             blockhash: test_blockhash,
             priority_fee: (2 - i) as u64 * 500,
             compute_units: 100_000,
+            total_cost: 0,
             is_vote: false,
             expires_at_slot: 300,
             write_accounts: vec![{
