@@ -367,7 +367,7 @@ impl ForkChoice {
         // Set new root if we found a finalization candidate
         if let Some(new_root) = finalization_candidate {
             // Update BankForks root
-            if let Ok(()) = bank_forks.set_root(new_root) {
+            if bank_forks.set_root(new_root).is_ok() {
                 // Prune our fork tree
                 self.set_root(new_root);
                 return Some(new_root);

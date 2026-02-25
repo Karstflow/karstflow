@@ -305,7 +305,7 @@ impl ReplayStage {
                         if self.config.enable_root_progression {
                             let mut bank_forks = self.bank_transition.bank_forks.write().unwrap();
                             if new_root > bank_forks.root_slot() {
-                                if let Err(e) = bank_forks.set_root(new_root) {
+                                if let Err(e) = bank_forks.set_root(new_root).map(|_| ()) {
                                     eprintln!("Root progression failed: {:?}", e);
                                 } else {
                                     drop(bank_forks);

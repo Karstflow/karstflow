@@ -200,7 +200,7 @@ impl BankTransition {
     /// This prunes all banks below the new root and marks the root bank as rooted.
     pub fn set_root(&mut self, new_root_slot: u64) -> Result<(), BankTransitionError> {
         let mut bank_forks = self.bank_forks.write().unwrap();
-        bank_forks.set_root(new_root_slot)?;
+        bank_forks.set_root(new_root_slot).map(|_| ())?;
         Ok(())
     }
 

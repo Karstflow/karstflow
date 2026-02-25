@@ -37,7 +37,7 @@ pub use bank::{
     Bank, BankFeeError, BankFreezeError, BankRootError, BankStatus, BankTickError,
     BankTransactionError, SlotFinalizationResult, SlotInfo,
 };
-pub use bank_forks::{BankForks, BankForksError};
+pub use bank_forks::{BankForks, BankForksError, EvictionReport};
 pub use blockhash_queue::{BlockhashInfo, BlockhashQueue, Hash, MAX_RECENT_BLOCKHASHES};
 pub use clock::{
     calculate_stake_weighted_timestamp, Clock, DEFAULT_HASHES_PER_TICK, DEFAULT_TICKS_PER_SECOND,
