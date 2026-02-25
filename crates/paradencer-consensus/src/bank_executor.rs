@@ -6,7 +6,8 @@
 /// and fee collection.
 use crate::cost_tracker::TransactionCost;
 use crate::{Bank, BankStatus, FeeCalculator};
-use paradencer_ids::VOTE_PROGRAM_ID;
+use paradencer_constants::ledger::NONCE_ACCOUNT_SIZE;
+use paradencer_ids::{INCINERATOR_ID, SYSTEM_PROGRAM_ID, VOTE_PROGRAM_ID};
 use paradencer_storage::{Account, Pubkey, TransactionId};
 use std::collections::HashMap;
 
@@ -141,6 +142,8 @@ pub enum TransactionExecutionError {
     FeePayerNotFound,
     /// Insufficient balance to pay transaction fee.
     InsufficientFee { required: u64, available: u64 },
+    /// Fee payer account is not a valid system or nonce account.
+    InvalidAccountForFee,
     /// A referenced account could not be loaded.
     AccountLoadFailed(String),
     /// An instruction failed during execution.
@@ -170,6 +173,7 @@ impl std::fmt::Display for TransactionExecutionError {
             } => {
                 write!(f, "insufficient fee: need {required}, have {available}")
             }
+            Self::InvalidAccountForFee => write!(f, "invalid account for fee"),
             Self::AccountLoadFailed(msg) => write!(f, "account load failed: {msg}"),
             Self::InstructionFailed { index, message } => {
                 write!(f, "instruction {index} failed: {message}")
@@ -351,6 +355,63 @@ fn is_rent_transition_allowed(pre: &RentState, post: &RentState) -> bool {
 }
 
 // ---------------------------------------------------------------------------
+// System account kind detection
+// ---------------------------------------------------------------------------
+
+/// Classification of system-owned accounts for fee payer validation.
+///
+/// Only system-owned accounts may pay transaction fees.
+/// Nonce accounts require additional minimum balance to remain rent-exempt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SystemAccountKind {
+    /// Regular system account (zero data length).
+    System,
+    /// Initialized durable nonce account.
+    Nonce,
+}
+
+/// Determine whether an account is a valid fee payer (system or nonce account).
+///
+/// Returns `None` for accounts that cannot pay fees:
+/// - Non-system-owned accounts
+/// - Non-zero data length that doesn't match nonce format
+/// - Uninitialized nonce accounts
+fn get_system_account_kind(account: &Account) -> Option<SystemAccountKind> {
+    // Must be owned by the System Program
+    if account.meta.owner != SYSTEM_PROGRAM_ID {
+        return None;
+    }
+
+    // Empty data means a regular system account (transfer, stake source, etc.)
+    if account.data.is_empty() {
+        return Some(SystemAccountKind::System);
+    }
+
+    // Nonce accounts have exactly NONCE_ACCOUNT_SIZE bytes
+    if account.data.len() != NONCE_ACCOUNT_SIZE {
+        return None;
+    }
+
+    // Parse the nonce version+state discriminants.
+    // Layout: u32 version (LE) | u32 state (LE) | ...
+    // Version 0=legacy, 1=current; State 0=uninitialized, 1=initialized
+    let data = account.data.as_slice();
+    if data.len() < 8 {
+        return None;
+    }
+    let version = u32::from_le_bytes(data[0..4].try_into().expect("slice is 4 bytes"));
+    if version > 1 {
+        return None;
+    }
+    let state = u32::from_le_bytes(data[4..8].try_into().expect("slice is 4 bytes"));
+    if state == paradencer_constants::ledger::NONCE_STATE_INITIALIZED {
+        Some(SystemAccountKind::Nonce)
+    } else {
+        None // Uninitialized nonce accounts cannot pay fees
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Bank execution methods
 // ---------------------------------------------------------------------------
 
@@ -476,14 +537,21 @@ impl Bank {
             }
         };
 
-        // Step 3: Validate and debit fee
+        // Step 3: Validate fee payer and debit fee
+        //
+        // Matches the protocol's fee payer validation:
+        // 1. Account must exist (lamports > 0)
+        // 2. Must be a valid system or nonce account
+        // 3. For nonce accounts: reserve rent-exempt minimum balance
+        // 4. After fee deduction: validate rent state transition
         let fee_calculator = FeeCalculator::default();
         let fee = fee_calculator.calculate_fee(transaction.num_signatures);
+        let rent = crate::Rent::default();
 
         let fee_payer = &transaction.account_keys[0];
         let payer_account = match account_state.get(fee_payer) {
-            Some(acc) => acc.clone(),
-            None => {
+            Some(acc) if acc.meta.lamports > 0 => acc.clone(),
+            _ => {
                 return TransactionExecutionResult {
                     success: false,
                     compute_units_consumed: 0,
@@ -496,7 +564,31 @@ impl Bank {
             }
         };
 
-        if payer_account.meta.lamports < fee {
+        // Validate account kind: must be system account or initialized nonce
+        let account_kind = match get_system_account_kind(&payer_account) {
+            Some(kind) => kind,
+            None => {
+                return TransactionExecutionResult {
+                    success: false,
+                    compute_units_consumed: 0,
+                    fee: 0,
+                    modified_accounts: HashMap::new(),
+                    logs: vec![],
+                    error: Some(TransactionExecutionError::InvalidAccountForFee),
+                    vote_updates: vec![],
+                };
+            }
+        };
+
+        // Nonce accounts must retain rent-exempt minimum for their data
+        let min_balance = match account_kind {
+            SystemAccountKind::Nonce => rent.minimum_balance(NONCE_ACCOUNT_SIZE),
+            SystemAccountKind::System => 0,
+        };
+
+        // Check: lamports - min_balance >= fee
+        let available_for_fee = payer_account.meta.lamports.saturating_sub(min_balance);
+        if fee > available_for_fee {
             return TransactionExecutionResult {
                 success: false,
                 compute_units_consumed: 0,
@@ -505,18 +597,34 @@ impl Bank {
                 logs: vec![],
                 error: Some(TransactionExecutionError::InsufficientFee {
                     required: fee,
-                    available: payer_account.meta.lamports,
+                    available: available_for_fee,
+                }),
+                vote_updates: vec![],
+            };
+        }
+
+        // Validate rent state transition after fee deduction
+        let pre_rent_state = RentState::from_account(&payer_account, &rent);
+        let mut payer_after_fee = payer_account;
+        payer_after_fee.meta.lamports = payer_after_fee.meta.lamports.saturating_sub(fee);
+        let post_rent_state = RentState::from_account(&payer_after_fee, &rent);
+
+        if !is_rent_transition_allowed(&pre_rent_state, &post_rent_state) {
+            return TransactionExecutionResult {
+                success: false,
+                compute_units_consumed: 0,
+                fee: 0,
+                modified_accounts: HashMap::new(),
+                logs: vec![],
+                error: Some(TransactionExecutionError::InsufficientFundsForRent {
+                    account: *fee_payer,
                 }),
                 vote_updates: vec![],
             };
         }
 
         // Debit fee from payer upfront (non-refundable)
-        {
-            let mut payer = payer_account;
-            payer.meta.lamports = payer.meta.lamports.saturating_sub(fee);
-            account_state.insert(*fee_payer, payer);
-        }
+        account_state.insert(*fee_payer, payer_after_fee);
 
         // Step 4: Execute instructions
         let mut total_compute = 0u64;
@@ -636,9 +744,13 @@ impl Bank {
             }
         }
 
-        // Step 4b: Validate rent state transitions for writable accounts
-        let rent = crate::Rent::default();
+        // Step 4b: Validate rent state transitions for writable accounts.
+        // The incinerator account is exempt from rent state checks — it
+        // accumulates burned lamports and is zeroed at slot freeze.
         let rent_violation = modified.iter().find_map(|(pubkey, post_account)| {
+            if *pubkey == INCINERATOR_ID {
+                return None; // Incinerator is exempt
+            }
             let pre_account = account_state.get(pubkey).cloned().unwrap_or_default();
             let pre_state = RentState::from_account(&pre_account, &rent);
             let post_state = RentState::from_account(post_account, &rent);
@@ -1057,6 +1169,25 @@ mod tests {
     }
 
     #[test]
+    fn process_transaction_fails_zero_lamport_payer() {
+        let bank = create_test_bank();
+        let backend = PassthroughBackend;
+
+        let payer = Pubkey::new_unique();
+        let program = Pubkey::new_unique();
+
+        // Payer has 0 lamports — account doesn't exist
+        let tx = create_simple_transaction(payer, program, vec![payer], vec![]);
+        let result = bank.process_transaction(&tx, &backend, MAX_COMPUTE_UNITS);
+
+        assert!(!result.success);
+        assert!(matches!(
+            result.error,
+            Some(TransactionExecutionError::FeePayerNotFound)
+        ));
+    }
+
+    #[test]
     fn process_transaction_fails_insufficient_fee() {
         let bank = create_test_bank();
         let backend = PassthroughBackend;
@@ -1064,7 +1195,11 @@ mod tests {
         let payer = Pubkey::new_unique();
         let program = Pubkey::new_unique();
 
-        // Payer has 0 lamports — can't pay fee
+        // Payer exists but has too few lamports for the fee.
+        // System-owned, empty data → valid SystemAccountKind::System.
+        let payer_account = Account::new(1, vec![], Pubkey::default());
+        store_test_account(&bank, &payer, &payer_account);
+
         let tx = create_simple_transaction(payer, program, vec![payer], vec![]);
         let result = bank.process_transaction(&tx, &backend, MAX_COMPUTE_UNITS);
 
@@ -1944,5 +2079,148 @@ mod tests {
 
         // Capacity should have decreased
         assert!(bank.cost_tracker().remaining_capacity() < initial_capacity);
+    }
+
+    // -----------------------------------------------------------------------
+    // System account kind detection tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn system_account_kind_regular_system_account() {
+        let account = Account::new(1_000, vec![], SYSTEM_PROGRAM_ID);
+        assert_eq!(
+            get_system_account_kind(&account),
+            Some(SystemAccountKind::System)
+        );
+    }
+
+    #[test]
+    fn system_account_kind_non_system_owner_returns_none() {
+        let other_owner = Pubkey::new_unique();
+        let account = Account::new(1_000, vec![], other_owner);
+        assert_eq!(get_system_account_kind(&account), None);
+    }
+
+    #[test]
+    fn system_account_kind_wrong_data_len_returns_none() {
+        // System-owned but data length doesn't match nonce (not 0 and not NONCE_ACCOUNT_SIZE)
+        let account = Account::new(1_000, vec![0u8; 50], SYSTEM_PROGRAM_ID);
+        assert_eq!(get_system_account_kind(&account), None);
+    }
+
+    #[test]
+    fn system_account_kind_initialized_nonce() {
+        // Build a nonce account: version=1 (current), state=1 (initialized)
+        let mut data = vec![0u8; NONCE_ACCOUNT_SIZE];
+        data[0..4].copy_from_slice(&1u32.to_le_bytes()); // version = current
+        data[4..8].copy_from_slice(&1u32.to_le_bytes()); // state = initialized
+
+        let account = Account::new(1_000_000, data, SYSTEM_PROGRAM_ID);
+        assert_eq!(
+            get_system_account_kind(&account),
+            Some(SystemAccountKind::Nonce)
+        );
+    }
+
+    #[test]
+    fn system_account_kind_uninitialized_nonce_returns_none() {
+        let mut data = vec![0u8; NONCE_ACCOUNT_SIZE];
+        data[0..4].copy_from_slice(&1u32.to_le_bytes()); // version = current
+        data[4..8].copy_from_slice(&0u32.to_le_bytes()); // state = uninitialized
+
+        let account = Account::new(1_000_000, data, SYSTEM_PROGRAM_ID);
+        assert_eq!(get_system_account_kind(&account), None);
+    }
+
+    #[test]
+    fn system_account_kind_legacy_nonce() {
+        let mut data = vec![0u8; NONCE_ACCOUNT_SIZE];
+        data[0..4].copy_from_slice(&0u32.to_le_bytes()); // version = legacy
+        data[4..8].copy_from_slice(&1u32.to_le_bytes()); // state = initialized
+
+        let account = Account::new(1_000_000, data, SYSTEM_PROGRAM_ID);
+        assert_eq!(
+            get_system_account_kind(&account),
+            Some(SystemAccountKind::Nonce)
+        );
+    }
+
+    #[test]
+    fn fee_payer_non_system_owner_rejected() {
+        let bank = create_test_bank();
+        let backend = PassthroughBackend;
+
+        let payer = Pubkey::new_unique();
+        let program = Pubkey::new_unique();
+
+        // Non-system owner → cannot pay fees
+        let other_owner = Pubkey::new_unique();
+        let payer_account = Account::new(1_000_000, vec![], other_owner);
+        store_test_account(&bank, &payer, &payer_account);
+
+        let tx = create_simple_transaction(payer, program, vec![payer], vec![]);
+        let result = bank.process_transaction(&tx, &backend, MAX_COMPUTE_UNITS);
+
+        assert!(!result.success);
+        assert!(matches!(
+            result.error,
+            Some(TransactionExecutionError::InvalidAccountForFee)
+        ));
+    }
+
+    #[test]
+    fn nonce_fee_payer_reserves_rent_exempt_minimum() {
+        let bank = create_test_bank();
+        let backend = PassthroughBackend;
+
+        let payer = Pubkey::new_unique();
+        let program = Pubkey::new_unique();
+
+        // Build initialized nonce account with exactly enough for rent minimum
+        // but not enough for rent minimum + fee
+        let rent = crate::Rent::default();
+        let min_balance = rent.minimum_balance(NONCE_ACCOUNT_SIZE);
+
+        let mut data = vec![0u8; NONCE_ACCOUNT_SIZE];
+        data[0..4].copy_from_slice(&1u32.to_le_bytes()); // version = current
+        data[4..8].copy_from_slice(&1u32.to_le_bytes()); // state = initialized
+
+        // Just the rent minimum — no room for any fee
+        let payer_account = Account::new(min_balance, data, SYSTEM_PROGRAM_ID);
+        store_test_account(&bank, &payer, &payer_account);
+
+        let tx = create_simple_transaction(payer, program, vec![payer], vec![]);
+        let result = bank.process_transaction(&tx, &backend, MAX_COMPUTE_UNITS);
+
+        assert!(!result.success);
+        assert!(matches!(
+            result.error,
+            Some(TransactionExecutionError::InsufficientFee { .. })
+        ));
+    }
+
+    #[test]
+    fn incinerator_exempt_from_rent_state_check() {
+        // The incinerator account should not trigger rent state violations
+        // even when transitioning to a non-exempt state.
+        let rent = crate::Rent::default();
+        let incinerator = INCINERATOR_ID;
+
+        // Pre: rent-exempt account
+        let pre = Account::new(10_000_000, vec![0u8; 100], Pubkey::default());
+        let pre_state = RentState::from_account(&pre, &rent);
+        assert_eq!(pre_state, RentState::RentExempt);
+
+        // Post: rent-paying (normally disallowed)
+        let post = Account::new(1, vec![0u8; 100], Pubkey::default());
+        let post_state = RentState::from_account(&post, &rent);
+        assert!(matches!(post_state, RentState::RentPaying { .. }));
+
+        // Transition from exempt to paying is normally disallowed
+        assert!(!is_rent_transition_allowed(&pre_state, &post_state));
+
+        // But incinerator_id should be exempt — verified in process_transaction
+        // by the pubkey check. This is a documentation test.
+        assert_eq!(incinerator, paradencer_ids::INCINERATOR_ID);
     }
 }

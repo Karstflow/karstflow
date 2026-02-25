@@ -119,12 +119,16 @@ impl Bank {
         result
     }
 
-    /// Complete a slot: distribute fees, collect rent, and run epoch boundary
-    /// processing if applicable.
+    /// Complete a slot: distribute fees and run epoch boundary processing
+    /// if applicable.
     ///
     /// Call this after all transactions and ticks for the slot have been
     /// processed, but before calling `freeze()`. The runtime performs
     /// end-of-slot housekeeping before sealing the bank hash.
+    ///
+    /// Note: Rent collection is disabled on modern protocol
+    /// (`disable_rent_fees_collection` always active). All accounts must
+    /// be rent-exempt, enforced during transaction execution.
     pub fn finish_slot(
         &self,
         stake_tracker: &StakeTracker,
@@ -137,8 +141,8 @@ impl Bank {
         // 1. Distribute fees
         let fees = self.distribute_fees().map_err(|e| format!("{:?}", e))?;
 
-        // 2. Collect rent
-        let rent = self.collect_rent();
+        // 2. Rent collection disabled — all accounts must be rent-exempt.
+        let rent = RentCollectionResult::default();
 
         // 3. Epoch boundary processing
         let is_epoch_boundary = self.is_epoch_boundary();

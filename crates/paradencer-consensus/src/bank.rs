@@ -793,6 +793,11 @@ impl Bank {
             .unwrap()
             .register_hash(blockhash_info);
 
+        // Delete incinerator account: zero its lamports and reduce capitalization.
+        // The incinerator accumulates burned lamports from transactions;
+        // zeroing it at slot freeze keeps total supply accurate.
+        self.run_incinerator();
+
         // Check and process epoch boundary
         let epoch_boundary = self.is_epoch_boundary();
         if epoch_boundary {
@@ -820,24 +825,53 @@ impl Bank {
     /// vote reward distribution, leader schedule regeneration, and
     /// queues partitioned stake reward distribution.
     fn process_epoch_boundary(&self) {
-        // Step 1: Collect rent from non-exempt accounts
-        self.collect_rent_for_epoch();
+        // Note: Rent fee collection is disabled on modern protocol.
+        // The `disable_rent_fees_collection` feature is always active,
+        // meaning no rent is collected from accounts. All accounts
+        // must be rent-exempt (enforced during transaction execution
+        // via rent state transition validation).
 
-        // Step 2: Feature activation — scan feature accounts, activate pending
+        // Step 1: Feature activation — scan feature accounts, activate pending
         self.activate_pending_features();
 
-        // Step 3: Epoch rewards — calculate and prepare distribution
+        // Step 2: Epoch rewards — calculate and prepare distribution
         self.calculate_and_prepare_rewards();
 
-        // Step 4: Regenerate leader schedule for the next epoch
+        // Step 3: Regenerate leader schedule for the next epoch
         self.regenerate_leader_schedule();
+    }
+
+    /// Zero out the incinerator account and reduce capitalization.
+    ///
+    /// The incinerator is a special account that accumulates burned lamports.
+    /// At slot freeze, its balance is deleted to keep total supply accurate.
+    fn run_incinerator(&self) {
+        let incinerator_key = paradencer_ids::INCINERATOR_ID;
+        if let Some(account) = self.accounts.get_published_account(&incinerator_key) {
+            let balance = account.meta.lamports;
+            if balance > 0 {
+                // Update lattice hash before modifying the account
+                let mut zeroed = account.clone();
+                zeroed.meta.lamports = 0;
+                self.update_account_hash(&incinerator_key, Some(&account), &zeroed);
+
+                // Store the zeroed account
+                self.accounts
+                    .store_published_account(incinerator_key, zeroed);
+
+                // Reduce capitalization by the burned amount
+                self.capitalization.fetch_sub(balance, Ordering::Relaxed);
+            }
+        }
     }
 
     /// Collect rent from all non-exempt accounts at epoch boundary.
     ///
-    /// Iterates all published accounts, calculates rent due based on
-    /// data size and current balance, debits rent-paying accounts,
-    /// and burns the collected rent (reducing capitalization).
+    /// NOTE: This method is retained for compatibility but is no longer called
+    /// from the epoch boundary. The `disable_rent_fees_collection` feature is
+    /// always active on modern protocol — rent is not actively collected.
+    /// Rent state transitions are enforced during transaction execution instead.
+    #[allow(dead_code)]
     fn collect_rent_for_epoch(&self) {
         let collector = crate::rent::RentCollector::default_for_epoch(self.epoch);
 
@@ -2392,7 +2426,10 @@ mod tests {
     }
 
     #[test]
-    fn rent_collected_at_epoch_boundary() {
+    fn rent_not_collected_at_epoch_boundary() {
+        // Rent collection is disabled (`disable_rent_fees_collection` always active).
+        // All accounts must be rent-exempt; this is enforced during transaction
+        // execution via rent state transition validation.
         let accounts = Arc::new(AccountDatabase::new());
         let epoch_schedule = Arc::new(EpochSchedule::default());
         let leader = Pubkey::new_unique();
@@ -2413,7 +2450,7 @@ mod tests {
             renter,
             Account {
                 meta: paradencer_types::AccountMeta {
-                    lamports: 100, // Way below rent exemption
+                    lamports: 100,
                     owner: Pubkey::default(),
                     executable: false,
                     rent_epoch: 0,
@@ -2440,11 +2477,11 @@ mod tests {
         }
         child.finish_slot().unwrap();
 
-        // After epoch boundary processing, the renter's balance should have decreased
+        // Rent is NOT collected — balance should remain unchanged.
         let renter_account = accounts.get_published_account(&renter).unwrap();
-        assert!(
-            renter_account.meta.lamports < 100,
-            "Rent should have been collected: balance = {}",
+        assert_eq!(
+            renter_account.meta.lamports, 100,
+            "Rent should NOT be collected: balance = {}",
             renter_account.meta.lamports
         );
     }
