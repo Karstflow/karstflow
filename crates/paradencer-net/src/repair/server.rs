@@ -110,12 +110,36 @@ impl RateLimiter {
     }
 }
 
-/// Trait for providing shred data to the repair server
+/// Trait for providing shred data to the repair server.
+///
+/// Implementations back different storage strategies: in-memory for testing,
+/// blockstore-backed for production. The `get_ancestor_hashes` method enables
+/// proper AncestorHashes responses with real bank hashes.
 pub trait ShredProvider: Send + Sync {
     fn get_shred(&self, slot: Slot, index: ShredIndex) -> Option<ShredData>;
     fn get_highest_shred_index(&self, slot: Slot) -> Option<ShredIndex>;
     fn get_shreds_in_range(&self, start_slot: Slot, end_slot: Slot) -> Vec<ShredData>;
     fn get_ancestors(&self, slot: Slot, count: u64) -> Vec<ShredData>;
+
+    /// Get ancestor slot hashes for the AncestorHashes repair protocol.
+    ///
+    /// Returns up to `count` ancestor (slot, bank_hash) pairs starting from
+    /// the parent of `slot`. Production implementations should return real
+    /// bank hashes from the committed ledger.
+    ///
+    /// Default: derives placeholder hashes from ancestor shred data.
+    fn get_ancestor_hashes(&self, slot: Slot, count: u64) -> Vec<(Slot, [u8; 32])> {
+        let ancestors = self.get_ancestors(slot, count);
+        ancestors
+            .iter()
+            .map(|s| {
+                let mut hash = [0u8; 32];
+                let copy_len = s.data.len().min(32);
+                hash[..copy_len].copy_from_slice(&s.data[..copy_len]);
+                (s.slot, hash)
+            })
+            .collect()
+    }
 }
 
 /// Simple in-memory shred store for testing
@@ -376,22 +400,12 @@ impl RepairServer {
                 }
             }
             RepairRequest::Ancestor { slot, .. } => {
-                // AncestorHashes: return Vec<(Slot, Hash)>
-                // TODO: Implement proper ancestor hash chain lookup
-                let ancestors = shred_provider.get_ancestors(
+                // AncestorHashes: return Vec<(Slot, Hash)>.
+                // Production implementations return real bank hashes.
+                let hashes = shred_provider.get_ancestor_hashes(
                     slot,
                     paradencer_constants::repair::MAX_ANCESTOR_HASHES_RESPONSE as u64,
                 );
-                let hashes: Vec<(u64, [u8; 32])> = ancestors
-                    .iter()
-                    .map(|s| {
-                        let mut hash = [0u8; 32];
-                        // Use first 32 bytes of shred data as placeholder hash
-                        let copy_len = s.data.len().min(32);
-                        hash[..copy_len].copy_from_slice(&s.data[..copy_len]);
-                        (s.slot, hash)
-                    })
-                    .collect();
                 let resp = response::WireAncestorHashesResponse::Hashes(hashes);
                 Some(response::encode_ancestor_response(&resp, nonce))
             }
@@ -574,5 +588,64 @@ mod tests {
         } else {
             panic!("expected Hashes variant");
         }
+    }
+
+    #[test]
+    fn test_get_ancestor_hashes_default() {
+        let store = InMemoryShredStore::new();
+        store.insert(ShredData::new(99, 0, vec![0xAA; 32], false));
+        store.insert(ShredData::new(98, 0, vec![0xBB; 32], false));
+
+        let hashes = store.get_ancestor_hashes(100, 5);
+        assert!(!hashes.is_empty());
+
+        // Each hash should be derived from the shred's first 32 bytes.
+        for (slot, hash) in &hashes {
+            assert!(*slot == 99 || *slot == 98);
+            if *slot == 99 {
+                assert_eq!(hash, &[0xAA; 32]);
+            } else {
+                assert_eq!(hash, &[0xBB; 32]);
+            }
+        }
+    }
+
+    #[test]
+    fn test_ancestor_hashes_custom_provider() {
+        /// A custom provider that returns real bank hashes.
+        struct CustomProvider;
+
+        impl ShredProvider for CustomProvider {
+            fn get_shred(&self, _slot: Slot, _index: ShredIndex) -> Option<ShredData> {
+                None
+            }
+            fn get_highest_shred_index(&self, _slot: Slot) -> Option<ShredIndex> {
+                None
+            }
+            fn get_shreds_in_range(&self, _start: Slot, _end: Slot) -> Vec<ShredData> {
+                vec![]
+            }
+            fn get_ancestors(&self, _slot: Slot, _count: u64) -> Vec<ShredData> {
+                vec![]
+            }
+            fn get_ancestor_hashes(&self, slot: Slot, count: u64) -> Vec<(Slot, [u8; 32])> {
+                (1..=count.min(3))
+                    .map(|i| {
+                        let ancestor = slot.saturating_sub(i);
+                        let mut hash = [0u8; 32];
+                        hash[0] = ancestor as u8;
+                        (ancestor, hash)
+                    })
+                    .collect()
+            }
+        }
+
+        let provider = CustomProvider;
+        let hashes = provider.get_ancestor_hashes(100, 3);
+        assert_eq!(hashes.len(), 3);
+        assert_eq!(hashes[0].0, 99);
+        assert_eq!(hashes[0].1[0], 99);
+        assert_eq!(hashes[1].0, 98);
+        assert_eq!(hashes[2].0, 97);
     }
 }

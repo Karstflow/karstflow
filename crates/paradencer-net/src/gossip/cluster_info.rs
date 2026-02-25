@@ -714,6 +714,26 @@ impl ClusterInfo {
         info.wallclock = current_timestamp_ms();
     }
 
+    /// Look up a node's identity by their repair socket address.
+    ///
+    /// Scans all contact info entries for a matching repair address.
+    /// Returns `None` if no node has a matching repair address.
+    pub fn lookup_by_repair_addr(&self, addr: &SocketAddr) -> Option<NodeId> {
+        let table = self.table.read();
+        table
+            .contact_info_entries()
+            .into_iter()
+            .filter_map(|entry| {
+                entry
+                    .value
+                    .data
+                    .as_contact_info()
+                    .and_then(ContactInfo::from_crds_contact_info)
+            })
+            .find(|info| info.repair_addr == *addr)
+            .map(|info| info.node_id)
+    }
+
     /// Access the underlying CRDS table (for advanced operations).
     pub fn crds_table(&self) -> &Arc<RwLock<CrdsTable>> {
         &self.table
@@ -1132,6 +1152,37 @@ mod tests {
         cluster.refresh_self_contact_info();
         let refreshed = cluster.self_contact_info();
         assert!(refreshed.wallclock >= original_wallclock);
+    }
+
+    #[test]
+    fn lookup_by_repair_addr_finds_peer() {
+        let self_node_id = NodeId::new([0u8; 32]);
+        let self_info = create_test_contact_info(self_node_id, 8000);
+        let cluster = ClusterInfo::new(
+            self_node_id,
+            self_info,
+            Duration::from_secs(30),
+            MAX_CLUSTER_SIZE,
+        );
+
+        let peer_id = NodeId::new([1u8; 32]);
+        let repair_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)), 9003);
+        let peer_info = ContactInfo::new(
+            peer_id,
+            SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)), 9000),
+            SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)), 9001),
+            SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)), 9002),
+            repair_addr,
+            1,
+        );
+        cluster.insert(peer_info);
+
+        let found = cluster.lookup_by_repair_addr(&repair_addr);
+        assert_eq!(found, Some(peer_id));
+
+        // Unknown address returns None.
+        let unknown = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(192, 168, 0, 1)), 5555);
+        assert_eq!(cluster.lookup_by_repair_addr(&unknown), None);
     }
 
     #[test]

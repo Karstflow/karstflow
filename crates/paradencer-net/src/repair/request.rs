@@ -301,9 +301,12 @@ impl RepairRequester {
             let request_type = request.request_type();
             let (slot, index) = extract_slot_index(&request);
 
-            // Convert to wire format and sign
-            // TODO: Look up recipient pubkey from ClusterInfo by SocketAddr
-            let recipient = [0u8; 32];
+            // Convert to wire format and sign.
+            // Look up recipient pubkey from ClusterInfo by repair SocketAddr.
+            let recipient = cluster_info
+                .lookup_by_repair_addr(&target)
+                .map(|id| id.0)
+                .unwrap_or([0u8; 32]);
             let mut wire_msg = match convert::request_to_wire(&request, recipient) {
                 Some(msg) => msg,
                 None => continue, // SlotRange not representable
@@ -417,6 +420,10 @@ fn extract_slot_index(request: &RepairRequest) -> (Slot, ShredIndex) {
 }
 
 /// Reconstruct an internal RepairResponse from wire response payload.
+///
+/// Parses the raw shred bytes to extract slot, index, and is_last_in_slot
+/// from the shred header. Falls back to pending request metadata if the
+/// payload can't be parsed (too short, coding shred, etc.).
 fn reconstruct_response(pending: &PendingRequest, payload: Vec<u8>, nonce: u64) -> RepairResponse {
     let responder = NodeId::new([0u8; 32]); // Wire responses don't carry responder ID
 
@@ -429,20 +436,17 @@ fn reconstruct_response(pending: &PendingRequest, payload: Vec<u8>, nonce: u64) 
                     nonce,
                 }
             } else {
+                let (slot, index, is_last) =
+                    parse_shred_header(&payload).unwrap_or((pending.slot, pending.index, false));
                 RepairResponse::Shred {
                     responder,
-                    shred: Some(ShredData::new(
-                        pending.slot,
-                        pending.index,
-                        payload,
-                        false, // TODO: Determine from shred header
-                    )),
+                    shred: Some(ShredData::new(slot, index, payload, is_last)),
                     nonce,
                 }
             }
         }
         RepairRequestType::HighestShred => {
-            // HighestWindowIndex returns a shred — the highest one
+            // HighestWindowIndex returns the highest shred for the slot.
             if payload.is_empty() {
                 RepairResponse::HighestShred {
                     responder,
@@ -451,16 +455,17 @@ fn reconstruct_response(pending: &PendingRequest, payload: Vec<u8>, nonce: u64) 
                     nonce,
                 }
             } else {
-                // TODO: Parse shred header to extract actual index
+                let (slot, index, is_last) =
+                    parse_shred_header(&payload).unwrap_or((pending.slot, 0, false));
                 RepairResponse::Shred {
                     responder,
-                    shred: Some(ShredData::new(pending.slot, 0, payload, false)),
+                    shred: Some(ShredData::new(slot, index, payload, is_last)),
                     nonce,
                 }
             }
         }
         RepairRequestType::Orphan => {
-            // Orphan returns ancestor shreds
+            // Orphan returns ancestor shreds.
             if payload.is_empty() {
                 RepairResponse::Shreds {
                     responder,
@@ -468,16 +473,18 @@ fn reconstruct_response(pending: &PendingRequest, payload: Vec<u8>, nonce: u64) 
                     nonce,
                 }
             } else {
+                let (slot, index, is_last) =
+                    parse_shred_header(&payload).unwrap_or((pending.slot, 0, false));
                 RepairResponse::Shreds {
                     responder,
-                    shreds: vec![ShredData::new(pending.slot, 0, payload, false)],
+                    shreds: vec![ShredData::new(slot, index, payload, is_last)],
                     nonce,
                 }
             }
         }
         RepairRequestType::Ancestor => {
-            // AncestorHashes returns bincode-serialized Vec<(Slot, Hash)> + nonce
-            // For now, wrap as raw shred data
+            // AncestorHashes returns bincode-serialized Vec<(Slot, Hash)> + nonce.
+            // Wrap as raw data — the caller decodes the ancestor hash response.
             RepairResponse::Shreds {
                 responder,
                 shreds: vec![ShredData::new(pending.slot, 0, payload, false)],
@@ -485,7 +492,7 @@ fn reconstruct_response(pending: &PendingRequest, payload: Vec<u8>, nonce: u64) 
             }
         }
         RepairRequestType::SlotRange => {
-            // SlotRange has no wire equivalent, should not reach here
+            // SlotRange has no wire equivalent, should not reach here.
             RepairResponse::Error {
                 responder,
                 error_code: 400,
@@ -494,6 +501,16 @@ fn reconstruct_response(pending: &PendingRequest, payload: Vec<u8>, nonce: u64) 
             }
         }
     }
+}
+
+/// Parse raw shred bytes to extract slot, index, and is_last_in_slot.
+///
+/// Returns `None` if the payload is too short or not a valid shred
+/// (e.g., corrupted data). The caller should fall back to request metadata.
+fn parse_shred_header(payload: &[u8]) -> Option<(Slot, ShredIndex, bool)> {
+    use paradencer_types::shred::ShredParser;
+    let shred = ShredParser::parse(payload).ok()?;
+    Some((shred.slot(), shred.index(), shred.is_last_in_slot()))
 }
 
 #[cfg(test)]
@@ -603,6 +620,153 @@ mod tests {
             assert_eq!(nonce, 42);
         } else {
             panic!("expected Shred None response");
+        }
+    }
+
+    /// Build a minimal legacy data shred for testing.
+    fn build_test_shred(slot: u64, index: u32, is_last: bool) -> Vec<u8> {
+        use paradencer_types::shred::{
+            SHRED_LAST_IN_SLOT, SHRED_LEGACY_DATA_NIBBLE, SHRED_TYPE_LEGACY_DATA, SIGNATURE_SIZE,
+        };
+        let variant_byte = SHRED_TYPE_LEGACY_DATA | SHRED_LEGACY_DATA_NIBBLE;
+        let mut buf = Vec::new();
+        buf.extend_from_slice(&[0u8; SIGNATURE_SIZE]); // signature
+        buf.push(variant_byte);
+        buf.extend_from_slice(&slot.to_le_bytes());
+        buf.extend_from_slice(&index.to_le_bytes());
+        buf.extend_from_slice(&1u16.to_le_bytes()); // version
+        buf.extend_from_slice(&0u32.to_le_bytes()); // fec_set_index
+                                                    // Data header
+        buf.extend_from_slice(&1u16.to_le_bytes()); // parent_offset
+        let flags = if is_last { SHRED_LAST_IN_SLOT } else { 0 };
+        buf.push(flags);
+        buf.extend_from_slice(&64u16.to_le_bytes()); // size
+                                                     // Payload
+        buf.extend_from_slice(&[0xAB; 64]);
+        buf
+    }
+
+    #[test]
+    fn test_parse_shred_header_extracts_fields() {
+        let payload = build_test_shred(500, 42, false);
+        let (slot, index, is_last) = parse_shred_header(&payload).unwrap();
+        assert_eq!(slot, 500);
+        assert_eq!(index, 42);
+        assert!(!is_last);
+    }
+
+    #[test]
+    fn test_parse_shred_header_last_in_slot() {
+        let payload = build_test_shred(999, 10, true);
+        let (slot, index, is_last) = parse_shred_header(&payload).unwrap();
+        assert_eq!(slot, 999);
+        assert_eq!(index, 10);
+        assert!(is_last);
+    }
+
+    #[test]
+    fn test_parse_shred_header_too_short_falls_back() {
+        // A payload too short to parse should return None.
+        assert!(parse_shred_header(&[1, 2, 3]).is_none());
+        assert!(parse_shred_header(&[]).is_none());
+    }
+
+    #[test]
+    fn test_reconstruct_parses_shred_header() {
+        let payload = build_test_shred(777, 33, true);
+        let pending = PendingRequest {
+            created_at: Instant::now(),
+            request_type: RepairRequestType::Shred,
+            slot: 0,  // wrong — should be overridden by parsed value
+            index: 0, // wrong — should be overridden by parsed value
+            response_tx: oneshot::channel().0,
+        };
+
+        let response = reconstruct_response(&pending, payload, 99);
+        if let RepairResponse::Shred {
+            shred: Some(shred),
+            nonce,
+            ..
+        } = response
+        {
+            assert_eq!(shred.slot, 777);
+            assert_eq!(shred.index, 33);
+            assert!(shred.is_last_in_slot);
+            assert_eq!(nonce, 99);
+        } else {
+            panic!("expected Shred response");
+        }
+    }
+
+    #[test]
+    fn test_reconstruct_highest_parses_header() {
+        let payload = build_test_shred(555, 100, false);
+        let pending = PendingRequest {
+            created_at: Instant::now(),
+            request_type: RepairRequestType::HighestShred,
+            slot: 0,
+            index: 0,
+            response_tx: oneshot::channel().0,
+        };
+
+        let response = reconstruct_response(&pending, payload, 88);
+        if let RepairResponse::Shred {
+            shred: Some(shred), ..
+        } = response
+        {
+            assert_eq!(shred.slot, 555);
+            assert_eq!(shred.index, 100);
+            assert!(!shred.is_last_in_slot);
+        } else {
+            panic!("expected Shred response with parsed header");
+        }
+    }
+
+    #[test]
+    fn test_reconstruct_orphan_parses_header() {
+        let payload = build_test_shred(300, 7, true);
+        let pending = PendingRequest {
+            created_at: Instant::now(),
+            request_type: RepairRequestType::Orphan,
+            slot: 0,
+            index: 0,
+            response_tx: oneshot::channel().0,
+        };
+
+        let response = reconstruct_response(&pending, payload, 77);
+        if let RepairResponse::Shreds { shreds, nonce, .. } = response {
+            assert_eq!(shreds.len(), 1);
+            assert_eq!(shreds[0].slot, 300);
+            assert_eq!(shreds[0].index, 7);
+            assert!(shreds[0].is_last_in_slot);
+            assert_eq!(nonce, 77);
+        } else {
+            panic!("expected Shreds response");
+        }
+    }
+
+    #[test]
+    fn test_reconstruct_falls_back_on_invalid_payload() {
+        // Non-parseable payload falls back to pending request metadata.
+        let pending = PendingRequest {
+            created_at: Instant::now(),
+            request_type: RepairRequestType::Shred,
+            slot: 200,
+            index: 15,
+            response_tx: oneshot::channel().0,
+        };
+
+        // 10 bytes is too short for a shred header.
+        let response = reconstruct_response(&pending, vec![0xFF; 10], 55);
+        if let RepairResponse::Shred {
+            shred: Some(shred), ..
+        } = response
+        {
+            assert_eq!(shred.slot, 200);
+            assert_eq!(shred.index, 15);
+            assert!(!shred.is_last_in_slot);
+        } else {
+            panic!("expected Shred response with fallback metadata");
         }
     }
 
