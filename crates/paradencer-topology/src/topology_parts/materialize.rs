@@ -13,6 +13,7 @@ use paradencer_stages::{
     ShredFilterStats, ShredNetworkConfig, ShredNetworkService, StageTelemetryStats,
     StorageRuntimePolicy, TxFilter,
 };
+use paradencer_storage::Blockstore;
 use paradencer_types::shred::Shred;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -23,6 +24,24 @@ pub fn materialize_services(
     metrics_output_format: MetricsOutputFormat,
     metrics_output_target: MetricsOutputTarget,
     storage_runtime_policy: StorageRuntimePolicy,
+) -> Result<MaterializedTopology> {
+    materialize_services_with_blockstore(
+        topology_spec,
+        ingress_policy,
+        metrics_output_format,
+        metrics_output_target,
+        storage_runtime_policy,
+        None,
+    )
+}
+
+pub fn materialize_services_with_blockstore(
+    topology_spec: TopologySpec,
+    ingress_policy: IngressPolicy,
+    metrics_output_format: MetricsOutputFormat,
+    metrics_output_target: MetricsOutputTarget,
+    storage_runtime_policy: StorageRuntimePolicy,
+    blockstore: Option<Arc<Blockstore>>,
 ) -> Result<MaterializedTopology> {
     validate_topology_requirements(&topology_spec)?;
 
@@ -170,11 +189,15 @@ pub fn materialize_services(
                     // ShredCollector: accumulates shreds by slot, emits assembled blocks.
                     // Receives completed FEC sets from the network service, plus a
                     // direct shred channel for future repair/catch-up paths.
-                    services.push(Box::new(ShredCollector::with_fec_input(
+                    let mut collector = ShredCollector::with_fec_input(
                         direct_shred_rx.clone(),
                         fec_completed_rx.clone(),
                         assembled_block_tx.clone(),
-                    )));
+                    );
+                    if let Some(ref bs) = blockstore {
+                        collector.set_blockstore(Arc::clone(bs));
+                    }
+                    services.push(Box::new(collector));
                     shred_collector_added = true;
                 }
             }

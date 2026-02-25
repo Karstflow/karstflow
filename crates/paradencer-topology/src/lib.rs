@@ -4,7 +4,9 @@ mod topology_parts;
 pub use errors::{Result, TopologyError};
 #[cfg(test)]
 pub use topology_parts::{load_topology_from_file, plan_default_topology};
-pub use topology_parts::{materialize_services, MaterializedTopology};
+pub use topology_parts::{
+    materialize_services, materialize_services_with_blockstore, MaterializedTopology,
+};
 
 #[cfg(test)]
 mod tests {

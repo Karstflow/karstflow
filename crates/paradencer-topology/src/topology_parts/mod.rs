@@ -8,7 +8,7 @@ mod validation;
 
 #[cfg(test)]
 pub use loader::load_topology_from_file;
-pub use materialize::materialize_services;
+pub use materialize::{materialize_services, materialize_services_with_blockstore};
 #[cfg(test)]
 pub use planner::plan_default_topology;
 pub use types::MaterializedTopology;

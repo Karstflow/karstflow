@@ -7,11 +7,12 @@ mod runner;
 mod surface;
 
 pub use bootstrap::{
-    build_consensus_infrastructure, build_diagnostics_summary_from_probe, build_pipeline_service,
-    build_repair_service, build_replay_service, build_replay_service_with_block_input,
-    build_shred_pipeline, build_storage_maintenance_service, build_turbine_service,
-    build_vote_broadcast_service, ensure_mainnet_readiness, evaluate_mainnet_readiness,
-    load_node_config, materialize_service_pair_from_config, materialize_services_from_config,
+    build_blockstore, build_consensus_infrastructure, build_diagnostics_summary_from_probe,
+    build_pipeline_service, build_repair_service, build_replay_service,
+    build_replay_service_with_block_input, build_shred_pipeline, build_storage_maintenance_service,
+    build_turbine_service, build_vote_broadcast_service, ensure_mainnet_readiness,
+    evaluate_mainnet_readiness, load_node_config, materialize_service_pair_from_config,
+    materialize_services_from_config, materialize_services_from_config_with_blockstore,
     maybe_start_metrics_http_bridge, print_preflight_ok, resolve_validator_identity,
     run_diagnostics_phase, run_preflight_phase, run_preflight_phase_with_probe_report,
     run_runtime_phase, run_startup_checks, run_startup_checks_with_probe_report,

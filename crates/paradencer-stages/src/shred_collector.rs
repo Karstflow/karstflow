@@ -12,8 +12,10 @@ use crate::shred_assembler::{AssembledBlock, ShredAssembler};
 use crate::shred_network::CompletedFecSet;
 use paradencer_mesh::{InPort, OutPort, ReceiveError, SendError};
 use paradencer_runtime::{RuntimeError, RuntimeResult, Service, ServiceContext};
+use paradencer_storage::Blockstore;
 use paradencer_types::shred::Shred;
 use std::collections::BTreeMap;
+use std::sync::Arc;
 use std::time::Duration;
 
 /// Configuration for the shred collector.
@@ -54,6 +56,10 @@ pub struct ShredCollectorStats {
     pub slots_evicted_overflow: u64,
     pub assembly_failures: u64,
     pub downstream_backpressure: u64,
+    /// Number of shreds successfully persisted to the blockstore.
+    pub blockstore_writes: u64,
+    /// Number of shred blockstore writes that failed.
+    pub blockstore_write_errors: u64,
 }
 
 pub struct ShredCollector {
@@ -62,6 +68,8 @@ pub struct ShredCollector {
     /// Channel for completed FEC sets from the shred network stage.
     incoming_fec_sets: Option<InPort<CompletedFecSet>>,
     block_output: OutPort<AssembledBlock>,
+    /// Optional persistent storage for write-through shred persistence.
+    blockstore: Option<Arc<Blockstore>>,
     slot_buffers: BTreeMap<u64, SlotBuffer>,
     assembler: ShredAssembler,
     stats: ShredCollectorStats,
@@ -87,6 +95,7 @@ impl ShredCollector {
             incoming_shreds,
             incoming_fec_sets: Some(incoming_fec_sets),
             block_output,
+            blockstore: None,
             slot_buffers: BTreeMap::new(),
             assembler: ShredAssembler::new(),
             stats: ShredCollectorStats::default(),
@@ -103,14 +112,38 @@ impl ShredCollector {
             incoming_shreds,
             incoming_fec_sets: None,
             block_output,
+            blockstore: None,
             slot_buffers: BTreeMap::new(),
             assembler: ShredAssembler::new(),
             stats: ShredCollectorStats::default(),
         }
     }
 
+    /// Attach persistent blockstore for write-through shred persistence.
+    ///
+    /// When a blockstore is attached, every received shred is written to
+    /// persistent storage before block assembly. This enables the repair
+    /// service to serve shreds from disk and provides crash recovery.
+    pub fn set_blockstore(&mut self, blockstore: Arc<Blockstore>) {
+        self.blockstore = Some(blockstore);
+    }
+
     pub fn stats(&self) -> &ShredCollectorStats {
         &self.stats
+    }
+
+    /// Persist a shred to the blockstore if one is attached.
+    ///
+    /// Errors are counted but not propagated — blockstore writes must not
+    /// block the real-time shred pipeline. The repair service can request
+    /// missing shreds later if persistence fails.
+    fn persist_shred(&mut self, shred: &Shred) {
+        if let Some(ref blockstore) = self.blockstore {
+            match blockstore.insert_shred(shred) {
+                Ok(_) => self.stats.blockstore_writes += 1,
+                Err(_) => self.stats.blockstore_write_errors += 1,
+            }
+        }
     }
 
     /// Insert a completed FEC set's data shreds into the slot buffers.
@@ -121,6 +154,12 @@ impl ShredCollector {
     pub fn insert_completed_fec_set(&mut self, fec_set: CompletedFecSet) {
         self.stats.fec_sets_received += 1;
         let slot = fec_set.slot;
+        let max_shreds = self.config.max_shreds_per_slot;
+
+        // Persist shreds to blockstore before buffering.
+        for shred in &fec_set.data_shreds {
+            self.persist_shred(shred);
+        }
 
         let buffer = self.slot_buffers.entry(slot).or_insert_with(|| SlotBuffer {
             shreds: Vec::new(),
@@ -132,7 +171,7 @@ impl ShredCollector {
             self.stats.shreds_received += 1;
             let is_last = shred.is_last_in_slot();
 
-            if buffer.shreds.len() < self.config.max_shreds_per_slot {
+            if buffer.shreds.len() < max_shreds {
                 buffer.shreds.push(shred);
             }
             if is_last {
@@ -161,30 +200,41 @@ impl ShredCollector {
 
     /// Drain all available shreds from the input channel into slot buffers.
     fn drain_incoming(&mut self) -> Result<bool, ReceiveError> {
-        let mut received_any = false;
+        // Collect shreds from the channel first, then process them.
+        // This avoids borrow conflicts between the channel, persist, and buffer.
+        let mut batch = Vec::new();
         loop {
             match self.incoming_shreds.try_recv() {
-                Ok(Some(shred)) => {
-                    received_any = true;
-                    self.stats.shreds_received += 1;
-                    let slot = shred.slot();
-                    let is_last = shred.is_last_in_slot();
-
-                    let buffer = self.slot_buffers.entry(slot).or_insert_with(|| SlotBuffer {
-                        shreds: Vec::new(),
-                        last_in_slot_seen: false,
-                        age_ticks: 0,
-                    });
-
-                    if buffer.shreds.len() < self.config.max_shreds_per_slot {
-                        buffer.shreds.push(shred);
-                    }
-                    if is_last {
-                        buffer.last_in_slot_seen = true;
-                    }
-                }
+                Ok(Some(shred)) => batch.push(shred),
                 Ok(None) => break,
-                Err(ReceiveError::QueueClosed) => return Err(ReceiveError::QueueClosed),
+                Err(ReceiveError::QueueClosed) => {
+                    if batch.is_empty() {
+                        return Err(ReceiveError::QueueClosed);
+                    }
+                    break;
+                }
+            }
+        }
+
+        let received_any = !batch.is_empty();
+        for shred in batch {
+            self.stats.shreds_received += 1;
+            let slot = shred.slot();
+            let is_last = shred.is_last_in_slot();
+
+            self.persist_shred(&shred);
+
+            let buffer = self.slot_buffers.entry(slot).or_insert_with(|| SlotBuffer {
+                shreds: Vec::new(),
+                last_in_slot_seen: false,
+                age_ticks: 0,
+            });
+
+            if buffer.shreds.len() < self.config.max_shreds_per_slot {
+                buffer.shreds.push(shred);
+            }
+            if is_last {
+                buffer.last_in_slot_seen = true;
             }
         }
         Ok(received_any)
@@ -288,5 +338,135 @@ impl Service for ShredCollector {
         self.age_and_evict();
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use paradencer_mesh::bounded_link;
+    use paradencer_types::shred::{
+        DataShredHeader, ShredCommonHeader, ShredVariant, SIGNATURE_SIZE,
+    };
+
+    fn make_data_shred(slot: u64, index: u32, last_in_slot: bool) -> Shred {
+        let common = ShredCommonHeader {
+            signature: [0u8; SIGNATURE_SIZE],
+            variant: 0x55, // legacy data
+            slot,
+            index,
+            version: 1,
+            fec_set_index: 0,
+        };
+        let flags = if last_in_slot { 0x80 } else { 0 };
+        let data_header = DataShredHeader {
+            parent_offset: 1,
+            flags,
+            size: 64,
+        };
+        Shred::new(
+            common,
+            ShredVariant::LegacyData(data_header),
+            vec![0xAA; 64],
+        )
+    }
+
+    #[test]
+    fn collector_persists_shreds_to_blockstore_on_drain() {
+        let blockstore = Arc::new(Blockstore::in_memory());
+        let (shred_tx, shred_rx) = bounded_link::<Shred>(64);
+        let (_block_tx, block_rx) = bounded_link::<AssembledBlock>(8);
+
+        // Swap tx/rx: collector reads from shred_rx, we write to shred_tx.
+        let mut collector = ShredCollector::new(shred_rx, _block_tx);
+        collector.set_blockstore(Arc::clone(&blockstore));
+
+        // Send two shreds.
+        shred_tx.try_send(make_data_shred(10, 0, false)).unwrap();
+        shred_tx.try_send(make_data_shred(10, 1, false)).unwrap();
+
+        // Drain incoming — should persist both.
+        collector.drain_incoming().unwrap();
+
+        assert_eq!(collector.stats.blockstore_writes, 2);
+        assert_eq!(collector.stats.blockstore_write_errors, 0);
+
+        // Verify data is readable from blockstore.
+        assert!(blockstore.get_data_shred(10, 0).unwrap().is_some());
+        assert!(blockstore.get_data_shred(10, 1).unwrap().is_some());
+        assert!(blockstore.get_data_shred(10, 2).unwrap().is_none());
+
+        // Drop unused receiver to avoid warnings.
+        drop(block_rx);
+    }
+
+    #[test]
+    fn collector_persists_fec_set_shreds_to_blockstore() {
+        let blockstore = Arc::new(Blockstore::in_memory());
+        let (shred_tx, shred_rx) = bounded_link::<Shred>(64);
+        let (block_tx, _block_rx) = bounded_link::<AssembledBlock>(8);
+
+        let mut collector = ShredCollector::new(shred_rx, block_tx);
+        collector.set_blockstore(Arc::clone(&blockstore));
+
+        let fec_set = CompletedFecSet {
+            slot: 20,
+            fec_set_index: 0,
+            data_shreds: vec![
+                make_data_shred(20, 0, false),
+                make_data_shred(20, 1, false),
+                make_data_shred(20, 2, true),
+            ],
+            was_recovered: false,
+        };
+
+        collector.insert_completed_fec_set(fec_set);
+
+        assert_eq!(collector.stats.blockstore_writes, 3);
+        assert!(blockstore.get_data_shred(20, 0).unwrap().is_some());
+        assert!(blockstore.get_data_shred(20, 1).unwrap().is_some());
+        assert!(blockstore.get_data_shred(20, 2).unwrap().is_some());
+
+        // Last-in-slot flag should be recorded in slot metadata.
+        let meta = blockstore.get_slot_meta(20).unwrap().unwrap();
+        assert_eq!(meta.expected_data_shreds, Some(3));
+
+        drop(shred_tx);
+    }
+
+    #[test]
+    fn collector_works_without_blockstore() {
+        let (shred_tx, shred_rx) = bounded_link::<Shred>(64);
+        let (block_tx, _block_rx) = bounded_link::<AssembledBlock>(8);
+
+        let mut collector = ShredCollector::new(shred_rx, block_tx);
+        // No blockstore set — should still function normally.
+
+        shred_tx.try_send(make_data_shred(5, 0, false)).unwrap();
+        collector.drain_incoming().unwrap();
+
+        assert_eq!(collector.stats.shreds_received, 1);
+        assert_eq!(collector.stats.blockstore_writes, 0);
+        assert_eq!(collector.stats.blockstore_write_errors, 0);
+
+        drop(shred_tx);
+    }
+
+    #[test]
+    fn collector_blockstore_and_buffer_both_populated() {
+        let blockstore = Arc::new(Blockstore::in_memory());
+        let (shred_tx, shred_rx) = bounded_link::<Shred>(64);
+        let (block_tx, _block_rx) = bounded_link::<AssembledBlock>(8);
+
+        let mut collector = ShredCollector::new(shred_rx, block_tx);
+        collector.set_blockstore(Arc::clone(&blockstore));
+
+        shred_tx.try_send(make_data_shred(7, 0, false)).unwrap();
+        collector.drain_incoming().unwrap();
+
+        // Blockstore has the shred.
+        assert!(blockstore.get_data_shred(7, 0).unwrap().is_some());
+        // In-memory buffer also has it.
+        assert_eq!(collector.slot_buffers.get(&7).unwrap().shreds.len(), 1);
     }
 }

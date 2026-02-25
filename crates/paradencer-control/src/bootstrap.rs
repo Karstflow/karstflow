@@ -32,7 +32,7 @@ use paradencer_storage::{
     AccountDatabase, Blockstore, MaintenanceConfig, Pubkey, StorageEngine,
     StorageMaintenanceService,
 };
-use paradencer_topology::{materialize_services, MaterializedTopology};
+use paradencer_topology::{materialize_services_with_blockstore, MaterializedTopology};
 use std::collections::HashSet;
 use std::path::Path;
 use std::sync::{Arc, Mutex, RwLock};
@@ -1145,6 +1145,39 @@ pub fn build_storage_maintenance_service(
 }
 
 // ---------------------------------------------------------------------------
+// Blockstore
+// ---------------------------------------------------------------------------
+
+/// Open a persistent blockstore for shred storage and serving.
+///
+/// When `data_dir` is provided, opens a disk-backed blockstore at
+/// `<data_dir>/blockstore`. Returns `None` when no data directory is configured
+/// (in-memory-only mode). The same `Arc<Blockstore>` should be shared between
+/// the shred pipeline (write path) and the repair service (read path).
+pub fn build_blockstore(data_dir: Option<&Path>) -> Result<Option<Arc<Blockstore>>> {
+    match data_dir {
+        Some(dir) => {
+            let blockstore_dir = dir.join("blockstore");
+            std::fs::create_dir_all(&blockstore_dir).map_err(|e| ControlPlaneError::Bootstrap {
+                message: format!(
+                    "failed to create blockstore directory {}: {e}",
+                    blockstore_dir.display()
+                ),
+            })?;
+            let blockstore =
+                Blockstore::open(&blockstore_dir).map_err(|e| ControlPlaneError::Bootstrap {
+                    message: format!(
+                        "failed to open blockstore at {}: {e}",
+                        blockstore_dir.display()
+                    ),
+                })?;
+            Ok(Some(Arc::new(blockstore)))
+        }
+        None => Ok(None),
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Shred pipeline: ShredCollector → ReplayService
 // ---------------------------------------------------------------------------
 
@@ -1166,7 +1199,10 @@ pub struct ShredPipelineBundle {
 /// Creates a ShredCollector service that receives individual parsed shreds,
 /// groups them by slot, detects block boundaries, and emits assembled blocks.
 /// The caller should connect `block_receiver` to a ReplayService block input.
-pub fn build_shred_pipeline(config: ShredCollectorConfig) -> ShredPipelineBundle {
+pub fn build_shred_pipeline(
+    config: ShredCollectorConfig,
+    blockstore: Option<Arc<Blockstore>>,
+) -> ShredPipelineBundle {
     let shred_channel_depth = config.max_shreds_per_slot.max(256);
     let block_channel_depth = config.max_buffered_slots.max(64);
 
@@ -1174,7 +1210,10 @@ pub fn build_shred_pipeline(config: ShredCollectorConfig) -> ShredPipelineBundle
     let (block_tx, block_rx) =
         bounded_link::<paradencer_stages::AssembledBlock>(block_channel_depth);
 
-    let collector = ShredCollector::with_config(shred_rx, block_tx, config);
+    let mut collector = ShredCollector::with_config(shred_rx, block_tx, config);
+    if let Some(bs) = blockstore {
+        collector.set_blockstore(bs);
+    }
 
     ShredPipelineBundle {
         service: Box::new(collector),
@@ -1214,12 +1253,25 @@ pub fn load_node_config(config_path: Option<&Path>) -> Result<NodeConfig> {
 }
 
 pub fn materialize_services_from_config(node_config: &NodeConfig) -> Result<MaterializedTopology> {
-    materialize_services(
+    materialize_services_from_config_with_blockstore(node_config, None)
+}
+
+/// Materialize topology services with an optional blockstore for shred persistence.
+///
+/// When a blockstore is provided, the ShredCollector writes every received shred
+/// to persistent storage. The same `Arc<Blockstore>` should be shared with the
+/// repair service (via `BlockstoreShredProvider`) for serving stored shreds.
+pub fn materialize_services_from_config_with_blockstore(
+    node_config: &NodeConfig,
+    blockstore: Option<Arc<Blockstore>>,
+) -> Result<MaterializedTopology> {
+    materialize_services_with_blockstore(
         node_config.topology_spec.clone(),
         node_config.ingress_policy.clone(),
         node_config.metrics_output_format,
         node_config.metrics_output_target.clone(),
         node_config.storage_runtime_policy.clone(),
+        blockstore,
     )
     .map_err(ControlPlaneError::from)
 }
@@ -1680,12 +1732,12 @@ pub fn ensure_mainnet_readiness(report: &MainnetReadinessReport) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::{
-        build_consensus_infrastructure, build_pipeline_service, build_replay_service,
-        build_shred_pipeline, build_storage_maintenance_service, ensure_mainnet_readiness,
-        evaluate_mainnet_readiness, load_node_config, materialize_service_pair_from_config,
-        materialize_services_from_config, maybe_start_metrics_http_bridge,
-        maybe_start_rpc_http_server, resolve_validator_identity, run_diagnostics_phase,
-        start_gossip_service, BlockstoreShredProvider,
+        build_blockstore, build_consensus_infrastructure, build_pipeline_service,
+        build_replay_service, build_shred_pipeline, build_storage_maintenance_service,
+        ensure_mainnet_readiness, evaluate_mainnet_readiness, load_node_config,
+        materialize_service_pair_from_config, materialize_services_from_config,
+        maybe_start_metrics_http_bridge, maybe_start_rpc_http_server, resolve_validator_identity,
+        run_diagnostics_phase, start_gossip_service, BlockstoreShredProvider,
     };
     use crate::errors::ControlPlaneError;
     use paradencer_config::NodeConfig;
@@ -1847,13 +1899,79 @@ mod tests {
         use paradencer_runtime::{ServiceContext, ShutdownSwitch};
         use paradencer_stages::ShredCollectorConfig;
 
-        let bundle = build_shred_pipeline(ShredCollectorConfig::default());
+        let bundle = build_shred_pipeline(ShredCollectorConfig::default(), None);
         assert_eq!(bundle.service.name(), "shred-collector");
 
         // Service ticks without error (no shreds pending).
         let ctx = ServiceContext::new(ShutdownSwitch::new());
         let mut service = bundle.service;
         service.tick(&ctx).unwrap();
+    }
+
+    #[test]
+    fn build_shred_pipeline_with_blockstore_persists_shreds() {
+        use paradencer_runtime::{ServiceContext, ShutdownSwitch};
+        use paradencer_stages::ShredCollectorConfig;
+        use paradencer_storage::Blockstore;
+        use paradencer_types::shred::{
+            DataShredHeader, Shred, ShredCommonHeader, ShredVariant, SIGNATURE_SIZE,
+        };
+
+        let blockstore = Arc::new(Blockstore::in_memory());
+        let bundle = build_shred_pipeline(
+            ShredCollectorConfig::default(),
+            Some(Arc::clone(&blockstore)),
+        );
+
+        // Send a shred through the pipeline.
+        let common = ShredCommonHeader {
+            signature: [0u8; SIGNATURE_SIZE],
+            variant: 0x55,
+            slot: 42,
+            index: 0,
+            version: 1,
+            fec_set_index: 0,
+        };
+        let data_header = DataShredHeader {
+            parent_offset: 1,
+            flags: 0,
+            size: 64,
+        };
+        let shred = Shred::new(
+            common,
+            ShredVariant::LegacyData(data_header),
+            vec![0xBE; 64],
+        );
+
+        bundle.shred_input.try_send(shred).unwrap();
+
+        // Tick the collector to drain the incoming shred.
+        let ctx = ServiceContext::new(ShutdownSwitch::new());
+        let mut service = bundle.service;
+        service.tick(&ctx).unwrap();
+
+        // Verify the shred was persisted to blockstore.
+        let stored = blockstore.get_data_shred(42, 0).unwrap();
+        assert!(stored.is_some());
+        assert_eq!(stored.unwrap(), vec![0xBE; 64]);
+    }
+
+    #[test]
+    fn build_blockstore_creates_persistent_store() {
+        let dir = tempfile::tempdir().expect("tmpdir");
+        let bs = build_blockstore(Some(dir.path())).unwrap();
+        assert!(bs.is_some());
+
+        // Insert and read back.
+        let bs = bs.unwrap();
+        bs.insert_data_shred(1, 0, &[0xFF; 32]).unwrap();
+        assert!(bs.get_data_shred(1, 0).unwrap().is_some());
+    }
+
+    #[test]
+    fn build_blockstore_returns_none_without_data_dir() {
+        let bs = build_blockstore(None).unwrap();
+        assert!(bs.is_none());
     }
 
     #[test]

@@ -12,6 +12,7 @@ paradencer-core = { path = "../paradencer-core" }
 paradencer-net = { path = "../paradencer-net" }
 paradencer-runtime = { path = "../paradencer-runtime" }
 paradencer-stages = { path = "../paradencer-stages" }
+paradencer-storage = { path = "../paradencer-storage" }
 paradencer-mesh = { path = "../paradencer-mesh" }
 paradencer-types = { path = "../paradencer-types" }
 paradencer-constants = { path = "../paradencer-constants" }
