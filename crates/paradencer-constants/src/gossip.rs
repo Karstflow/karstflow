@@ -135,6 +135,14 @@ pub const PULL_INTERVAL_MS: u64 = 32;
 /// Prune interval (milliseconds).
 pub const PRUNE_INTERVAL_MS: u64 = 10_000;
 
+/// Prune origin timeout (milliseconds). After this duration, a prune
+/// entry expires and the origin may be forwarded to that destination again.
+pub const PRUNE_TIMEOUT_MS: u64 = 30_000;
+
+/// Maximum number of prune entries per destination node.
+/// Prevents unbounded memory growth from excessive prune messages.
+pub const MAX_PRUNE_ENTRIES_PER_DEST: usize = 256;
+
 /// Ping interval (milliseconds).
 pub const PING_INTERVAL_MS: u64 = 5_000;
 

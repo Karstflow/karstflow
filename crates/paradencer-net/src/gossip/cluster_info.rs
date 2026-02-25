@@ -1,6 +1,6 @@
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
@@ -205,6 +205,74 @@ impl GossipNode {
     }
 }
 
+/// Tracks which CRDS value origins should be excluded when pushing to
+/// specific destination nodes. Populated from received prune messages.
+///
+/// Key: destination node pubkey (the peer we push to).
+/// Value: map of origin pubkey → expiration timestamp (millis).
+///
+/// When a peer sends us a prune message saying "stop forwarding origin X
+/// to me", we store (peer, X) → expiration. On each push cycle, values
+/// whose origin is in the prune set for a given target are excluded.
+struct PruneMap {
+    /// destination → (origin → expiration_ms)
+    entries: HashMap<[u8; 32], HashMap<[u8; 32], u64>>,
+}
+
+impl PruneMap {
+    fn new() -> Self {
+        Self {
+            entries: HashMap::new(),
+        }
+    }
+
+    /// Record prune origins for a destination. The prune message tells us
+    /// that `destination` no longer wants values from these `origins`.
+    fn record(&mut self, destination: [u8; 32], origins: &[[u8; 32]], expiration_ms: u64) {
+        let dest_map = self.entries.entry(destination).or_default();
+        for &origin in origins {
+            dest_map.insert(origin, expiration_ms);
+        }
+        // Enforce per-destination limit.
+        if dest_map.len() > gossip::MAX_PRUNE_ENTRIES_PER_DEST {
+            // Evict oldest entries.
+            let mut pairs: Vec<_> = dest_map.iter().map(|(&k, &v)| (k, v)).collect();
+            pairs.sort_by_key(|(_, exp)| *exp);
+            let to_remove = pairs.len() - gossip::MAX_PRUNE_ENTRIES_PER_DEST;
+            for (key, _) in pairs.into_iter().take(to_remove) {
+                dest_map.remove(&key);
+            }
+        }
+    }
+
+    /// Check if an origin should be excluded when pushing to a destination.
+    fn is_pruned(&self, destination: &[u8; 32], origin: &[u8; 32], now_ms: u64) -> bool {
+        if let Some(dest_map) = self.entries.get(destination) {
+            if let Some(&expiration) = dest_map.get(origin) {
+                return now_ms < expiration;
+            }
+        }
+        false
+    }
+
+    /// Remove expired prune entries. Returns total number of entries removed.
+    fn expire(&mut self, now_ms: u64) -> usize {
+        let mut removed = 0;
+        self.entries.retain(|_, dest_map| {
+            let before = dest_map.len();
+            dest_map.retain(|_, expiration| *expiration > now_ms);
+            removed += before - dest_map.len();
+            !dest_map.is_empty()
+        });
+        removed
+    }
+
+    /// Total active prune entries across all destinations.
+    fn total_entries(&self) -> usize {
+        self.entries.values().map(|m| m.len()).sum()
+    }
+}
+
 /// Cluster information storage backed by CrdsTable.
 ///
 /// Provides a higher-level API for the gossip service while using the
@@ -218,13 +286,17 @@ pub struct ClusterInfo {
     /// Ed25519 secret key (32-byte seed) for signing our own CRDS values.
     /// None when running without signing (e.g. tests that don't need it).
     signing_key: Option<[u8; 32]>,
+    /// Tracks prune origins per destination for push filtering.
+    prune_map: RwLock<PruneMap>,
+    /// Prune entry duration (milliseconds from wallclock).
+    prune_timeout_ms: u64,
 }
 
 impl ClusterInfo {
     pub fn new(
         node_id: NodeId,
         contact_info: ContactInfo,
-        _prune_timeout: Duration,
+        prune_timeout: Duration,
         max_nodes: usize,
     ) -> Self {
         let table = CrdsTable::with_limits(max_nodes, gossip::MAX_PURGED_ENTRIES);
@@ -234,6 +306,8 @@ impl ClusterInfo {
             table: Arc::new(RwLock::new(table)),
             max_nodes,
             signing_key: None,
+            prune_map: RwLock::new(PruneMap::new()),
+            prune_timeout_ms: prune_timeout.as_millis() as u64,
         }
     }
 
@@ -241,7 +315,7 @@ impl ClusterInfo {
     pub fn with_signing_key(
         node_id: NodeId,
         contact_info: ContactInfo,
-        _prune_timeout: Duration,
+        prune_timeout: Duration,
         max_nodes: usize,
         signing_key: [u8; 32],
     ) -> Self {
@@ -252,6 +326,8 @@ impl ClusterInfo {
             table: Arc::new(RwLock::new(table)),
             max_nodes,
             signing_key: Some(signing_key),
+            prune_map: RwLock::new(PruneMap::new()),
+            prune_timeout_ms: prune_timeout.as_millis() as u64,
         }
     }
 
@@ -528,6 +604,34 @@ impl ClusterInfo {
         // Create a fresh table
         let new_table = CrdsTable::with_limits(self.max_nodes, gossip::MAX_PURGED_ENTRIES);
         *self.table.write() = new_table;
+    }
+
+    /// Record prune origins from a validated prune message.
+    ///
+    /// After this call, values from `origins` will be excluded when
+    /// pushing to `destination` until the prune entry expires.
+    pub fn record_prune(&self, destination: [u8; 32], origins: &[[u8; 32]], wallclock_ms: u64) {
+        let expiration = wallclock_ms + self.prune_timeout_ms;
+        self.prune_map
+            .write()
+            .record(destination, origins, expiration);
+    }
+
+    /// Check if a value origin should be excluded when pushing to a target.
+    pub fn is_origin_pruned(&self, destination: &[u8; 32], origin: &[u8; 32]) -> bool {
+        let now_ms = current_timestamp_ms();
+        self.prune_map.read().is_pruned(destination, origin, now_ms)
+    }
+
+    /// Remove expired prune entries. Returns the number removed.
+    pub fn expire_prune_entries(&self) -> usize {
+        let now_ms = current_timestamp_ms();
+        self.prune_map.write().expire(now_ms)
+    }
+
+    /// Total number of active prune entries.
+    pub fn prune_entry_count(&self) -> usize {
+        self.prune_map.read().total_entries()
     }
 
     /// Build a bloom filter for a pull request.
@@ -830,5 +934,91 @@ mod tests {
 
         let (filter, _mask) = cluster.build_pull_filter();
         assert!(filter.bits_set() > 0);
+    }
+
+    // -- Prune map tests --
+
+    #[test]
+    fn prune_map_records_and_checks() {
+        let mut pm = PruneMap::new();
+        let dest = [1u8; 32];
+        let origin_a = [2u8; 32];
+        let origin_b = [3u8; 32];
+        let origin_c = [4u8; 32];
+
+        pm.record(dest, &[origin_a, origin_b], 1000 + 30_000); // expires at 31000
+
+        assert!(pm.is_pruned(&dest, &origin_a, 1000));
+        assert!(pm.is_pruned(&dest, &origin_b, 1000));
+        assert!(!pm.is_pruned(&dest, &origin_c, 1000));
+
+        // Different destination is not pruned.
+        let other_dest = [99u8; 32];
+        assert!(!pm.is_pruned(&other_dest, &origin_a, 1000));
+    }
+
+    #[test]
+    fn prune_map_expires_entries() {
+        let mut pm = PruneMap::new();
+        let dest = [1u8; 32];
+        let origin = [2u8; 32];
+
+        // Expires at 31000.
+        pm.record(dest, &[origin], 31_000);
+
+        assert!(pm.is_pruned(&dest, &origin, 30_000));
+        assert!(!pm.is_pruned(&dest, &origin, 31_001)); // expired
+
+        let removed = pm.expire(31_001);
+        assert_eq!(removed, 1);
+        assert_eq!(pm.total_entries(), 0);
+    }
+
+    #[test]
+    fn prune_map_enforces_per_dest_limit() {
+        let mut pm = PruneMap::new();
+        let dest = [1u8; 32];
+
+        // Add more than MAX_PRUNE_ENTRIES_PER_DEST entries.
+        let limit = gossip::MAX_PRUNE_ENTRIES_PER_DEST;
+        let origins: Vec<[u8; 32]> = (0..limit + 50)
+            .map(|i| {
+                let mut o = [0u8; 32];
+                o[0] = (i >> 8) as u8;
+                o[1] = (i & 0xFF) as u8;
+                o
+            })
+            .collect();
+
+        pm.record(dest, &origins, 50_000);
+
+        // Should be capped at the limit.
+        assert_eq!(pm.total_entries(), limit);
+    }
+
+    #[test]
+    fn cluster_info_prune_integration() {
+        let self_node_id = NodeId::new([0u8; 32]);
+        let self_info = create_test_contact_info(self_node_id, 8000);
+        let cluster = ClusterInfo::new(
+            self_node_id,
+            self_info,
+            Duration::from_millis(30_000),
+            MAX_CLUSTER_SIZE,
+        );
+
+        let dest = [1u8; 32];
+        let origin = [2u8; 32];
+        let now_ms = current_timestamp_ms();
+
+        cluster.record_prune(dest, &[origin], now_ms);
+
+        // Should be pruned since it was just recorded.
+        assert!(cluster.is_origin_pruned(&dest, &origin));
+        assert_eq!(cluster.prune_entry_count(), 1);
+
+        // A different origin is not pruned.
+        let other_origin = [3u8; 32];
+        assert!(!cluster.is_origin_pruned(&dest, &other_origin));
     }
 }

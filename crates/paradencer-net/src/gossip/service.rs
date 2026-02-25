@@ -319,13 +319,21 @@ impl GossipService {
                 stats
                     .prune_messages_received
                     .fetch_add(1, Ordering::Relaxed);
-                // Verify prune data signature
+                // Verify prune data signature before processing.
                 if prune_data.verify() {
-                    // TODO: Process prune origins — exclude from push targets
+                    // The prune message says: "I (pubkey) already receive
+                    // values from these origins via another path, so stop
+                    // forwarding them to me." We record this so that our
+                    // push loop can filter accordingly.
+                    cluster_info.record_prune(
+                        prune_data.pubkey,
+                        &prune_data.prunes,
+                        prune_data.wallclock,
+                    );
                     tracing::debug!(
                         sender = %bs58::encode(&prune_data.pubkey).into_string()[..8],
                         prune_count = prune_data.prunes.len(),
-                        "received prune message"
+                        "processed prune message"
                     );
                 }
             }
@@ -464,10 +472,37 @@ impl GossipService {
             return new_cursor;
         }
 
-        let message = WireProtocol::PushMessage(cluster_info.node_id().0, wire_values);
+        let self_pubkey = cluster_info.node_id().0;
+        let has_prune_entries = cluster_info.prune_entry_count() > 0;
 
-        if let Ok(encoded) = message.encode() {
-            for target in targets {
+        for target in &targets {
+            // Apply per-target prune filtering: exclude values whose origin
+            // is in the prune set for this destination.
+            let filtered: Vec<&WireCrdsValue> = if has_prune_entries {
+                wire_values
+                    .iter()
+                    .filter(|wv| {
+                        let origin = wv.origin();
+                        // Never prune our own self-value.
+                        if *origin == self_pubkey {
+                            return true;
+                        }
+                        !cluster_info.is_origin_pruned(&target.node_id.0, origin)
+                    })
+                    .collect()
+            } else {
+                wire_values.iter().collect()
+            };
+
+            if filtered.is_empty() {
+                continue;
+            }
+
+            // Build a per-target push message with only non-pruned values.
+            let values_for_target: Vec<WireCrdsValue> = filtered.into_iter().cloned().collect();
+            let message = WireProtocol::PushMessage(self_pubkey, values_for_target);
+
+            if let Ok(encoded) = message.encode() {
                 match socket.send_to(&encoded, target.gossip_addr).await {
                     Ok(_) => {
                         stats.push_messages_sent.fetch_add(1, Ordering::Relaxed);
@@ -566,6 +601,9 @@ impl GossipService {
                 _ = ticker.tick() => {
                     let expired = cluster_info.prune_stale_nodes();
                     stats.nodes_pruned.fetch_add(expired as u64, Ordering::Relaxed);
+
+                    // Expire stale prune map entries.
+                    let _prune_expired = cluster_info.expire_prune_entries();
                 }
                 _ = shutdown_rx.recv() => {
                     break;
