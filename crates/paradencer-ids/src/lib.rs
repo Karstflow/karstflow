@@ -192,6 +192,16 @@ pub const FEATURE_PROGRAM_ID: Pubkey = Pubkey::new([
     35, 72, 27, 33, 148, 106, 118, 112, 0, 0, 0, 0,
 ]);
 
+/// Alias: the BPF Loader Program ID is the upgradeable loader.
+pub const UPGRADEABLE_LOADER_PROGRAM_ID: Pubkey = BPF_LOADER_PROGRAM_ID;
+
+/// Secp256r1 ECDSA verification precompile
+/// Secp256r1SigVerify1111111111111111111111111
+pub const SECP256R1_PROGRAM_ID: Pubkey = Pubkey::new([
+    0x06, 0xa3, 0x69, 0x83, 0xd2, 0x0e, 0x20, 0x32, 0x69, 0xa1, 0xe2, 0x55, 0xaf, 0x71, 0xe7, 0xbc,
+    0x5d, 0x0a, 0xe1, 0xb0, 0x44, 0x5e, 0x0d, 0x5e, 0x74, 0x5c, 0x4b, 0x80, 0x00, 0x00, 0x00, 0x00,
+]);
+
 /// Fees sysvar (deprecated) - SysvarFees111111111111111111111111111111111
 pub const FEES_SYSVAR_ID: Pubkey = Pubkey::new([
     6, 167, 213, 23, 24, 199, 116, 201, 40, 86, 99, 152, 105, 29, 94, 182, 139, 94, 184, 163, 155,

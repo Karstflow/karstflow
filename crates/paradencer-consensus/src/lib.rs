@@ -16,6 +16,7 @@ mod fork_choice;
 mod inflation;
 mod leader_schedule;
 mod nonce;
+pub mod pack;
 mod rent;
 mod reward_application;
 mod rewards;

@@ -105,12 +105,6 @@ impl PriorityQueue {
         entry.id = self.next_id;
         self.next_id += 1;
 
-        let target = if entry.is_vote {
-            &mut self.votes
-        } else {
-            &mut self.pending
-        };
-
         let total = self.pending.len() + self.votes.len();
         if total >= self.capacity {
             // Try to evict lowest-priority non-vote transaction

@@ -4,12 +4,17 @@
 //! fee revenue while respecting compute unit limits, per-account write-lock
 //! costs, and data size constraints.
 
+pub mod cost_model;
 pub mod priority;
 pub mod scheduler;
 
 #[cfg(test)]
 mod tests;
 
+pub use cost_model::{
+    compute_transaction_cost, CostRebateTracker, InstructionView,
+    TransactionCost as PackTransactionCost,
+};
 pub use priority::{PendingTransaction, PriorityQueue};
 pub use scheduler::{
     BlockLimits, BlockScheduler, BlockUsage, MicroblockSchedule, ScheduledTransaction,

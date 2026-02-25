@@ -425,7 +425,7 @@ fn pack_end_block_allows_new_scheduling() {
     // The second is deferred (block limit), schedule again returns empty
     let mb_empty = pack.schedule_microblock();
     // May or may not schedule depending on remaining capacity — but block is almost full
-    let total_scheduled = mb1.transactions.len() + mb_empty.transactions.len();
+    let _total_scheduled = mb1.transactions.len() + mb_empty.transactions.len();
 
     // End block and schedule again
     pack.end_block();

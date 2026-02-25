@@ -56,3 +56,44 @@ pub const DEFAULT_PENDING_POOL_CAPACITY: usize = 32_768;
 
 /// Maximum age (in slots) before a pending transaction is expired.
 pub const MAX_PENDING_TRANSACTION_AGE_SLOTS: u64 = 150;
+
+// ---------------------------------------------------------------------------
+// Transaction cost model (consensus-critical)
+// ---------------------------------------------------------------------------
+
+/// Cost per writable account lock (CU). Each writable account in a
+/// transaction adds this fixed cost to the total.
+pub const COST_PER_WRITABLE_ACCOUNT: u64 = 300;
+
+/// Number of instruction data bytes that cost 1 compute unit.
+/// Actual cost = instruction_data_bytes / INSTRUCTION_DATA_BYTES_PER_CU.
+pub const INSTRUCTION_DATA_BYTES_PER_CU: u64 = 4;
+
+/// Fixed execution cost for simple vote transactions (CU).
+pub const SIMPLE_VOTE_EXECUTION_COST: u64 = 2_100;
+
+/// Maximum compute units allocated to a single builtin program instruction.
+pub const MAX_BUILTIN_PROGRAM_COST: u64 = 200_000;
+
+/// Per-signature cost for Ed25519 precompile verification (CU).
+pub const ED25519_PRECOMPILE_COST_PER_SIGNATURE: u64 = 2_400;
+
+/// Per-signature cost for secp256k1 precompile verification (CU).
+pub const SECP256K1_PRECOMPILE_COST_PER_SIGNATURE: u64 = 6_690;
+
+/// Per-signature cost for secp256r1 precompile verification (CU).
+pub const SECP256R1_PRECOMPILE_COST_PER_SIGNATURE: u64 = 4_800;
+
+/// Heap cost per kilobyte (CU) when a transaction requests heap via
+/// the Compute Budget program.
+pub const HEAP_COST_PER_KILOBYTE: u64 = 8;
+
+/// Divisor for loaded accounts data cost: cost = loaded_bytes / this value.
+pub const LOADED_ACCOUNTS_DATA_COST_DIVISOR: u64 = 32_768;
+
+/// Percentage of signature fees that are burned (not distributed).
+pub const TRANSACTION_FEE_BURN_PERCENT: u64 = 50;
+
+/// Maximum microblock compute units (CU). Each microblock is bounded
+/// by this limit to allow fine-grained pacing.
+pub const MAX_CUS_PER_MICROBLOCK: u64 = 1_600_000;
