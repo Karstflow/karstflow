@@ -6,8 +6,14 @@
 /// and fee collection.
 use crate::cost_tracker::TransactionCost;
 use crate::{Bank, BankStatus, FeeCalculator};
+use paradencer_constants::compute_budget_program::INSTRUCTION_SET_LOADED_ACCOUNTS_DATA_SIZE_LIMIT;
+use paradencer_constants::execution::{
+    MAX_LOADED_ACCOUNTS_DATA_SIZE, TRANSACTION_ACCOUNT_BASE_SIZE,
+};
 use paradencer_constants::ledger::NONCE_ACCOUNT_SIZE;
-use paradencer_ids::{INCINERATOR_ID, SYSTEM_PROGRAM_ID, VOTE_PROGRAM_ID};
+use paradencer_ids::{
+    COMPUTE_BUDGET_PROGRAM_ID, INCINERATOR_ID, SYSTEM_PROGRAM_ID, VOTE_PROGRAM_ID,
+};
 use paradencer_storage::{Account, Pubkey, TransactionId};
 use std::collections::HashMap;
 
@@ -160,6 +166,8 @@ pub enum TransactionExecutionError {
     InsufficientFundsForRent { account: Pubkey },
     /// Block cost limit would be exceeded by this transaction.
     BlockCostLimitExceeded(String),
+    /// Total loaded accounts data size exceeds per-transaction limit.
+    MaxLoadedAccountsDataSizeExceeded { loaded: u64, limit: u64 },
 }
 
 impl std::fmt::Display for TransactionExecutionError {
@@ -191,6 +199,12 @@ impl std::fmt::Display for TransactionExecutionError {
             }
             Self::BlockCostLimitExceeded(msg) => {
                 write!(f, "block cost limit exceeded: {msg}")
+            }
+            Self::MaxLoadedAccountsDataSizeExceeded { loaded, limit } => {
+                write!(
+                    f,
+                    "loaded accounts data size exceeded: {loaded} bytes > {limit} byte limit"
+                )
             }
         }
     }
@@ -412,6 +426,48 @@ fn get_system_account_kind(account: &Account) -> Option<SystemAccountKind> {
 }
 
 // ---------------------------------------------------------------------------
+// Loaded accounts data size helpers
+// ---------------------------------------------------------------------------
+
+/// Parse the loaded accounts data size limit from a transaction's compute
+/// budget instructions.
+///
+/// Returns the custom limit if `SetLoadedAccountsDataSizeLimit` is present,
+/// otherwise returns the protocol default (64 MiB).
+fn parse_loaded_accounts_data_size_limit(tx: &SanitizedTransaction) -> u64 {
+    for ix in &tx.instructions {
+        let program_id = match tx.account_keys.get(ix.program_id_index as usize) {
+            Some(id) => id,
+            None => continue,
+        };
+        if *program_id != COMPUTE_BUDGET_PROGRAM_ID {
+            continue;
+        }
+        if ix.data.is_empty() {
+            continue;
+        }
+        if ix.data[0] == INSTRUCTION_SET_LOADED_ACCOUNTS_DATA_SIZE_LIMIT && ix.data.len() >= 5 {
+            let declared =
+                u32::from_le_bytes([ix.data[1], ix.data[2], ix.data[3], ix.data[4]]) as u64;
+            return declared.min(MAX_LOADED_ACCOUNTS_DATA_SIZE);
+        }
+    }
+    MAX_LOADED_ACCOUNTS_DATA_SIZE
+}
+
+/// Calculate the loaded data contribution of a single account.
+///
+/// Existing accounts contribute a fixed base overhead (64 bytes) plus their
+/// data length. Non-existent accounts (zero lamports, empty data) contribute
+/// nothing.
+fn account_loaded_size(account: &Account) -> u64 {
+    if account.meta.lamports == 0 && account.data.is_empty() {
+        return 0;
+    }
+    TRANSACTION_ACCOUNT_BASE_SIZE + account.data.len() as u64
+}
+
+// ---------------------------------------------------------------------------
 // Bank execution methods
 // ---------------------------------------------------------------------------
 
@@ -521,21 +577,25 @@ impl Bank {
             };
         }
 
-        // Step 2: Load accounts
-        let mut account_state = match self.load_transaction_accounts(transaction) {
-            Ok(state) => state,
-            Err(err) => {
-                return TransactionExecutionResult {
-                    success: false,
-                    compute_units_consumed: 0,
-                    fee: 0,
-                    modified_accounts: HashMap::new(),
-                    logs: vec![],
-                    error: Some(err),
-                    vote_updates: vec![],
-                };
-            }
-        };
+        // Step 1f: Parse loaded accounts data size limit from ComputeBudget
+        let loaded_data_size_limit = parse_loaded_accounts_data_size_limit(transaction);
+
+        // Step 2: Load accounts (with data size limit enforcement)
+        let mut account_state =
+            match self.load_transaction_accounts(transaction, loaded_data_size_limit) {
+                Ok(state) => state,
+                Err(err) => {
+                    return TransactionExecutionResult {
+                        success: false,
+                        compute_units_consumed: 0,
+                        fee: 0,
+                        modified_accounts: HashMap::new(),
+                        logs: vec![],
+                        error: Some(err),
+                        vote_updates: vec![],
+                    };
+                }
+            };
 
         // Step 3: Validate fee payer and debit fee
         //
@@ -850,13 +910,16 @@ impl Bank {
     /// Load accounts referenced by a transaction from the account database.
     ///
     /// Checks the sysvar cache first for sysvar accounts, then falls back
-    /// to the account database.
+    /// to the account database. Tracks total loaded data size and rejects
+    /// the transaction if it exceeds the per-transaction limit.
     fn load_transaction_accounts(
         &self,
         transaction: &SanitizedTransaction,
+        data_size_limit: u64,
     ) -> Result<HashMap<Pubkey, Account>, TransactionExecutionError> {
         let db = self.accounts();
         let mut loaded = HashMap::with_capacity(transaction.account_keys.len());
+        let mut accumulated_data_size: u64 = 0;
 
         for key in &transaction.account_keys {
             // Check sysvar cache first for sysvar accounts
@@ -865,6 +928,19 @@ impl Bank {
                 .and_then(|cache| cache.get_sysvar_account(key))
                 .or_else(|| db.get_published_account(key))
                 .unwrap_or_default();
+
+            // Accumulate loaded data size for existing accounts
+            accumulated_data_size =
+                accumulated_data_size.saturating_add(account_loaded_size(&account));
+            if accumulated_data_size > data_size_limit {
+                return Err(
+                    TransactionExecutionError::MaxLoadedAccountsDataSizeExceeded {
+                        loaded: accumulated_data_size,
+                        limit: data_size_limit,
+                    },
+                );
+            }
+
             loaded.insert(*key, account);
         }
 
@@ -2222,5 +2298,175 @@ mod tests {
         // But incinerator_id should be exempt — verified in process_transaction
         // by the pubkey check. This is a documentation test.
         assert_eq!(incinerator, paradencer_ids::INCINERATOR_ID);
+    }
+
+    // -- Loaded accounts data size tests --
+
+    #[test]
+    fn account_loaded_size_zero_for_nonexistent() {
+        let account = Account::default();
+        assert_eq!(account_loaded_size(&account), 0);
+    }
+
+    #[test]
+    fn account_loaded_size_includes_base_and_data() {
+        let account = Account::new(1_000_000, vec![0u8; 200], Pubkey::default());
+        // base (64) + data (200)
+        assert_eq!(account_loaded_size(&account), 264);
+    }
+
+    #[test]
+    fn account_loaded_size_lamports_only_no_data() {
+        let account = Account::new(1_000_000, vec![], Pubkey::default());
+        // base (64) + data (0) = 64
+        assert_eq!(account_loaded_size(&account), 64);
+    }
+
+    #[test]
+    fn parse_loaded_accounts_limit_default() {
+        let tx = SanitizedTransaction {
+            account_keys: vec![Pubkey::new_unique()],
+            recent_blockhash: [0; 32],
+            instructions: vec![],
+            num_signatures: 1,
+            signatures: vec![],
+            message_bytes: vec![],
+        };
+        assert_eq!(
+            parse_loaded_accounts_data_size_limit(&tx),
+            MAX_LOADED_ACCOUNTS_DATA_SIZE
+        );
+    }
+
+    #[test]
+    fn parse_loaded_accounts_limit_from_compute_budget() {
+        let cb_id = COMPUTE_BUDGET_PROGRAM_ID;
+        let payer = Pubkey::new_unique();
+
+        // SetLoadedAccountsDataSizeLimit(100_000)
+        let mut data = vec![INSTRUCTION_SET_LOADED_ACCOUNTS_DATA_SIZE_LIMIT];
+        data.extend_from_slice(&100_000u32.to_le_bytes());
+
+        let tx = SanitizedTransaction {
+            account_keys: vec![payer, cb_id],
+            recent_blockhash: [0; 32],
+            instructions: vec![CompiledInstruction {
+                program_id_index: 1,
+                account_indices: vec![],
+                data,
+            }],
+            num_signatures: 1,
+            signatures: vec![],
+            message_bytes: vec![],
+        };
+        assert_eq!(parse_loaded_accounts_data_size_limit(&tx), 100_000);
+    }
+
+    #[test]
+    fn parse_loaded_accounts_limit_capped_at_max() {
+        let cb_id = COMPUTE_BUDGET_PROGRAM_ID;
+        let payer = Pubkey::new_unique();
+
+        // SetLoadedAccountsDataSizeLimit(u32::MAX) → capped at 64 MiB
+        let mut data = vec![INSTRUCTION_SET_LOADED_ACCOUNTS_DATA_SIZE_LIMIT];
+        data.extend_from_slice(&u32::MAX.to_le_bytes());
+
+        let tx = SanitizedTransaction {
+            account_keys: vec![payer, cb_id],
+            recent_blockhash: [0; 32],
+            instructions: vec![CompiledInstruction {
+                program_id_index: 1,
+                account_indices: vec![],
+                data,
+            }],
+            num_signatures: 1,
+            signatures: vec![],
+            message_bytes: vec![],
+        };
+        assert_eq!(
+            parse_loaded_accounts_data_size_limit(&tx),
+            MAX_LOADED_ACCOUNTS_DATA_SIZE
+        );
+    }
+
+    #[test]
+    fn loaded_accounts_data_size_exceeds_limit() {
+        let bank = create_test_bank();
+        let backend = PassthroughBackend;
+
+        // Store an account with large data
+        let large_key = Pubkey::new_unique();
+        let large_account = Account::new(1_000_000_000, vec![0u8; 1024], Pubkey::default());
+        store_test_account(&bank, &large_key, &large_account);
+
+        let payer = Pubkey::new_unique();
+        let payer_account = Account::new(1_000_000_000, vec![], SYSTEM_PROGRAM_ID);
+        store_test_account(&bank, &payer, &payer_account);
+
+        let cb_id = COMPUTE_BUDGET_PROGRAM_ID;
+        let sys_id = SYSTEM_PROGRAM_ID;
+
+        // Set a very tight loaded accounts data size limit (100 bytes)
+        let mut limit_data = vec![INSTRUCTION_SET_LOADED_ACCOUNTS_DATA_SIZE_LIMIT];
+        limit_data.extend_from_slice(&100u32.to_le_bytes());
+
+        let tx = SanitizedTransaction {
+            account_keys: vec![payer, cb_id, sys_id, large_key],
+            recent_blockhash: [0u8; 32],
+            instructions: vec![
+                CompiledInstruction {
+                    program_id_index: 1,
+                    account_indices: vec![],
+                    data: limit_data,
+                },
+                CompiledInstruction {
+                    program_id_index: 2,
+                    account_indices: vec![0, 3],
+                    data: vec![0; 4],
+                },
+            ],
+            num_signatures: 0,
+            signatures: vec![],
+            message_bytes: vec![],
+        };
+
+        let result = bank.process_transaction(&tx, &backend, MAX_COMPUTE_UNITS);
+
+        assert!(!result.success);
+        assert!(matches!(
+            result.error,
+            Some(TransactionExecutionError::MaxLoadedAccountsDataSizeExceeded { .. })
+        ));
+    }
+
+    #[test]
+    fn loaded_accounts_data_size_within_limit() {
+        let bank = create_test_bank();
+        let backend = PassthroughBackend;
+
+        let payer = Pubkey::new_unique();
+        let payer_account = Account::new(1_000_000_000, vec![], SYSTEM_PROGRAM_ID);
+        store_test_account(&bank, &payer, &payer_account);
+
+        let recipient = Pubkey::new_unique();
+        let sys_id = SYSTEM_PROGRAM_ID;
+
+        let tx = SanitizedTransaction {
+            account_keys: vec![payer, sys_id, recipient],
+            recent_blockhash: [0u8; 32],
+            instructions: vec![CompiledInstruction {
+                program_id_index: 1,
+                account_indices: vec![0, 2],
+                data: vec![0; 4],
+            }],
+            num_signatures: 0,
+            signatures: vec![],
+            message_bytes: vec![],
+        };
+
+        let result = bank.process_transaction(&tx, &backend, MAX_COMPUTE_UNITS);
+
+        // Should succeed — small accounts well within 64 MiB default limit
+        assert!(result.success);
     }
 }

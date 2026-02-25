@@ -13,7 +13,8 @@
 /// - Precompile verification cost (Ed25519, secp256k1, secp256r1)
 use paradencer_constants::block_limits::{
     COST_PER_WRITABLE_ACCOUNT, ED25519_PRECOMPILE_COST_PER_SIGNATURE, HEAP_COST_PER_KILOBYTE,
-    INSTRUCTION_DATA_BYTES_PER_CU, LOADED_ACCOUNTS_DATA_COST_DIVISOR, MAX_BUILTIN_PROGRAM_COST,
+    INSTRUCTION_DATA_BYTES_PER_CU, LOADED_ACCOUNTS_DATA_COST_DIVISOR,
+    LOADED_ACCOUNTS_DATA_PAGE_COST, MAX_BUILTIN_PROGRAM_COST,
     SECP256K1_PRECOMPILE_COST_PER_SIGNATURE, SECP256R1_PRECOMPILE_COST_PER_SIGNATURE,
     SIGNATURE_COST, SIMPLE_VOTE_EXECUTION_COST,
 };
@@ -184,10 +185,12 @@ pub fn compute_transaction_cost(
                 .saturating_mul(SECP256R1_PRECOMPILE_COST_PER_SIGNATURE),
         );
 
-    // Loaded accounts data cost.
+    // Loaded accounts data cost: ceil(declared_size / page_size) * page_cost.
     let loaded_accounts_data_cost =
         if let Some(declared_size) = budget_params.loaded_accounts_data_size {
-            declared_size / LOADED_ACCOUNTS_DATA_COST_DIVISOR
+            let pages = declared_size.saturating_add(LOADED_ACCOUNTS_DATA_COST_DIVISOR - 1)
+                / LOADED_ACCOUNTS_DATA_COST_DIVISOR;
+            pages.saturating_mul(LOADED_ACCOUNTS_DATA_PAGE_COST)
         } else {
             0
         };
@@ -821,7 +824,8 @@ mod tests {
         ];
 
         let cost = compute_transaction_cost(&instructions, 1, 1, false);
-        assert_eq!(cost.loaded_accounts_data_cost, 65536 / 32768); // 2 CU
+        // 64KB = 2 pages of 32KB × 8 CU/page = 16 CU
+        assert_eq!(cost.loaded_accounts_data_cost, 16);
     }
 
     // -- Total cost composition test --

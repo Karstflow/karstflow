@@ -228,6 +228,12 @@ pub mod execution {
     // Account data size limits
     pub const MAX_LOADED_ACCOUNTS_DATA_SIZE: u64 = 64 * 1024 * 1024; // 64MB
 
+    /// Per-account base overhead added to loaded data size (SIMD-0186).
+    ///
+    /// Each existing account contributes this many bytes plus its actual data
+    /// length toward the per-transaction loaded accounts data size limit.
+    pub const TRANSACTION_ACCOUNT_BASE_SIZE: u64 = 64;
+
     // Legacy compute costs (deprecated but kept for reference)
     pub const DEFAULT_INSTRUCTION_BASE_COST: u64 = 150;
     pub const COMPUTE_UNIT_COST_PER_ACCOUNT: u64 = 100;

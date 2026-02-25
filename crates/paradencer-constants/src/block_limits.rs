@@ -88,8 +88,13 @@ pub const SECP256R1_PRECOMPILE_COST_PER_SIGNATURE: u64 = 4_800;
 /// the Compute Budget program.
 pub const HEAP_COST_PER_KILOBYTE: u64 = 8;
 
-/// Divisor for loaded accounts data cost: cost = loaded_bytes / this value.
+/// Page size (bytes) for loaded accounts data cost calculation.
 pub const LOADED_ACCOUNTS_DATA_COST_DIVISOR: u64 = 32_768;
+
+/// Compute units charged per page of loaded account data.
+///
+/// Formula: cost_cu = ceil(loaded_bytes / DIVISOR) * PAGE_COST
+pub const LOADED_ACCOUNTS_DATA_PAGE_COST: u64 = 8;
 
 /// Percentage of signature fees that are burned (not distributed).
 pub const TRANSACTION_FEE_BURN_PERCENT: u64 = 50;
