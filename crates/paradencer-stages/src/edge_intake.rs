@@ -168,8 +168,8 @@ impl EdgeIntake {
         let mut sig = [0u8; 64];
         sig[..8].copy_from_slice(&packet_id.to_le_bytes());
         buf.extend_from_slice(&sig);
-        // Variant: legacy data (0b0101)
-        buf.push(0b0101);
+        // Variant: legacy data (0xA5)
+        buf.push(0xA5);
         // Slot (8 bytes LE)
         buf.extend_from_slice(&slot.to_le_bytes());
         // Index (4 bytes LE)

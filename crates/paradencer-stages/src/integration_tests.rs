@@ -14,10 +14,11 @@ mod tests {
 
     /// Create a deterministic test shred
     fn create_test_shred(slot: u64, index: u32, fec_set_index: u32, data: &[u8]) -> Shred {
+        let variant_byte = SHRED_TYPE_LEGACY_DATA | SHRED_LEGACY_DATA_NIBBLE;
         Shred::new(
             ShredCommonHeader {
                 signature: [0; SIGNATURE_SIZE],
-                variant: SHRED_DATA_FLAG,
+                variant: variant_byte,
                 slot,
                 index,
                 version: 1,
@@ -41,10 +42,11 @@ mod tests {
         num_coding: u16,
         data: &[u8],
     ) -> Shred {
+        let variant_byte = SHRED_TYPE_LEGACY_CODE | SHRED_LEGACY_CODE_NIBBLE;
         Shred::new(
             ShredCommonHeader {
                 signature: [0; SIGNATURE_SIZE],
-                variant: SHRED_CODE_FLAG,
+                variant: variant_byte,
                 slot,
                 index,
                 version: 1,

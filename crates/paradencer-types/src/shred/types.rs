@@ -59,55 +59,71 @@ mod serde_arrays {
     }
 }
 
-/// Size of a complete shred packet in bytes
-pub const SHRED_SIZE: usize = 1228;
+// Re-export wire-format constants from paradencer-constants for backward compat.
+pub use paradencer_constants::shred::{
+    MERKLE_MAX_PROOF_DEPTH, MERKLE_PROOF_NODE_BYTES, SHRED_CODE_HEADER_BYTES,
+    SHRED_DATA_HEADER_BYTES, SHRED_MAX_SIZE, SHRED_MIN_SIZE, SHRED_SIGNATURE_BYTES,
+};
 
-/// Size of the shred header in bytes
-pub const SHRED_HEADER_SIZE: usize = 88;
+/// Size of a complete shred packet in bytes (alias for SHRED_MAX_SIZE).
+pub const SHRED_SIZE: usize = SHRED_MAX_SIZE;
 
-/// Maximum number of data shreds per FEC block
-pub const MAX_DATA_SHREDS_PER_FEC_BLOCK: usize = 67;
+/// Size of the data shred header in bytes.
+pub const SHRED_HEADER_SIZE: usize = SHRED_DATA_HEADER_BYTES;
 
-/// Maximum number of coding shreds per FEC block
-pub const MAX_CODING_SHREDS_PER_FEC_BLOCK: usize = 67;
+/// Maximum number of data shreds per FEC block.
+pub const MAX_DATA_SHREDS_PER_FEC_BLOCK: usize = paradencer_constants::shred::MAX_FEC_DATA_SHREDS;
 
-/// Signature size in bytes (Ed25519)
-pub const SIGNATURE_SIZE: usize = 64;
+/// Maximum number of coding shreds per FEC block.
+pub const MAX_CODING_SHREDS_PER_FEC_BLOCK: usize =
+    paradencer_constants::shred::MAX_FEC_CODING_SHREDS;
 
-/// Shred payload size (SHRED_SIZE - SHRED_HEADER_SIZE)
+/// Signature size in bytes (Ed25519).
+pub const SIGNATURE_SIZE: usize = SHRED_SIGNATURE_BYTES;
+
+/// Data shred payload size (SHRED_MIN_SIZE - SHRED_DATA_HEADER_BYTES).
+pub const DATA_SHRED_PAYLOAD_SIZE: usize = SHRED_MIN_SIZE - SHRED_DATA_HEADER_BYTES;
+
+/// Coding shred payload size (SHRED_MAX_SIZE - SHRED_CODE_HEADER_BYTES).
+pub const CODING_SHRED_PAYLOAD_SIZE: usize = SHRED_MAX_SIZE - SHRED_CODE_HEADER_BYTES;
+
+/// Shred payload size for legacy data (no Merkle overhead).
 pub const SHRED_PAYLOAD_SIZE: usize = SHRED_SIZE - SHRED_HEADER_SIZE;
 
-/// Data shred payload size (includes data-specific header)
-pub const DATA_SHRED_PAYLOAD_SIZE: usize = 1051;
+// Re-export variant byte constants.
+pub use paradencer_constants::shred::{
+    SHRED_LEGACY_CODE_NIBBLE, SHRED_LEGACY_DATA_NIBBLE, SHRED_PROOF_COUNT_MASK,
+    SHRED_TYPEMASK_CODE, SHRED_TYPEMASK_DATA, SHRED_TYPE_LEGACY_CODE, SHRED_TYPE_LEGACY_DATA,
+    SHRED_TYPE_MASK, SHRED_TYPE_MERKLE_CODE, SHRED_TYPE_MERKLE_CODE_CHAINED,
+    SHRED_TYPE_MERKLE_CODE_CHAINED_RESIGNED, SHRED_TYPE_MERKLE_DATA,
+    SHRED_TYPE_MERKLE_DATA_CHAINED, SHRED_TYPE_MERKLE_DATA_CHAINED_RESIGNED,
+};
 
-/// Coding shred payload size
-pub const CODING_SHRED_PAYLOAD_SIZE: usize = 1139;
+// Backward compat aliases (used widely in existing code).
+/// Lower nibble value for legacy data variant byte.
+pub const SHRED_DATA_FLAG: u8 = SHRED_LEGACY_DATA_NIBBLE;
+/// Lower nibble value for legacy code variant byte.
+pub const SHRED_CODE_FLAG: u8 = SHRED_LEGACY_CODE_NIBBLE;
 
-/// Size of Merkle proof in bytes
-pub const MERKLE_PROOF_SIZE: usize = 20 * 32; // 20 hashes
-
-/// Shred variant bit flags
-pub const SHRED_VARIANT_MASK: u8 = 0x0F;
-pub const SHRED_DATA_FLAG: u8 = 0b0101;
-pub const SHRED_CODE_FLAG: u8 = 0b1010;
-
-/// Merkle variant flag
-pub const SHRED_MERKLE_FLAG: u8 = 0x40;
-
-/// Last shred in slot flag
+/// Last shred in slot flag (bit in data shred flags byte).
 pub const SHRED_LAST_IN_SLOT: u8 = 0x80;
 
-/// A complete shred with all its components
+/// A complete shred with all its components.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Shred {
-    /// Common header present in all shreds
+    /// Common header present in all shreds.
     pub common_header: ShredCommonHeader,
 
-    /// Variant-specific data
+    /// Variant-specific data.
     pub variant: ShredVariant,
 
-    /// Raw payload bytes
+    /// Payload bytes (after header, before Merkle proof for Merkle shreds).
     pub payload: Vec<u8>,
+
+    /// Original wire-format bytes when parsed from the network.
+    /// Used for Merkle signature verification which hashes over raw bytes.
+    #[serde(skip)]
+    pub raw: Option<Vec<u8>>,
 }
 
 /// Common header present in all shred types
@@ -175,11 +191,14 @@ pub struct CodingShredHeader {
     pub position: u16,
 }
 
-/// Merkle proof for shred authentication
+/// Merkle proof for shred authentication.
+///
+/// Each node is a 20-byte truncated SHA-256 hash. The proof contains
+/// sibling hashes needed to reconstruct the Merkle root from a leaf.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MerkleProof {
-    /// Merkle tree proof nodes
-    pub proof: Vec<[u8; 32]>,
+    /// Merkle tree proof nodes (truncated 20-byte SHA-256 hashes).
+    pub proof: Vec<[u8; MERKLE_PROOF_NODE_BYTES]>,
 }
 
 /// FEC set identifier
@@ -218,31 +237,52 @@ pub struct ShredMetadata {
 }
 
 impl Shred {
-    /// Create a new shred with the given components
+    /// Create a new shred with the given components.
     pub fn new(common_header: ShredCommonHeader, variant: ShredVariant, payload: Vec<u8>) -> Self {
         Self {
             common_header,
             variant,
             payload,
+            raw: None,
         }
     }
 
-    /// Get the slot number
+    /// Create a new shred preserving original wire-format bytes.
+    pub fn with_raw(
+        common_header: ShredCommonHeader,
+        variant: ShredVariant,
+        payload: Vec<u8>,
+        raw: Vec<u8>,
+    ) -> Self {
+        Self {
+            common_header,
+            variant,
+            payload,
+            raw: Some(raw),
+        }
+    }
+
+    /// Get the slot number.
     pub fn slot(&self) -> u64 {
         self.common_header.slot
     }
 
-    /// Get the shred index
+    /// Get the shred index.
     pub fn index(&self) -> u32 {
         self.common_header.index
     }
 
-    /// Get the FEC set index
+    /// Get the FEC set index.
     pub fn fec_set_index(&self) -> u32 {
         self.common_header.fec_set_index
     }
 
-    /// Check if this is a data shred
+    /// Extract the shred type from the variant byte (upper nibble).
+    pub fn shred_type(&self) -> u8 {
+        self.common_header.variant & SHRED_TYPE_MASK
+    }
+
+    /// Check if this is a data shred (from the parsed variant enum).
     pub fn is_data(&self) -> bool {
         matches!(
             self.variant,
@@ -250,7 +290,7 @@ impl Shred {
         )
     }
 
-    /// Check if this is a coding shred
+    /// Check if this is a coding shred (from the parsed variant enum).
     pub fn is_coding(&self) -> bool {
         matches!(
             self.variant,
@@ -258,7 +298,7 @@ impl Shred {
         )
     }
 
-    /// Check if this shred uses Merkle proofs
+    /// Check if this shred uses Merkle proofs (from the parsed variant enum).
     pub fn is_merkle(&self) -> bool {
         matches!(
             self.variant,
@@ -266,7 +306,33 @@ impl Shred {
         )
     }
 
-    /// Check if this is the last shred in a slot
+    /// Check if this is a chained Merkle shred (from variant byte).
+    pub fn is_chained(&self) -> bool {
+        let t = self.shred_type();
+        t == SHRED_TYPE_MERKLE_DATA_CHAINED
+            || t == SHRED_TYPE_MERKLE_CODE_CHAINED
+            || t == SHRED_TYPE_MERKLE_DATA_CHAINED_RESIGNED
+            || t == SHRED_TYPE_MERKLE_CODE_CHAINED_RESIGNED
+    }
+
+    /// Check if this is a resigned (retransmitter-signed) Merkle shred (from variant byte).
+    pub fn is_resigned(&self) -> bool {
+        let t = self.shred_type();
+        t == SHRED_TYPE_MERKLE_DATA_CHAINED_RESIGNED || t == SHRED_TYPE_MERKLE_CODE_CHAINED_RESIGNED
+    }
+
+    /// Get the Merkle proof depth (number of proof nodes) from the variant byte.
+    /// Returns 0 for legacy shreds.
+    pub fn merkle_proof_count(&self) -> usize {
+        let t = self.shred_type();
+        if t == SHRED_TYPE_LEGACY_DATA || t == SHRED_TYPE_LEGACY_CODE {
+            0
+        } else {
+            (self.common_header.variant & SHRED_PROOF_COUNT_MASK) as usize
+        }
+    }
+
+    /// Check if this is the last shred in a slot.
     pub fn is_last_in_slot(&self) -> bool {
         match &self.variant {
             ShredVariant::LegacyData(header) | ShredVariant::MerkleData(header, _) => {
@@ -367,9 +433,33 @@ mod tests {
     }
 
     #[test]
-    fn test_shred_variant_flags() {
-        assert_eq!(SHRED_DATA_FLAG & SHRED_VARIANT_MASK, SHRED_DATA_FLAG);
-        assert_eq!(SHRED_CODE_FLAG & SHRED_VARIANT_MASK, SHRED_CODE_FLAG);
+    fn test_variant_byte_encoding() {
+        // Legacy data: 0xA5 → type=0xA0, nibble=5
+        let v = SHRED_TYPE_LEGACY_DATA | SHRED_LEGACY_DATA_NIBBLE;
+        assert_eq!(v, 0xA5);
+        assert_eq!(v & SHRED_TYPE_MASK, SHRED_TYPE_LEGACY_DATA);
+        assert_eq!(v & SHRED_TYPEMASK_DATA, SHRED_TYPEMASK_DATA);
+        assert_eq!(v & SHRED_TYPEMASK_CODE, 0);
+
+        // Legacy code: 0x5A → type=0x50, nibble=0xA
+        let v = SHRED_TYPE_LEGACY_CODE | SHRED_LEGACY_CODE_NIBBLE;
+        assert_eq!(v, 0x5A);
+        assert_eq!(v & SHRED_TYPE_MASK, SHRED_TYPE_LEGACY_CODE);
+        assert_eq!(v & SHRED_TYPEMASK_CODE, SHRED_TYPEMASK_CODE);
+
+        // Merkle data with 5 proof nodes: 0x85
+        let v = SHRED_TYPE_MERKLE_DATA | 5;
+        assert_eq!(v, 0x85);
+        assert_eq!(v & SHRED_TYPE_MASK, SHRED_TYPE_MERKLE_DATA);
+        assert_eq!(v & SHRED_PROOF_COUNT_MASK, 5);
+        assert_eq!(v & SHRED_TYPEMASK_DATA, SHRED_TYPEMASK_DATA);
+
+        // Merkle code with 10 proof nodes: 0x4A
+        let v = SHRED_TYPE_MERKLE_CODE | 10;
+        assert_eq!(v, 0x4A);
+        assert_eq!(v & SHRED_TYPE_MASK, SHRED_TYPE_MERKLE_CODE);
+        assert_eq!(v & SHRED_PROOF_COUNT_MASK, 10);
+        assert_eq!(v & SHRED_TYPEMASK_CODE, SHRED_TYPEMASK_CODE);
     }
 
     #[test]
@@ -383,10 +473,11 @@ mod tests {
     }
 
     #[test]
-    fn test_shred_type_checks() {
+    fn test_shred_type_checks_legacy_data() {
+        let variant_byte = SHRED_TYPE_LEGACY_DATA | SHRED_LEGACY_DATA_NIBBLE; // 0xA5
         let common_header = ShredCommonHeader {
             signature: [0; SIGNATURE_SIZE],
-            variant: SHRED_DATA_FLAG,
+            variant: variant_byte,
             slot: 100,
             index: 0,
             version: 1,
@@ -408,8 +499,85 @@ mod tests {
         assert!(shred.is_data());
         assert!(!shred.is_coding());
         assert!(!shred.is_merkle());
+        assert!(!shred.is_chained());
+        assert!(!shred.is_resigned());
+        assert_eq!(shred.merkle_proof_count(), 0);
         assert_eq!(shred.slot(), 100);
         assert_eq!(shred.index(), 0);
         assert_eq!(shred.data_size(), Some(512));
+    }
+
+    #[test]
+    fn test_shred_type_checks_merkle_data() {
+        let proof_depth = 5u8;
+        let variant_byte = SHRED_TYPE_MERKLE_DATA | proof_depth; // 0x85
+        let common_header = ShredCommonHeader {
+            signature: [1; SIGNATURE_SIZE],
+            variant: variant_byte,
+            slot: 200,
+            index: 3,
+            version: 2,
+            fec_set_index: 0,
+        };
+
+        let data_header = DataShredHeader {
+            parent_offset: 1,
+            flags: 0,
+            size: 512,
+        };
+
+        let proof = MerkleProof {
+            proof: vec![[0xAA; MERKLE_PROOF_NODE_BYTES]; proof_depth as usize],
+        };
+
+        let shred = Shred::new(
+            common_header,
+            ShredVariant::MerkleData(data_header, proof),
+            vec![0; 512],
+        );
+
+        assert!(shred.is_data());
+        assert!(!shred.is_coding());
+        assert!(shred.is_merkle());
+        assert!(!shred.is_chained());
+        assert!(!shred.is_resigned());
+        assert_eq!(shred.merkle_proof_count(), 5);
+    }
+
+    #[test]
+    fn test_shred_type_checks_merkle_code_chained_resigned() {
+        let proof_depth = 8u8;
+        let variant_byte = SHRED_TYPE_MERKLE_CODE_CHAINED_RESIGNED | proof_depth; // 0x78
+        let common_header = ShredCommonHeader {
+            signature: [1; SIGNATURE_SIZE],
+            variant: variant_byte,
+            slot: 300,
+            index: 10,
+            version: 1,
+            fec_set_index: 5,
+        };
+
+        let coding_header = CodingShredHeader {
+            num_data_shreds: 32,
+            num_coding_shreds: 32,
+            position: 3,
+        };
+
+        let proof = MerkleProof {
+            proof: vec![[0xBB; MERKLE_PROOF_NODE_BYTES]; proof_depth as usize],
+        };
+
+        let shred = Shred::new(
+            common_header,
+            ShredVariant::MerkleCoding(coding_header, proof),
+            vec![0; 256],
+        );
+
+        assert!(!shred.is_data());
+        assert!(shred.is_coding());
+        assert!(shred.is_merkle());
+        assert!(shred.is_chained());
+        assert!(shred.is_resigned());
+        assert_eq!(shred.merkle_proof_count(), 8);
     }
 }

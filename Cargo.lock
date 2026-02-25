@@ -1704,6 +1704,7 @@ dependencies = [
  "bincode",
  "blake3",
  "bs58",
+ "paradencer-constants",
  "serde",
  "sha2",
  "thiserror 2.0.18",

@@ -4,8 +4,8 @@ use crate::shred_assembler::AssembledBlock;
 use crate::shred_network::{CompletedFecSet, ShredNetworkConfig, ShredNetworkService};
 use crate::{ShredCollector, ShredCollectorConfig};
 use paradencer_types::shred::{
-    DataShredHeader, Shred, ShredCommonHeader, ShredVariant, SHRED_DATA_FLAG, SHRED_LAST_IN_SLOT,
-    SIGNATURE_SIZE,
+    DataShredHeader, Shred, ShredCommonHeader, ShredVariant, SHRED_LAST_IN_SLOT,
+    SHRED_LEGACY_DATA_NIBBLE, SHRED_TYPE_LEGACY_DATA, SIGNATURE_SIZE,
 };
 use paradencer_types::Hash;
 
@@ -24,7 +24,7 @@ fn make_shred(slot: u64, index: u32, last_in_slot: bool, payload: Vec<u8>) -> Sh
     Shred::new(
         ShredCommonHeader {
             signature: [0; SIGNATURE_SIZE],
-            variant: SHRED_DATA_FLAG,
+            variant: SHRED_TYPE_LEGACY_DATA | SHRED_LEGACY_DATA_NIBBLE,
             slot,
             index,
             version: 1,

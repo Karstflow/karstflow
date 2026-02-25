@@ -8,8 +8,9 @@ use super::poh::PohEntry;
 use paradencer_storage::Pubkey;
 use paradencer_types::shred::{
     CodingShredHeader, DataShredHeader, Shred, ShredCommonHeader, ShredVariant,
-    DATA_SHRED_PAYLOAD_SIZE, MAX_DATA_SHREDS_PER_FEC_BLOCK, SHRED_CODE_FLAG, SHRED_DATA_FLAG,
-    SHRED_LAST_IN_SLOT, SHRED_MERKLE_FLAG, SIGNATURE_SIZE,
+    DATA_SHRED_PAYLOAD_SIZE, MAX_DATA_SHREDS_PER_FEC_BLOCK, SHRED_LAST_IN_SLOT,
+    SHRED_LEGACY_CODE_NIBBLE, SHRED_LEGACY_DATA_NIBBLE, SHRED_TYPE_LEGACY_CODE,
+    SHRED_TYPE_LEGACY_DATA, SHRED_TYPE_MERKLE_CODE, SHRED_TYPE_MERKLE_DATA, SIGNATURE_SIZE,
 };
 use reed_solomon_erasure::galois_8::ReedSolomon;
 use thiserror::Error;
@@ -192,10 +193,13 @@ impl EntryShredder {
             size: data.len() as u16,
         };
 
+        // TODO: When producing Merkle shreds, the lower nibble should encode the proof depth.
+        // For now we use depth=0 as placeholder; real production will set the proof depth
+        // after computing the Merkle tree for the FEC set.
         let variant_byte = if self.config.use_merkle_proofs {
-            SHRED_DATA_FLAG | SHRED_MERKLE_FLAG
+            SHRED_TYPE_MERKLE_DATA
         } else {
-            SHRED_DATA_FLAG
+            SHRED_TYPE_LEGACY_DATA | SHRED_LEGACY_DATA_NIBBLE
         };
 
         let common_header = ShredCommonHeader {
@@ -284,9 +288,9 @@ impl EntryShredder {
             };
 
             let variant_byte = if self.config.use_merkle_proofs {
-                SHRED_CODE_FLAG | SHRED_MERKLE_FLAG
+                SHRED_TYPE_MERKLE_CODE
             } else {
-                SHRED_CODE_FLAG
+                SHRED_TYPE_LEGACY_CODE | SHRED_LEGACY_CODE_NIBBLE
             };
 
             let common_header = ShredCommonHeader {

@@ -248,7 +248,7 @@ mod tests {
         Shred::new(
             ShredCommonHeader {
                 signature: [0; SIGNATURE_SIZE],
-                variant: SHRED_DATA_FLAG,
+                variant: SHRED_TYPE_LEGACY_DATA | SHRED_LEGACY_DATA_NIBBLE,
                 slot,
                 index,
                 version: 1,

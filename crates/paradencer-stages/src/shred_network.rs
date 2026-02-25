@@ -793,7 +793,7 @@ mod tests {
         sig[12..16].copy_from_slice(&fec_set_index.to_le_bytes());
         ShredCommonHeader {
             signature: sig,
-            variant: SHRED_DATA_FLAG,
+            variant: SHRED_TYPE_LEGACY_DATA | SHRED_LEGACY_DATA_NIBBLE,
             slot,
             index,
             version: 1,
@@ -1569,7 +1569,7 @@ mod tests {
         let shred = Shred::new(
             ShredCommonHeader {
                 signature: [0u8; 64],
-                variant: SHRED_DATA_FLAG,
+                variant: SHRED_TYPE_LEGACY_DATA | SHRED_LEGACY_DATA_NIBBLE,
                 slot: 100,
                 index: 0,
                 version: 1,

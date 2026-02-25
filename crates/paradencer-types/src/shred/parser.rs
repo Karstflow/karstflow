@@ -38,7 +38,10 @@ pub type ShredParseResult<T> = Result<T, ShredParseError>;
 pub struct ShredParser;
 
 impl ShredParser {
-    /// Parse a raw byte buffer into a Shred
+    /// Parse a raw byte buffer into a Shred.
+    ///
+    /// Preserves the original wire-format bytes in `Shred::raw` for
+    /// Merkle signature verification.
     pub fn parse(data: &[u8]) -> ShredParseResult<Shred> {
         // Minimum shred size check
         if data.len() < SHRED_HEADER_SIZE {
@@ -53,14 +56,37 @@ impl ShredParser {
         // Parse common header
         let common_header = Self::parse_common_header(&mut cursor)?;
 
-        // Parse variant-specific data
-        let variant = Self::parse_variant(&mut cursor, common_header.variant)?;
+        // Parse variant-specific data (Merkle proof is extracted from raw tail)
+        let variant = Self::parse_variant(&mut cursor, common_header.variant, data)?;
 
-        // Extract remaining payload
-        let position = cursor.position() as usize;
-        let payload = data[position..].to_vec();
+        // Extract payload: bytes between the header and the Merkle proof tail.
+        let header_end = cursor.position() as usize;
+        let shred_type = common_header.variant & SHRED_TYPE_MASK;
+        let is_legacy =
+            shred_type == SHRED_TYPE_LEGACY_DATA || shred_type == SHRED_TYPE_LEGACY_CODE;
 
-        Ok(Shred::new(common_header, variant, payload))
+        let payload = if is_legacy {
+            data[header_end..].to_vec()
+        } else {
+            // For Merkle shreds, payload ends where the Merkle proof begins.
+            let proof_count = (common_header.variant & SHRED_PROOF_COUNT_MASK) as usize;
+            let merkle_sz = proof_count * MERKLE_PROOF_NODE_BYTES;
+            let is_resigned = matches!(
+                shred_type,
+                SHRED_TYPE_MERKLE_DATA_CHAINED_RESIGNED | SHRED_TYPE_MERKLE_CODE_CHAINED_RESIGNED
+            );
+            let resign_sz = if is_resigned { SIGNATURE_SIZE } else { 0 };
+            let proof_start = data.len().saturating_sub(merkle_sz + resign_sz);
+            let end = proof_start.max(header_end);
+            data[header_end..end].to_vec()
+        };
+
+        Ok(Shred::with_raw(
+            common_header,
+            variant,
+            payload,
+            data.to_vec(),
+        ))
     }
 
     /// Parse the common header present in all shreds
@@ -110,34 +136,39 @@ impl ShredParser {
         })
     }
 
-    /// Parse variant-specific header based on variant byte
+    /// Parse variant-specific header based on variant byte.
+    ///
+    /// The variant byte encodes the shred type in the upper nibble and
+    /// the Merkle proof depth (node count) in the lower nibble.
     fn parse_variant(
         cursor: &mut Cursor<&[u8]>,
         variant_byte: u8,
+        raw_data: &[u8],
     ) -> ShredParseResult<ShredVariant> {
-        let is_merkle = (variant_byte & SHRED_MERKLE_FLAG) != 0;
-        let variant_type = variant_byte & SHRED_VARIANT_MASK;
+        let shred_type = variant_byte & SHRED_TYPE_MASK;
+        let is_data = shred_type & SHRED_TYPEMASK_DATA != 0;
+        let is_code = shred_type & SHRED_TYPEMASK_CODE != 0;
+        let is_legacy =
+            shred_type == SHRED_TYPE_LEGACY_DATA || shred_type == SHRED_TYPE_LEGACY_CODE;
 
-        match variant_type {
-            SHRED_DATA_FLAG => {
-                let data_header = Self::parse_data_header(cursor)?;
-                if is_merkle {
-                    let proof = Self::parse_merkle_proof(cursor)?;
-                    Ok(ShredVariant::MerkleData(data_header, proof))
-                } else {
-                    Ok(ShredVariant::LegacyData(data_header))
-                }
+        if is_data {
+            let data_header = Self::parse_data_header(cursor)?;
+            if is_legacy {
+                Ok(ShredVariant::LegacyData(data_header))
+            } else {
+                let proof = Self::extract_merkle_proof(variant_byte, raw_data, true)?;
+                Ok(ShredVariant::MerkleData(data_header, proof))
             }
-            SHRED_CODE_FLAG => {
-                let coding_header = Self::parse_coding_header(cursor)?;
-                if is_merkle {
-                    let proof = Self::parse_merkle_proof(cursor)?;
-                    Ok(ShredVariant::MerkleCoding(coding_header, proof))
-                } else {
-                    Ok(ShredVariant::LegacyCoding(coding_header))
-                }
+        } else if is_code {
+            let coding_header = Self::parse_coding_header(cursor)?;
+            if is_legacy {
+                Ok(ShredVariant::LegacyCoding(coding_header))
+            } else {
+                let proof = Self::extract_merkle_proof(variant_byte, raw_data, false)?;
+                Ok(ShredVariant::MerkleCoding(coding_header, proof))
             }
-            _ => Err(ShredParseError::InvalidVariant(variant_byte)),
+        } else {
+            Err(ShredParseError::InvalidVariant(variant_byte))
         }
     }
 
@@ -210,43 +241,83 @@ impl ShredParser {
         })
     }
 
-    /// Parse Merkle proof
-    fn parse_merkle_proof(cursor: &mut Cursor<&[u8]>) -> ShredParseResult<MerkleProof> {
-        // Read number of proof nodes (typically 20 for Solana)
-        let mut num_nodes_buf = [0u8; 1];
-        cursor
-            .read_exact(&mut num_nodes_buf)
-            .map_err(|e| ShredParseError::IoError(e.to_string()))?;
-        let num_nodes = num_nodes_buf[0] as usize;
+    /// Extract Merkle proof nodes from the tail of the raw shred bytes.
+    ///
+    /// The proof sits at the end of the shred (before any retransmitter signature).
+    /// The number of proof nodes is encoded in the lower nibble of the variant byte.
+    fn extract_merkle_proof(
+        variant_byte: u8,
+        raw: &[u8],
+        is_data: bool,
+    ) -> ShredParseResult<MerkleProof> {
+        let proof_count = (variant_byte & SHRED_PROOF_COUNT_MASK) as usize;
+        if proof_count > MERKLE_MAX_PROOF_DEPTH {
+            return Err(ShredParseError::InvalidMerkleProof);
+        }
+        if proof_count == 0 {
+            return Ok(MerkleProof { proof: Vec::new() });
+        }
 
-        if num_nodes > 32 {
+        let merkle_sz = proof_count * MERKLE_PROOF_NODE_BYTES;
+        let shred_type = variant_byte & SHRED_TYPE_MASK;
+        let is_resigned = matches!(
+            shred_type,
+            SHRED_TYPE_MERKLE_DATA_CHAINED_RESIGNED | SHRED_TYPE_MERKLE_CODE_CHAINED_RESIGNED
+        );
+        let resign_sz = if is_resigned { SIGNATURE_SIZE } else { 0 };
+
+        // Merkle proof offset: shred_size - merkle_sz - resign_sz
+        let shred_sz = if is_data { SHRED_MIN_SIZE } else { SHRED_SIZE };
+        let shred_end = raw.len().min(shred_sz);
+        let proof_start = shred_end
+            .checked_sub(merkle_sz + resign_sz)
+            .ok_or(ShredParseError::InvalidMerkleProof)?;
+
+        if proof_start + merkle_sz > raw.len() {
             return Err(ShredParseError::InvalidMerkleProof);
         }
 
-        let mut proof = Vec::with_capacity(num_nodes);
-        for _ in 0..num_nodes {
-            let mut node = [0u8; 32];
-            cursor
-                .read_exact(&mut node)
-                .map_err(|e| ShredParseError::IoError(e.to_string()))?;
+        let mut proof = Vec::with_capacity(proof_count);
+        for i in 0..proof_count {
+            let off = proof_start + i * MERKLE_PROOF_NODE_BYTES;
+            let mut node = [0u8; MERKLE_PROOF_NODE_BYTES];
+            node.copy_from_slice(&raw[off..off + MERKLE_PROOF_NODE_BYTES]);
             proof.push(node);
         }
 
         Ok(MerkleProof { proof })
     }
 
-    /// Serialize a shred into bytes
+    /// Serialize a shred into wire-format bytes.
+    ///
+    /// For Merkle shreds, the proof is written at the tail of the shred
+    /// with zero-padding between the payload and proof as needed.
     pub fn serialize(shred: &Shred) -> ShredParseResult<Vec<u8>> {
         let mut buffer = Vec::with_capacity(SHRED_SIZE);
 
         // Write common header
         Self::write_common_header(&mut buffer, &shred.common_header)?;
 
-        // Write variant-specific data
-        Self::write_variant(&mut buffer, &shred.variant)?;
+        // Write variant-specific header (NOT the proof yet)
+        Self::write_variant_header(&mut buffer, &shred.variant)?;
 
         // Write payload
         buffer.extend_from_slice(&shred.payload);
+
+        // For Merkle shreds, pad to target size then append proof at tail.
+        match &shred.variant {
+            ShredVariant::MerkleData(_, proof) | ShredVariant::MerkleCoding(_, proof) => {
+                let is_data = matches!(&shred.variant, ShredVariant::MerkleData(_, _));
+                let target_sz = if is_data { SHRED_MIN_SIZE } else { SHRED_SIZE };
+                let merkle_sz = proof.proof.len() * MERKLE_PROOF_NODE_BYTES;
+                let needed = target_sz.saturating_sub(merkle_sz);
+                if buffer.len() < needed {
+                    buffer.resize(needed, 0);
+                }
+                Self::write_merkle_proof(&mut buffer, proof)?;
+            }
+            _ => {}
+        }
 
         Ok(buffer)
     }
@@ -265,18 +336,14 @@ impl ShredParser {
         Ok(())
     }
 
-    /// Write variant-specific data to buffer
-    fn write_variant(buffer: &mut Vec<u8>, variant: &ShredVariant) -> ShredParseResult<()> {
+    /// Write variant-specific header fields (not the Merkle proof).
+    fn write_variant_header(buffer: &mut Vec<u8>, variant: &ShredVariant) -> ShredParseResult<()> {
         match variant {
-            ShredVariant::LegacyData(header) => Self::write_data_header(buffer, header),
-            ShredVariant::LegacyCoding(header) => Self::write_coding_header(buffer, header),
-            ShredVariant::MerkleData(header, proof) => {
-                Self::write_data_header(buffer, header)?;
-                Self::write_merkle_proof(buffer, proof)
+            ShredVariant::LegacyData(header) | ShredVariant::MerkleData(header, _) => {
+                Self::write_data_header(buffer, header)
             }
-            ShredVariant::MerkleCoding(header, proof) => {
-                Self::write_coding_header(buffer, header)?;
-                Self::write_merkle_proof(buffer, proof)
+            ShredVariant::LegacyCoding(header) | ShredVariant::MerkleCoding(header, _) => {
+                Self::write_coding_header(buffer, header)
             }
         }
     }
@@ -300,9 +367,12 @@ impl ShredParser {
         Ok(())
     }
 
-    /// Write Merkle proof to buffer
+    /// Append Merkle proof nodes to buffer.
+    ///
+    /// Proof nodes are 20-byte truncated SHA-256 hashes. They are written
+    /// at the tail of the shred, so the caller must pad the payload to the
+    /// appropriate offset before calling this.
     fn write_merkle_proof(buffer: &mut Vec<u8>, proof: &MerkleProof) -> ShredParseResult<()> {
-        buffer.push(proof.proof.len() as u8);
         for node in &proof.proof {
             buffer.extend_from_slice(node);
         }
@@ -314,37 +384,79 @@ impl ShredParser {
 mod tests {
     use super::*;
 
+    /// Build a wire-format legacy data shred.
+    fn build_legacy_data_wire(slot: u64, index: u32, fec_set: u32, payload: &[u8]) -> Vec<u8> {
+        let variant_byte = SHRED_TYPE_LEGACY_DATA | SHRED_LEGACY_DATA_NIBBLE; // 0xA5
+        let mut buf = Vec::new();
+        buf.extend_from_slice(&[0u8; SIGNATURE_SIZE]);
+        buf.push(variant_byte);
+        buf.extend_from_slice(&slot.to_le_bytes());
+        buf.extend_from_slice(&index.to_le_bytes());
+        buf.extend_from_slice(&1u16.to_le_bytes()); // version
+        buf.extend_from_slice(&fec_set.to_le_bytes());
+        // Data header
+        buf.extend_from_slice(&1u16.to_le_bytes()); // parent_offset
+        buf.push(0); // flags
+        buf.extend_from_slice(&(payload.len() as u16).to_le_bytes()); // size
+                                                                      // Payload
+        buf.extend_from_slice(payload);
+        buf
+    }
+
+    /// Build a wire-format legacy coding shred.
+    fn build_legacy_code_wire(slot: u64, index: u32, fec_set: u32, payload: &[u8]) -> Vec<u8> {
+        let variant_byte = SHRED_TYPE_LEGACY_CODE | SHRED_LEGACY_CODE_NIBBLE; // 0x5A
+        let mut buf = Vec::new();
+        buf.extend_from_slice(&[0u8; SIGNATURE_SIZE]);
+        buf.push(variant_byte);
+        buf.extend_from_slice(&slot.to_le_bytes());
+        buf.extend_from_slice(&index.to_le_bytes());
+        buf.extend_from_slice(&1u16.to_le_bytes()); // version
+        buf.extend_from_slice(&fec_set.to_le_bytes());
+        // Coding header
+        buf.extend_from_slice(&32u16.to_le_bytes()); // num_data
+        buf.extend_from_slice(&32u16.to_le_bytes()); // num_coding
+        buf.extend_from_slice(&10u16.to_le_bytes()); // position
+                                                     // Payload
+        buf.extend_from_slice(payload);
+        buf
+    }
+
+    /// Build a wire-format Merkle data shred.
+    fn build_merkle_data_wire(
+        slot: u64,
+        index: u32,
+        fec_set: u32,
+        proof_depth: u8,
+        proof_fill: u8,
+    ) -> Vec<u8> {
+        let variant_byte = SHRED_TYPE_MERKLE_DATA | proof_depth;
+        let merkle_sz = proof_depth as usize * MERKLE_PROOF_NODE_BYTES;
+        let mut buf = vec![0u8; SHRED_MIN_SIZE];
+        // Signature
+        buf[..SIGNATURE_SIZE].fill(0x01);
+        // Common header
+        buf[SIGNATURE_SIZE] = variant_byte;
+        buf[0x41..0x49].copy_from_slice(&slot.to_le_bytes());
+        buf[0x49..0x4d].copy_from_slice(&index.to_le_bytes());
+        buf[0x4d..0x4f].copy_from_slice(&1u16.to_le_bytes()); // version
+        buf[0x4f..0x53].copy_from_slice(&fec_set.to_le_bytes());
+        // Data header
+        buf[0x53..0x55].copy_from_slice(&1u16.to_le_bytes()); // parent_offset
+        buf[0x55] = 0; // flags
+        buf[0x56..0x58].copy_from_slice(&512u16.to_le_bytes()); // size
+                                                                // Payload at 0x58
+        buf[0x58..0x58 + 128].fill(0xAB);
+        // Merkle proof at tail
+        let proof_start = SHRED_MIN_SIZE - merkle_sz;
+        buf[proof_start..].fill(proof_fill);
+        buf
+    }
+
     #[test]
     fn test_parse_legacy_data_shred() {
-        let mut buffer = Vec::new();
-
-        // Signature
-        buffer.extend_from_slice(&[0u8; SIGNATURE_SIZE]);
-
-        // Variant (data, no merkle)
-        buffer.push(SHRED_DATA_FLAG);
-
-        // Slot
-        buffer.extend_from_slice(&100u64.to_le_bytes());
-
-        // Index
-        buffer.extend_from_slice(&5u32.to_le_bytes());
-
-        // Version
-        buffer.extend_from_slice(&1u16.to_le_bytes());
-
-        // FEC set index
-        buffer.extend_from_slice(&0u32.to_le_bytes());
-
-        // Data header
-        buffer.extend_from_slice(&1u16.to_le_bytes()); // parent_offset
-        buffer.push(0); // flags
-        buffer.extend_from_slice(&512u16.to_le_bytes()); // size
-
-        // Payload
-        buffer.extend_from_slice(&vec![0xAB; 512]);
-
-        let shred = ShredParser::parse(&buffer).unwrap();
+        let wire = build_legacy_data_wire(100, 5, 0, &vec![0xAB; 512]);
+        let shred = ShredParser::parse(&wire).unwrap();
 
         assert_eq!(shred.slot(), 100);
         assert_eq!(shred.index(), 5);
@@ -352,39 +464,13 @@ mod tests {
         assert!(!shred.is_coding());
         assert!(!shred.is_merkle());
         assert_eq!(shred.data_size(), Some(512));
+        assert!(shred.raw.is_some());
     }
 
     #[test]
     fn test_parse_legacy_coding_shred() {
-        let mut buffer = Vec::new();
-
-        // Signature
-        buffer.extend_from_slice(&[0u8; SIGNATURE_SIZE]);
-
-        // Variant (coding, no merkle)
-        buffer.push(SHRED_CODE_FLAG);
-
-        // Slot
-        buffer.extend_from_slice(&100u64.to_le_bytes());
-
-        // Index
-        buffer.extend_from_slice(&5u32.to_le_bytes());
-
-        // Version
-        buffer.extend_from_slice(&1u16.to_le_bytes());
-
-        // FEC set index
-        buffer.extend_from_slice(&0u32.to_le_bytes());
-
-        // Coding header
-        buffer.extend_from_slice(&32u16.to_le_bytes()); // num_data_shreds
-        buffer.extend_from_slice(&32u16.to_le_bytes()); // num_coding_shreds
-        buffer.extend_from_slice(&10u16.to_le_bytes()); // position
-
-        // Payload
-        buffer.extend_from_slice(&vec![0xCD; 512]);
-
-        let shred = ShredParser::parse(&buffer).unwrap();
+        let wire = build_legacy_code_wire(100, 5, 0, &vec![0xCD; 512]);
+        let shred = ShredParser::parse(&wire).unwrap();
 
         assert_eq!(shred.slot(), 100);
         assert_eq!(shred.index(), 5);
@@ -400,59 +486,33 @@ mod tests {
 
     #[test]
     fn test_parse_merkle_data_shred() {
-        let mut buffer = Vec::new();
-
-        // Signature
-        buffer.extend_from_slice(&[0u8; SIGNATURE_SIZE]);
-
-        // Variant (data + merkle)
-        buffer.push(SHRED_DATA_FLAG | SHRED_MERKLE_FLAG);
-
-        // Slot
-        buffer.extend_from_slice(&100u64.to_le_bytes());
-
-        // Index
-        buffer.extend_from_slice(&5u32.to_le_bytes());
-
-        // Version
-        buffer.extend_from_slice(&1u16.to_le_bytes());
-
-        // FEC set index
-        buffer.extend_from_slice(&0u32.to_le_bytes());
-
-        // Data header
-        buffer.extend_from_slice(&1u16.to_le_bytes()); // parent_offset
-        buffer.push(0); // flags
-        buffer.extend_from_slice(&512u16.to_le_bytes()); // size
-
-        // Merkle proof (3 nodes)
-        buffer.push(3);
-        for _ in 0..3 {
-            buffer.extend_from_slice(&[0xFF; 32]);
-        }
-
-        // Payload
-        buffer.extend_from_slice(&vec![0xAB; 512]);
-
-        let shred = ShredParser::parse(&buffer).unwrap();
+        let proof_depth = 3u8;
+        let wire = build_merkle_data_wire(100, 5, 0, proof_depth, 0xFF);
+        let shred = ShredParser::parse(&wire).unwrap();
 
         assert_eq!(shred.slot(), 100);
+        assert_eq!(shred.index(), 5);
         assert!(shred.is_data());
         assert!(shred.is_merkle());
+        assert_eq!(shred.merkle_proof_count(), 3);
 
         match &shred.variant {
             ShredVariant::MerkleData(_, proof) => {
                 assert_eq!(proof.proof.len(), 3);
+                for node in &proof.proof {
+                    assert_eq!(*node, [0xFF; MERKLE_PROOF_NODE_BYTES]);
+                }
             }
             _ => panic!("Expected MerkleData variant"),
         }
     }
 
     #[test]
-    fn test_serialize_roundtrip() {
+    fn test_serialize_roundtrip_legacy() {
+        let variant_byte = SHRED_TYPE_LEGACY_DATA | SHRED_LEGACY_DATA_NIBBLE;
         let common_header = ShredCommonHeader {
             signature: [0xAB; SIGNATURE_SIZE],
-            variant: SHRED_DATA_FLAG,
+            variant: variant_byte,
             slot: 100,
             index: 5,
             version: 1,
@@ -488,9 +548,9 @@ mod tests {
 
     #[test]
     fn test_parse_invalid_variant() {
-        // Buffer must be at least SHRED_HEADER_SIZE (88 bytes) to pass length check
+        // Variant 0x30 has upper nibble 0x30, which is neither data nor code.
         let mut buffer = vec![0u8; SHRED_HEADER_SIZE];
-        buffer[SIGNATURE_SIZE] = 0xFF; // Invalid variant byte
+        buffer[SIGNATURE_SIZE] = 0x30;
 
         let result = ShredParser::parse(&buffer);
         assert!(matches!(result, Err(ShredParseError::InvalidVariant(_))));

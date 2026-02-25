@@ -7,8 +7,8 @@ fn build_test_shred_bytes(slot: u64, index: u32) -> Vec<u8> {
     let mut buf = Vec::new();
     // Signature (64 bytes)
     buf.extend_from_slice(&[0u8; 64]);
-    // Variant: legacy data (0b0101)
-    buf.push(0b0101);
+    // Variant: legacy data = 0xA5 (upper nibble 0xA0 = legacy data, lower nibble 0x05)
+    buf.push(0xA5);
     // Slot
     buf.extend_from_slice(&slot.to_le_bytes());
     // Index
