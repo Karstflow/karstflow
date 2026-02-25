@@ -661,9 +661,80 @@ impl ClusterInfo {
             .collect()
     }
 
+    /// Publish a vote transaction to the gossip network.
+    ///
+    /// Creates a signed Vote CRDS value and inserts it into the table.
+    /// The value will be picked up by the push loop and broadcast to peers.
+    /// `vote_index` selects which slot (0..31) this vote occupies per node.
+    pub fn publish_vote(&self, vote_index: u8, transaction_bytes: Vec<u8>) {
+        let now_nanos = current_timestamp_nanos();
+        let mut value = CrdsValue {
+            origin: self.node_id.0,
+            wallclock_nanos: now_nanos,
+            signature: [0u8; 64],
+            data: CrdsValueData::Vote(super::crds::VoteGossip {
+                index: vote_index,
+                slot: 0,
+                hash: [0u8; 32],
+                transaction_bytes,
+            }),
+        };
+        self.sign_value(&mut value);
+        let mut table = self.table.write();
+        table.insert(value, 0, now_nanos, EntryOrigin::Push);
+    }
+
+    /// Publish a duplicate shred proof to the gossip network.
+    ///
+    /// Creates a signed DuplicateShred CRDS value and inserts it into the
+    /// table. Broadcast is handled by the push loop.
+    pub fn publish_duplicate_shred(&self, index: u16, proof_bytes: Vec<u8>) {
+        let now_nanos = current_timestamp_nanos();
+        let mut value = CrdsValue {
+            origin: self.node_id.0,
+            wallclock_nanos: now_nanos,
+            signature: [0u8; 64],
+            data: CrdsValueData::DuplicateShred(super::crds::DuplicateShredProof {
+                index,
+                proof_bytes,
+            }),
+        };
+        self.sign_value(&mut value);
+        let mut table = self.table.write();
+        table.insert(value, 0, now_nanos, EntryOrigin::Push);
+    }
+
+    /// Refresh the self ContactInfo entry with an updated wallclock.
+    ///
+    /// Called periodically (every ~7.5s) to maintain freshness. Updates
+    /// the wallclock timestamp and re-inserts into the CRDS table as a
+    /// new value that will be picked up by the push loop.
+    pub fn refresh_self_contact_info(&self) {
+        let mut info = self.self_contact_info.write();
+        info.wallclock = current_timestamp_ms();
+    }
+
     /// Access the underlying CRDS table (for advanced operations).
     pub fn crds_table(&self) -> &Arc<RwLock<CrdsTable>> {
         &self.table
+    }
+
+    /// Return all CRDS values matching a pull filter (all types, not just ContactInfo).
+    ///
+    /// This is used for pull responses where we need to return any value type
+    /// that the requester doesn't already have.
+    pub fn filter_all_values_for_pull(
+        &self,
+        filter: &GossipBloomFilter,
+        mask: &PullRequestMask,
+        max_count: usize,
+    ) -> Vec<CrdsValue> {
+        let table = self.table.read();
+        table
+            .filter_for_pull_response(filter, mask, max_count)
+            .into_iter()
+            .cloned()
+            .collect()
     }
 }
 
@@ -994,6 +1065,73 @@ mod tests {
 
         // Should be capped at the limit.
         assert_eq!(pm.total_entries(), limit);
+    }
+
+    #[test]
+    fn publish_vote_inserts_into_table() {
+        let (secret, pubkey) = paradencer_crypto::generate_keypair();
+        let node_id = NodeId(pubkey);
+        let info = create_test_contact_info(node_id, 8000);
+        let cluster = ClusterInfo::with_signing_key(
+            node_id,
+            info,
+            Duration::from_secs(30),
+            MAX_CLUSTER_SIZE,
+            secret,
+        );
+
+        let tx_bytes = vec![1, 2, 3, 4, 5]; // mock transaction
+        cluster.publish_vote(0, tx_bytes.clone());
+
+        // Check the vote was inserted into the CRDS table.
+        assert!(cluster.total_entries() >= 1);
+
+        // Verify we can retrieve it via cursor-based pull.
+        let (values, _cursor) = cluster.values_since_cursor(0);
+        let vote_count = values
+            .iter()
+            .filter(|v| matches!(v.data, CrdsValueData::Vote(_)))
+            .count();
+        assert_eq!(vote_count, 1);
+    }
+
+    #[test]
+    fn publish_duplicate_shred_inserts_into_table() {
+        let (secret, pubkey) = paradencer_crypto::generate_keypair();
+        let node_id = NodeId(pubkey);
+        let info = create_test_contact_info(node_id, 8000);
+        let cluster = ClusterInfo::with_signing_key(
+            node_id,
+            info,
+            Duration::from_secs(30),
+            MAX_CLUSTER_SIZE,
+            secret,
+        );
+
+        let proof = vec![0xDE, 0xAD, 0xBE, 0xEF];
+        cluster.publish_duplicate_shred(0, proof);
+
+        let (values, _cursor) = cluster.values_since_cursor(0);
+        let ds_count = values
+            .iter()
+            .filter(|v| matches!(v.data, CrdsValueData::DuplicateShred(_)))
+            .count();
+        assert_eq!(ds_count, 1);
+    }
+
+    #[test]
+    fn refresh_self_contact_info_updates_wallclock() {
+        let node_id = NodeId::new([0u8; 32]);
+        let info = create_test_contact_info(node_id, 8000);
+        let original_wallclock = info.wallclock;
+        let cluster = ClusterInfo::new(node_id, info, Duration::from_secs(30), MAX_CLUSTER_SIZE);
+
+        // Wait a tiny bit to ensure wallclock changes.
+        std::thread::sleep(Duration::from_millis(2));
+
+        cluster.refresh_self_contact_info();
+        let refreshed = cluster.self_contact_info();
+        assert!(refreshed.wallclock >= original_wallclock);
     }
 
     #[test]

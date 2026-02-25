@@ -19,6 +19,6 @@ pub use sampler::WeightedPeerSampler;
 pub use table::{CrdsTable, InsertOutcome};
 pub use value::{
     CrdsContactInfo, CrdsValue, CrdsValueData, DuplicateShredProof, EpochSlots,
-    IncrementalSnapshotHashes, NodeInstanceToken, RestartHeaviestFork, RestartLastVotedForkSlots,
-    SnapshotHashes, VersionInfo, VoteGossip,
+    IncrementalSnapshotHashes, LowestSlot, NodeInstanceToken, RestartHeaviestFork,
+    RestartLastVotedForkSlots, SnapshotHashes, VersionInfo, VoteGossip,
 };

@@ -6,12 +6,17 @@
 //! (nanoseconds internally, milliseconds on the wire).
 
 use super::bloom::{WireBloom, WireCrdsFilter};
-use super::crds_data::{WireCrdsData, WireLegacyContactInfo, WireNodeInstance};
+use super::crds_data::{
+    WireAccountsHashes, WireCrdsData, WireDuplicateShred, WireLegacyContactInfo,
+    WireLegacyVersion2, WireLowestSlot, WireNodeInstance, WireSnapshotHashes, WireVersionEntry,
+    WireVote,
+};
 use super::crds_value::WireCrdsValue;
 use crate::gossip::cluster_info::ContactInfo;
 use crate::gossip::crds::{
-    CrdsContactInfo, CrdsValue, CrdsValueData, GossipBloomFilter, NodeInstanceToken,
-    PullRequestMask, VersionInfo,
+    CrdsContactInfo, CrdsValue, CrdsValueData, DuplicateShredProof, EpochSlots, GossipBloomFilter,
+    IncrementalSnapshotHashes, LowestSlot, NodeInstanceToken, PullRequestMask, SnapshotHashes,
+    VersionInfo, VoteGossip,
 };
 use paradencer_constants::gossip;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
@@ -185,7 +190,72 @@ pub fn internal_to_wire_value(value: &CrdsValue) -> Option<WireCrdsValue> {
                 token: ni.token,
             })
         }
-        // TODO: Add conversion for other CrdsValueData variants as needed.
+        CrdsValueData::Vote(vote) => {
+            // Deserialize the transaction bytes back to wire transaction.
+            let transaction: super::crds_data::WireTransaction =
+                match bincode::deserialize(&vote.transaction_bytes) {
+                    Ok(tx) => tx,
+                    Err(_) => return None,
+                };
+            WireCrdsData::Vote(
+                vote.index,
+                WireVote {
+                    from: origin,
+                    transaction,
+                    wallclock: wallclock_ms,
+                },
+            )
+        }
+        CrdsValueData::DuplicateShred(ds) => WireCrdsData::DuplicateShred(
+            ds.index,
+            WireDuplicateShred {
+                from: origin,
+                wallclock: wallclock_ms,
+                slot: 0,
+                _unused: 0,
+                _unused_shred_type: 0,
+                num_chunks: 0,
+                chunk_index: 0,
+                chunk: ds.proof_bytes.clone(),
+            },
+        ),
+        CrdsValueData::IncrementalSnapshotHashes(ish) => {
+            WireCrdsData::SnapshotHashes(WireSnapshotHashes {
+                from: origin,
+                full: ish.base,
+                incremental: ish.hashes.clone(),
+                wallclock: wallclock_ms,
+            })
+        }
+        CrdsValueData::LegacySnapshotHashes(sh) => {
+            WireCrdsData::LegacySnapshotHashes(WireAccountsHashes {
+                from: origin,
+                hashes: sh.hashes.clone(),
+                wallclock: wallclock_ms,
+            })
+        }
+        CrdsValueData::Version(v) => WireCrdsData::Version(WireVersionEntry {
+            from: origin,
+            wallclock: wallclock_ms,
+            version: WireLegacyVersion2 {
+                major: v.major,
+                minor: v.minor,
+                patch: v.patch,
+                commit: Some(v.commit),
+                feature_set: v.feature_set,
+            },
+        }),
+        CrdsValueData::LowestSlot(ls) => WireCrdsData::LowestSlot(
+            0,
+            WireLowestSlot {
+                from: origin,
+                root: 0,
+                lowest: ls.slot,
+                slots: std::collections::BTreeSet::new(),
+                stash: Vec::new(),
+                wallclock: wallclock_ms,
+            },
+        ),
         _ => return None,
     };
 
@@ -264,7 +334,78 @@ pub fn wire_to_internal_value(wv: &WireCrdsValue) -> Option<CrdsValue> {
         WireCrdsData::NodeInstance(ni) => {
             CrdsValueData::NodeInstance(NodeInstanceToken { token: ni.token })
         }
-        _ => return None,
+        WireCrdsData::Vote(index, vote) => {
+            // Serialize the wire transaction to bytes for internal storage.
+            let transaction_bytes = match bincode::serialize(&vote.transaction) {
+                Ok(bytes) => bytes,
+                Err(_) => return None,
+            };
+            CrdsValueData::Vote(VoteGossip {
+                index: *index,
+                slot: 0, // Extracted by callers if needed from the transaction data
+                hash: [0u8; 32],
+                transaction_bytes,
+            })
+        }
+        WireCrdsData::DuplicateShred(index, ds) => {
+            CrdsValueData::DuplicateShred(DuplicateShredProof {
+                index: *index,
+                proof_bytes: ds.chunk.clone(),
+            })
+        }
+        WireCrdsData::SnapshotHashes(sh) => {
+            CrdsValueData::IncrementalSnapshotHashes(IncrementalSnapshotHashes {
+                base: sh.full,
+                hashes: sh.incremental.clone(),
+            })
+        }
+        WireCrdsData::LegacySnapshotHashes(ah) | WireCrdsData::AccountsHashes(ah) => {
+            CrdsValueData::LegacySnapshotHashes(SnapshotHashes {
+                hashes: ah.hashes.clone(),
+            })
+        }
+        WireCrdsData::LowestSlot(_index, ls) => {
+            CrdsValueData::LowestSlot(LowestSlot { slot: ls.lowest })
+        }
+        WireCrdsData::EpochSlots(index, es) => {
+            // Store compressed slots as raw bytes for relay purposes.
+            let slot_bytes: Vec<u8> = bincode::serialize(&es.slots).unwrap_or_default();
+            CrdsValueData::EpochSlots(EpochSlots {
+                index: *index,
+                slots: slot_bytes,
+            })
+        }
+        WireCrdsData::Version(ve) => CrdsValueData::Version(VersionInfo {
+            client: 0,
+            major: ve.version.major,
+            minor: ve.version.minor,
+            patch: ve.version.patch,
+            commit: ve.version.commit.unwrap_or(0),
+            feature_set: ve.version.feature_set,
+        }),
+        WireCrdsData::LegacyVersion(lve) => CrdsValueData::LegacyVersion(VersionInfo {
+            client: 0,
+            major: lve.version.major,
+            minor: lve.version.minor,
+            patch: lve.version.patch,
+            commit: lve.version.commit.unwrap_or(0),
+            feature_set: 0,
+        }),
+        WireCrdsData::RestartHeaviestFork(rhf) => {
+            CrdsValueData::RestartHeaviestFork(super::super::crds::RestartHeaviestFork {
+                slot: rhf.last_slot,
+                hash: rhf.last_slot_hash,
+                observed_stake: rhf.observed_stake,
+            })
+        }
+        WireCrdsData::RestartLastVotedForkSlots(rlv) => CrdsValueData::RestartLastVotedForkSlots(
+            super::super::crds::RestartLastVotedForkSlots {
+                slots: bincode::serialize(&rlv.offsets).unwrap_or_default(),
+                last_voted_slot: rlv.last_voted_slot,
+                last_voted_hash: rlv.last_voted_hash,
+                shred_version: rlv.shred_version,
+            },
+        ),
     };
 
     Some(CrdsValue {
@@ -588,5 +729,343 @@ mod tests {
         assert_eq!(back_mask.mask, mask.mask);
         assert_eq!(back_mask.mask_bits, mask.mask_bits);
         assert_eq!(back_bloom.total_bits(), bloom.total_bits());
+    }
+
+    #[test]
+    fn vote_wire_round_trip() {
+        use super::super::crds_data::{
+            WireCompiledInstruction, WireMessage, WireMessageHeader, WireSignature, WireTransaction,
+        };
+
+        let pubkey = [10u8; 32];
+        let now_ms: u64 = 1_700_000_000_000;
+        let now_nanos = (now_ms as i64) * 1_000_000;
+
+        // Build a wire transaction and serialize to bytes.
+        let wire_tx = WireTransaction {
+            signatures: vec![WireSignature([0xAA; 64])],
+            message: WireMessage {
+                header: WireMessageHeader {
+                    num_required_signatures: 1,
+                    num_readonly_signed_accounts: 0,
+                    num_readonly_unsigned_accounts: 1,
+                },
+                account_keys: vec![[0xBB; 32], [0xCC; 32]],
+                recent_blockhash: [0xDD; 32],
+                instructions: vec![WireCompiledInstruction {
+                    program_id_index: 1,
+                    accounts: vec![0],
+                    data: vec![2, 0, 0, 0],
+                }],
+            },
+        };
+        let tx_bytes = bincode::serialize(&wire_tx).unwrap();
+
+        let internal = CrdsValue {
+            origin: pubkey,
+            wallclock_nanos: now_nanos,
+            signature: [0u8; 64],
+            data: CrdsValueData::Vote(VoteGossip {
+                index: 3,
+                slot: 100,
+                hash: [0u8; 32],
+                transaction_bytes: tx_bytes.clone(),
+            }),
+        };
+
+        let wire = internal_to_wire_value(&internal).unwrap();
+        assert_eq!(wire.origin(), &pubkey);
+        assert_eq!(wire.wallclock_ms(), now_ms);
+
+        if let WireCrdsData::Vote(idx, ref vote) = wire.data {
+            assert_eq!(idx, 3);
+            assert_eq!(vote.from, pubkey);
+            assert_eq!(vote.transaction, wire_tx);
+        } else {
+            panic!("expected Vote variant");
+        }
+
+        // Convert back to internal.
+        let back = wire_to_internal_value(&wire).unwrap();
+        assert_eq!(back.origin, pubkey);
+        if let CrdsValueData::Vote(ref v) = back.data {
+            assert_eq!(v.index, 3);
+            assert_eq!(v.transaction_bytes, tx_bytes);
+        } else {
+            panic!("expected Vote variant");
+        }
+    }
+
+    #[test]
+    fn duplicate_shred_wire_round_trip() {
+        let pubkey = [11u8; 32];
+        let now_nanos: i64 = 1_700_000_000_000_000_000;
+
+        let internal = CrdsValue {
+            origin: pubkey,
+            wallclock_nanos: now_nanos,
+            signature: [0u8; 64],
+            data: CrdsValueData::DuplicateShred(DuplicateShredProof {
+                index: 7,
+                proof_bytes: vec![1, 2, 3, 4, 5, 6, 7, 8],
+            }),
+        };
+
+        let wire = internal_to_wire_value(&internal).unwrap();
+        if let WireCrdsData::DuplicateShred(idx, ref ds) = wire.data {
+            assert_eq!(idx, 7);
+            assert_eq!(ds.chunk, vec![1, 2, 3, 4, 5, 6, 7, 8]);
+        } else {
+            panic!("expected DuplicateShred variant");
+        }
+
+        let back = wire_to_internal_value(&wire).unwrap();
+        if let CrdsValueData::DuplicateShred(ref dp) = back.data {
+            assert_eq!(dp.index, 7);
+            assert_eq!(dp.proof_bytes, vec![1, 2, 3, 4, 5, 6, 7, 8]);
+        } else {
+            panic!("expected DuplicateShred variant");
+        }
+    }
+
+    #[test]
+    fn snapshot_hashes_wire_round_trip() {
+        let pubkey = [12u8; 32];
+        let now_nanos: i64 = 1_700_000_000_000_000_000;
+
+        let internal = CrdsValue {
+            origin: pubkey,
+            wallclock_nanos: now_nanos,
+            signature: [0u8; 64],
+            data: CrdsValueData::IncrementalSnapshotHashes(IncrementalSnapshotHashes {
+                base: (1000, [0xAA; 32]),
+                hashes: vec![(1100, [0xBB; 32]), (1200, [0xCC; 32])],
+            }),
+        };
+
+        let wire = internal_to_wire_value(&internal).unwrap();
+        if let WireCrdsData::SnapshotHashes(ref sh) = wire.data {
+            assert_eq!(sh.full, (1000, [0xAA; 32]));
+            assert_eq!(sh.incremental.len(), 2);
+        } else {
+            panic!("expected SnapshotHashes variant");
+        }
+
+        let back = wire_to_internal_value(&wire).unwrap();
+        if let CrdsValueData::IncrementalSnapshotHashes(ref ish) = back.data {
+            assert_eq!(ish.base, (1000, [0xAA; 32]));
+            assert_eq!(ish.hashes.len(), 2);
+            assert_eq!(ish.hashes[0], (1100, [0xBB; 32]));
+        } else {
+            panic!("expected IncrementalSnapshotHashes variant");
+        }
+    }
+
+    #[test]
+    fn version_wire_round_trip() {
+        let pubkey = [13u8; 32];
+        let now_nanos: i64 = 1_700_000_000_000_000_000;
+
+        let internal = CrdsValue {
+            origin: pubkey,
+            wallclock_nanos: now_nanos,
+            signature: [0u8; 64],
+            data: CrdsValueData::Version(VersionInfo {
+                client: 5,
+                major: 2,
+                minor: 1,
+                patch: 17,
+                commit: 0xDEAD,
+                feature_set: 0xBEEF,
+            }),
+        };
+
+        let wire = internal_to_wire_value(&internal).unwrap();
+        if let WireCrdsData::Version(ref ve) = wire.data {
+            assert_eq!(ve.version.major, 2);
+            assert_eq!(ve.version.minor, 1);
+            assert_eq!(ve.version.patch, 17);
+            assert_eq!(ve.version.feature_set, 0xBEEF);
+        } else {
+            panic!("expected Version variant");
+        }
+
+        let back = wire_to_internal_value(&wire).unwrap();
+        if let CrdsValueData::Version(ref vi) = back.data {
+            assert_eq!(vi.major, 2);
+            assert_eq!(vi.minor, 1);
+            assert_eq!(vi.patch, 17);
+            assert_eq!(vi.commit, 0xDEAD);
+            assert_eq!(vi.feature_set, 0xBEEF);
+        } else {
+            panic!("expected Version variant");
+        }
+    }
+
+    #[test]
+    fn lowest_slot_wire_round_trip() {
+        let pubkey = [14u8; 32];
+        let now_nanos: i64 = 1_700_000_000_000_000_000;
+
+        let internal = CrdsValue {
+            origin: pubkey,
+            wallclock_nanos: now_nanos,
+            signature: [0u8; 64],
+            data: CrdsValueData::LowestSlot(LowestSlot { slot: 42 }),
+        };
+
+        let wire = internal_to_wire_value(&internal).unwrap();
+        if let WireCrdsData::LowestSlot(_, ref ls) = wire.data {
+            assert_eq!(ls.lowest, 42);
+        } else {
+            panic!("expected LowestSlot variant");
+        }
+
+        let back = wire_to_internal_value(&wire).unwrap();
+        if let CrdsValueData::LowestSlot(ref ls) = back.data {
+            assert_eq!(ls.slot, 42);
+        } else {
+            panic!("expected LowestSlot variant");
+        }
+    }
+
+    #[test]
+    fn wire_to_internal_all_types_return_some() {
+        use super::super::crds_data::*;
+
+        let pubkey = [20u8; 32];
+        let wc = 1_700_000_000_000u64;
+
+        // Vote
+        let vote_wire = WireCrdsValue {
+            signature: [0u8; 64],
+            data: WireCrdsData::Vote(
+                0,
+                WireVote {
+                    from: pubkey,
+                    transaction: WireTransaction {
+                        signatures: vec![WireSignature([0; 64])],
+                        message: WireMessage {
+                            header: WireMessageHeader {
+                                num_required_signatures: 1,
+                                num_readonly_signed_accounts: 0,
+                                num_readonly_unsigned_accounts: 0,
+                            },
+                            account_keys: vec![[0; 32]],
+                            recent_blockhash: [0; 32],
+                            instructions: vec![],
+                        },
+                    },
+                    wallclock: wc,
+                },
+            ),
+        };
+        assert!(wire_to_internal_value(&vote_wire).is_some());
+
+        // SnapshotHashes
+        let sh_wire = WireCrdsValue {
+            signature: [0u8; 64],
+            data: WireCrdsData::SnapshotHashes(WireSnapshotHashes {
+                from: pubkey,
+                full: (100, [1; 32]),
+                incremental: vec![],
+                wallclock: wc,
+            }),
+        };
+        assert!(wire_to_internal_value(&sh_wire).is_some());
+
+        // LegacySnapshotHashes
+        let lsh_wire = WireCrdsValue {
+            signature: [0u8; 64],
+            data: WireCrdsData::LegacySnapshotHashes(WireAccountsHashes {
+                from: pubkey,
+                hashes: vec![(100, [1; 32])],
+                wallclock: wc,
+            }),
+        };
+        assert!(wire_to_internal_value(&lsh_wire).is_some());
+
+        // LowestSlot
+        let ls_wire = WireCrdsValue {
+            signature: [0u8; 64],
+            data: WireCrdsData::LowestSlot(
+                0,
+                WireLowestSlot {
+                    from: pubkey,
+                    root: 0,
+                    lowest: 50,
+                    slots: std::collections::BTreeSet::new(),
+                    stash: vec![],
+                    wallclock: wc,
+                },
+            ),
+        };
+        assert!(wire_to_internal_value(&ls_wire).is_some());
+
+        // Version
+        let ver_wire = WireCrdsValue {
+            signature: [0u8; 64],
+            data: WireCrdsData::Version(WireVersionEntry {
+                from: pubkey,
+                wallclock: wc,
+                version: WireLegacyVersion2 {
+                    major: 2,
+                    minor: 0,
+                    patch: 0,
+                    commit: None,
+                    feature_set: 0,
+                },
+            }),
+        };
+        assert!(wire_to_internal_value(&ver_wire).is_some());
+
+        // LegacyVersion
+        let lver_wire = WireCrdsValue {
+            signature: [0u8; 64],
+            data: WireCrdsData::LegacyVersion(WireLegacyVersionEntry {
+                from: pubkey,
+                wallclock: wc,
+                version: WireLegacyVersion1 {
+                    major: 1,
+                    minor: 14,
+                    patch: 3,
+                    commit: None,
+                },
+            }),
+        };
+        assert!(wire_to_internal_value(&lver_wire).is_some());
+
+        // DuplicateShred
+        let ds_wire = WireCrdsValue {
+            signature: [0u8; 64],
+            data: WireCrdsData::DuplicateShred(
+                5,
+                WireDuplicateShred {
+                    from: pubkey,
+                    wallclock: wc,
+                    slot: 42,
+                    _unused: 0,
+                    _unused_shred_type: 0,
+                    num_chunks: 3,
+                    chunk_index: 1,
+                    chunk: vec![1, 2, 3],
+                },
+            ),
+        };
+        assert!(wire_to_internal_value(&ds_wire).is_some());
+
+        // RestartHeaviestFork
+        let rhf_wire = WireCrdsValue {
+            signature: [0u8; 64],
+            data: WireCrdsData::RestartHeaviestFork(WireRestartHeaviestFork {
+                from: pubkey,
+                wallclock: wc,
+                last_slot: 500,
+                last_slot_hash: [0xAA; 32],
+                observed_stake: 1_000_000,
+                shred_version: 42,
+            }),
+        };
+        assert!(wire_to_internal_value(&rhf_wire).is_some());
     }
 }

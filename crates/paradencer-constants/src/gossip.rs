@@ -146,6 +146,18 @@ pub const MAX_PRUNE_ENTRIES_PER_DEST: usize = 256;
 /// Ping interval (milliseconds).
 pub const PING_INTERVAL_MS: u64 = 5_000;
 
+/// ContactInfo self-refresh interval (milliseconds).
+/// The validator re-signs and queues its own ContactInfo for broadcast
+/// at this rate to maintain freshness across the cluster.
+pub const CONTACT_INFO_REFRESH_INTERVAL_MS: u64 = 7_500;
+
+/// Maximum number of vote entries per validator in the CRDS table.
+/// Each vote index (0..MAX_VOTE_ENTRIES) is a separate CRDS key slot.
+pub const MAX_VOTE_ENTRIES: u8 = 32;
+
+/// Maximum number of duplicate shred proof entries per validator.
+pub const MAX_DUPLICATE_SHRED_ENTRIES: u16 = 512;
+
 // ---------------------------------------------------------------------------
 // Contact info socket types
 // ---------------------------------------------------------------------------

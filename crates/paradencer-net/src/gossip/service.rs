@@ -276,21 +276,23 @@ impl GossipService {
 
                 // Convert wire filter to internal bloom filter
                 let (bloom, mask) = convert::wire_filter_to_internal(&wire_filter);
-                let matching_infos = cluster_info.filter_for_pull_response(
+
+                // Return all CRDS value types matching the filter, not just ContactInfo.
+                let matching_values = cluster_info.filter_all_values_for_pull(
                     &bloom,
                     &mask,
                     gossip_const::MAX_VALUES_PER_MESSAGE,
                 );
 
-                // Convert matching infos to wire values and sign them
-                let wire_values: Vec<WireCrdsValue> = matching_infos
+                // Convert internal values to wire format and sign them.
+                let wire_values: Vec<WireCrdsValue> = matching_values
                     .iter()
-                    .map(|ci| {
-                        let mut wv = convert::contact_info_to_wire_value(ci);
+                    .filter_map(|v| {
+                        let mut wv = convert::internal_to_wire_value(v)?;
                         if let Some(key) = cluster_info.signing_key() {
                             wv.sign(key);
                         }
-                        wv
+                        Some(wv)
                     })
                     .collect();
 
@@ -408,6 +410,10 @@ impl GossipService {
     /// Tracks a cursor into the CRDS table so each push cycle only sends
     /// values that were inserted or updated since the previous cycle,
     /// plus our own self-value (always included for freshness).
+    ///
+    /// Also runs a ContactInfo refresh timer that re-signs our own
+    /// ContactInfo periodically (every ~7.5s) to maintain freshness
+    /// across the cluster.
     async fn push_loop(
         socket: Arc<UdpSocket>,
         cluster_info: Arc<ClusterInfo>,
@@ -415,15 +421,22 @@ impl GossipService {
         config: GossipConfig,
         shutdown_rx: &mut broadcast::Receiver<()>,
     ) {
-        let mut ticker = interval(config.push_interval);
+        let mut push_ticker = interval(config.push_interval);
+        let mut refresh_ticker = interval(Duration::from_millis(
+            gossip_const::CONTACT_INFO_REFRESH_INTERVAL_MS,
+        ));
         let mut push_cursor: u64 = cluster_info.cursor();
 
         loop {
             tokio::select! {
-                _ = ticker.tick() => {
+                _ = push_ticker.tick() => {
                     push_cursor = Self::do_push_gossip(
                         &socket, &cluster_info, &stats, &config, push_cursor
                     ).await;
+                }
+                _ = refresh_ticker.tick() => {
+                    // Refresh self ContactInfo wallclock to maintain freshness.
+                    cluster_info.refresh_self_contact_info();
                 }
                 _ = shutdown_rx.recv() => {
                     break;
