@@ -9,8 +9,24 @@
 /// directly from shared memory — zero copies on the consumer path.
 use crate::data_region::{compact_next, DataRegion};
 use crate::flow::FlowSequence;
-use crate::fragment::{seq_diff, seq_inc, FragmentMeta};
+use crate::fragment::{seq_diff, seq_inc, ts_compress, FragmentMeta};
 use crate::meta_ring::{MetaRing, PollResult};
+use std::sync::OnceLock;
+use std::time::Instant;
+
+/// Process-local epoch for monotonic nanosecond timestamps.
+///
+/// Initialized on first call to `now_nanos()`. All tile link timestamps
+/// are relative to this epoch, giving sub-microsecond inter-tile latency
+/// measurement within the ~4.3 second window of the 32-bit compressed form.
+static EPOCH: OnceLock<Instant> = OnceLock::new();
+
+/// Current nanosecond timestamp relative to process startup.
+#[inline]
+fn now_nanos() -> i64 {
+    let epoch = EPOCH.get_or_init(Instant::now);
+    epoch.elapsed().as_nanos() as i64
+}
 
 // ---------------------------------------------------------------------------
 // Configuration
@@ -102,7 +118,7 @@ impl TileLink {
             data_region: &self.data_region,
             flow_seq: &self.flow_seq,
             next_seq: self.config.initial_seq,
-            _depth: self.config.depth,
+            depth: self.config.depth,
         }
     }
 
@@ -116,7 +132,7 @@ impl TileLink {
             data_region: &self.data_region,
             flow_seq: &self.flow_seq,
             next_seq: start_seq,
-            _depth: self.config.depth,
+            depth: self.config.depth,
         }
     }
 
@@ -189,17 +205,11 @@ impl<'a> LinkProducer<'a> {
             dest.copy_from_slice(payload);
         }
 
-        // Publish metadata.
+        // Publish metadata with current timestamps.
         let seq = self.next_seq;
-        self.meta_ring.publish(
-            seq,
-            sig,
-            chunk,
-            payload.len() as u16,
-            ctl,
-            0, // tsorig (TODO: add timestamp support)
-            0, // tspub
-        );
+        let ts = ts_compress(now_nanos());
+        self.meta_ring
+            .publish(seq, sig, chunk, payload.len() as u16, ctl, ts, ts);
 
         // Advance state.
         self.current_chunk = compact_next(chunk, payload.len(), self.chunk0, self.wmark);
@@ -244,9 +254,8 @@ pub struct LinkConsumer<'a> {
     flow_seq: &'a FlowSequence,
     /// Next sequence number expected from the producer.
     next_seq: u64,
-    /// Ring depth for overrun recovery.
-    // TODO: Used for batch overrun recovery.
-    _depth: usize,
+    /// Ring depth for overrun recovery during batch receive.
+    depth: usize,
 }
 
 /// Result of receiving a fragment.
@@ -301,6 +310,48 @@ impl<'a> LinkConsumer<'a> {
     /// Next expected sequence number.
     pub fn next_seq(&self) -> u64 {
         self.next_seq
+    }
+
+    /// Receive up to `max_count` consecutive fragments in a batch.
+    ///
+    /// Returns a vector of `(FragmentMeta, payload_slice)` pairs.
+    /// If an overrun is detected mid-batch, recovery is performed:
+    /// the consumer skips to the producer's current position and returns
+    /// whatever fragments were successfully received before the overrun.
+    ///
+    /// This is more efficient than calling `receive()` in a loop because
+    /// it amortizes the flow sequence update across the entire batch.
+    pub fn receive_batch(
+        &mut self,
+        max_count: usize,
+        max_polls_per_frag: usize,
+    ) -> Vec<(FragmentMeta, &'a [u8])> {
+        let mut results = Vec::with_capacity(max_count.min(self.depth));
+
+        for _ in 0..max_count {
+            match self.meta_ring.poll(self.next_seq, max_polls_per_frag) {
+                PollResult::Ready(meta) => {
+                    let payload =
+                        unsafe { self.data_region.read_payload(meta.chunk, meta.sz) };
+                    self.next_seq = seq_inc(self.next_seq, 1);
+                    results.push((meta, payload));
+                }
+                PollResult::Overrun { found_seq } => {
+                    // Overrun detected — skip to the producer's current position.
+                    self.next_seq = found_seq;
+                    self.flow_seq.update(self.next_seq);
+                    break;
+                }
+                PollResult::Timeout => break,
+            }
+        }
+
+        // Single flow sequence update for the entire batch.
+        if !results.is_empty() {
+            self.flow_seq.update(self.next_seq);
+        }
+
+        results
     }
 
     /// How far behind the consumer is from the producer watermark.
@@ -539,5 +590,185 @@ mod tests {
 
         producer.send(0, b"b", ctl);
         assert_eq!(producer.next_seq(), 2);
+    }
+
+    #[test]
+    fn timestamps_are_populated() {
+        let mut link = default_link();
+
+        {
+            let mut producer = link.producer();
+            let ctl = ctl_pack(0, true, true, false);
+            producer.send(0, b"timestamped", ctl);
+        }
+
+        let mut consumer = link.consumer();
+        match consumer.receive(1) {
+            ReceiveResult::Ready { meta, .. } => {
+                // tsorig and tspub should be non-zero compressed timestamps.
+                assert_ne!(meta.tsorig, 0, "tsorig should be set");
+                assert_ne!(meta.tspub, 0, "tspub should be set");
+                // For a direct send, origin and publish timestamps are equal.
+                assert_eq!(meta.tsorig, meta.tspub);
+            }
+            other => panic!("expected Ready, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn timestamps_are_monotonic() {
+        let mut link = TileLink::new(TileLinkConfig {
+            mtu: 64,
+            depth: 16,
+            burst: 1,
+            initial_seq: 0,
+        });
+
+        {
+            let mut producer = link.producer();
+            let ctl = ctl_pack(0, true, true, false);
+            producer.send(0, b"first", ctl);
+            // Small delay to ensure distinct timestamps.
+            std::thread::sleep(std::time::Duration::from_millis(1));
+            producer.send(1, b"second", ctl);
+        }
+
+        let mut consumer = link.consumer();
+        let first = match consumer.receive(1) {
+            ReceiveResult::Ready { meta, .. } => meta.tspub,
+            other => panic!("expected Ready, got {:?}", other),
+        };
+        let second = match consumer.receive(1) {
+            ReceiveResult::Ready { meta, .. } => meta.tspub,
+            other => panic!("expected Ready, got {:?}", other),
+        };
+
+        // Second timestamp should be >= first (compressed 32-bit wrapping
+        // means we compare as unsigned within a short window).
+        assert!(second >= first, "timestamps should be monotonic: {} >= {}", second, first);
+    }
+
+    #[test]
+    fn batch_receive_multiple() {
+        let mut link = TileLink::new(TileLinkConfig {
+            mtu: 128,
+            depth: 16,
+            burst: 1,
+            initial_seq: 0,
+        });
+
+        let messages: Vec<Vec<u8>> = (0..5u8)
+            .map(|i| format!("batch-{}", i).into_bytes())
+            .collect();
+
+        {
+            let mut producer = link.producer();
+            let ctl = ctl_pack(0, true, true, false);
+            for (i, msg) in messages.iter().enumerate() {
+                producer.send(i as u64, msg, ctl);
+            }
+        }
+
+        let mut consumer = link.consumer();
+        let batch = consumer.receive_batch(10, 1);
+
+        assert_eq!(batch.len(), 5);
+        for (i, (meta, payload)) in batch.iter().enumerate() {
+            assert_eq!(meta.seq, i as u64);
+            assert_eq!(*payload, messages[i].as_slice());
+        }
+    }
+
+    #[test]
+    fn batch_receive_respects_max_count() {
+        let mut link = TileLink::new(TileLinkConfig {
+            mtu: 64,
+            depth: 16,
+            burst: 1,
+            initial_seq: 0,
+        });
+
+        {
+            let mut producer = link.producer();
+            let ctl = ctl_pack(0, true, true, false);
+            for i in 0..5u64 {
+                producer.send(i, b"x", ctl);
+            }
+        }
+
+        let mut consumer = link.consumer();
+        // Request at most 3 of 5 available.
+        let batch = consumer.receive_batch(3, 1);
+        assert_eq!(batch.len(), 3);
+        assert_eq!(consumer.next_seq(), 3);
+
+        // Remaining 2 should be available.
+        let batch2 = consumer.receive_batch(10, 1);
+        assert_eq!(batch2.len(), 2);
+        assert_eq!(consumer.next_seq(), 5);
+    }
+
+    #[test]
+    fn batch_receive_empty_when_nothing_available() {
+        let link = default_link();
+        let mut consumer = link.consumer();
+        let batch = consumer.receive_batch(10, 5);
+        assert!(batch.is_empty());
+    }
+
+    #[test]
+    fn batch_receive_overrun_recovery() {
+        let mut link = TileLink::new(TileLinkConfig {
+            mtu: 64,
+            depth: 4,
+            burst: 1,
+            initial_seq: 0,
+        });
+
+        let ctl = ctl_pack(0, true, true, false);
+
+        // Round 1: publish 4, consume 4 to advance flow.
+        let mut prod_seq;
+        {
+            let mut producer = link.producer();
+            for i in 0..4u64 {
+                producer.send(i, b"x", ctl);
+            }
+            prod_seq = producer.next_seq();
+        }
+        {
+            let mut consumer = link.consumer();
+            let _ = consumer.receive_batch(4, 1);
+        }
+
+        // Round 2: publish 4 more (seqs 4-7), consume them.
+        {
+            let mut producer = link.producer_at(prod_seq);
+            for i in 4..8u64 {
+                producer.send(i, &[i as u8], ctl);
+            }
+            prod_seq = producer.next_seq();
+        }
+        {
+            let mut consumer = link.consumer_at(4);
+            let _ = consumer.receive_batch(4, 1);
+        }
+
+        // Round 3: publish 4 more (seqs 8-11). Ring now holds 8,9,10,11.
+        {
+            let mut producer = link.producer_at(prod_seq);
+            for i in 8..12u64 {
+                producer.send(i, &[i as u8], ctl);
+            }
+        }
+
+        // Stale consumer at seq 4 should detect overrun and recover.
+        let mut stale = link.consumer_at(4);
+        let batch = stale.receive_batch(10, 1);
+
+        // Overrun detected — batch may be empty (recovery happened immediately).
+        // Consumer should have advanced past the overrun point.
+        assert!(batch.is_empty());
+        assert_eq!(stale.next_seq(), 8, "consumer should recover to seq 8");
     }
 }
