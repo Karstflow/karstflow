@@ -118,10 +118,15 @@ pub struct ReplayBundle {
 ///
 /// Creates all shared consensus components (BankForks, ForkChoice, Tower,
 /// VoteProcessor, CommitmentTracker) initialized from a genesis bank.
-/// The initial stake is used for fork choice weight calculations.
+/// The initial stake is used as a fallback for fork choice weight calculations
+/// when no real stake data is available from the bank's stake tracker.
 ///
 /// When `data_dir` is provided, accounts are backed by persistent storage
 /// and recovered from disk on startup. Otherwise runs in-memory only.
+///
+/// If the bank has a populated stake tracker (e.g., from snapshot bootstrap),
+/// the real total stake is used for fork choice and vote processing instead
+/// of the hardcoded initial_stake fallback.
 pub fn build_consensus_infrastructure(
     initial_stake: u64,
     data_dir: Option<&Path>,
@@ -154,12 +159,34 @@ pub fn build_consensus_infrastructure(
     let validators = vec![(validator, initial_stake)];
     let leader_schedule = Arc::new(LeaderSchedule::new(0, &validators).unwrap());
     let genesis = Bank::new_genesis(accounts, epoch_schedule, leader_schedule);
+
+    // Extract real stake data from the bank if available.
+    // When restoring from a snapshot, the bank's stake tracker is populated
+    // with actual delegations — use that for accurate consensus weights.
+    let (effective_stake, vote_processor_tracker) =
+        if let Some(tracker_arc) = genesis.stake_tracker() {
+            let tracker = tracker_arc.read().unwrap();
+            let real_stake = tracker.total_stake();
+            if real_stake > 0 {
+                eprintln!(
+                    "consensus: using real stake from {} delegations ({} total lamports)",
+                    tracker.delegation_count(),
+                    real_stake,
+                );
+                (real_stake, tracker.clone())
+            } else {
+                (initial_stake, StakeTracker::new(0))
+            }
+        } else {
+            (initial_stake, StakeTracker::new(0))
+        };
+
     let bank_forks = Arc::new(RwLock::new(BankForks::new(genesis)));
-    let fork_choice = Arc::new(Mutex::new(ForkChoice::new(initial_stake)));
+    let fork_choice = Arc::new(Mutex::new(ForkChoice::new(effective_stake)));
     let execution_bridge = Arc::new(ExecutionBridge::new());
     let vote_processor = Arc::new(Mutex::new(VoteProcessor::new(
         VoteProcessorConfig::default(),
-        StakeTracker::new(0),
+        vote_processor_tracker,
     )));
     let tower = Arc::new(RwLock::new(Tower::new()));
     let commitment_tracker = Arc::new(Mutex::new(CommitmentTracker::default()));
@@ -173,6 +200,67 @@ pub fn build_consensus_infrastructure(
         commitment_tracker,
         storage_engine,
     })
+}
+
+/// Build consensus infrastructure from pre-initialized BankForks.
+///
+/// Use this when bootstrapping from a snapshot: the caller runs
+/// `bootstrap_from_snapshot()` to produce a fully initialized `BankForks`
+/// (with stake tracker, vote account cache, feature set, sysvar cache, and
+/// stake history already populated), then wraps it with the remaining
+/// consensus components (ForkChoice, Tower, VoteProcessor, CommitmentTracker).
+///
+/// The VoteProcessor receives a clone of the working bank's stake tracker
+/// so consensus weight calculations use real delegation data from the snapshot.
+/// ForkChoice is initialized with the total effective stake.
+pub fn build_consensus_from_bank_forks(
+    bank_forks: BankForks,
+    storage_engine: Option<Arc<StorageEngine>>,
+) -> ConsensusBundle {
+    let working_bank = bank_forks.working_bank();
+
+    // Extract real stake data from the snapshot-initialized bank.
+    let (effective_stake, vote_processor_tracker) =
+        if let Some(tracker_arc) = working_bank.stake_tracker() {
+            let tracker = tracker_arc.read().unwrap();
+            let real_stake = tracker.total_stake();
+            if real_stake > 0 {
+                eprintln!(
+                    "consensus: initialized from snapshot with {} delegations ({} total stake)",
+                    tracker.delegation_count(),
+                    real_stake,
+                );
+                (real_stake, tracker.clone())
+            } else {
+                eprintln!("consensus: snapshot has empty stake tracker, using unit stake");
+                (1, StakeTracker::new(0))
+            }
+        } else {
+            eprintln!("consensus: no stake tracker on snapshot bank, using unit stake");
+            (1, StakeTracker::new(0))
+        };
+
+    drop(working_bank);
+
+    let bank_forks = Arc::new(RwLock::new(bank_forks));
+    let fork_choice = Arc::new(Mutex::new(ForkChoice::new(effective_stake)));
+    let execution_bridge = Arc::new(ExecutionBridge::new());
+    let vote_processor = Arc::new(Mutex::new(VoteProcessor::new(
+        VoteProcessorConfig::default(),
+        vote_processor_tracker,
+    )));
+    let tower = Arc::new(RwLock::new(Tower::new()));
+    let commitment_tracker = Arc::new(Mutex::new(CommitmentTracker::default()));
+
+    ConsensusBundle {
+        bank_forks,
+        fork_choice,
+        execution_bridge,
+        vote_processor,
+        tower,
+        commitment_tracker,
+        storage_engine,
+    }
 }
 
 /// Build the replay service for processing assembled blocks through consensus.
@@ -2380,6 +2468,69 @@ mod tests {
         let identity = paradencer_config::load_identity_keypair(&path).unwrap();
         assert_eq!(identity.secret_key(), &secret);
         assert_eq!(identity.pubkey(), &pubkey);
+    }
+
+    #[test]
+    fn build_consensus_from_bank_forks_uses_real_stake() {
+        use super::build_consensus_from_bank_forks;
+        use paradencer_consensus::{
+            Bank, BankForks, Delegation, EpochSchedule, LeaderSchedule, StakeTracker,
+        };
+        use paradencer_storage::{AccountDatabase, Pubkey};
+        use std::sync::{Arc, RwLock};
+
+        let voter_a = Pubkey::new_unique();
+        let voter_b = Pubkey::new_unique();
+
+        // Create a bank and populate its stake tracker with real delegation data.
+        let db = Arc::new(AccountDatabase::new());
+        let epoch_schedule = Arc::new(EpochSchedule::default());
+        let validator = Pubkey::new_unique();
+        let ls = Arc::new(LeaderSchedule::new(0, &[(validator, 1000)]).unwrap());
+        let mut bank = Bank::new_genesis(db, epoch_schedule, ls);
+
+        // Build a stake tracker with known delegations.
+        let mut tracker = StakeTracker::new(10); // epoch 10 so stakes are effective
+        let stake_a = Pubkey::new_unique();
+        let stake_b = Pubkey::new_unique();
+        tracker.add_delegation(stake_a, Delegation::new(voter_a, 5_000_000, 0));
+        tracker.add_delegation(stake_b, Delegation::new(voter_b, 3_000_000, 0));
+        assert_eq!(tracker.total_stake(), 8_000_000);
+
+        bank.set_stake_tracker(Arc::new(RwLock::new(tracker)));
+        let bank_forks = BankForks::new(bank);
+
+        // Build consensus bundle from the pre-initialized BankForks.
+        let consensus = build_consensus_from_bank_forks(bank_forks, None);
+
+        // Verify ForkChoice was initialized with real total stake.
+        let fork_choice = consensus.fork_choice.lock().unwrap();
+        assert_eq!(fork_choice.stats().total_stake, 8_000_000);
+        drop(fork_choice);
+
+        // Verify VoteProcessor has real total stake.
+        let vp = consensus.vote_processor.lock().unwrap();
+        assert_eq!(vp.total_stake(), 8_000_000);
+    }
+
+    #[test]
+    fn build_consensus_from_bank_forks_handles_empty_stake() {
+        use super::build_consensus_from_bank_forks;
+        use paradencer_consensus::{Bank, BankForks, EpochSchedule, LeaderSchedule};
+        use paradencer_storage::{AccountDatabase, Pubkey};
+        use std::sync::Arc;
+
+        let db = Arc::new(AccountDatabase::new());
+        let epoch_schedule = Arc::new(EpochSchedule::default());
+        let validator = Pubkey::new_unique();
+        let ls = Arc::new(LeaderSchedule::new(0, &[(validator, 1000)]).unwrap());
+        let bank = Bank::new_genesis(db, epoch_schedule, ls);
+        let bank_forks = BankForks::new(bank);
+
+        // No stake tracker set → should use fallback stake of 1.
+        let consensus = build_consensus_from_bank_forks(bank_forks, None);
+        let fork_choice = consensus.fork_choice.lock().unwrap();
+        assert_eq!(fork_choice.stats().total_stake, 1);
     }
 
     #[test]
