@@ -298,3 +298,160 @@ impl ErasureMeta {
         self.num_data_shreds + self.num_coding_shreds
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // --- SlotStatus ---
+
+    #[test]
+    fn slot_status_roundtrip() {
+        let statuses = [
+            SlotStatus::Incomplete,
+            SlotStatus::Complete,
+            SlotStatus::Confirmed,
+            SlotStatus::Dead,
+            SlotStatus::Duplicate,
+        ];
+        for status in &statuses {
+            let byte = status.to_byte();
+            let restored = SlotStatus::from_byte(byte).unwrap();
+            assert_eq!(*status, restored);
+        }
+    }
+
+    #[test]
+    fn slot_status_invalid_byte() {
+        assert!(SlotStatus::from_byte(5).is_err());
+        assert!(SlotStatus::from_byte(255).is_err());
+    }
+
+    // --- SlotMeta creation and helpers ---
+
+    #[test]
+    fn new_slot_meta() {
+        let meta = SlotMeta::new(42, Some(41));
+        assert_eq!(meta.slot, 42);
+        assert_eq!(meta.parent_slot, Some(41));
+        assert_eq!(meta.received_data_shreds, 0);
+        assert_eq!(meta.received_coding_shreds, 0);
+        assert_eq!(meta.expected_data_shreds, None);
+        assert_eq!(meta.status, SlotStatus::Incomplete);
+        assert!(!meta.is_connected);
+        assert!(meta.next_slots.is_empty());
+    }
+
+    #[test]
+    fn new_slot_meta_no_parent() {
+        let meta = SlotMeta::new(0, None);
+        assert_eq!(meta.parent_slot, None);
+    }
+
+    #[test]
+    fn is_complete_by_status() {
+        let mut meta = SlotMeta::new(1, None);
+        assert!(!meta.is_complete());
+
+        meta.status = SlotStatus::Complete;
+        assert!(meta.is_complete());
+
+        meta.status = SlotStatus::Confirmed;
+        assert!(meta.is_complete());
+    }
+
+    #[test]
+    fn is_complete_by_shred_count() {
+        let mut meta = SlotMeta::new(1, None);
+        meta.expected_data_shreds = Some(10);
+        meta.received_data_shreds = 10;
+        assert!(meta.is_complete());
+    }
+
+    #[test]
+    fn is_complete_insufficient_shreds() {
+        let mut meta = SlotMeta::new(1, None);
+        meta.expected_data_shreds = Some(10);
+        meta.received_data_shreds = 5;
+        assert!(!meta.is_complete());
+    }
+
+    #[test]
+    fn is_dead() {
+        let mut meta = SlotMeta::new(1, None);
+        assert!(!meta.is_dead());
+        meta.status = SlotStatus::Dead;
+        assert!(meta.is_dead());
+    }
+
+    // --- SlotMeta serialization ---
+
+    #[test]
+    fn serialize_roundtrip_minimal() {
+        let meta = SlotMeta::new(100, None);
+        let bytes = meta.serialize();
+        let restored = SlotMeta::deserialize(&bytes).unwrap();
+
+        assert_eq!(restored.slot, 100);
+        assert_eq!(restored.parent_slot, None);
+        assert_eq!(restored.status, SlotStatus::Incomplete);
+        assert!(!restored.is_connected);
+    }
+
+    #[test]
+    fn serialize_roundtrip_full() {
+        let mut meta = SlotMeta::new(500, Some(499));
+        meta.received_data_shreds = 32;
+        meta.received_coding_shreds = 16;
+        meta.expected_data_shreds = Some(64);
+        meta.status = SlotStatus::Complete;
+        meta.completion_timestamp = Some(1_700_000_000);
+        meta.next_slots = vec![501, 502];
+        meta.is_connected = true;
+
+        let bytes = meta.serialize();
+        let restored = SlotMeta::deserialize(&bytes).unwrap();
+
+        assert_eq!(restored.slot, 500);
+        assert_eq!(restored.parent_slot, Some(499));
+        assert_eq!(restored.received_data_shreds, 32);
+        assert_eq!(restored.received_coding_shreds, 16);
+        assert_eq!(restored.expected_data_shreds, Some(64));
+        assert_eq!(restored.status, SlotStatus::Complete);
+        assert_eq!(restored.completion_timestamp, Some(1_700_000_000));
+        assert_eq!(restored.next_slots, vec![501, 502]);
+        assert!(restored.is_connected);
+    }
+
+    #[test]
+    fn deserialize_rejects_truncated() {
+        assert!(SlotMeta::deserialize(&[0; 4]).is_err());
+    }
+
+    #[test]
+    fn serialize_roundtrip_dead_slot() {
+        let mut meta = SlotMeta::new(999, Some(998));
+        meta.status = SlotStatus::Dead;
+
+        let bytes = meta.serialize();
+        let restored = SlotMeta::deserialize(&bytes).unwrap();
+        assert_eq!(restored.status, SlotStatus::Dead);
+    }
+
+    // --- ErasureMeta ---
+
+    #[test]
+    fn erasure_meta_creation() {
+        let em = ErasureMeta::new(10, 0, 32, 16);
+        assert_eq!(em.slot, 10);
+        assert_eq!(em.fec_set_index, 0);
+        assert_eq!(em.num_data_shreds, 32);
+        assert_eq!(em.num_coding_shreds, 16);
+    }
+
+    #[test]
+    fn erasure_meta_total_shreds() {
+        let em = ErasureMeta::new(1, 0, 20, 10);
+        assert_eq!(em.total_shreds(), 30);
+    }
+}

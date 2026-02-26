@@ -90,3 +90,97 @@ impl Default for EpochRewardsSysvar {
         Self::inactive()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn sample_rewards() -> EpochRewards {
+        EpochRewards {
+            total_rewards: 1_000_000,
+            validator_rewards: 800_000,
+            foundation_rewards: 200_000,
+            capitalization: 500_000_000_000,
+            epoch_duration_years: 0.002,
+            validator_rate: 0.05,
+            foundation_rate: 0.01,
+        }
+    }
+
+    #[test]
+    fn inactive_is_not_active() {
+        let sysvar = EpochRewardsSysvar::inactive();
+        assert!(!sysvar.is_active());
+        assert!(sysvar.rewards.is_none());
+    }
+
+    #[test]
+    fn active_is_active() {
+        let sysvar = EpochRewardsSysvar::active(sample_rewards());
+        assert!(sysvar.is_active());
+        assert!(sysvar.rewards.is_some());
+    }
+
+    #[test]
+    fn active_preserves_fields() {
+        let rewards = sample_rewards();
+        let sysvar = EpochRewardsSysvar::active(rewards.clone());
+        let r = sysvar.rewards.unwrap();
+        assert_eq!(r.total_rewards, rewards.total_rewards);
+        assert_eq!(r.validator_rewards, rewards.validator_rewards);
+        assert_eq!(r.foundation_rewards, rewards.foundation_rewards);
+        assert_eq!(r.capitalization, rewards.capitalization);
+        assert!((r.epoch_duration_years - rewards.epoch_duration_years).abs() < f64::EPSILON);
+        assert!((r.validator_rate - rewards.validator_rate).abs() < f64::EPSILON);
+        assert!((r.foundation_rate - rewards.foundation_rate).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn serialization_roundtrip_inactive() {
+        let sysvar = EpochRewardsSysvar::inactive();
+        let bytes = sysvar.to_bytes();
+        assert_eq!(bytes.len(), 1);
+        assert_eq!(bytes[0], 0);
+
+        let restored = EpochRewardsSysvar::from_bytes(&bytes).unwrap();
+        assert!(!restored.is_active());
+    }
+
+    #[test]
+    fn serialization_roundtrip_active() {
+        let rewards = sample_rewards();
+        let sysvar = EpochRewardsSysvar::active(rewards.clone());
+        let bytes = sysvar.to_bytes();
+        assert_eq!(bytes.len(), 57); // 1 + 7*8
+
+        let restored = EpochRewardsSysvar::from_bytes(&bytes).unwrap();
+        assert!(restored.is_active());
+        let r = restored.rewards.unwrap();
+        assert_eq!(r.total_rewards, rewards.total_rewards);
+        assert_eq!(r.validator_rewards, rewards.validator_rewards);
+        assert_eq!(r.foundation_rewards, rewards.foundation_rewards);
+        assert_eq!(r.capitalization, rewards.capitalization);
+        assert!((r.epoch_duration_years - rewards.epoch_duration_years).abs() < f64::EPSILON);
+        assert!((r.validator_rate - rewards.validator_rate).abs() < f64::EPSILON);
+        assert!((r.foundation_rate - rewards.foundation_rate).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn from_bytes_rejects_empty() {
+        assert!(EpochRewardsSysvar::from_bytes(&[]).is_none());
+    }
+
+    #[test]
+    fn from_bytes_rejects_truncated_active() {
+        // Active flag = 1, but not enough data for all fields
+        let mut data = vec![1u8; 20];
+        data[0] = 1;
+        assert!(EpochRewardsSysvar::from_bytes(&data).is_none());
+    }
+
+    #[test]
+    fn default_is_inactive() {
+        let d = EpochRewardsSysvar::default();
+        assert!(!d.is_active());
+    }
+}
