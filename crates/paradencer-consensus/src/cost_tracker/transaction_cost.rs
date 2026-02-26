@@ -52,3 +52,63 @@ impl TransactionCost {
         self.writable_accounts.push((pubkey, cost));
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn pk(n: u8) -> Pubkey {
+        Pubkey::new([n; 32])
+    }
+
+    #[test]
+    fn new_defaults() {
+        let cost = TransactionCost::new(1000, false);
+        assert_eq!(cost.compute_units, 1000);
+        assert!(!cost.is_vote);
+        assert!(cost.writable_accounts.is_empty());
+        assert_eq!(cost.data_size_delta, 0);
+        assert_eq!(cost.signature_count, 1);
+    }
+
+    #[test]
+    fn new_vote_tx() {
+        let cost = TransactionCost::new(500, true);
+        assert!(cost.is_vote);
+    }
+
+    #[test]
+    fn total_cost_compute_only() {
+        let cost = TransactionCost::new(10_000, false);
+        // total = compute + base + sig_cost * 1
+        let expected = 10_000 + TRANSACTION_BASE_COST + SIGNATURE_COST;
+        assert_eq!(cost.total_cost(), expected);
+    }
+
+    #[test]
+    fn total_cost_with_write_locks() {
+        let mut cost = TransactionCost::new(5000, false);
+        cost.add_writable_account(pk(1), 100);
+        cost.add_writable_account(pk(2), 200);
+        // write_lock_total = (100 + 200) + 2 * WRITE_LOCK_COST
+        let write_total = 300 + 2 * WRITE_LOCK_COST;
+        let expected = 5000 + TRANSACTION_BASE_COST + SIGNATURE_COST + write_total;
+        assert_eq!(cost.total_cost(), expected);
+    }
+
+    #[test]
+    fn total_cost_multiple_signatures() {
+        let mut cost = TransactionCost::new(1000, false);
+        cost.signature_count = 3;
+        let expected = 1000 + TRANSACTION_BASE_COST + 3 * SIGNATURE_COST;
+        assert_eq!(cost.total_cost(), expected);
+    }
+
+    #[test]
+    fn add_writable_account() {
+        let mut cost = TransactionCost::new(0, false);
+        cost.add_writable_account(pk(1), 50);
+        assert_eq!(cost.writable_accounts.len(), 1);
+        assert_eq!(cost.writable_accounts[0].1, 50);
+    }
+}

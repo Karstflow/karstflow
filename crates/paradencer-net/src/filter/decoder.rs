@@ -117,3 +117,137 @@ fn fingerprint(packet_id: u64, payload_bytes: usize, source: IngressSource) -> u
     source.hash(&mut hasher);
     hasher.finish()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn default_policy() -> IngressPolicy {
+        IngressPolicy::default()
+    }
+
+    fn make_frame(packet_id: u64, payload_bytes: usize, source: IngressSource) -> InboundFrame {
+        InboundFrame {
+            packet_id,
+            payload_bytes,
+            source,
+            data: vec![0u8; payload_bytes],
+        }
+    }
+
+    // --- PacketDecoder ---
+
+    #[test]
+    fn packet_decoder_accepts_valid_frame() {
+        let decoder = PacketDecoder::new(default_policy()).unwrap();
+        let frame = make_frame(1, 100, IngressSource::Quic);
+        match decoder.decode(&frame) {
+            DecodeOutcome::Accepted(tx) => {
+                assert_eq!(tx.transaction_id, 1);
+                assert_eq!(tx.estimated_cost_units, 400); // 100 * 4
+                assert_eq!(tx.source, IngressSource::Quic);
+            }
+            DecodeOutcome::Dropped(reason) => panic!("expected accepted, got {:?}", reason),
+        }
+    }
+
+    #[test]
+    fn packet_decoder_drops_empty_payload() {
+        let decoder = PacketDecoder::new(default_policy()).unwrap();
+        let frame = make_frame(1, 0, IngressSource::Quic);
+        match decoder.decode(&frame) {
+            DecodeOutcome::Dropped(DropReason::EmptyPayload) => {}
+            other => panic!("expected EmptyPayload, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn packet_decoder_drops_oversized_payload() {
+        let decoder = PacketDecoder::new(default_policy()).unwrap();
+        let frame = make_frame(1, 2000, IngressSource::Quic); // default max is 1232
+        match decoder.decode(&frame) {
+            DecodeOutcome::Dropped(DropReason::OversizedPayload) => {}
+            other => panic!("expected OversizedPayload, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn packet_decoder_drops_disallowed_source() {
+        let mut policy = default_policy();
+        policy.allow_gossip_source = false;
+        let decoder = PacketDecoder::new(policy).unwrap();
+        let frame = make_frame(1, 100, IngressSource::Gossip);
+        match decoder.decode(&frame) {
+            DecodeOutcome::Dropped(DropReason::SourceNotAllowed) => {}
+            other => panic!("expected SourceNotAllowed, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn packet_decoder_dedup_fingerprint_deterministic() {
+        let decoder = PacketDecoder::new(default_policy()).unwrap();
+        let frame1 = make_frame(42, 100, IngressSource::Quic);
+        let frame2 = make_frame(42, 100, IngressSource::Quic);
+        let tx1 = match decoder.decode(&frame1) {
+            DecodeOutcome::Accepted(tx) => tx,
+            _ => panic!("expected accepted"),
+        };
+        let tx2 = match decoder.decode(&frame2) {
+            DecodeOutcome::Accepted(tx) => tx,
+            _ => panic!("expected accepted"),
+        };
+        assert_eq!(tx1.dedup_fingerprint, tx2.dedup_fingerprint);
+    }
+
+    // --- ShredDecoder ---
+
+    #[test]
+    fn shred_decoder_accepts_valid_frame() {
+        let decoder = ShredDecoder::new(default_policy()).unwrap();
+        let frame = make_frame(64, 200, IngressSource::Quic);
+        match decoder.decode(&frame) {
+            ShredDecodeOutcome::Accepted(shred) => {
+                assert_eq!(shred.shred_id, 64);
+                assert_eq!(shred.slot, 2); // 64 / 32
+                assert_eq!(shred.source, IngressSource::Quic);
+            }
+            ShredDecodeOutcome::Dropped(reason) => panic!("expected accepted, got {:?}", reason),
+        }
+    }
+
+    #[test]
+    fn shred_decoder_drops_empty_payload() {
+        let decoder = ShredDecoder::new(default_policy()).unwrap();
+        let frame = make_frame(1, 0, IngressSource::Quic);
+        assert!(matches!(
+            decoder.decode(&frame),
+            ShredDecodeOutcome::Dropped(DropReason::EmptyPayload)
+        ));
+    }
+
+    #[test]
+    fn shred_decoder_drops_oversized() {
+        let decoder = ShredDecoder::new(default_policy()).unwrap();
+        let frame = make_frame(1, 2000, IngressSource::Quic);
+        assert!(matches!(
+            decoder.decode(&frame),
+            ShredDecodeOutcome::Dropped(DropReason::OversizedPayload)
+        ));
+    }
+
+    // --- fingerprint ---
+
+    #[test]
+    fn fingerprint_changes_with_source() {
+        let f1 = fingerprint(1, 100, IngressSource::Quic);
+        let f2 = fingerprint(1, 100, IngressSource::Gossip);
+        assert_ne!(f1, f2);
+    }
+
+    #[test]
+    fn fingerprint_changes_with_packet_id() {
+        let f1 = fingerprint(1, 100, IngressSource::Quic);
+        let f2 = fingerprint(2, 100, IngressSource::Quic);
+        assert_ne!(f1, f2);
+    }
+}

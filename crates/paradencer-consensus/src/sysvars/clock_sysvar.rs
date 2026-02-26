@@ -61,3 +61,59 @@ impl From<Clock> for ClockSysvar {
         Self::new(clock)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_clock() -> Clock {
+        Clock {
+            slot: 12345,
+            epoch_start_timestamp: -1_000_000,
+            epoch: 42,
+            leader_schedule_epoch: 43,
+            unix_timestamp: 1_700_000_000,
+        }
+    }
+
+    #[test]
+    fn serialization_roundtrip() {
+        let sysvar = ClockSysvar::new(test_clock());
+        let bytes = sysvar.to_bytes();
+        assert_eq!(bytes.len(), 40);
+        let restored = ClockSysvar::from_bytes(&bytes).unwrap();
+        assert_eq!(restored, sysvar);
+    }
+
+    #[test]
+    fn from_bytes_rejects_too_short() {
+        assert!(ClockSysvar::from_bytes(&[0u8; 39]).is_none());
+    }
+
+    #[test]
+    fn default_clock_roundtrip() {
+        let sysvar = ClockSysvar::default();
+        let bytes = sysvar.to_bytes();
+        let restored = ClockSysvar::from_bytes(&bytes).unwrap();
+        assert_eq!(restored.clock.slot, 0);
+        assert_eq!(restored.clock.epoch, 0);
+    }
+
+    #[test]
+    fn from_clock_conversion() {
+        let clock = test_clock();
+        let sysvar: ClockSysvar = clock.into();
+        assert_eq!(sysvar.clock.slot, 12345);
+    }
+
+    #[test]
+    fn negative_timestamps_preserved() {
+        let mut clock = test_clock();
+        clock.epoch_start_timestamp = -999_999_999;
+        clock.unix_timestamp = -1;
+        let sysvar = ClockSysvar::new(clock);
+        let restored = ClockSysvar::from_bytes(&sysvar.to_bytes()).unwrap();
+        assert_eq!(restored.clock.epoch_start_timestamp, -999_999_999);
+        assert_eq!(restored.clock.unix_timestamp, -1);
+    }
+}

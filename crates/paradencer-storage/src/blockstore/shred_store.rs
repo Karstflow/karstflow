@@ -82,3 +82,90 @@ fn shred_key(slot: u64, index: u32) -> Vec<u8> {
     key.extend_from_slice(&index.to_be_bytes());
     key
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn backend() -> BlockstoreBackend {
+        BlockstoreBackend::in_memory()
+    }
+
+    #[test]
+    fn shred_key_encoding() {
+        let key = shred_key(1, 42);
+        assert_eq!(key.len(), 12);
+        let slot = u64::from_be_bytes(key[0..8].try_into().unwrap());
+        let index = u32::from_be_bytes(key[8..12].try_into().unwrap());
+        assert_eq!(slot, 1);
+        assert_eq!(index, 42);
+    }
+
+    #[test]
+    fn insert_and_get_data_shred() {
+        let b = backend();
+        let store = ShredStore::new(&b);
+        let mut meta = SlotMeta::new(1, Some(0));
+        store.insert_data(1, 0, b"shred_data", &mut meta).unwrap();
+        assert_eq!(meta.received_data_shreds, 1);
+
+        let data = store.get_data(1, 0).unwrap();
+        assert_eq!(data, Some(b"shred_data".to_vec()));
+    }
+
+    #[test]
+    fn insert_and_get_coding_shred() {
+        let b = backend();
+        let store = ShredStore::new(&b);
+        store.insert_coding(1, 0, b"coding_data").unwrap();
+
+        let data = store.get_coding(1, 0).unwrap();
+        assert_eq!(data, Some(b"coding_data".to_vec()));
+    }
+
+    #[test]
+    fn get_missing_shred_returns_none() {
+        let b = backend();
+        let store = ShredStore::new(&b);
+        assert!(store.get_data(99, 0).unwrap().is_none());
+        assert!(store.get_coding(99, 0).unwrap().is_none());
+    }
+
+    #[test]
+    fn get_slot_data_shreds_sorted() {
+        let b = backend();
+        let store = ShredStore::new(&b);
+        let mut meta = SlotMeta::new(1, Some(0));
+
+        // Insert out of order
+        store.insert_data(1, 2, b"d2", &mut meta).unwrap();
+        store.insert_data(1, 0, b"d0", &mut meta).unwrap();
+        store.insert_data(1, 1, b"d1", &mut meta).unwrap();
+
+        let shreds = store.get_slot_data_shreds(1).unwrap();
+        assert_eq!(shreds.len(), 3);
+        assert_eq!(shreds[0], (0, b"d0".to_vec()));
+        assert_eq!(shreds[1], (1, b"d1".to_vec()));
+        assert_eq!(shreds[2], (2, b"d2".to_vec()));
+    }
+
+    #[test]
+    fn get_slot_data_shreds_empty_slot() {
+        let b = backend();
+        let store = ShredStore::new(&b);
+        let shreds = store.get_slot_data_shreds(42).unwrap();
+        assert!(shreds.is_empty());
+    }
+
+    #[test]
+    fn data_and_coding_are_independent() {
+        let b = backend();
+        let store = ShredStore::new(&b);
+        let mut meta = SlotMeta::new(1, Some(0));
+        store.insert_data(1, 0, b"data", &mut meta).unwrap();
+        store.insert_coding(1, 0, b"coding").unwrap();
+
+        assert_eq!(store.get_data(1, 0).unwrap(), Some(b"data".to_vec()));
+        assert_eq!(store.get_coding(1, 0).unwrap(), Some(b"coding".to_vec()));
+    }
+}

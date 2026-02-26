@@ -67,3 +67,69 @@ impl From<StakeHistory> for StakeHistorySysvar {
         Self::new(history)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_history() -> StakeHistory {
+        let mut h = StakeHistory::new();
+        h.add(10, StakeHistoryEntry::new(1000, 200, 50));
+        h.add(11, StakeHistoryEntry::new(1100, 100, 30));
+        h
+    }
+
+    #[test]
+    fn serialization_roundtrip_empty() {
+        let sysvar = StakeHistorySysvar::new(StakeHistory::new());
+        let bytes = sysvar.to_bytes();
+        assert_eq!(bytes.len(), 8); // just the count
+        let restored = StakeHistorySysvar::from_bytes(&bytes).unwrap();
+        assert_eq!(restored.history.iter().count(), 0);
+    }
+
+    #[test]
+    fn serialization_roundtrip_with_entries() {
+        let sysvar = StakeHistorySysvar::new(test_history());
+        let bytes = sysvar.to_bytes();
+        // 8 (count) + 2 * 32 (entries) = 72
+        assert_eq!(bytes.len(), 72);
+        let restored = StakeHistorySysvar::from_bytes(&bytes).unwrap();
+        let entries: Vec<_> = restored.history.iter().collect();
+        assert_eq!(entries.len(), 2);
+    }
+
+    #[test]
+    fn from_bytes_rejects_too_short() {
+        assert!(StakeHistorySysvar::from_bytes(&[0u8; 7]).is_none());
+    }
+
+    #[test]
+    fn from_bytes_rejects_truncated_entries() {
+        let mut data = vec![0u8; 8];
+        // Say 1 entry exists
+        data[0..8].copy_from_slice(&1u64.to_le_bytes());
+        // But no entry data follows
+        assert!(StakeHistorySysvar::from_bytes(&data).is_none());
+    }
+
+    #[test]
+    fn from_stake_history_conversion() {
+        let h = test_history();
+        let sysvar: StakeHistorySysvar = h.into();
+        assert_eq!(sysvar.history.iter().count(), 2);
+    }
+
+    #[test]
+    fn entry_values_preserved() {
+        let mut h = StakeHistory::new();
+        h.add(99, StakeHistoryEntry::new(5000, 300, 100));
+        let sysvar = StakeHistorySysvar::new(h);
+        let restored = StakeHistorySysvar::from_bytes(&sysvar.to_bytes()).unwrap();
+        let entry = restored.history.iter().next().unwrap();
+        assert_eq!(entry.epoch, 99);
+        assert_eq!(entry.entry.effective, 5000);
+        assert_eq!(entry.entry.activating, 300);
+        assert_eq!(entry.entry.deactivating, 100);
+    }
+}

@@ -198,6 +198,27 @@ impl IngressPolicy {
     }
 }
 
+#[cfg(test)]
+impl IngressPolicy {
+    /// Test helper: creates a valid default policy suitable for unit tests.
+    fn test_default() -> Self {
+        Self::default()
+    }
+
+    fn test_udp() -> Self {
+        Self {
+            ingress_mode: IngressMode::Udp,
+            udp_bind_address: Some("127.0.0.1:9000".parse().unwrap()),
+            udp_max_packets_per_tick: 64,
+            udp_quic_source_port: Some(9001),
+            udp_gossip_source_port: Some(9002),
+            udp_bundle_source_port: Some(9003),
+            udp_rpc_source_port: Some(9004),
+            ..Self::default()
+        }
+    }
+}
+
 impl Default for IngressPolicy {
     fn default() -> Self {
         Self {
@@ -244,5 +265,172 @@ impl Default for IngressPolicy {
             synthetic_source_weight_bundle: 0,
             synthetic_source_weight_rpc: 0,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ingress_mode_parse_synthetic() {
+        assert_eq!(
+            IngressMode::parse("synthetic"),
+            Some(IngressMode::Synthetic)
+        );
+        assert_eq!(
+            IngressMode::parse("SYNTHETIC"),
+            Some(IngressMode::Synthetic)
+        );
+    }
+
+    #[test]
+    fn ingress_mode_parse_udp() {
+        assert_eq!(IngressMode::parse("udp"), Some(IngressMode::Udp));
+        assert_eq!(IngressMode::parse("UDP"), Some(IngressMode::Udp));
+    }
+
+    #[test]
+    fn ingress_mode_parse_invalid() {
+        assert!(IngressMode::parse("tcp").is_none());
+        assert!(IngressMode::parse("").is_none());
+    }
+
+    #[test]
+    fn default_policy_validates() {
+        let policy = IngressPolicy::test_default();
+        assert!(policy.validate().is_ok());
+    }
+
+    #[test]
+    fn validate_rejects_zero_max_payload() {
+        let mut policy = IngressPolicy::test_default();
+        policy.max_payload_bytes = 0;
+        assert!(policy.validate().is_err());
+    }
+
+    #[test]
+    fn validate_rejects_zero_dedup_window() {
+        let mut policy = IngressPolicy::test_default();
+        policy.dedup_window_capacity = 0;
+        assert!(policy.validate().is_err());
+    }
+
+    #[test]
+    fn validate_rejects_zero_egress_retry_buffer() {
+        let mut policy = IngressPolicy::test_default();
+        policy.egress_retry_buffer_capacity = 0;
+        assert!(policy.validate().is_err());
+    }
+
+    #[test]
+    fn validate_rejects_zero_egress_retry_ticks() {
+        let mut policy = IngressPolicy::test_default();
+        policy.egress_retry_max_wait_ticks = 0;
+        assert!(policy.validate().is_err());
+    }
+
+    #[test]
+    fn validate_synthetic_rejects_zero_batch_size() {
+        let mut policy = IngressPolicy::test_default();
+        policy.ingress_mode = IngressMode::Synthetic;
+        policy.synthetic_batch_size_per_tick = 0;
+        assert!(policy.validate().is_err());
+    }
+
+    #[test]
+    fn validate_synthetic_rejects_zero_payload_bytes() {
+        let mut policy = IngressPolicy::test_default();
+        policy.ingress_mode = IngressMode::Synthetic;
+        policy.synthetic_payload_bytes = 0;
+        assert!(policy.validate().is_err());
+    }
+
+    #[test]
+    fn validate_synthetic_rejects_zero_weights() {
+        let mut policy = IngressPolicy::test_default();
+        policy.ingress_mode = IngressMode::Synthetic;
+        policy.synthetic_source_weight_quic = 0;
+        policy.synthetic_source_weight_gossip = 0;
+        policy.synthetic_source_weight_bundle = 0;
+        policy.synthetic_source_weight_rpc = 0;
+        assert!(policy.validate().is_err());
+    }
+
+    #[test]
+    fn validate_udp_requires_bind_address() {
+        let mut policy = IngressPolicy::test_default();
+        policy.ingress_mode = IngressMode::Udp;
+        policy.udp_bind_address = None;
+        assert!(policy.validate().is_err());
+    }
+
+    #[test]
+    fn validate_udp_requires_nonzero_max_packets() {
+        let mut policy = IngressPolicy::test_udp();
+        policy.udp_max_packets_per_tick = 0;
+        assert!(policy.validate().is_err());
+    }
+
+    #[test]
+    fn validate_udp_ok() {
+        let policy = IngressPolicy::test_udp();
+        assert!(policy.validate().is_ok());
+    }
+
+    #[test]
+    fn source_is_allowed_defaults() {
+        let policy = IngressPolicy::test_default();
+        assert!(policy.source_is_allowed(IngressSource::Quic));
+        assert!(policy.source_is_allowed(IngressSource::Gossip));
+        assert!(policy.source_is_allowed(IngressSource::Bundle));
+        assert!(policy.source_is_allowed(IngressSource::Rpc));
+    }
+
+    #[test]
+    fn source_is_allowed_disabled() {
+        let mut policy = IngressPolicy::test_default();
+        policy.allow_quic_source = false;
+        assert!(!policy.source_is_allowed(IngressSource::Quic));
+        assert!(policy.source_is_allowed(IngressSource::Gossip));
+    }
+
+    #[test]
+    fn source_min_gap_ticks_routing() {
+        let mut policy = IngressPolicy::test_default();
+        policy.quic_min_gap_ticks = 10;
+        policy.gossip_min_gap_ticks = 20;
+        policy.bundle_min_gap_ticks = 30;
+        policy.rpc_min_gap_ticks = 40;
+        assert_eq!(policy.source_min_gap_ticks(IngressSource::Quic), 10);
+        assert_eq!(policy.source_min_gap_ticks(IngressSource::Gossip), 20);
+        assert_eq!(policy.source_min_gap_ticks(IngressSource::Bundle), 30);
+        assert_eq!(policy.source_min_gap_ticks(IngressSource::Rpc), 40);
+    }
+
+    #[test]
+    fn synthetic_source_cursor_weighted() {
+        let mut policy = IngressPolicy::test_default();
+        policy.synthetic_source_weight_quic = 2;
+        policy.synthetic_source_weight_gossip = 1;
+        policy.synthetic_source_weight_bundle = 1;
+        policy.synthetic_source_weight_rpc = 0;
+        // total = 4, cursor 0,1 → Quic; 2 → Gossip; 3 → Bundle
+        assert_eq!(policy.synthetic_source_for_cursor(0), IngressSource::Quic);
+        assert_eq!(policy.synthetic_source_for_cursor(1), IngressSource::Quic);
+        assert_eq!(policy.synthetic_source_for_cursor(2), IngressSource::Gossip);
+        assert_eq!(policy.synthetic_source_for_cursor(3), IngressSource::Bundle);
+        // wraps around
+        assert_eq!(policy.synthetic_source_for_cursor(4), IngressSource::Quic);
+    }
+
+    #[test]
+    fn classify_udp_source_port() {
+        let policy = IngressPolicy::test_udp();
+        assert_eq!(policy.classify_udp_source_port(9002), IngressSource::Gossip);
+        assert_eq!(policy.classify_udp_source_port(9003), IngressSource::Bundle);
+        assert_eq!(policy.classify_udp_source_port(9004), IngressSource::Rpc);
+        // Unknown port defaults to Quic
+        assert_eq!(policy.classify_udp_source_port(12345), IngressSource::Quic);
     }
 }

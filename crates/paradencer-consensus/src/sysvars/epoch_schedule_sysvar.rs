@@ -61,3 +61,61 @@ impl From<EpochSchedule> for EpochScheduleSysvar {
         Self::new(schedule)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_schedule() -> EpochSchedule {
+        EpochSchedule::new(EpochScheduleConfig {
+            slots_per_epoch: 432_000,
+            leader_schedule_slot_offset: 432_000,
+            warmup: false,
+            first_normal_epoch: 0,
+            first_normal_slot: 0,
+        })
+    }
+
+    #[test]
+    fn serialization_roundtrip() {
+        let sysvar = EpochScheduleSysvar::new(test_schedule());
+        let bytes = sysvar.to_bytes();
+        assert_eq!(bytes.len(), 33);
+        let restored = EpochScheduleSysvar::from_bytes(&bytes).unwrap();
+        assert_eq!(
+            restored.schedule.config().slots_per_epoch,
+            sysvar.schedule.config().slots_per_epoch
+        );
+        assert_eq!(
+            restored.schedule.config().warmup,
+            sysvar.schedule.config().warmup
+        );
+    }
+
+    #[test]
+    fn from_bytes_rejects_too_short() {
+        assert!(EpochScheduleSysvar::from_bytes(&[0u8; 32]).is_none());
+    }
+
+    #[test]
+    fn warmup_flag_preserved() {
+        let config = EpochScheduleConfig {
+            slots_per_epoch: 8192,
+            leader_schedule_slot_offset: 8192,
+            warmup: true,
+            first_normal_epoch: 14,
+            first_normal_slot: 524_256,
+        };
+        let sysvar = EpochScheduleSysvar::new(EpochSchedule::new(config));
+        let restored = EpochScheduleSysvar::from_bytes(&sysvar.to_bytes()).unwrap();
+        assert!(restored.schedule.config().warmup);
+        assert_eq!(restored.schedule.config().first_normal_epoch, 14);
+    }
+
+    #[test]
+    fn from_epoch_schedule_conversion() {
+        let schedule = test_schedule();
+        let sysvar: EpochScheduleSysvar = schedule.into();
+        assert_eq!(sysvar.schedule.config().slots_per_epoch, 432_000);
+    }
+}

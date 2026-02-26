@@ -51,3 +51,53 @@ impl From<Rent> for RentSysvar {
         Self::new(rent)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_rent() -> Rent {
+        Rent {
+            lamports_per_byte_year: 3480,
+            exemption_threshold: 2.0,
+            burn_percent: 50,
+        }
+    }
+
+    #[test]
+    fn serialization_roundtrip() {
+        let sysvar = RentSysvar::new(test_rent());
+        let bytes = sysvar.to_bytes();
+        assert_eq!(bytes.len(), 17);
+        let restored = RentSysvar::from_bytes(&bytes).unwrap();
+        assert_eq!(restored, sysvar);
+    }
+
+    #[test]
+    fn from_bytes_rejects_too_short() {
+        assert!(RentSysvar::from_bytes(&[0u8; 16]).is_none());
+    }
+
+    #[test]
+    fn float_threshold_preserved() {
+        let mut rent = test_rent();
+        rent.exemption_threshold = 1.5;
+        let sysvar = RentSysvar::new(rent);
+        let restored = RentSysvar::from_bytes(&sysvar.to_bytes()).unwrap();
+        assert!((restored.rent.exemption_threshold - 1.5).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn from_rent_conversion() {
+        let rent = test_rent();
+        let sysvar: RentSysvar = rent.into();
+        assert_eq!(sysvar.rent.burn_percent, 50);
+    }
+
+    #[test]
+    fn burn_percent_byte() {
+        let sysvar = RentSysvar::new(test_rent());
+        let bytes = sysvar.to_bytes();
+        assert_eq!(bytes[16], 50); // burn_percent is last byte
+    }
+}
