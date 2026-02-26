@@ -260,3 +260,221 @@ pub fn calculate_total_points(
 
     total_points
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::stake::delegation::Delegation;
+    use paradencer_storage::Pubkey;
+
+    fn make_stake(amount: u64, credits: u64) -> StakeAccount {
+        let d = Delegation::new(Pubkey::new_unique(), amount, 0);
+        StakeAccount::new(d, credits)
+    }
+
+    fn make_credits(entries: &[(u64, u64, u64)]) -> Vec<EpochCreditEntry> {
+        entries
+            .iter()
+            .map(|&(epoch, credits, prev)| EpochCreditEntry {
+                epoch,
+                credits,
+                prev_credits: prev,
+            })
+            .collect()
+    }
+
+    // --- split_commission ---
+
+    #[test]
+    fn split_commission_zero_gives_all_to_staker() {
+        let split = split_commission(1000, 0);
+        assert_eq!(split.voter_portion, 0);
+        assert_eq!(split.staker_portion, 1000);
+        assert!(!split.is_split);
+    }
+
+    #[test]
+    fn split_commission_100_gives_all_to_voter() {
+        let split = split_commission(1000, 100);
+        assert_eq!(split.voter_portion, 1000);
+        assert_eq!(split.staker_portion, 0);
+        assert!(!split.is_split);
+    }
+
+    #[test]
+    fn split_commission_50_splits_evenly() {
+        let split = split_commission(1000, 50);
+        assert_eq!(split.voter_portion, 500);
+        assert_eq!(split.staker_portion, 500);
+        assert!(split.is_split);
+    }
+
+    #[test]
+    fn split_commission_10_percent() {
+        let split = split_commission(1000, 10);
+        assert_eq!(split.voter_portion, 100);
+        assert_eq!(split.staker_portion, 900);
+        assert!(split.is_split);
+    }
+
+    #[test]
+    fn split_commission_clamps_above_100() {
+        let split = split_commission(1000, 200);
+        // Should clamp to 100%
+        assert_eq!(split.voter_portion, 1000);
+        assert_eq!(split.staker_portion, 0);
+    }
+
+    #[test]
+    fn split_commission_symmetric_rounding() {
+        // 33% of 100 lamports: voter=33, staker=67 (not 100-33=67)
+        let split = split_commission(100, 33);
+        assert_eq!(split.voter_portion, 33);
+        assert_eq!(split.staker_portion, 67);
+        // Both computed independently, so they sum to 100 in this case
+        assert_eq!(split.voter_portion + split.staker_portion, 100);
+    }
+
+    #[test]
+    fn split_commission_dust_possible() {
+        // 33% of 10: voter=3, staker=6 (3+6=9, dust=1)
+        let split = split_commission(10, 33);
+        assert_eq!(split.voter_portion, 3);
+        assert_eq!(split.staker_portion, 6);
+        assert!(split.voter_portion + split.staker_portion <= 10);
+    }
+
+    // --- calculate_points_and_credits ---
+
+    #[test]
+    fn points_empty_credits() {
+        let stake = make_stake(1000, 0);
+        let calc = calculate_points_and_credits(&stake, &[], |_| 1000);
+        assert_eq!(calc.points, 0);
+        assert!(!calc.force_credits_update_with_skipped_reward);
+    }
+
+    #[test]
+    fn points_normal_credits() {
+        let stake = make_stake(1000, 0);
+        // Epoch 5: credits went from 0 to 100
+        let credits = make_credits(&[(5, 100, 0)]);
+        let calc = calculate_points_and_credits(&stake, &credits, |_| 1000);
+        // 1000 stake * 100 credits = 100_000 points
+        assert_eq!(calc.points, 100_000);
+        assert_eq!(calc.new_credits_observed, 100);
+    }
+
+    #[test]
+    fn points_multi_epoch() {
+        let stake = make_stake(1000, 0);
+        let credits = make_credits(&[
+            (5, 100, 0),   // earned 100
+            (6, 250, 100), // earned 150
+        ]);
+        let calc = calculate_points_and_credits(&stake, &credits, |_| 1000);
+        // 1000*100 + 1000*150 = 250_000
+        assert_eq!(calc.points, 250_000);
+        assert_eq!(calc.new_credits_observed, 250);
+    }
+
+    #[test]
+    fn points_vote_credits_less_than_stake_forces_update() {
+        let stake = make_stake(1000, 200);
+        // Vote account has only 100 credits, less than stake's 200
+        let credits = make_credits(&[(5, 100, 50)]);
+        let calc = calculate_points_and_credits(&stake, &credits, |_| 1000);
+        assert_eq!(calc.points, 0);
+        assert!(calc.force_credits_update_with_skipped_reward);
+        assert_eq!(calc.new_credits_observed, 100);
+    }
+
+    #[test]
+    fn points_same_credits_no_work() {
+        let stake = make_stake(1000, 100);
+        let credits = make_credits(&[(5, 100, 50)]);
+        let calc = calculate_points_and_credits(&stake, &credits, |_| 1000);
+        assert_eq!(calc.points, 0);
+        assert!(!calc.force_credits_update_with_skipped_reward);
+    }
+
+    // --- calculate_stake_rewards ---
+
+    #[test]
+    fn rewards_normal_calculation() {
+        let stake = make_stake(10_000, 0);
+        let credits = make_credits(&[(5, 100, 0)]);
+        let total_points: u128 = 10_000 * 100; // same as stake's points
+        let total_rewards = 500;
+
+        let result =
+            calculate_stake_rewards(&stake, &credits, 10, 5, total_rewards, total_points, |_| {
+                10_000
+            });
+
+        let r = result.unwrap();
+        // Full reward (only stake in pool), 10% commission
+        assert_eq!(r.staker_reward + r.voter_reward, 500);
+        assert_eq!(r.voter_reward, 50); // 10% of 500
+        assert_eq!(r.staker_reward, 450); // 90% of 500
+    }
+
+    #[test]
+    fn rewards_zero_total_rewards_forces_credit_update() {
+        let stake = make_stake(10_000, 0);
+        let credits = make_credits(&[(5, 100, 0)]);
+
+        let result = calculate_stake_rewards(&stake, &credits, 10, 5, 0, 1_000_000, |_| 10_000);
+
+        let r = result.unwrap();
+        assert_eq!(r.staker_reward, 0);
+        assert_eq!(r.voter_reward, 0);
+        assert_eq!(r.new_credits_observed, 100);
+    }
+
+    #[test]
+    fn rewards_activation_epoch_forces_credit_update() {
+        let stake = make_stake(10_000, 0);
+        let credits = make_credits(&[(0, 100, 0)]);
+
+        // rewarded_epoch == activation_epoch (0)
+        let result = calculate_stake_rewards(&stake, &credits, 10, 0, 500, 1_000_000, |_| 10_000);
+
+        let r = result.unwrap();
+        assert_eq!(r.staker_reward, 0);
+        assert_eq!(r.voter_reward, 0);
+    }
+
+    #[test]
+    fn rewards_none_when_zero_points() {
+        let stake = make_stake(10_000, 100);
+        // Credits same as observed — no new credits
+        let credits = make_credits(&[(5, 100, 50)]);
+        let result = calculate_stake_rewards(&stake, &credits, 10, 5, 500, 1_000_000, |_| 10_000);
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn rewards_none_when_split_rounds_to_zero() {
+        let stake = make_stake(1, 0);
+        let credits = make_credits(&[(5, 1, 0)]);
+        // Very small reward: 1 point out of huge total
+        let result = calculate_stake_rewards(&stake, &credits, 50, 5, 1, 1_000_000_000, |_| 1);
+        // Reward rounds to 0
+        assert!(result.is_none());
+    }
+
+    // --- calculate_total_points ---
+
+    #[test]
+    fn total_points_across_stakes() {
+        let s1 = make_stake(1000, 0);
+        let c1 = make_credits(&[(5, 100, 0)]); // 1000*100 = 100_000
+        let s2 = make_stake(2000, 0);
+        let c2 = make_credits(&[(5, 50, 0)]); // 2000*50 = 100_000
+
+        let stakes = vec![(s1, c1), (s2, c2)];
+        let total = calculate_total_points(&stakes, |s, _| s.delegation.stake_amount);
+        assert_eq!(total, 200_000);
+    }
+}

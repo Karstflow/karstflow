@@ -269,3 +269,170 @@ impl StakeAccount {
         Ok(())
     }
 }
+
+#[cfg(test)]
+#[allow(deprecated)]
+mod tests {
+    use super::*;
+
+    fn voter() -> Pubkey {
+        Pubkey::new_unique()
+    }
+
+    // --- Delegation tests ---
+
+    #[test]
+    fn new_delegation_is_active() {
+        let d = Delegation::new(voter(), 1000, 5);
+        assert_eq!(d.stake_amount, 1000);
+        assert_eq!(d.activation_epoch, 5);
+        assert_eq!(d.deactivation_epoch, u64::MAX);
+        assert!(!d.is_deactivated());
+        assert!(!d.is_bootstrap());
+    }
+
+    #[test]
+    fn bootstrap_delegation() {
+        let d = Delegation {
+            voter_pubkey: voter(),
+            stake_amount: 5000,
+            activation_epoch: u64::MAX,
+            deactivation_epoch: u64::MAX,
+            warmup_cooldown_rate: 0.25,
+        };
+        assert!(d.is_bootstrap());
+    }
+
+    #[test]
+    fn deactivate_marks_delegation() {
+        let mut d = Delegation::new(voter(), 1000, 5);
+        d.deactivate(10);
+        assert!(d.is_deactivated());
+        assert_eq!(d.deactivation_epoch, 10);
+    }
+
+    #[test]
+    fn bootstrap_delegation_fully_effective_at_any_epoch() {
+        let d = Delegation {
+            voter_pubkey: voter(),
+            stake_amount: 5000,
+            activation_epoch: u64::MAX,
+            deactivation_epoch: u64::MAX,
+            warmup_cooldown_rate: 0.25,
+        };
+        let status = d.activation_status(100, None, None);
+        assert_eq!(status.effective, 5000);
+        assert_eq!(status.activating, 0);
+    }
+
+    #[test]
+    fn activation_epoch_shows_all_activating() {
+        let d = Delegation::new(voter(), 1000, 5);
+        let status = d.activation_status(5, None, None);
+        assert_eq!(status.effective, 0);
+        assert_eq!(status.activating, 1000);
+    }
+
+    #[test]
+    fn before_activation_shows_zero() {
+        let d = Delegation::new(voter(), 1000, 5);
+        let status = d.activation_status(3, None, None);
+        assert_eq!(status.effective, 0);
+        assert_eq!(status.activating, 0);
+    }
+
+    #[test]
+    fn same_epoch_activate_deactivate_shows_zero() {
+        let mut d = Delegation::new(voter(), 1000, 5);
+        d.deactivate(5);
+        let status = d.activation_status(5, None, None);
+        assert_eq!(status.effective, 0);
+        assert_eq!(status.activating, 0);
+    }
+
+    #[test]
+    fn fully_activated_without_history() {
+        let d = Delegation::new(voter(), 1000, 5);
+        // No history provided => assume fully activated after activation epoch
+        let status = d.activation_status(10, None, None);
+        assert_eq!(status.effective, 1000);
+        assert_eq!(status.activating, 0);
+    }
+
+    #[test]
+    fn warmup_with_history() {
+        // Large stake relative to cluster so it cannot fully activate in one epoch
+        let d = Delegation::new(voter(), 100_000, 5);
+        let mut history = StakeHistory::new();
+        // Epoch 5: small cluster, large activating pool
+        history.add(5, StakeHistoryEntry::new(1_000, 100_000, 0));
+
+        let status = d.activation_status(6, Some(&history), None);
+        // Should have warmed up some but not fully (25% of 1000 effective = 250 capacity)
+        assert!(status.effective > 0);
+        assert!(status.effective < 100_000);
+    }
+
+    #[test]
+    fn deactivation_epoch_shows_effective_as_deactivating() {
+        let mut d = Delegation::new(voter(), 1000, 5);
+        d.deactivate(10);
+
+        // Without history, assume fully effective at deactivation
+        let status = d.activation_status(10, None, None);
+        assert_eq!(status.effective, 1000);
+        assert_eq!(status.deactivating, 1000);
+    }
+
+    #[test]
+    fn effective_stake_convenience() {
+        let d = Delegation::new(voter(), 1000, 5);
+        let effective = d.effective_stake(10, None, None);
+        assert_eq!(effective, 1000);
+    }
+
+    // --- StakeAccount tests ---
+
+    #[test]
+    fn split_reduces_original() {
+        let d = Delegation::new(voter(), 1000, 5);
+        let mut account = StakeAccount::new(d, 0);
+
+        let split = account.split(400, 400).unwrap();
+        assert_eq!(account.delegation.stake_amount, 600);
+        assert_eq!(split.delegation.stake_amount, 400);
+    }
+
+    #[test]
+    fn split_fails_when_insufficient() {
+        let d = Delegation::new(voter(), 1000, 5);
+        let mut account = StakeAccount::new(d, 0);
+
+        let result = account.split(1500, 400);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn merge_combines_stakes() {
+        let v = voter();
+        let d1 = Delegation::new(v, 1000, 5);
+        let d2 = Delegation::new(v, 500, 5);
+        let mut a1 = StakeAccount::new(d1, 100);
+        let a2 = StakeAccount::new(d2, 200);
+
+        a1.merge(&a2).unwrap();
+        assert_eq!(a1.delegation.stake_amount, 1500);
+        assert_eq!(a1.credits_observed, 200); // max of 100, 200
+    }
+
+    #[test]
+    fn merge_rejects_different_voters() {
+        let d1 = Delegation::new(Pubkey::new_unique(), 1000, 5);
+        let d2 = Delegation::new(Pubkey::new_unique(), 500, 5);
+        let mut a1 = StakeAccount::new(d1, 0);
+        let a2 = StakeAccount::new(d2, 0);
+
+        let result = a1.merge(&a2);
+        assert!(result.is_err());
+    }
+}

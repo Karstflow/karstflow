@@ -65,3 +65,53 @@ pub fn warmup_cooldown_rate(current_epoch: u64, new_rate_activation_epoch: Optio
         _ => constants::DEFAULT_WARMUP_COOLDOWN_RATE,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn default_rate_when_no_activation_epoch() {
+        let rate = warmup_cooldown_rate(100, None);
+        assert!((rate - 0.25).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn default_rate_before_activation_epoch() {
+        let rate = warmup_cooldown_rate(99, Some(100));
+        assert!((rate - 0.25).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn new_rate_at_activation_epoch() {
+        let rate = warmup_cooldown_rate(100, Some(100));
+        assert!((rate - 0.09).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn new_rate_after_activation_epoch() {
+        let rate = warmup_cooldown_rate(200, Some(100));
+        assert!((rate - 0.09).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn activation_status_total() {
+        let status = ActivationStatus::new(100, 50, 25);
+        assert_eq!(status.total(), 175);
+    }
+
+    #[test]
+    fn activation_status_in_transition() {
+        assert!(ActivationStatus::new(100, 50, 0).in_transition());
+        assert!(ActivationStatus::new(100, 0, 25).in_transition());
+        assert!(!ActivationStatus::new(100, 0, 0).in_transition());
+    }
+
+    #[test]
+    fn activation_status_history_roundtrip() {
+        let status = ActivationStatus::new(100, 50, 25);
+        let entry = status.to_history_entry();
+        let back = ActivationStatus::from_history_entry(&entry);
+        assert_eq!(status, back);
+    }
+}
