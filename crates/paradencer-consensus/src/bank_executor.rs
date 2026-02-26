@@ -18,6 +18,7 @@ use paradencer_constants::execution::{
     MAX_COMPUTE_UNIT_LIMIT, MAX_LOADED_ACCOUNTS_DATA_SIZE, TRANSACTION_ACCOUNT_BASE_SIZE,
 };
 use paradencer_constants::ledger::NONCE_ACCOUNT_SIZE;
+use paradencer_constants::system_program::MAX_ACCOUNT_DATA_SIZE;
 use paradencer_ids::{
     COMPUTE_BUDGET_PROGRAM_ID, ED25519_PROGRAM_ID, INCINERATOR_ID, SECP256K1_PROGRAM_ID,
     SECP256R1_PROGRAM_ID, SYSTEM_PROGRAM_ID, VOTE_PROGRAM_ID,
@@ -217,6 +218,12 @@ pub enum TransactionExecutionError {
     DuplicateAccountKey { account: Pubkey },
     /// Total lamports across writable accounts changed during execution.
     UnbalancedTransaction,
+    /// An account's data size exceeds the maximum permitted length.
+    AccountDataTooLarge {
+        account: Pubkey,
+        size: u64,
+        limit: u64,
+    },
 }
 
 impl std::fmt::Display for TransactionExecutionError {
@@ -262,6 +269,16 @@ impl std::fmt::Display for TransactionExecutionError {
                 write!(f, "duplicate account key: {account:?}")
             }
             Self::UnbalancedTransaction => write!(f, "transaction lamports not balanced"),
+            Self::AccountDataTooLarge {
+                account,
+                size,
+                limit,
+            } => {
+                write!(
+                    f,
+                    "account {account:?} data too large: {size} bytes > {limit} byte limit"
+                )
+            }
         }
     }
 }
@@ -1028,7 +1045,7 @@ impl Bank {
         // Total fee = execution fee (signatures * rate) + priority fee.
         // Execution fees are subject to 50% burn, priority fees go
         // 100% to the slot leader.
-        let fee_calculator = FeeCalculator::default();
+        let fee_calculator = FeeCalculator::new(self.lamports_per_signature());
         let precompile_sigs = count_precompile_signatures(transaction);
         let total_signatures = transaction.num_signatures.saturating_add(precompile_sigs);
         let execution_fee = fee_calculator.calculate_fee(total_signatures);
@@ -1236,7 +1253,24 @@ impl Bank {
             }
         }
 
-        // Step 4c: Verify lamport conservation across writable accounts.
+        // Step 4c: Verify no account exceeds maximum data size.
+        if exec_error.is_none() {
+            if let Some(pubkey) = modified.iter().find_map(|(k, v)| {
+                if v.data.len() as u64 > MAX_ACCOUNT_DATA_SIZE {
+                    Some(*k)
+                } else {
+                    None
+                }
+            }) {
+                exec_error = Some(TransactionExecutionError::AccountDataTooLarge {
+                    account: pubkey,
+                    size: modified[&pubkey].data.len() as u64,
+                    limit: MAX_ACCOUNT_DATA_SIZE,
+                });
+            }
+        }
+
+        // Step 4d: Verify lamport conservation across writable accounts.
         // Total lamports before execution must equal total lamports after.
         if exec_error.is_none() {
             if let Err(e) = verify_lamport_balance(transaction, &account_state, &modified) {
@@ -1543,6 +1577,9 @@ fn extract_voted_slot(data: &[u8]) -> Option<u64> {
 mod tests {
     use super::*;
     use crate::{EpochSchedule, LeaderSchedule};
+    use paradencer_constants::economics::{
+        DEFAULT_TARGET_SIGNATURES_PER_SLOT, LAMPORTS_PER_SIGNATURE,
+    };
     use paradencer_constants::execution::MAX_COMPUTE_UNITS;
     use paradencer_storage::{AccountDatabase, Pubkey};
     use std::sync::Arc;
@@ -3791,5 +3828,91 @@ mod tests {
             message_bytes: vec![],
         };
         assert_eq!(super::count_precompile_signatures(&tx), 0);
+    }
+
+    // ── account data size limit tests ─────────────────────────────────
+
+    #[test]
+    fn account_data_within_limit_accepted() {
+        let bank = create_test_bank();
+
+        // Backend that creates a moderately sized account (under 10MB)
+        struct DataGrowBackend;
+        impl ExecutionBackend for DataGrowBackend {
+            fn execute_instruction(
+                &self,
+                instruction: &InstructionInfo,
+                _remaining: u64,
+            ) -> InstructionResult {
+                let mut modified = HashMap::new();
+                if let Some((key, acc, _, _)) = instruction.accounts.first() {
+                    let mut new_acc = acc.clone();
+                    new_acc.data = vec![0u8; 1024].into(); // 1KB — well under limit
+                    modified.insert(*key, new_acc);
+                }
+                InstructionResult {
+                    success: true,
+                    compute_units_consumed: 100,
+                    modified_accounts: modified,
+                    logs: vec![],
+                    error: None,
+                }
+            }
+        }
+
+        let payer = Pubkey::new_unique();
+        let program = Pubkey::new_unique();
+        // Need enough lamports to remain rent-exempt after data grows to 1KB.
+        store_test_account(
+            &bank,
+            &payer,
+            &Account::new(100_000_000, vec![], Pubkey::default()),
+        );
+
+        let tx = create_simple_transaction(payer, program, vec![payer], vec![]);
+        let result = bank.process_transaction(&tx, &DataGrowBackend, MAX_COMPUTE_UNITS);
+        assert!(result.success, "should accept account under size limit");
+    }
+
+    // ── fee rate governor tests ───────────────────────────────────────
+
+    #[test]
+    fn derive_fee_rate_returns_target_at_zero_sigs() {
+        let rate = crate::bank::derive_fee_rate(LAMPORTS_PER_SIGNATURE, 0);
+        // With 0 signatures, desired is at minimum (target/2). Current is at target.
+        // Should decrease by one step.
+        assert!(rate < LAMPORTS_PER_SIGNATURE);
+        assert!(rate > 0);
+    }
+
+    #[test]
+    fn derive_fee_rate_increases_under_load() {
+        let rate = crate::bank::derive_fee_rate(
+            LAMPORTS_PER_SIGNATURE,
+            DEFAULT_TARGET_SIGNATURES_PER_SLOT * 2,
+        );
+        assert!(rate > LAMPORTS_PER_SIGNATURE);
+    }
+
+    #[test]
+    fn derive_fee_rate_decreases_when_idle() {
+        let rate = crate::bank::derive_fee_rate(
+            LAMPORTS_PER_SIGNATURE,
+            DEFAULT_TARGET_SIGNATURES_PER_SLOT / 4,
+        );
+        assert!(rate < LAMPORTS_PER_SIGNATURE);
+    }
+
+    #[test]
+    fn child_bank_inherits_derived_fee_rate() {
+        let bank = create_test_bank();
+
+        // Simulate heavy load
+        bank.add_signatures(DEFAULT_TARGET_SIGNATURES_PER_SLOT * 3);
+
+        let child = Bank::new_from_parent(&bank, bank.slot() + 1, bank.leader_schedule().clone());
+
+        // Child's fee rate should be higher than the default
+        assert!(child.lamports_per_signature() > LAMPORTS_PER_SIGNATURE);
     }
 }

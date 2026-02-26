@@ -9,7 +9,7 @@ use crate::sysvars::SysvarCache;
 use crate::transaction_cache::TransactionCache;
 use crate::StakeHistory;
 use crate::StakeTracker;
-use paradencer_constants::economics::LAMPORTS_PER_SIGNATURE;
+use paradencer_constants::economics::{DEFAULT_TARGET_SIGNATURES_PER_SLOT, LAMPORTS_PER_SIGNATURE};
 use paradencer_constants::ledger::{GENESIS_EPOCH, GENESIS_SLOT, TICKS_PER_SLOT};
 use paradencer_crypto::lthash::{self, LatticeHashValue};
 use paradencer_ids::SYSTEM_PROGRAM_ID;
@@ -102,6 +102,10 @@ pub struct Bank {
     /// Updated by process_transaction after successful execution.
     accounts_data_size: AtomicI64,
 
+    /// Current lamports-per-signature rate, derived from parent's signature count.
+    /// Updated each slot via the fee rate governor.
+    lamports_per_signature: AtomicU64,
+
     // Leader schedule computed at epoch boundary for the next epoch
     next_leader_schedule: RwLock<Option<Arc<LeaderSchedule>>>,
 
@@ -183,6 +187,7 @@ impl Bank {
             transaction_cache: Arc::new(TransactionCache::new()),
             cost_tracker: Arc::new(crate::cost_tracker::CostTracker::new()),
             accounts_data_size: AtomicI64::new(0),
+            lamports_per_signature: AtomicU64::new(LAMPORTS_PER_SIGNATURE),
             next_leader_schedule: RwLock::new(None),
             stake_tracker: None,
             stake_history: None,
@@ -262,6 +267,9 @@ impl Bank {
             transaction_cache: Arc::new(TransactionCache::new()),
             cost_tracker: Arc::new(crate::cost_tracker::CostTracker::new()),
             accounts_data_size: AtomicI64::new(bank_state.accounts_data_len as i64),
+            lamports_per_signature: AtomicU64::new(
+                bank_state.fee_rate_governor.target_lamports_per_signature,
+            ),
             next_leader_schedule: RwLock::new(None),
             stake_tracker: None,
             stake_history: None,
@@ -339,6 +347,10 @@ impl Bank {
             transaction_cache: parent.transaction_cache.clone(),
             cost_tracker: Arc::new(crate::cost_tracker::CostTracker::new()),
             accounts_data_size: AtomicI64::new(parent.accounts_data_size.load(Ordering::Acquire)),
+            lamports_per_signature: AtomicU64::new(derive_fee_rate(
+                parent.lamports_per_signature.load(Ordering::Relaxed),
+                parent.signature_count.load(Ordering::Relaxed),
+            )),
             next_leader_schedule: RwLock::new(None),
             stake_tracker: parent.stake_tracker.clone(),
             stake_history: parent.stake_history.clone(),
@@ -486,7 +498,7 @@ impl Bank {
             burn_percent: economics::DEFAULT_FEE_BURN_PERCENT,
             last_restart_slot: 0,
             recent_blockhash: *self.last_blockhash.read().unwrap(),
-            lamports_per_signature: economics::LAMPORTS_PER_SIGNATURE,
+            lamports_per_signature: self.lamports_per_signature(),
         }
     }
 
@@ -565,6 +577,11 @@ impl Bank {
     /// Get the slot's signature count.
     pub fn signature_count(&self) -> u64 {
         self.signature_count.load(Ordering::Relaxed)
+    }
+
+    /// Current lamports-per-signature fee rate for this slot.
+    pub fn lamports_per_signature(&self) -> u64 {
+        self.lamports_per_signature.load(Ordering::Relaxed)
     }
 
     /// Get the last PoH blockhash for this slot.
@@ -804,13 +821,13 @@ impl Bank {
             sysvars.update_clock(self.slot, self.epoch, timestamp);
             sysvars.update_slot_hashes(self.slot, self.hash());
             sysvars.update_slot_history(self.slot);
-            sysvars.update_recent_blockhashes(self.hash(), LAMPORTS_PER_SIGNATURE);
+            sysvars.update_recent_blockhashes(self.hash(), self.lamports_per_signature());
         }
 
         // Register this slot's blockhash in the recent blockhash queue
         let bank_hash = self.hash();
-        let blockhash_info =
-            BlockhashInfo::new(Pubkey::from(bank_hash), LAMPORTS_PER_SIGNATURE, self.slot);
+        let fee_rate = self.lamports_per_signature();
+        let blockhash_info = BlockhashInfo::new(Pubkey::from(bank_hash), fee_rate, self.slot);
         self.blockhash_queue
             .write()
             .unwrap()
@@ -1273,6 +1290,38 @@ pub enum BankRootError {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BankFeeError {
     BankFrozen,
+}
+
+/// Derive the new fee rate from the parent slot's signature count.
+///
+/// Uses an adjustment step of target/20 (5%) per slot, clamped between
+/// target/2 and target*10. This matches the protocol's gradual fee
+/// adjustment to prevent sudden fee spikes.
+pub(crate) fn derive_fee_rate(current_rate: u64, parent_signature_count: u64) -> u64 {
+    let target = LAMPORTS_PER_SIGNATURE;
+    let target_sigs = DEFAULT_TARGET_SIGNATURES_PER_SLOT;
+
+    if target_sigs == 0 {
+        return target;
+    }
+
+    let min_rate = (target / 2).max(1);
+    let max_rate = target.saturating_mul(10);
+
+    // Calculate desired rate based on congestion ratio
+    let clamped_sigs = parent_signature_count.min(u32::MAX as u64);
+    let desired = (target as u128 * clamped_sigs as u128 / target_sigs as u128) as u64;
+    let desired = desired.clamp(min_rate, max_rate);
+
+    // Gradually adjust toward desired rate in steps of target/20 (5%)
+    let step = (target / 20).max(1);
+    if desired > current_rate {
+        (current_rate + step).min(max_rate)
+    } else if desired < current_rate {
+        current_rate.saturating_sub(step).max(min_rate)
+    } else {
+        desired
+    }
 }
 
 #[cfg(test)]
