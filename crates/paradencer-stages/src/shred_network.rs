@@ -631,7 +631,7 @@ impl ShredNetworkStage {
                 let abs_index = fec_set_index + rel_idx as u32;
                 let recovered_shred = Shred::new(
                     ShredCommonHeader {
-                        signature: [0u8; 64], // TODO: recovered shreds don't have valid signatures
+                        signature: [0u8; 64], // Erasure-recovered shreds cannot carry a valid leader signature
                         variant: ref_variant_byte,
                         slot,
                         index: abs_index,

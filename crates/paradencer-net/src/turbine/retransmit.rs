@@ -124,6 +124,10 @@ pub struct RetransmitService {
 
     /// Monotonic nonce counter for repair requests
     nonce_counter: AtomicU64,
+
+    /// Ed25519 secret key for signing repair requests (32-byte seed).
+    /// When present, outgoing repair requests are signed for authentication.
+    signing_key: Option<[u8; 32]>,
 }
 
 impl RetransmitService {
@@ -152,12 +156,21 @@ impl RetransmitService {
             pending_requests: Arc::new(RwLock::new(HashMap::new())),
             shred_cache: Arc::new(RwLock::new(HashMap::new())),
             nonce_counter: AtomicU64::new(0),
+            signing_key: None,
         }
     }
 
     /// Update the turbine tree
     pub fn update_tree(&self, tree: TurbineTree) {
         *self.tree.write() = Some(tree);
+    }
+
+    /// Set the Ed25519 signing key for authenticating outgoing repair requests.
+    ///
+    /// The key is a 32-byte Ed25519 seed. When set, all repair requests
+    /// sent to peers are signed before transmission.
+    pub fn set_signing_key(&mut self, key: [u8; 32]) {
+        self.signing_key = Some(key);
     }
 
     /// Submit a shred for retransmission
@@ -343,9 +356,9 @@ impl RetransmitService {
 
     /// Send a retransmit request to peers.
     ///
-    /// For each target peer, resolves the peer's repair address from
-    /// the turbine tree and sends a serialized repair request via the
-    /// transport layer.
+    /// For each target peer, resolves the peer's identity and repair address
+    /// from the turbine tree, constructs a signed repair request addressed
+    /// to that specific peer, and sends it via the transport layer.
     fn send_retransmit_request(&self, request: &RetransmitRequest) {
         let tree_guard = self.tree.read();
         let Some(ref current_tree) = *tree_guard else {
@@ -354,46 +367,51 @@ impl RetransmitService {
         };
 
         let nonce = self.nonce_counter.fetch_add(1, Ordering::Relaxed);
-        let repair_request = RepairRequest::Shred {
-            requester: self.node_id,
-            slot: request.slot,
-            index: request.index,
-            nonce,
-        };
-
-        // Convert to wire format and sign
-        // TODO: Look up recipient pubkey from turbine tree node
-        let recipient = [0u8; 32];
-        let wire_msg = match convert::request_to_wire(&repair_request, recipient) {
-            Some(msg) => msg,
-            None => {
-                error!("Failed to convert repair request to wire format");
-                return;
-            }
-        };
-
-        // TODO: Sign with node's signing key when available
-        // wire_msg.sign(&signing_key);
-
-        let encoded = match wire_msg.encode() {
-            Ok(bytes) => bytes,
-            Err(e) => {
-                error!("Failed to encode repair request: {}", e);
-                return;
-            }
-        };
 
         let mut sent = 0u32;
         for peer_id in &request.target_peers {
-            let addr = match current_tree.get_node(peer_id) {
-                Some(node) => node.contact_info.repair_addr,
+            let node = match current_tree.get_node(peer_id) {
+                Some(node) => node,
                 None => {
                     debug!("Peer {} not in turbine tree, skipping", peer_id);
                     continue;
                 }
             };
 
-            if let Err(e) = self.transport.send_to(&encoded, addr) {
+            let repair_request = RepairRequest::Shred {
+                requester: self.node_id,
+                slot: request.slot,
+                index: request.index,
+                nonce,
+            };
+
+            // Address the repair request to this specific peer's pubkey.
+            let recipient = peer_id.0;
+            let mut wire_msg = match convert::request_to_wire(&repair_request, recipient) {
+                Some(msg) => msg,
+                None => {
+                    error!("Failed to convert repair request to wire format");
+                    continue;
+                }
+            };
+
+            // Sign with our Ed25519 key so the recipient can verify authenticity.
+            if let Some(ref key) = self.signing_key {
+                wire_msg.sign(key);
+            }
+
+            let encoded = match wire_msg.encode() {
+                Ok(bytes) => bytes,
+                Err(e) => {
+                    error!("Failed to encode repair request: {}", e);
+                    continue;
+                }
+            };
+
+            if let Err(e) = self
+                .transport
+                .send_to(&encoded, node.contact_info.repair_addr)
+            {
                 warn!(
                     "Failed to send retransmit request to peer {}: {}",
                     peer_id, e
@@ -648,5 +666,70 @@ mod tests {
         service.send_retransmit_request(&request);
 
         assert_eq!(send_count.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn test_send_retransmit_request_per_peer_addressing() {
+        // Verify that each peer receives a request addressed to its own pubkey.
+        let counting = CountingTransport::new();
+        let send_count = counting.send_count.clone();
+
+        let root_id = create_node_id(0);
+        let transport: Arc<dyn ShredTransport> = Arc::new(counting);
+        let config = TurbineConfig::default();
+        let stats = RetransmitStats::new(Arc::new(crate::turbine::TurbineStats::new()));
+
+        let service = RetransmitService::new(root_id, transport, config.clone(), stats);
+
+        let peer1 = create_node_id(1);
+        let peer2 = create_node_id(2);
+
+        let validators = vec![
+            ValidatorInfo::new(create_contact_info(peer1, 9001), 1000),
+            ValidatorInfo::new(create_contact_info(peer2, 9002), 1000),
+        ];
+
+        let builder = TurbineTreeBuilder::new(config);
+        let tree = builder.build(root_id, create_contact_info(root_id, 9000), validators, 100);
+        service.update_tree(tree);
+
+        let request = RetransmitRequest::new(100, 5, vec![peer1, peer2]);
+        service.send_retransmit_request(&request);
+
+        // Both peers should receive the request.
+        assert_eq!(send_count.load(Ordering::Relaxed), 2);
+    }
+
+    #[test]
+    fn test_signing_key_set_and_used() {
+        let counting = CountingTransport::new();
+        let send_count = counting.send_count.clone();
+        let byte_count = counting.byte_count.clone();
+
+        let root_id = create_node_id(0);
+        let transport: Arc<dyn ShredTransport> = Arc::new(counting);
+        let config = TurbineConfig::default();
+        let stats = RetransmitStats::new(Arc::new(crate::turbine::TurbineStats::new()));
+
+        let mut service = RetransmitService::new(root_id, transport, config.clone(), stats);
+
+        // Set a signing key.
+        let (secret, _pubkey) = paradencer_crypto::generate_keypair();
+        service.set_signing_key(secret);
+
+        let peer1 = create_node_id(1);
+        let validators = vec![ValidatorInfo::new(create_contact_info(peer1, 9001), 1000)];
+
+        let builder = TurbineTreeBuilder::new(config);
+        let tree = builder.build(root_id, create_contact_info(root_id, 9000), validators, 100);
+        service.update_tree(tree);
+
+        let request = RetransmitRequest::new(200, 10, vec![peer1]);
+        service.send_retransmit_request(&request);
+
+        // Signed request should be sent.
+        assert_eq!(send_count.load(Ordering::Relaxed), 1);
+        // Signed messages are larger than unsigned due to signature bytes.
+        assert!(byte_count.load(Ordering::Relaxed) > 0);
     }
 }

@@ -25,6 +25,7 @@ pub(crate) struct ShredFilterMetrics {
     pub(crate) dropped_empty_payload: u64,
     pub(crate) dropped_oversized_payload: u64,
     pub(crate) dropped_disallowed_source: u64,
+    pub(crate) parse_failures: u64,
 }
 
 #[derive(serde::Serialize)]

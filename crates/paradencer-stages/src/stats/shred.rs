@@ -9,6 +9,7 @@ pub struct ShredFilterStats {
     dropped_empty_payload: AtomicU64,
     dropped_oversized_payload: AtomicU64,
     dropped_disallowed_source: AtomicU64,
+    parse_failures: AtomicU64,
 }
 
 impl ShredFilterStats {
@@ -18,6 +19,10 @@ impl ShredFilterStats {
 
     pub(crate) fn increment_duplicates(&self) {
         self.duplicate_shreds.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub(crate) fn increment_parse_failures(&self) {
+        self.parse_failures.fetch_add(1, Ordering::Relaxed);
     }
 
     pub(crate) fn increment_drop_reason(&self, drop_reason: DropReason) {
@@ -46,6 +51,7 @@ impl ShredFilterStats {
             dropped_empty_payload: self.dropped_empty_payload.load(Ordering::Relaxed),
             dropped_oversized_payload: self.dropped_oversized_payload.load(Ordering::Relaxed),
             dropped_disallowed_source: self.dropped_disallowed_source.load(Ordering::Relaxed),
+            parse_failures: self.parse_failures.load(Ordering::Relaxed),
         }
     }
 }

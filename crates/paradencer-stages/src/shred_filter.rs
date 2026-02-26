@@ -122,7 +122,7 @@ impl Service for ShredFilter {
                             Err(_parse_error) => {
                                 // Raw bytes failed to parse into a valid shred structure.
                                 // The frame-level checks passed but the shred format is invalid.
-                                // TODO: add parse failure counter to ShredFilterStats
+                                self.shred_filter_stats.increment_parse_failures();
                             }
                         }
                     }
