@@ -9,9 +9,10 @@ use crate::sysvars::SysvarCache;
 use crate::transaction_cache::TransactionCache;
 use crate::StakeHistory;
 use crate::StakeTracker;
-use paradencer_constants::economics::{FEE_BURN_PERCENT, LAMPORTS_PER_SIGNATURE};
+use paradencer_constants::economics::LAMPORTS_PER_SIGNATURE;
 use paradencer_constants::ledger::{GENESIS_EPOCH, GENESIS_SLOT, TICKS_PER_SLOT};
 use paradencer_crypto::lthash::{self, LatticeHashValue};
+use paradencer_ids::SYSTEM_PROGRAM_ID;
 use paradencer_storage::{Account, AccountDatabase, Pubkey, SnapshotBankState};
 use std::sync::atomic::{AtomicU64, AtomicU8, Ordering};
 use std::sync::{Arc, RwLock};
@@ -1083,29 +1084,61 @@ impl Bank {
 
         let execution_fees = self.execution_fees.swap(0, Ordering::Relaxed);
         let priority_fees = self.priority_fees.swap(0, Ordering::Relaxed);
-        let total_fees = execution_fees.saturating_add(priority_fees);
 
-        if total_fees == 0 {
+        if execution_fees == 0 && priority_fees == 0 {
             return Ok((0, 0));
         }
 
-        let burn_share = total_fees
-            .saturating_mul(FEE_BURN_PERCENT)
-            .checked_div(100)
-            .unwrap_or(0);
-        let leader_share = total_fees.saturating_sub(burn_share);
+        // Burn 50% of execution fees only. Priority fees are NOT burned —
+        // they go 100% to the slot leader.
+        let burn_share = execution_fees / 2;
+        let leader_share = priority_fees.saturating_add(execution_fees - burn_share);
 
         // Reduce capitalization by burned amount
         self.capitalization.fetch_sub(burn_share, Ordering::Relaxed);
 
-        // Credit the leader's account with their share of fees
+        // Validate fee collector (leader) before crediting
         if leader_share > 0 {
             if let Some(leader) = self.get_leader() {
-                self.credit_leader_fees(&leader, leader_share);
+                if self.validate_fee_collector(&leader) {
+                    self.credit_leader_fees(&leader, leader_share);
+                } else {
+                    // Invalid fee collector — burn the entire leader share
+                    self.capitalization
+                        .fetch_sub(leader_share, Ordering::Relaxed);
+                    return Ok((0, burn_share.saturating_add(leader_share)));
+                }
             }
         }
 
         Ok((leader_share, burn_share))
+    }
+
+    /// Validate the fee collector account before crediting fees.
+    ///
+    /// The fee collector must be owned by the system program and must
+    /// remain rent-exempt after receiving the fee payout. If validation
+    /// fails, fees should be burned instead.
+    fn validate_fee_collector(&self, leader: &Pubkey) -> bool {
+        let account = match self.accounts.get_published_account(leader) {
+            Some(acc) => acc,
+            None => {
+                // New account — will be created by credit_leader_fees.
+                // System-owned default account is always valid.
+                return true;
+            }
+        };
+
+        // Fee collector must be owned by the system program
+        if account.meta.owner != SYSTEM_PROGRAM_ID {
+            return false;
+        }
+
+        // After adding fees, account must be rent-exempt
+        // (lamports always increase, data size unchanged, so just check post-state)
+        let post_lamports = account.meta.lamports.saturating_add(1);
+        let min_balance = self.rent.minimum_balance(account.data.len());
+        post_lamports >= min_balance
     }
 
     /// Credit fee income to the leader's account.
@@ -1629,12 +1662,13 @@ mod tests {
 
         let (leader, burned) = bank.distribute_fees().unwrap();
 
-        // Total = 10000, burn 50% = 5000
-        assert_eq!(burned, 5000);
-        assert_eq!(leader, 5000);
+        // Burn 50% of execution fees only: 6000/2 = 3000
+        // Leader gets: 4000 (all priority) + 3000 (half execution) = 7000
+        assert_eq!(burned, 3000);
+        assert_eq!(leader, 7000);
 
-        // Capitalization reduced
-        assert_eq!(bank.capitalization(), 1_000_000_000 - 5000);
+        // Capitalization reduced by burned amount
+        assert_eq!(bank.capitalization(), 1_000_000_000 - 3000);
 
         // Fees cleared
         assert_eq!(bank.execution_fees(), 0);

@@ -18,6 +18,9 @@ pub mod economics {
     pub const MIN_LAMPORTS_PER_SIGNATURE: u64 = 0;
     pub const MAX_LAMPORTS_PER_SIGNATURE: u64 = 100_000;
 
+    /// Micro-lamports per lamport for priority fee calculation.
+    pub const MICRO_LAMPORTS_PER_LAMPORT: u64 = 1_000_000;
+
     /// Percentage of execution fees distributed to the slot leader.
     pub const FEE_LEADER_SHARE_PERCENT: u64 = 50;
     /// Percentage of execution fees burned to reduce total supply.
