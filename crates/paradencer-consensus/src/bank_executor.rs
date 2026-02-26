@@ -21,8 +21,8 @@ use paradencer_constants::ledger::NONCE_ACCOUNT_SIZE;
 use paradencer_constants::system_program::MAX_ACCOUNT_DATA_SIZE;
 use paradencer_constants::sysvars::MAX_INSTRUCTIONS_PER_TRANSACTION;
 use paradencer_ids::{
-    COMPUTE_BUDGET_PROGRAM_ID, ED25519_PROGRAM_ID, INCINERATOR_ID, SECP256K1_PROGRAM_ID,
-    SECP256R1_PROGRAM_ID, SYSTEM_PROGRAM_ID, VOTE_PROGRAM_ID,
+    COMPUTE_BUDGET_PROGRAM_ID, ED25519_PROGRAM_ID, INCINERATOR_ID, INSTRUCTIONS_SYSVAR_ID,
+    SECP256K1_PROGRAM_ID, SECP256R1_PROGRAM_ID, SYSTEM_PROGRAM_ID, VOTE_PROGRAM_ID,
 };
 use paradencer_storage::{Account, AccountData, Pubkey, TransactionId};
 use std::collections::HashMap;
@@ -814,6 +814,110 @@ fn account_loaded_size(account: &Account) -> u64 {
 }
 
 // ---------------------------------------------------------------------------
+// Instructions sysvar serialization
+// ---------------------------------------------------------------------------
+
+/// Serialize a transaction's instructions into the on-chain Instructions sysvar format.
+///
+/// The binary layout matches the Solana protocol:
+///   - `[u16]` number of instructions
+///   - `[u16 * num_instructions]` offset table (byte offset of each instruction)
+///   - For each instruction:
+///       - `[u16]` number of accounts
+///       - For each account:
+///           - `[u8]` flags (bit 0 = is_signer, bit 1 = is_writable)
+///           - `[32]` pubkey bytes
+///       - `[32]` program ID pubkey bytes
+///       - `[u16]` instruction data length
+///       - `[variable]` instruction data
+///   - `[u16]` current instruction index (initially 0, updated per-instruction)
+fn serialize_instructions_sysvar(transaction: &SanitizedTransaction) -> Vec<u8> {
+    let num_instructions = transaction.instructions.len();
+
+    // First pass: compute sizes and offsets
+    let header_size = 2 + num_instructions * 2; // num_instructions(u16) + offsets(u16 each)
+    let mut instruction_sizes = Vec::with_capacity(num_instructions);
+
+    for instruction in &transaction.instructions {
+        let num_accounts = instruction.account_indices.len();
+        // u16 num_accounts + (u8 flags + 32 pubkey) per account + 32 program_id + u16 data_len + data
+        let size = 2 + num_accounts * 33 + 32 + 2 + instruction.data.len();
+        instruction_sizes.push(size);
+    }
+
+    let total_size: usize = header_size + instruction_sizes.iter().sum::<usize>() + 2; // +2 for trailing current_index
+    let mut buf = vec![0u8; total_size];
+
+    // Write number of instructions
+    buf[0..2].copy_from_slice(&(num_instructions as u16).to_le_bytes());
+
+    // Compute and write offsets
+    let mut offset = header_size;
+    for (i, &size) in instruction_sizes.iter().enumerate() {
+        let off_pos = 2 + i * 2;
+        buf[off_pos..off_pos + 2].copy_from_slice(&(offset as u16).to_le_bytes());
+        offset += size;
+    }
+
+    // Write each instruction
+    let mut pos = header_size;
+    for instruction in &transaction.instructions {
+        let num_accounts = instruction.account_indices.len();
+        buf[pos..pos + 2].copy_from_slice(&(num_accounts as u16).to_le_bytes());
+        pos += 2;
+
+        for &ai in &instruction.account_indices {
+            let acct_idx = ai as usize;
+            let is_signer = transaction.is_signer(acct_idx);
+            let program_id_for_check = transaction
+                .account_keys
+                .get(instruction.program_id_index as usize)
+                .copied()
+                .unwrap_or_default();
+            let is_writable = is_account_writable(transaction, acct_idx, &program_id_for_check);
+            let flags: u8 = if is_signer { 1 } else { 0 } | if is_writable { 2 } else { 0 };
+            buf[pos] = flags;
+            pos += 1;
+
+            if let Some(pubkey) = transaction.account_keys.get(acct_idx) {
+                buf[pos..pos + 32].copy_from_slice(&pubkey.to_bytes());
+            }
+            pos += 32;
+        }
+
+        // Program ID
+        if let Some(program_id) = transaction
+            .account_keys
+            .get(instruction.program_id_index as usize)
+        {
+            buf[pos..pos + 32].copy_from_slice(&program_id.to_bytes());
+        }
+        pos += 32;
+
+        // Instruction data
+        buf[pos..pos + 2].copy_from_slice(&(instruction.data.len() as u16).to_le_bytes());
+        pos += 2;
+        buf[pos..pos + instruction.data.len()].copy_from_slice(&instruction.data);
+        pos += instruction.data.len();
+    }
+
+    // Current instruction index (starts at 0)
+    buf[pos..pos + 2].copy_from_slice(&0u16.to_le_bytes());
+
+    buf
+}
+
+/// Update the current instruction index in serialized Instructions sysvar data.
+///
+/// The index is stored as a u16 in the last 2 bytes of the serialized data.
+fn update_instructions_sysvar_index(data: &mut [u8], index: u16) {
+    if data.len() >= 2 {
+        let pos = data.len() - 2;
+        data[pos..pos + 2].copy_from_slice(&index.to_le_bytes());
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Durable nonce transaction handling
 // ---------------------------------------------------------------------------
 
@@ -1196,6 +1300,22 @@ impl Bank {
         let mut exec_error: Option<TransactionExecutionError> = None;
         let mut return_data: Option<(Pubkey, Vec<u8>)> = None;
 
+        // Pre-serialize Instructions sysvar if any instruction references it.
+        // Programs can introspect the full instruction list via this sysvar.
+        let uses_instructions_sysvar = transaction.instructions.iter().any(|ix| {
+            ix.account_indices.iter().any(|&ai| {
+                transaction
+                    .account_keys
+                    .get(ai as usize)
+                    .is_some_and(|k| *k == INSTRUCTIONS_SYSVAR_ID)
+            })
+        });
+        let mut instructions_sysvar_data = if uses_instructions_sysvar {
+            Some(serialize_instructions_sysvar(transaction))
+        } else {
+            None
+        };
+
         'execution: for (idx, instruction) in transaction.instructions.iter().enumerate() {
             // Resolve program id
             let program_id = match transaction
@@ -1232,11 +1352,25 @@ impl Bank {
                     }
                 };
 
-                let account = modified
-                    .get(&pubkey)
-                    .or_else(|| account_state.get(&pubkey))
-                    .cloned()
-                    .unwrap_or_default();
+                // For the Instructions sysvar, substitute the serialized
+                // transaction instructions instead of loading from state.
+                let account = if pubkey == INSTRUCTIONS_SYSVAR_ID {
+                    if let Some(ref mut sysvar_data) = instructions_sysvar_data {
+                        update_instructions_sysvar_index(sysvar_data, idx as u16);
+                        Account {
+                            data: AccountData::new(sysvar_data.clone()),
+                            ..Account::default()
+                        }
+                    } else {
+                        Account::default()
+                    }
+                } else {
+                    modified
+                        .get(&pubkey)
+                        .or_else(|| account_state.get(&pubkey))
+                        .cloned()
+                        .unwrap_or_default()
+                };
 
                 let writable = is_account_writable(transaction, acct_idx, &program_id);
                 let signer = transaction.is_signer(acct_idx);
@@ -4276,5 +4410,144 @@ mod tests {
         assert_eq!(bank.transaction_count(), 3);
         assert_eq!(bank.nonvote_transaction_count(), 3);
         assert!(bank.total_compute_units_used() > 0);
+    }
+
+    // ── Instructions sysvar tests ──────────────────────────────────────
+
+    #[test]
+    fn serialize_instructions_sysvar_basic() {
+        let payer = Pubkey::new_unique();
+        let program = Pubkey::new_unique();
+        let other = Pubkey::new_unique();
+
+        let tx = SanitizedTransaction {
+            account_keys: vec![payer, program, other],
+            instructions: vec![
+                CompiledInstruction {
+                    program_id_index: 1,
+                    account_indices: vec![0, 2],
+                    data: vec![0xAA, 0xBB],
+                },
+                CompiledInstruction {
+                    program_id_index: 1,
+                    account_indices: vec![2],
+                    data: vec![0xCC],
+                },
+            ],
+            recent_blockhash: [0u8; 32],
+            num_signatures: 1,
+            num_readonly_signed: 0,
+            num_readonly_unsigned: 1,
+            signatures: vec![],
+            message_bytes: vec![],
+        };
+
+        let data = serialize_instructions_sysvar(&tx);
+
+        // Parse back: first 2 bytes = num_instructions
+        let num_ix = u16::from_le_bytes([data[0], data[1]]) as usize;
+        assert_eq!(num_ix, 2);
+
+        // Offsets for each instruction
+        let off0 = u16::from_le_bytes([data[2], data[3]]) as usize;
+        let off1 = u16::from_le_bytes([data[4], data[5]]) as usize;
+        assert!(off0 < off1);
+
+        // First instruction at off0: 2 accounts
+        let num_accounts = u16::from_le_bytes([data[off0], data[off0 + 1]]) as usize;
+        assert_eq!(num_accounts, 2);
+
+        // Current instruction index at the end
+        let idx_pos = data.len() - 2;
+        let current_idx = u16::from_le_bytes([data[idx_pos], data[idx_pos + 1]]);
+        assert_eq!(current_idx, 0);
+    }
+
+    #[test]
+    fn update_instructions_sysvar_index_works() {
+        let mut data = vec![0u8; 10];
+        update_instructions_sysvar_index(&mut data, 5);
+        assert_eq!(data[8], 5);
+        assert_eq!(data[9], 0);
+
+        update_instructions_sysvar_index(&mut data, 256);
+        assert_eq!(u16::from_le_bytes([data[8], data[9]]), 256);
+    }
+
+    #[test]
+    fn instructions_sysvar_injected_into_accounts() {
+        // Create a backend that checks the Instructions sysvar account exists
+        struct InstructionsSysvarCheckBackend;
+
+        impl ExecutionBackend for InstructionsSysvarCheckBackend {
+            fn execute_instruction(
+                &self,
+                instruction: &InstructionInfo,
+                _remaining: u64,
+            ) -> InstructionResult {
+                // Check if Instructions sysvar is in the accounts
+                let has_sysvar = instruction
+                    .accounts
+                    .iter()
+                    .any(|(k, _, _, _)| *k == INSTRUCTIONS_SYSVAR_ID);
+                let sysvar_data_len = instruction
+                    .accounts
+                    .iter()
+                    .find(|(k, _, _, _)| *k == INSTRUCTIONS_SYSVAR_ID)
+                    .map(|(_, a, _, _)| a.data.len())
+                    .unwrap_or(0);
+
+                InstructionResult {
+                    success: has_sysvar && sysvar_data_len > 0,
+                    compute_units_consumed: 100,
+                    modified_accounts: HashMap::new(),
+                    logs: vec![format!(
+                        "sysvar_present={}, data_len={}",
+                        has_sysvar, sysvar_data_len
+                    )],
+                    error: if has_sysvar && sysvar_data_len > 0 {
+                        None
+                    } else {
+                        Some("missing instructions sysvar".to_string())
+                    },
+                    return_data: None,
+                }
+            }
+        }
+
+        let bank = create_test_bank();
+        let payer = Pubkey::new_unique();
+        let program = Pubkey::new_unique();
+
+        store_test_account(
+            &bank,
+            &payer,
+            &Account::new(100_000_000, vec![], Pubkey::default()),
+        );
+
+        // Create transaction that references the Instructions sysvar
+        let tx = SanitizedTransaction {
+            account_keys: vec![payer, program, INSTRUCTIONS_SYSVAR_ID],
+            instructions: vec![CompiledInstruction {
+                program_id_index: 1,
+                account_indices: vec![0, 2], // payer + instructions sysvar
+                data: vec![1, 2, 3],
+            }],
+            recent_blockhash: bank.last_blockhash(),
+            num_signatures: 1,
+            num_readonly_signed: 0,
+            num_readonly_unsigned: 1,
+            signatures: vec![],
+            message_bytes: vec![],
+        };
+
+        let result =
+            bank.process_transaction(&tx, &InstructionsSysvarCheckBackend, MAX_COMPUTE_UNITS);
+
+        assert!(
+            result.success,
+            "Instructions sysvar should be injected: {:?}",
+            result.error
+        );
     }
 }
