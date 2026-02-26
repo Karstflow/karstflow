@@ -1,3 +1,5 @@
+pub mod features;
+
 use paradencer_types::{Pubkey, PUBKEY_BYTES};
 
 /// System Program ID - handles account creation, transfers, and allocation

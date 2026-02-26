@@ -8,10 +8,11 @@ use crate::{
     Token2022ProgramExecutor, TokenProgramExecutor, VoteProgramExecutor, MAX_COMPUTE_UNITS,
 };
 use paradencer_ids::{
+    features::{is_feature_active, ENABLE_LOADER_V4, ENABLE_SECP256R1_PRECOMPILE},
     ADDRESS_LOOKUP_TABLE_PROGRAM_ID, ASSOCIATED_TOKEN_PROGRAM_ID, BPF_LOADER_PROGRAM_ID,
     COMPUTE_BUDGET_PROGRAM_ID, CONFIG_PROGRAM_ID, ED25519_PROGRAM_ID, LOADER_V4_PROGRAM_ID,
-    MEMO_PROGRAM_ID, MEMO_PROGRAM_V3_ID, SECP256K1_PROGRAM_ID, STAKE_PROGRAM_ID, SYSTEM_PROGRAM_ID,
-    TOKEN_2022_PROGRAM_ID, TOKEN_PROGRAM_ID, VOTE_PROGRAM_ID,
+    MEMO_PROGRAM_ID, MEMO_PROGRAM_V3_ID, SECP256K1_PROGRAM_ID, SECP256R1_PROGRAM_ID,
+    STAKE_PROGRAM_ID, SYSTEM_PROGRAM_ID, TOKEN_2022_PROGRAM_ID, TOKEN_PROGRAM_ID, VOTE_PROGRAM_ID,
 };
 use paradencer_types::{Account, Pubkey};
 use std::collections::HashMap;
@@ -237,6 +238,32 @@ impl TransactionProcessor {
         }
     }
 
+    /// Check whether a feature-gated program is available.
+    ///
+    /// Returns a failure outcome when the required feature gate has not
+    /// been activated, or `None` to continue with normal dispatch.
+    /// When no sysvar snapshot is attached (tests, legacy paths), feature
+    /// gating is not enforced.
+    fn reject_if_feature_inactive(
+        &self,
+        context: &ExecutionContext,
+        feature_id: &Pubkey,
+        program_name: &str,
+    ) -> Option<ExecutionOutcome> {
+        if let Some(ref snapshot) = context.sysvar_snapshot {
+            if !is_feature_active(&snapshot.active_features, feature_id) {
+                return Some(ExecutionOutcome::failure(
+                    0,
+                    format!(
+                        "Program {} is not available: required feature gate not active",
+                        program_name,
+                    ),
+                ));
+            }
+        }
+        None
+    }
+
     /// Execute a single instruction with full context (including sysvar snapshot).
     pub fn execute_instruction(&self, context: &ExecutionContext) -> ExecutionOutcome {
         // Route to appropriate program
@@ -293,6 +320,12 @@ impl TransactionProcessor {
                 .execute(context)
                 .unwrap_or_else(|err| ExecutionOutcome::failure(150, err))
         } else if context.program_id == LOADER_V4_PROGRAM_ID {
+            // Loader V4 requires the enable_loader_v4 feature gate.
+            if let Some(rejection) =
+                self.reject_if_feature_inactive(context, &ENABLE_LOADER_V4, "LoaderV4")
+            {
+                return rejection;
+            }
             self.loader_v4
                 .execute(context)
                 .unwrap_or_else(|err| ExecutionOutcome::failure(200, err))
@@ -304,6 +337,15 @@ impl TransactionProcessor {
             self.secp256k1_precompile
                 .execute(context)
                 .unwrap_or_else(|err| ExecutionOutcome::failure(200, err))
+        } else if context.program_id == SECP256R1_PROGRAM_ID {
+            // Secp256r1 precompile requires the enable_secp256r1_precompile feature gate.
+            if let Some(rejection) =
+                self.reject_if_feature_inactive(context, &ENABLE_SECP256R1_PRECOMPILE, "Secp256r1")
+            {
+                return rejection;
+            }
+            // TODO: Implement Secp256r1PrecompileExecutor
+            ExecutionOutcome::failure(0, "Secp256r1 precompile not yet implemented".to_string())
         } else {
             // Try executing as a deployed BPF program via BytecodeVm
             self.try_execute_bpf(context)
@@ -863,5 +905,105 @@ mod tests {
             text.extend_from_slice(&insn.encode().to_le_bytes());
         }
         text
+    }
+
+    // -------------------------------------------------------------------
+    // Feature gate tests
+    // -------------------------------------------------------------------
+
+    /// Build an ExecutionContext with the given active feature set.
+    fn context_with_features(
+        program_id: Pubkey,
+        features: std::collections::HashSet<[u8; 32]>,
+    ) -> ExecutionContext {
+        let snapshot = SysvarSnapshot {
+            active_features: features,
+            ..SysvarSnapshot::default()
+        };
+        ExecutionContext::new(program_id, vec![], vec![])
+            .with_compute_budget(MAX_COMPUTE_UNITS)
+            .with_sysvar_snapshot(snapshot)
+    }
+
+    #[test]
+    fn loader_v4_rejected_when_feature_inactive() {
+        let processor = TransactionProcessor::new();
+        let ctx = context_with_features(LOADER_V4_PROGRAM_ID, std::collections::HashSet::new());
+
+        let outcome = processor.execute_instruction(&ctx);
+
+        assert!(!outcome.success);
+        assert!(outcome.logs[0].contains("not available"));
+        assert!(outcome.logs[0].contains("LoaderV4"));
+    }
+
+    #[test]
+    fn loader_v4_allowed_when_feature_active() {
+        let processor = TransactionProcessor::new();
+        let mut features = std::collections::HashSet::new();
+        features.insert(*ENABLE_LOADER_V4.as_bytes());
+        let ctx = context_with_features(LOADER_V4_PROGRAM_ID, features);
+
+        let outcome = processor.execute_instruction(&ctx);
+
+        // LoaderV4 with empty data may succeed or fail depending on implementation,
+        // but the point is it DISPATCHES (not rejected by feature gate).
+        // Check it didn't fail with the feature gate message.
+        if !outcome.success {
+            assert!(!outcome.logs[0].contains("not available"));
+        }
+    }
+
+    #[test]
+    fn loader_v4_allowed_without_snapshot() {
+        // When no sysvar snapshot is present (legacy/test paths), feature
+        // gating is not enforced.
+        let processor = TransactionProcessor::new();
+        let ctx = ExecutionContext::new(LOADER_V4_PROGRAM_ID, vec![], vec![])
+            .with_compute_budget(MAX_COMPUTE_UNITS);
+
+        let outcome = processor.execute_instruction(&ctx);
+
+        // Should dispatch to LoaderV4 without feature check.
+        if !outcome.success {
+            assert!(!outcome.logs[0].contains("not available"));
+        }
+    }
+
+    #[test]
+    fn secp256r1_rejected_when_feature_inactive() {
+        let processor = TransactionProcessor::new();
+        let ctx = context_with_features(SECP256R1_PROGRAM_ID, std::collections::HashSet::new());
+
+        let outcome = processor.execute_instruction(&ctx);
+
+        assert!(!outcome.success);
+        assert!(outcome.logs[0].contains("not available"));
+        assert!(outcome.logs[0].contains("Secp256r1"));
+    }
+
+    #[test]
+    fn secp256r1_dispatches_when_feature_active() {
+        let processor = TransactionProcessor::new();
+        let mut features = std::collections::HashSet::new();
+        features.insert(*ENABLE_SECP256R1_PRECOMPILE.as_bytes());
+        let ctx = context_with_features(SECP256R1_PROGRAM_ID, features);
+
+        let outcome = processor.execute_instruction(&ctx);
+
+        // Should fail with "not yet implemented" rather than "not available"
+        assert!(!outcome.success);
+        assert!(outcome.logs[0].contains("not yet implemented"));
+    }
+
+    #[test]
+    fn always_enabled_programs_ignore_features() {
+        // System, vote, stake etc. should work even with an empty feature set
+        let processor = TransactionProcessor::new();
+        let ctx = context_with_features(SYSTEM_PROGRAM_ID, std::collections::HashSet::new());
+
+        let outcome = processor.execute_instruction(&ctx);
+
+        assert!(outcome.success, "System program should always be available");
     }
 }
