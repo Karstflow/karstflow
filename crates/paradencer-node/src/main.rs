@@ -2,15 +2,16 @@ use paradencer_plugin::PluginService;
 
 use paradencer_control::{
     build_diagnostics_summary_from_probe, build_pipeline_service, build_repair_service,
-    build_replay_service_with_block_input, build_turbine_service, build_vote_broadcast_service,
-    dispatch_command, ensure_mainnet_readiness, evaluate_mainnet_readiness,
-    materialize_service_pair_from_config, materialize_services_from_config, parse_command,
-    render_diagnostics_cluster_mode_line, render_diagnostics_lane_capacity_line,
-    render_diagnostics_ok_line, render_diagnostics_probe_line,
-    render_diagnostics_readiness_issue_line, render_diagnostics_readiness_line,
-    render_diagnostics_services_line, render_diagnostics_stage_mix_line,
-    render_diagnostics_topology_line, render_preflight_readiness_issue_line,
-    render_preflight_readiness_line, render_readiness_policy_line, resolve_validator_identity,
+    build_replay_service_with_block_input, build_replay_service_with_consensus,
+    build_turbine_service, build_vote_broadcast_service, dispatch_command,
+    ensure_mainnet_readiness, evaluate_mainnet_readiness, materialize_service_pair_from_config,
+    materialize_services_from_config, parse_command, render_diagnostics_cluster_mode_line,
+    render_diagnostics_lane_capacity_line, render_diagnostics_ok_line,
+    render_diagnostics_probe_line, render_diagnostics_readiness_issue_line,
+    render_diagnostics_readiness_line, render_diagnostics_services_line,
+    render_diagnostics_stage_mix_line, render_diagnostics_topology_line,
+    render_preflight_readiness_issue_line, render_preflight_readiness_line,
+    render_readiness_policy_line, resolve_validator_identity, restore_from_snapshot_archive,
     run_diagnostics_phase, run_preflight_phase, run_preflight_phase_with_probe_report,
     run_runtime_phase_with_consensus, start_gossip_service, BlockstoreShredProvider, ServiceBundle,
 };
@@ -69,11 +70,25 @@ fn run_with_node_config(
         .expect("topology must provide shred block receiver");
     // Keep the direct shred sender alive so ShredCollector's input doesn't close.
     let _direct_shred_sender = runtime_topology.direct_shred_sender;
-    let replay_bundle = build_replay_service_with_block_input(
-        paradencer_stages::ReplayServiceConfig::default(),
-        shred_block_input,
-        1_000_000, // initial stake for fork choice
-    );
+
+    // Choose bootstrap path: snapshot archive or genesis.
+    // When PARADENCER_SNAPSHOT_ARCHIVE is set, restore from a Solana snapshot
+    // to join an existing network. Otherwise bootstrap from genesis state.
+    let replay_bundle = if let Some(ref archive_path) = node_config.snapshot_archive_path {
+        let consensus =
+            restore_from_snapshot_archive(archive_path, node_config.data_dir.as_deref())?;
+        build_replay_service_with_consensus(
+            paradencer_stages::ReplayServiceConfig::default(),
+            shred_block_input,
+            consensus,
+        )
+    } else {
+        build_replay_service_with_block_input(
+            paradencer_stages::ReplayServiceConfig::default(),
+            shred_block_input,
+            1_000_000, // initial stake for fork choice
+        )
+    };
     let consensus = replay_bundle.consensus;
 
     // Wire replay signals to the plugin service.

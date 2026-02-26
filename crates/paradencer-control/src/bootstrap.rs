@@ -8,8 +8,8 @@ use crate::{
 };
 use paradencer_config::{NodeConfig, ValidatorIdentity};
 use paradencer_consensus::{
-    Bank, BankForks, CommitmentTracker, EpochSchedule, ForkChoice, LeaderSchedule, StakeTracker,
-    Tower, VoteProcessor, VoteProcessorConfig,
+    bootstrap_from_snapshot, Bank, BankForks, CommitmentTracker, EpochSchedule, ForkChoice,
+    LeaderSchedule, StakeTracker, Tower, VoteProcessor, VoteProcessorConfig,
 };
 use paradencer_core::{ExecutionMode, LinkKind, PinnedCorePolicy, StageKind};
 use paradencer_execution::ExecutionBridge;
@@ -29,7 +29,7 @@ use paradencer_stages::{
     SbpfExecutionAdapter, ShredCollector, ShredCollectorConfig,
 };
 use paradencer_storage::{
-    AccountDatabase, Blockstore, MaintenanceConfig, Pubkey, StorageEngine,
+    AccountDatabase, Blockstore, MaintenanceConfig, Pubkey, SnapshotRestorer, StorageEngine,
     StorageMaintenanceService,
 };
 use paradencer_topology::{materialize_services_with_blockstore, MaterializedTopology};
@@ -342,6 +342,143 @@ pub struct ReplayBundleWithExternalInput {
     pub consensus: ConsensusBundle,
     /// Signal bus for subscribing to replay events (slot completed, root advanced, etc.).
     pub signal_bus: Arc<Mutex<paradencer_stages::SignalBus>>,
+}
+
+/// Build a replay service using pre-built consensus infrastructure.
+///
+/// Use this when bootstrapping from a snapshot: the caller runs
+/// `restore_from_snapshot_archive` to produce a `ConsensusBundle`, then
+/// passes it here along with the shred block input from the topology.
+pub fn build_replay_service_with_consensus(
+    config: ReplayServiceConfig,
+    block_input: InPort<paradencer_stages::AssembledBlock>,
+    consensus: ConsensusBundle,
+) -> ReplayBundleWithExternalInput {
+    let backend = Arc::new(SbpfExecutionAdapter::with_defaults());
+    let service = ReplayService::with_backend(
+        config,
+        block_input,
+        Arc::clone(&consensus.bank_forks),
+        Arc::clone(&consensus.fork_choice),
+        Arc::clone(&consensus.execution_bridge),
+        backend,
+        Arc::clone(&consensus.vote_processor),
+        Arc::clone(&consensus.tower),
+        Arc::clone(&consensus.commitment_tracker),
+    );
+
+    let signal_bus = service.signal_bus();
+
+    ReplayBundleWithExternalInput {
+        service: Box::new(service),
+        consensus,
+        signal_bus,
+    }
+}
+
+/// Restore accounts from a Solana snapshot archive and bootstrap consensus.
+///
+/// Performs the complete snapshot bootstrap sequence:
+/// 1. Opens or creates a persistent storage engine at `data_dir`
+/// 2. Reads and decompresses the snapshot archive (tar.zst)
+/// 3. Populates the account database from AppendVec entries
+/// 4. Initializes Bank, stake tracker, vote cache, features, sysvar cache
+/// 5. Seeds transaction cache from the status cache
+/// 6. Wraps in BankForks with consensus components (ForkChoice, Tower, etc.)
+///
+/// Returns a `ConsensusBundle` ready for use with `build_replay_service_with_consensus`.
+pub fn restore_from_snapshot_archive(
+    archive_path: &Path,
+    data_dir: Option<&Path>,
+) -> Result<ConsensusBundle> {
+    eprintln!(
+        "snapshot: restoring from archive {}",
+        archive_path.display()
+    );
+
+    // Open persistent storage if data_dir is provided.
+    let (accounts, storage_engine) = if let Some(dir) = data_dir {
+        let engine = StorageEngine::open(dir).map_err(|e| ControlPlaneError::Bootstrap {
+            message: format!("failed to open storage engine at {}: {e}", dir.display()),
+        })?;
+        let db = engine.create_account_database();
+        (Arc::new(db), Some(Arc::new(engine)))
+    } else {
+        (Arc::new(AccountDatabase::new()), None)
+    };
+
+    // Read and decompress the snapshot archive.
+    let archive_file =
+        std::fs::File::open(archive_path).map_err(|e| ControlPlaneError::Bootstrap {
+            message: format!(
+                "failed to open snapshot archive {}: {e}",
+                archive_path.display()
+            ),
+        })?;
+    let reader = std::io::BufReader::new(archive_file);
+
+    let restorer = SnapshotRestorer::new();
+    let restore_result = restorer
+        .restore_compressed(reader, &accounts)
+        .map_err(|e| ControlPlaneError::Bootstrap {
+            message: format!("snapshot restore failed: {e}"),
+        })?;
+
+    eprintln!(
+        "snapshot: restored {} accounts ({} total lamports) at slot {} (version: {})",
+        restore_result.accounts_loaded,
+        restore_result.total_lamports,
+        restore_result.slot,
+        restore_result.version,
+    );
+
+    if restore_result.bank_state.is_none() {
+        return Err(ControlPlaneError::Bootstrap {
+            message: "snapshot archive missing bank state metadata — cannot bootstrap consensus"
+                .to_string(),
+        });
+    }
+
+    // Create a temporary leader schedule for the restored epoch.
+    // The bootstrap_from_snapshot function requires a schedule for the Bank.
+    // This uses a placeholder identity; the replay service will compute the
+    // real schedule from stake data once consensus is running.
+    let placeholder_validator = Pubkey::new([1u8; 32]);
+    let leader_schedule = Arc::new(
+        LeaderSchedule::new(restore_result.slot, &[(placeholder_validator, 1)])
+            .expect("single-validator schedule should not fail"),
+    );
+
+    let bootstrap_result = bootstrap_from_snapshot(accounts, &restore_result, leader_schedule)
+        .map_err(|e| ControlPlaneError::Bootstrap {
+            message: format!("consensus bootstrap from snapshot failed: {e}"),
+        })?;
+
+    eprintln!(
+        "snapshot: bootstrap complete — slot={}, stake={}d/{}v, features={}/{}, txcache={}, lthash={} accounts, hash_ok={}",
+        bootstrap_result.slot,
+        bootstrap_result.stake_init.delegations_loaded,
+        bootstrap_result.vote_init.vote_accounts_loaded,
+        bootstrap_result.feature_init.features_activated,
+        bootstrap_result.feature_init.feature_accounts_scanned,
+        bootstrap_result.transactions_seeded,
+        bootstrap_result.lthash_accounts,
+        bootstrap_result.bank_hash_verified,
+    );
+
+    if !bootstrap_result.bank_hash_verified {
+        eprintln!(
+            "WARNING: bank hash verification FAILED — computed={:?}, expected={:?}. \
+             Consensus may produce incorrect results.",
+            &bootstrap_result.computed_bank_hash[..8],
+            &bootstrap_result.expected_bank_hash[..8],
+        );
+    }
+
+    Ok(build_consensus_from_bank_forks(
+        bootstrap_result.bank_forks,
+        storage_engine,
+    ))
 }
 
 // ---------------------------------------------------------------------------
@@ -2531,6 +2668,39 @@ mod tests {
         let consensus = build_consensus_from_bank_forks(bank_forks, None);
         let fork_choice = consensus.fork_choice.lock().unwrap();
         assert_eq!(fork_choice.stats().total_stake, 1);
+    }
+
+    #[test]
+    fn restore_from_snapshot_archive_returns_error_for_missing_file() {
+        use super::restore_from_snapshot_archive;
+        use std::path::Path;
+
+        let result =
+            restore_from_snapshot_archive(Path::new("/nonexistent/snapshot-123456.tar.zst"), None);
+        match result {
+            Err(ControlPlaneError::Bootstrap { message }) => {
+                assert!(
+                    message.contains("failed to open snapshot archive"),
+                    "unexpected error: {message}"
+                );
+            }
+            Err(e) => panic!("expected Bootstrap error, got: {e:?}"),
+            Ok(_) => panic!("expected error for missing file, got Ok"),
+        }
+    }
+
+    #[test]
+    fn build_replay_service_with_consensus_creates_service() {
+        use super::{build_consensus_infrastructure, build_replay_service_with_consensus};
+        use paradencer_mesh::bounded_link;
+        use paradencer_stages::ReplayServiceConfig;
+
+        let consensus = build_consensus_infrastructure(1_000_000, None, None).unwrap();
+        let (_tx, rx) = bounded_link::<paradencer_stages::AssembledBlock>(16);
+
+        let bundle =
+            build_replay_service_with_consensus(ReplayServiceConfig::default(), rx, consensus);
+        assert_eq!(bundle.service.name(), "replay-service");
     }
 
     #[test]

@@ -77,6 +77,10 @@ pub struct NodeConfig {
     /// Paths to plugin configuration files (JSON format).
     /// Each file specifies a plugin shared library and its settings.
     pub plugin_config_files: Vec<PathBuf>,
+    /// Path to a Solana snapshot archive (tar.zst format) for bootstrap.
+    /// When set, the validator restores accounts from this archive on startup
+    /// and initializes consensus from the snapshot bank state instead of genesis.
+    pub snapshot_archive_path: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone)]
@@ -152,6 +156,9 @@ impl NodeConfig {
         let data_dir = std::env::var("PARADENCER_DATA_DIR").ok().map(PathBuf::from);
         let plugin_config_files =
             parse_plugin_config_paths(std::env::var("PARADENCER_PLUGIN_CONFIG").ok());
+        let snapshot_archive_path = std::env::var("PARADENCER_SNAPSHOT_ARCHIVE")
+            .ok()
+            .map(PathBuf::from);
 
         Ok(Self {
             cluster_mode,
@@ -175,6 +182,7 @@ impl NodeConfig {
             network_config: build_network_config(profile.and_then(|p| p.network.as_ref())),
             data_dir,
             plugin_config_files,
+            snapshot_archive_path,
         })
     }
 
