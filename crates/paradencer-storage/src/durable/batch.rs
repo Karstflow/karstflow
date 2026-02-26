@@ -96,3 +96,99 @@ impl WriteBatch {
         self.ops.clear();
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn new_batch_is_empty() {
+        let batch = WriteBatch::new();
+        assert!(batch.is_empty());
+        assert_eq!(batch.len(), 0);
+    }
+
+    #[test]
+    fn with_capacity_is_empty() {
+        let batch = WriteBatch::with_capacity(100);
+        assert!(batch.is_empty());
+    }
+
+    #[test]
+    fn put_adds_operation() {
+        let mut batch = WriteBatch::new();
+        batch.put("accounts", b"key1", b"value1").unwrap();
+        assert_eq!(batch.len(), 1);
+
+        if let WriteOp::Put { cf, key, value } = &batch.ops()[0] {
+            assert_eq!(cf, "accounts");
+            assert_eq!(key, b"key1");
+            assert_eq!(value, b"value1");
+        } else {
+            panic!("expected Put operation");
+        }
+    }
+
+    #[test]
+    fn delete_adds_operation() {
+        let mut batch = WriteBatch::new();
+        batch.delete("accounts", b"key1").unwrap();
+        assert_eq!(batch.len(), 1);
+
+        if let WriteOp::Delete { cf, key } = &batch.ops()[0] {
+            assert_eq!(cf, "accounts");
+            assert_eq!(key, b"key1");
+        } else {
+            panic!("expected Delete operation");
+        }
+    }
+
+    #[test]
+    fn mixed_operations() {
+        let mut batch = WriteBatch::new();
+        batch.put("cf1", b"k1", b"v1").unwrap();
+        batch.delete("cf2", b"k2").unwrap();
+        batch.put("cf1", b"k3", b"v3").unwrap();
+        assert_eq!(batch.len(), 3);
+    }
+
+    #[test]
+    fn clear_removes_all() {
+        let mut batch = WriteBatch::new();
+        batch.put("cf", b"k", b"v").unwrap();
+        batch.delete("cf", b"k2").unwrap();
+        assert_eq!(batch.len(), 2);
+
+        batch.clear();
+        assert!(batch.is_empty());
+    }
+
+    #[test]
+    fn put_rejects_at_max_size() {
+        let mut batch = WriteBatch::new();
+        for i in 0..MAX_WRITE_BATCH_SIZE {
+            batch.put("cf", format!("k{i}").as_bytes(), b"v").unwrap();
+        }
+        assert_eq!(batch.len(), MAX_WRITE_BATCH_SIZE);
+
+        let result = batch.put("cf", b"overflow", b"v");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn delete_rejects_at_max_size() {
+        let mut batch = WriteBatch::new();
+        for i in 0..MAX_WRITE_BATCH_SIZE {
+            batch.put("cf", format!("k{i}").as_bytes(), b"v").unwrap();
+        }
+
+        let result = batch.delete("cf", b"overflow");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn default_is_empty() {
+        let batch: WriteBatch = Default::default();
+        assert!(batch.is_empty());
+    }
+}

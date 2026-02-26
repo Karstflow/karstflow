@@ -82,3 +82,54 @@ impl CachedProgram {
         )
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_owner() -> Pubkey {
+        Pubkey::new([1u8; 32])
+    }
+
+    #[test]
+    fn builtin_is_executable() {
+        let prog = CachedProgram::builtin(test_owner());
+        assert!(prog.is_executable());
+        assert!(prog.elf_bytes.is_none());
+        assert_eq!(prog.data_size, 0);
+        assert_eq!(prog.deployment_slot, 0);
+        assert!(prog.expiration_slot.is_none());
+        assert!(matches!(prog.program_type, ProgramType::Builtin));
+    }
+
+    #[test]
+    fn loaded_is_executable() {
+        let elf = vec![0x7f, 0x45, 0x4c, 0x46]; // ELF magic
+        let prog = CachedProgram::loaded(elf.clone(), test_owner(), 100);
+        assert!(prog.is_executable());
+        assert_eq!(prog.elf_bytes.as_deref(), Some(elf.as_slice()));
+        assert_eq!(prog.data_size, 4);
+        assert_eq!(prog.deployment_slot, 100);
+    }
+
+    #[test]
+    fn failed_is_not_executable() {
+        let prog = CachedProgram::failed("bad ELF".to_string(), test_owner());
+        assert!(!prog.is_executable());
+        assert!(matches!(prog.program_type, ProgramType::FailedToLoad(_)));
+    }
+
+    #[test]
+    fn closing_is_not_executable() {
+        let mut prog = CachedProgram::builtin(test_owner());
+        prog.program_type = ProgramType::Closing;
+        assert!(!prog.is_executable());
+    }
+
+    #[test]
+    fn loaded_data_size_matches_elf() {
+        let elf = vec![0u8; 1024];
+        let prog = CachedProgram::loaded(elf, test_owner(), 50);
+        assert_eq!(prog.data_size, 1024);
+    }
+}

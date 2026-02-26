@@ -128,3 +128,108 @@ impl Default for VersionCounter {
         Self::new()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_pubkey(n: u8) -> Pubkey {
+        Pubkey::new([n; 32])
+    }
+
+    fn test_account() -> Account {
+        Account::new(1000, vec![1, 2, 3], Pubkey::new([0u8; 32]))
+    }
+
+    // --- TransactionId ---
+
+    #[test]
+    fn root_is_all_zeros() {
+        let root = TransactionId::root();
+        assert!(root.is_root());
+        assert_eq!(root.as_bytes(), &[0u8; XID_BYTES]);
+    }
+
+    #[test]
+    fn from_slot_encodes_slot() {
+        let xid = TransactionId::from_slot(42);
+        assert!(!xid.is_root());
+        let expected_slot = u64::from_le_bytes(xid.as_bytes()[0..8].try_into().unwrap());
+        assert_eq!(expected_slot, 42);
+    }
+
+    #[test]
+    fn from_slot_zero_is_root() {
+        let xid = TransactionId::from_slot(0);
+        assert!(xid.is_root());
+    }
+
+    #[test]
+    fn xid_from_bytes() {
+        let bytes = [7u8; XID_BYTES];
+        let xid: TransactionId = bytes.into();
+        assert_eq!(xid.as_bytes(), &bytes);
+    }
+
+    #[test]
+    fn xid_default_is_root() {
+        let xid = TransactionId::default();
+        assert!(xid.is_root());
+    }
+
+    // --- RecordKey ---
+
+    #[test]
+    fn record_key_new() {
+        let xid = TransactionId::from_slot(5);
+        let pk = test_pubkey(1);
+        let key = RecordKey::new(xid, pk);
+        assert_eq!(key.xid, xid);
+        assert_eq!(key.pubkey, pk);
+    }
+
+    #[test]
+    fn record_key_published() {
+        let pk = test_pubkey(1);
+        let key = RecordKey::published(pk);
+        assert!(key.xid.is_root());
+        assert_eq!(key.pubkey, pk);
+    }
+
+    // --- AccountRecord ---
+
+    #[test]
+    fn account_record_new() {
+        let xid = TransactionId::from_slot(10);
+        let pk = test_pubkey(5);
+        let acct = test_account();
+        let record = AccountRecord::new(xid, pk, acct.clone(), 42);
+        assert_eq!(record.key.xid, xid);
+        assert_eq!(record.key.pubkey, pk);
+        assert_eq!(record.version, 42);
+        assert_eq!(record.account.meta.lamports, 1000);
+    }
+
+    // --- VersionCounter ---
+
+    #[test]
+    fn version_counter_starts_at_one() {
+        let vc = VersionCounter::new();
+        assert_eq!(vc.current(), 1);
+    }
+
+    #[test]
+    fn version_counter_increments() {
+        let vc = VersionCounter::new();
+        assert_eq!(vc.next(), 1);
+        assert_eq!(vc.next(), 2);
+        assert_eq!(vc.next(), 3);
+        assert_eq!(vc.current(), 4);
+    }
+
+    #[test]
+    fn version_counter_default() {
+        let vc = VersionCounter::default();
+        assert_eq!(vc.current(), 1);
+    }
+}
