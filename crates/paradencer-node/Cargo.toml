@@ -6,6 +6,7 @@ license.workspace = true
 authors.workspace = true
 
 [dependencies]
+crossbeam-channel.workspace = true
 paradencer-control = { path = "../paradencer-control" }
 paradencer-config = { path = "../paradencer-config" }
 paradencer-net = { path = "../paradencer-net" }

@@ -234,9 +234,12 @@ pub fn build_replay_service_with_block_input(
         Arc::clone(&consensus.commitment_tracker),
     );
 
+    let signal_bus = service.signal_bus();
+
     ReplayBundleWithExternalInput {
         service: Box::new(service),
         consensus,
+        signal_bus,
     }
 }
 
@@ -249,6 +252,8 @@ pub struct ReplayBundleWithExternalInput {
     pub service: Box<dyn Service>,
     /// Shared consensus infrastructure for other services to use.
     pub consensus: ConsensusBundle,
+    /// Signal bus for subscribing to replay events (slot completed, root advanced, etc.).
+    pub signal_bus: Arc<Mutex<paradencer_stages::SignalBus>>,
 }
 
 // ---------------------------------------------------------------------------

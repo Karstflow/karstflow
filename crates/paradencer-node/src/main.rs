@@ -76,6 +76,69 @@ fn run_with_node_config(
     );
     let consensus = replay_bundle.consensus;
 
+    // Wire replay signals to the plugin service.
+    // Subscribe to the SignalBus, then start the plugin observer that
+    // translates ReplaySignal → PluginEvent for all loaded plugins.
+    {
+        let (plugin_tx, plugin_rx) = crossbeam_channel::bounded(256);
+        let signal_rx = replay_bundle
+            .signal_bus
+            .lock()
+            .unwrap()
+            .subscribe()
+            .expect("signal bus subscriber limit not reached");
+
+        // Bridge thread: ReplaySignal → PluginEvent conversion.
+        std::thread::Builder::new()
+            .name("plugin-bridge".into())
+            .spawn(move || {
+                while let Ok(signal) = signal_rx.recv() {
+                    let event = match signal {
+                        paradencer_stages::ReplaySignal::SlotCompleted(info) => {
+                            paradencer_plugin::PluginEvent::SlotCompleted {
+                                slot: info.slot,
+                                parent_slot: info.parent_slot,
+                                bank_hash: info.bank_hash,
+                                block_hash: info.block_hash,
+                                transaction_count: info.transaction_count,
+                                executed_count: info.executed_count,
+                                fee_collected: info.fee_lamports_collected,
+                                capitalization: info.capitalization,
+                                entry_count: 0,
+                                compute_units: 0,
+                                priority_fee: 0,
+                            }
+                        }
+                        paradencer_stages::ReplaySignal::SlotDead(info) => {
+                            paradencer_plugin::PluginEvent::SlotDead {
+                                slot: info.slot,
+                                reason: format!("{:?}", info.reason),
+                            }
+                        }
+                        paradencer_stages::ReplaySignal::RootAdvanced(info) => {
+                            paradencer_plugin::PluginEvent::RootAdvanced {
+                                new_root: info.new_root,
+                                previous_root: info.previous_root,
+                            }
+                        }
+                        paradencer_stages::ReplaySignal::OptimisticConfirmation(info) => {
+                            paradencer_plugin::PluginEvent::OptimisticConfirmation {
+                                slot: info.slot,
+                            }
+                        }
+                        // PohReset and BecameLeader are internal signals, not exposed to plugins.
+                        _ => continue,
+                    };
+                    if plugin_tx.send(event).is_err() {
+                        break;
+                    }
+                }
+            })
+            .expect("failed to spawn plugin bridge thread");
+
+        plugin_service.start_slot_observer(plugin_rx);
+    }
+
     // Build the transaction pipeline for block production.
     // Pipeline inputs come directly from the topology — each TxFilter stage
     // forwards accepted raw transactions into the pipeline via a dedicated channel.
