@@ -7,6 +7,7 @@ use crate::reward_application::RewardApplicator;
 use crate::rewards_distribution::RewardsDistributor;
 use crate::sysvars::SysvarCache;
 use crate::transaction_cache::TransactionCache;
+use crate::vote_account_cache::VoteAccountCache;
 use crate::StakeHistory;
 use crate::StakeTracker;
 use paradencer_constants::economics::{DEFAULT_TARGET_SIGNATURES_PER_SLOT, LAMPORTS_PER_SIGNATURE};
@@ -119,6 +120,7 @@ pub struct Bank {
     stake_tracker: Option<Arc<RwLock<StakeTracker>>>,
     stake_history: Option<Arc<RwLock<StakeHistory>>>,
     feature_set: Option<Arc<RwLock<FeatureSet>>>,
+    vote_account_cache: Option<Arc<RwLock<VoteAccountCache>>>,
     rewards_distributor: RwLock<Option<RewardsDistributor>>,
 }
 
@@ -201,6 +203,7 @@ impl Bank {
             stake_tracker: None,
             stake_history: None,
             feature_set: None,
+            vote_account_cache: None,
             rewards_distributor: RwLock::new(None),
         }
     }
@@ -286,6 +289,7 @@ impl Bank {
             stake_tracker: None,
             stake_history: None,
             feature_set: None,
+            vote_account_cache: None,
             rewards_distributor: RwLock::new(None),
         }
     }
@@ -370,6 +374,7 @@ impl Bank {
             stake_tracker: parent.stake_tracker.clone(),
             stake_history: parent.stake_history.clone(),
             feature_set: parent.feature_set.clone(),
+            vote_account_cache: parent.vote_account_cache.clone(),
             rewards_distributor: RwLock::new(parent.rewards_distributor.read().unwrap().clone()),
         }
     }
@@ -504,6 +509,16 @@ impl Bank {
     /// Get a reference to the feature set, if attached.
     pub fn feature_set(&self) -> Option<&Arc<RwLock<FeatureSet>>> {
         self.feature_set.as_ref()
+    }
+
+    /// Attach a vote account cache for vote state tracking.
+    pub fn set_vote_account_cache(&mut self, cache: Arc<RwLock<VoteAccountCache>>) {
+        self.vote_account_cache = Some(cache);
+    }
+
+    /// Get a reference to the vote account cache, if attached.
+    pub fn vote_account_cache(&self) -> Option<&Arc<RwLock<VoteAccountCache>>> {
+        self.vote_account_cache.as_ref()
     }
 
     /// Build a slot context for instruction execution from current bank state.

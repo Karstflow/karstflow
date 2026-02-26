@@ -1744,6 +1744,10 @@ impl Bank {
         // leader schedule, rewards, and epoch processing see current state.
         self.update_stake_cache(accounts);
 
+        // Update vote account cache for modified vote accounts so that
+        // leader schedule, clock, and tower see current vote metadata.
+        self.update_vote_account_cache(accounts);
+
         // Write to database
         let mut xid_bytes = [0u8; 16];
         xid_bytes[0..8].copy_from_slice(&self.slot().to_le_bytes());
@@ -1754,6 +1758,58 @@ impl Bank {
             let _ = db.write_account(xid, *pubkey, account.clone());
         }
         let _ = db.publish_transaction(xid);
+    }
+
+    /// Update vote account cache for modified vote accounts.
+    ///
+    /// Inspects each modified account owned by the vote program. For
+    /// valid vote accounts, extracts node_pubkey, commission, last vote
+    /// slot, and last timestamp and upserts into the cache. Zero-lamport
+    /// vote accounts are removed from the cache.
+    fn update_vote_account_cache(&self, accounts: &HashMap<Pubkey, Account>) {
+        let cache_lock = match self.vote_account_cache() {
+            Some(cache) => cache,
+            None => return,
+        };
+
+        let mut has_vote_changes = false;
+        for account in accounts.values() {
+            if account.meta.owner == VOTE_PROGRAM_ID {
+                has_vote_changes = true;
+                break;
+            }
+        }
+        if !has_vote_changes {
+            return;
+        }
+
+        let mut cache = cache_lock.write().unwrap();
+
+        for (pubkey, account) in accounts {
+            if account.meta.owner != VOTE_PROGRAM_ID {
+                continue;
+            }
+
+            if account.meta.lamports == 0 {
+                cache.remove(pubkey);
+                continue;
+            }
+
+            // Parse key fields from vote account data. The binary layout
+            // starts with: node_pubkey(32) + authorized_voter(32) +
+            // authorized_withdrawer(32) + commission(1) + votes...
+            if let Some((node_pubkey, commission, last_vote_slot, last_timestamp)) =
+                parse_vote_cache_fields(account.data.as_ref())
+            {
+                cache.update_from_vote_state(
+                    *pubkey,
+                    node_pubkey,
+                    commission,
+                    last_vote_slot,
+                    last_timestamp,
+                );
+            }
+        }
     }
 
     /// Refresh the stake delegation cache for any modified stake accounts.
@@ -1810,6 +1866,66 @@ impl Bank {
             }
         }
     }
+}
+
+/// Extract vote account metadata from binary vote state data.
+///
+/// Parses the vote account layout to extract the key fields needed
+/// by the vote account cache: node pubkey, commission, most recent
+/// vote slot, and last timestamp. Returns `None` if data is too
+/// short or malformed.
+fn parse_vote_cache_fields(data: &[u8]) -> Option<(Pubkey, u8, u64, i64)> {
+    // Layout: node_pubkey(32) + authorized_voter(32) + withdrawer(32) + commission(1) + votes...
+    let min_size = 32 + 32 + 32 + 1 + 4; // 101 bytes minimum
+    if data.len() < min_size {
+        return None;
+    }
+
+    let node_pubkey = Pubkey::new(data[0..32].try_into().ok()?);
+    let commission = data[96];
+    let mut offset = 97;
+
+    // Parse votes to find the latest vote slot
+    let vote_count = u32::from_le_bytes(data[offset..offset + 4].try_into().ok()?) as usize;
+    offset += 4;
+
+    let mut last_vote_slot = 0u64;
+    for _ in 0..vote_count {
+        if offset + 12 > data.len() {
+            break;
+        }
+        let slot = u64::from_le_bytes(data[offset..offset + 8].try_into().ok()?);
+        offset += 12; // slot(8) + confirmation_count(4)
+        if slot > last_vote_slot {
+            last_vote_slot = slot;
+        }
+    }
+
+    // Skip root_slot option
+    if offset < data.len() {
+        if data[offset] == 1 {
+            offset += 9; // tag(1) + slot(8)
+        } else {
+            offset += 1; // tag(1)
+        }
+    }
+
+    // Skip epoch_credits
+    if offset + 4 <= data.len() {
+        let ec_count = u32::from_le_bytes(data[offset..offset + 4].try_into().ok()?) as usize;
+        offset += 4;
+        offset += ec_count * 24; // epoch(8) + credits(8) + prev_credits(8)
+    }
+
+    // Parse last_timestamp: slot(8) + timestamp(8)
+    let mut last_timestamp = 0i64;
+    if offset + 16 <= data.len() {
+        // Skip timestamp slot (8 bytes)
+        offset += 8;
+        last_timestamp = i64::from_le_bytes(data[offset..offset + 8].try_into().ok()?);
+    }
+
+    Some((node_pubkey, commission, last_vote_slot, last_timestamp))
 }
 
 /// Extract the highest voted slot from vote instruction data.
@@ -4774,5 +4890,155 @@ mod tests {
         modified.insert(key, account);
         // Should not panic even though the account is stake-owned
         bank.write_accounts(&modified);
+    }
+
+    // -----------------------------------------------------------------------
+    // Vote account cache tests
+    // -----------------------------------------------------------------------
+
+    /// Build minimal vote account data for testing.
+    fn make_vote_account_data(
+        node_pubkey: &Pubkey,
+        commission: u8,
+        votes: &[(u64, u32)],
+        last_timestamp: i64,
+    ) -> Vec<u8> {
+        let mut data = Vec::new();
+
+        // node_pubkey (32)
+        data.extend_from_slice(node_pubkey.as_ref());
+        // authorized_voter (32)
+        data.extend_from_slice(&[0u8; 32]);
+        // authorized_withdrawer (32)
+        data.extend_from_slice(&[0u8; 32]);
+        // commission (1)
+        data.push(commission);
+
+        // votes
+        data.extend_from_slice(&(votes.len() as u32).to_le_bytes());
+        for (slot, conf) in votes {
+            data.extend_from_slice(&slot.to_le_bytes());
+            data.extend_from_slice(&conf.to_le_bytes());
+        }
+
+        // root_slot = None
+        data.push(0);
+
+        // epoch_credits = empty
+        data.extend_from_slice(&0u32.to_le_bytes());
+
+        // last_timestamp: slot(8) + timestamp(8)
+        data.extend_from_slice(&0u64.to_le_bytes()); // timestamp slot
+        data.extend_from_slice(&last_timestamp.to_le_bytes());
+
+        data
+    }
+
+    #[test]
+    fn parse_vote_cache_fields_extracts_metadata() {
+        let node = Pubkey::new([42u8; 32]);
+        let data = make_vote_account_data(&node, 7, &[(100, 1), (200, 2), (150, 1)], 1_700_000);
+
+        let (parsed_node, commission, last_slot, ts) =
+            super::parse_vote_cache_fields(&data).unwrap();
+        assert_eq!(parsed_node, node);
+        assert_eq!(commission, 7);
+        assert_eq!(last_slot, 200); // highest slot in votes
+        assert_eq!(ts, 1_700_000);
+    }
+
+    #[test]
+    fn parse_vote_cache_fields_empty_votes() {
+        let node = Pubkey::new([1u8; 32]);
+        let data = make_vote_account_data(&node, 50, &[], 0);
+
+        let (_, commission, last_slot, _) = super::parse_vote_cache_fields(&data).unwrap();
+        assert_eq!(commission, 50);
+        assert_eq!(last_slot, 0);
+    }
+
+    #[test]
+    fn parse_vote_cache_fields_too_short() {
+        assert!(super::parse_vote_cache_fields(&[0; 50]).is_none());
+    }
+
+    #[test]
+    fn write_accounts_updates_vote_cache() {
+        use crate::vote_account_cache::VoteAccountCache;
+        use std::sync::RwLock;
+
+        let mut bank = create_test_bank();
+        let cache = Arc::new(RwLock::new(VoteAccountCache::new()));
+        bank.set_vote_account_cache(cache.clone());
+
+        let vote_key = Pubkey::new_unique();
+        let node_key = Pubkey::new([42u8; 32]);
+        let data = make_vote_account_data(&node_key, 10, &[(500, 1)], 1_700_000);
+        let account = Account::new(1_000_000, data, VOTE_PROGRAM_ID);
+
+        store_test_account(&bank, &vote_key, &account);
+        let mut modified = HashMap::new();
+        modified.insert(vote_key, account);
+        bank.write_accounts(&modified);
+
+        let c = cache.read().unwrap();
+        let entry = c.get(&vote_key).expect("vote account should be cached");
+        assert_eq!(entry.node_pubkey, node_key);
+        assert_eq!(entry.commission, 10);
+        assert_eq!(entry.last_vote_slot, 500);
+        assert_eq!(entry.last_vote_timestamp, 1_700_000);
+    }
+
+    #[test]
+    fn write_accounts_removes_vote_on_zero_lamports() {
+        use crate::vote_account_cache::VoteAccountCache;
+        use std::sync::RwLock;
+
+        let mut bank = create_test_bank();
+        let cache = Arc::new(RwLock::new(VoteAccountCache::new()));
+        bank.set_vote_account_cache(cache.clone());
+
+        let vote_key = Pubkey::new_unique();
+
+        // Pre-populate cache
+        {
+            let mut c = cache.write().unwrap();
+            c.update_from_vote_state(vote_key, Pubkey::new([1u8; 32]), 5, 100, 0);
+        }
+        assert!(cache.read().unwrap().get(&vote_key).is_some());
+
+        // Write zero-lamport account
+        let account = Account {
+            data: paradencer_storage::AccountData::new(vec![]),
+            meta: paradencer_storage::AccountMeta {
+                lamports: 0,
+                owner: VOTE_PROGRAM_ID,
+                ..Default::default()
+            },
+        };
+
+        let mut modified = HashMap::new();
+        modified.insert(vote_key, account);
+        bank.write_accounts(&modified);
+
+        assert!(
+            cache.read().unwrap().get(&vote_key).is_none(),
+            "Zero-lamport vote account should be removed from cache"
+        );
+    }
+
+    #[test]
+    fn write_accounts_no_vote_cache_is_noop() {
+        // Bank without a vote cache should not panic
+        let bank = create_test_bank();
+        let vote_key = Pubkey::new_unique();
+        let data = make_vote_account_data(&Pubkey::new([1u8; 32]), 5, &[(100, 1)], 0);
+        let account = Account::new(1_000_000, data, VOTE_PROGRAM_ID);
+        store_test_account(&bank, &vote_key, &account);
+
+        let mut modified = HashMap::new();
+        modified.insert(vote_key, account);
+        bank.write_accounts(&modified);
+        // Should not panic
     }
 }

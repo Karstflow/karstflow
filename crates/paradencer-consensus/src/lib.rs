@@ -31,6 +31,7 @@ mod tests;
 mod tower;
 mod tower_persistence;
 pub mod transaction_cache;
+mod vote_account_cache;
 mod vote_processor;
 mod vote_state;
 
@@ -83,6 +84,7 @@ pub use stake::{
 pub use stake_history::{EpochStakeEntry, StakeHistory, StakeHistoryEntry, STAKE_HISTORY_CAP};
 pub use tower::{Tower, TowerError, TowerVote};
 pub use tower_persistence::{SavedTower, SavedVote, TowerPersistenceError};
+pub use vote_account_cache::{VoteAccountCache, VoteAccountEntry};
 pub use vote_processor::{
     SlotVoteInfo, VoteProcessor, VoteProcessorConfig, VoteProcessorError, VoteProcessorStats,
 };
