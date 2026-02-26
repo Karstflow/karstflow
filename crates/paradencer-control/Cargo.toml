@@ -23,6 +23,7 @@ paradencer-types = { path = "../paradencer-types" }
 paradencer-observability = { path = "../paradencer-observability" }
 paradencer-rpc = { path = "../paradencer-rpc" }
 tokio = { workspace = true, features = ["sync", "rt", "time"] }
+tracing.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

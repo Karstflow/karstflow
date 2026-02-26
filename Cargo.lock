@@ -1438,6 +1438,7 @@ dependencies = [
  "serde_json",
  "thiserror 2.0.18",
  "toml",
+ "tracing",
 ]
 
 [[package]]
@@ -1484,6 +1485,7 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
+ "tracing",
 ]
 
 [[package]]
@@ -1586,6 +1588,7 @@ dependencies = [
  "paradencer-plugin",
  "paradencer-stages",
  "paradencer-topology",
+ "tracing",
 ]
 
 [[package]]
@@ -1681,6 +1684,7 @@ dependencies = [
  "serde_json",
  "sha2",
  "thiserror 2.0.18",
+ "tracing",
 ]
 
 [[package]]

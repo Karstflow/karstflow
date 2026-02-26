@@ -3,15 +3,13 @@ use crate::profile_types::NodeProfileToml;
 use crate::{ConfigError, Result};
 use std::fs;
 use std::path::{Path, PathBuf};
+use tracing::info;
 
 pub fn load_node_profile_from_env() -> Result<Option<NodeProfileToml>> {
     match std::env::var("PARADENCER_NODE_CONFIG_PATH") {
         Ok(path_value) => {
             let profile_path = PathBuf::from(path_value);
-            println!(
-                "[config] loading node profile from '{}'",
-                profile_path.display()
-            );
+            info!(path = %profile_path.display(), "loading node profile");
             let profile = load_node_profile_from_file(&profile_path)?;
             Ok(Some(profile))
         }

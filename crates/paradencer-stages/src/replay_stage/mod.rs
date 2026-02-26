@@ -38,6 +38,7 @@ use paradencer_consensus::{
 };
 use paradencer_execution::ExecutionBridge;
 use std::sync::{Arc, Mutex, RwLock};
+use tracing::{error, info, warn};
 
 /// Statistics for replay stage operations
 #[derive(Debug, Clone, Default)]
@@ -262,7 +263,7 @@ impl ReplayStage {
         if self.config.process_votes {
             if let Err(e) = self.vote_integration.process_votes_from_block(&block) {
                 // Vote processing failures are non-fatal
-                eprintln!("Vote processing warning for slot {}: {:?}", block.slot, e);
+                warn!(slot = block.slot, error = ?e, "vote processing warning");
             } else {
                 self.stats.lock().unwrap().record_vote_processed();
             }
@@ -297,10 +298,7 @@ impl ReplayStage {
                 .vote_integration
                 .process_vote_updates(&outcome.vote_updates)
             {
-                eprintln!(
-                    "Vote update processing warning for slot {}: {:?}",
-                    block.slot, e
-                );
+                warn!(slot = block.slot, error = ?e, "vote update processing warning");
             }
         }
 
@@ -327,9 +325,10 @@ impl ReplayStage {
             self.stats.lock().unwrap().record_bank_transition();
 
             if finalization.epoch_boundary {
-                println!(
-                    "Epoch boundary at slot {} (epoch {})",
-                    finalization.slot, finalization.epoch
+                info!(
+                    slot = finalization.slot,
+                    epoch = finalization.epoch,
+                    "epoch boundary reached",
                 );
             }
 
@@ -390,7 +389,7 @@ impl ReplayStage {
                                 let previous_root = bank_forks.root_slot();
                                 match bank_forks.set_root(new_root) {
                                     Err(e) => {
-                                        eprintln!("Root progression failed: {:?}", e);
+                                        error!(error = ?e, "root progression failed");
                                     }
                                     Ok(eviction_report) => {
                                         let pruned_count = eviction_report.total_evicted() as u64;
@@ -414,10 +413,7 @@ impl ReplayStage {
                                             if let Err(e) =
                                                 root_bank.accounts().notify_root_advanced(new_root)
                                             {
-                                                eprintln!(
-                                                    "Storage flush at root {} failed: {:?}",
-                                                    new_root, e
-                                                );
+                                                error!(root = new_root, error = ?e, "storage flush at root failed");
                                             }
                                         }
                                         drop(bank_forks_r);
@@ -433,7 +429,7 @@ impl ReplayStage {
                                             }),
                                         );
 
-                                        println!("Root progressed to slot {}", new_root);
+                                        info!(new_root, "root progressed");
                                     }
                                 }
                             }
@@ -441,10 +437,7 @@ impl ReplayStage {
                     }
                 }
                 Err(e) => {
-                    eprintln!(
-                        "Consensus decision warning for slot {}: {:?}",
-                        block.slot, e
-                    );
+                    warn!(slot = block.slot, error = ?e, "consensus decision warning");
                 }
             }
         }

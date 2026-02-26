@@ -12,6 +12,7 @@ use defaults::plan_default_topology;
 use env::{ensure_nonzero_usize, parse_optional_usize_env, resolve_topology_path};
 use file::load_topology_from_file;
 use paradencer_core::TopologySpec;
+use tracing::info;
 
 pub fn build_topology_spec(profile: Option<&NodeProfileToml>) -> Result<TopologySpec> {
     let profile_topology = profile.and_then(|node_profile| node_profile.topology.as_ref());
@@ -20,10 +21,7 @@ pub fn build_topology_spec(profile: Option<&NodeProfileToml>) -> Result<Topology
     );
 
     if let Some(path) = topology_path {
-        println!(
-            "[topology] loading external topology from '{}'",
-            path.display()
-        );
+        info!(path = %path.display(), "loading external topology");
         return load_topology_from_file(&path);
     }
 

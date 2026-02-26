@@ -11,6 +11,7 @@ use env::apply_env_overrides;
 use paradencer_net::IngressPolicy;
 use profile::{apply_profile, load_ingress_policy_from_file};
 use std::path::PathBuf;
+use tracing::info;
 
 pub fn build_ingress_policy(profile: Option<&NodeProfileToml>) -> Result<IngressPolicy> {
     let mut ingress_policy = IngressPolicy::default();
@@ -23,10 +24,7 @@ pub fn build_ingress_policy(profile: Option<&NodeProfileToml>) -> Result<Ingress
 
     if let Ok(path_value) = std::env::var("PARADENCER_INGRESS_POLICY_PATH") {
         let policy_path = PathBuf::from(path_value);
-        println!(
-            "[ingress] loading policy profile from '{}'",
-            policy_path.display()
-        );
+        info!(path = %policy_path.display(), "loading ingress policy profile");
         let policy_profile = load_ingress_policy_from_file(&policy_path)?;
         apply_profile(&mut ingress_policy, &policy_profile)?;
     }
@@ -59,9 +57,10 @@ pub fn migrate_ingress_policy_schema(mut profile: IngressPolicyToml) -> Result<I
     match schema_version {
         INGRESS_POLICY_SCHEMA_VERSION => Ok(profile),
         0 => {
-            eprintln!(
-                "[config] migrating ingress policy schema_version 0 -> {}",
-                INGRESS_POLICY_SCHEMA_VERSION
+            info!(
+                from = 0,
+                to = INGRESS_POLICY_SCHEMA_VERSION,
+                "migrating ingress policy schema",
             );
             profile.schema_version = Some(INGRESS_POLICY_SCHEMA_VERSION);
             Ok(profile)

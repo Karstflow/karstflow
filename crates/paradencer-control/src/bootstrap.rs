@@ -36,6 +36,7 @@ use paradencer_topology::{materialize_services_with_blockstore, MaterializedTopo
 use std::collections::HashSet;
 use std::path::Path;
 use std::sync::{Arc, Mutex, RwLock};
+use tracing::{error, info, warn};
 
 pub struct ServiceBundle {
     pub topology_name: String,
@@ -142,9 +143,10 @@ pub fn build_consensus_infrastructure(
             .map_err(|e| ControlPlaneError::Bootstrap {
                 message: format!("account recovery failed: {e}"),
             })?;
-        eprintln!(
-            "storage: recovered {} accounts ({} total lamports) from persistent storage",
-            stats.accounts.accounts_loaded, stats.accounts.total_lamports,
+        info!(
+            accounts_loaded = stats.accounts.accounts_loaded,
+            total_lamports = stats.accounts.total_lamports,
+            "recovered accounts from persistent storage",
         );
         (Arc::new(db), Some(Arc::new(engine)))
     } else {
@@ -168,10 +170,10 @@ pub fn build_consensus_infrastructure(
             let tracker = tracker_arc.read().unwrap();
             let real_stake = tracker.total_stake();
             if real_stake > 0 {
-                eprintln!(
-                    "consensus: using real stake from {} delegations ({} total lamports)",
-                    tracker.delegation_count(),
-                    real_stake,
+                info!(
+                    delegations = tracker.delegation_count(),
+                    total_lamports = real_stake,
+                    "using real stake for consensus",
                 );
                 (real_stake, tracker.clone())
             } else {
@@ -225,18 +227,18 @@ pub fn build_consensus_from_bank_forks(
             let tracker = tracker_arc.read().unwrap();
             let real_stake = tracker.total_stake();
             if real_stake > 0 {
-                eprintln!(
-                    "consensus: initialized from snapshot with {} delegations ({} total stake)",
-                    tracker.delegation_count(),
-                    real_stake,
+                info!(
+                    delegations = tracker.delegation_count(),
+                    total_stake = real_stake,
+                    "initialized consensus from snapshot stake",
                 );
                 (real_stake, tracker.clone())
             } else {
-                eprintln!("consensus: snapshot has empty stake tracker, using unit stake");
+                warn!("snapshot has empty stake tracker, using unit stake");
                 (1, StakeTracker::new(0))
             }
         } else {
-            eprintln!("consensus: no stake tracker on snapshot bank, using unit stake");
+            warn!("no stake tracker on snapshot bank, using unit stake");
             (1, StakeTracker::new(0))
         };
 
@@ -391,10 +393,7 @@ pub fn restore_from_snapshot_archive(
     archive_path: &Path,
     data_dir: Option<&Path>,
 ) -> Result<ConsensusBundle> {
-    eprintln!(
-        "snapshot: restoring from archive {}",
-        archive_path.display()
-    );
+    info!(path = %archive_path.display(), "restoring from snapshot archive");
 
     // Open persistent storage if data_dir is provided.
     let (accounts, storage_engine) = if let Some(dir) = data_dir {
@@ -424,12 +423,12 @@ pub fn restore_from_snapshot_archive(
             message: format!("snapshot restore failed: {e}"),
         })?;
 
-    eprintln!(
-        "snapshot: restored {} accounts ({} total lamports) at slot {} (version: {})",
-        restore_result.accounts_loaded,
-        restore_result.total_lamports,
-        restore_result.slot,
-        restore_result.version,
+    info!(
+        accounts_loaded = restore_result.accounts_loaded,
+        total_lamports = restore_result.total_lamports,
+        slot = restore_result.slot,
+        version = restore_result.version,
+        "snapshot restore complete",
     );
 
     if restore_result.bank_state.is_none() {
@@ -454,24 +453,23 @@ pub fn restore_from_snapshot_archive(
             message: format!("consensus bootstrap from snapshot failed: {e}"),
         })?;
 
-    eprintln!(
-        "snapshot: bootstrap complete — slot={}, stake={}d/{}v, features={}/{}, txcache={}, lthash={} accounts, hash_ok={}",
-        bootstrap_result.slot,
-        bootstrap_result.stake_init.delegations_loaded,
-        bootstrap_result.vote_init.vote_accounts_loaded,
-        bootstrap_result.feature_init.features_activated,
-        bootstrap_result.feature_init.feature_accounts_scanned,
-        bootstrap_result.transactions_seeded,
-        bootstrap_result.lthash_accounts,
-        bootstrap_result.bank_hash_verified,
+    info!(
+        slot = bootstrap_result.slot,
+        delegations = bootstrap_result.stake_init.delegations_loaded,
+        vote_accounts = bootstrap_result.vote_init.vote_accounts_loaded,
+        features_activated = bootstrap_result.feature_init.features_activated,
+        features_scanned = bootstrap_result.feature_init.feature_accounts_scanned,
+        transactions_seeded = bootstrap_result.transactions_seeded,
+        lthash_accounts = bootstrap_result.lthash_accounts,
+        bank_hash_verified = bootstrap_result.bank_hash_verified,
+        "snapshot bootstrap complete",
     );
 
     if !bootstrap_result.bank_hash_verified {
-        eprintln!(
-            "WARNING: bank hash verification FAILED — computed={:?}, expected={:?}. \
-             Consensus may produce incorrect results.",
-            &bootstrap_result.computed_bank_hash[..8],
-            &bootstrap_result.expected_bank_hash[..8],
+        warn!(
+            computed = ?&bootstrap_result.computed_bank_hash[..8],
+            expected = ?&bootstrap_result.expected_bank_hash[..8],
+            "bank hash verification FAILED — consensus may produce incorrect results",
         );
     }
 
@@ -531,15 +529,12 @@ pub fn resolve_validator_identity(node_config: &NodeConfig) -> Result<ValidatorI
             });
         }
 
-        eprintln!("identity: loaded validator keypair {:?}", identity);
+        info!(identity = ?identity, "loaded validator keypair");
         Ok(identity)
     } else {
         let (secret_key, pubkey) = paradencer_crypto::generate_keypair();
         let identity = ValidatorIdentity::new(secret_key, pubkey);
-        eprintln!(
-            "identity: generated ephemeral keypair {:?} (dev mode)",
-            identity
-        );
+        info!(identity = ?identity, "generated ephemeral keypair (dev mode)");
         Ok(identity)
     }
 }
@@ -1016,13 +1011,13 @@ pub fn build_repair_service(
                     match RepairService::new(node_id, cluster_info, config, provider).await {
                         Ok(s) => s,
                         Err(e) => {
-                            eprintln!("repair service failed to start: {e}");
+                            error!(error = %e, "repair service failed to start");
                             return;
                         }
                     };
 
                 if let Err(e) = service.start().await {
-                    eprintln!("repair service loops failed to start: {e}");
+                    error!(error = %e, "repair service loops failed to start");
                     return;
                 }
 

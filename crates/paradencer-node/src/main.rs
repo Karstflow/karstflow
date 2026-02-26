@@ -1,4 +1,5 @@
 use paradencer_plugin::PluginService;
+use tracing::warn;
 
 use paradencer_control::{
     build_diagnostics_summary_from_probe, build_pipeline_service, build_repair_service,
@@ -189,9 +190,7 @@ fn run_with_node_config(
                     as std::sync::Arc<dyn paradencer_net::ShredProvider>,
             ),
             Err(e) => {
-                eprintln!(
-                    "warning: failed to open blockstore for repair: {e}, using in-memory fallback"
-                );
+                warn!(error = %e, "failed to open blockstore for repair, using in-memory fallback");
                 None
             }
         });
