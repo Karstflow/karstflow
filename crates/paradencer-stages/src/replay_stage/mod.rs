@@ -236,6 +236,17 @@ impl ReplayStage {
         Arc::clone(&self.signal_bus)
     }
 
+    /// Emit a replay signal and log when subscribers drop messages.
+    fn emit_signal(&self, signal: ReplaySignal) {
+        let drops = self.signal_bus.lock().unwrap().emit(signal);
+        if drops > 0 {
+            warn!(
+                signal_drops = drops,
+                "replay signal dropped for overloaded subscribers"
+            );
+        }
+    }
+
     /// Process a single assembled block through replay
     pub fn replay_block(&mut self, block: AssembledBlock) -> Result<BlockOutcome, StageError> {
         // Step 1: Get or create working bank for this slot
@@ -277,14 +288,11 @@ impl ReplayStage {
             Ok(outcome) => outcome,
             Err(e) => {
                 // Emit SlotDead signal on block processing failure.
-                self.signal_bus
-                    .lock()
-                    .unwrap()
-                    .emit(ReplaySignal::SlotDead(SlotDeadInfo {
-                        slot: block.slot,
-                        parent_slot: block.parent_slot,
-                        reason: SlotDeadReason::ExecutionFailed(format!("{:?}", e)),
-                    }));
+                self.emit_signal(ReplaySignal::SlotDead(SlotDeadInfo {
+                    slot: block.slot,
+                    parent_slot: block.parent_slot,
+                    reason: SlotDeadReason::ExecutionFailed(format!("{:?}", e)),
+                }));
                 return Err(StageError::ReplayError(format!(
                     "Block processing failed: {:?}",
                     e
@@ -307,14 +315,11 @@ impl ReplayStage {
             let finalization = match self.bank_transition.freeze_bank(block.slot) {
                 Ok(f) => f,
                 Err(e) => {
-                    self.signal_bus
-                        .lock()
-                        .unwrap()
-                        .emit(ReplaySignal::SlotDead(SlotDeadInfo {
-                            slot: block.slot,
-                            parent_slot: block.parent_slot,
-                            reason: SlotDeadReason::BankFreezeError,
-                        }));
+                    self.emit_signal(ReplaySignal::SlotDead(SlotDeadInfo {
+                        slot: block.slot,
+                        parent_slot: block.parent_slot,
+                        reason: SlotDeadReason::BankFreezeError,
+                    }));
                     return Err(StageError::ReplayError(format!(
                         "Bank freeze failed: {:?}",
                         e
@@ -345,23 +350,20 @@ impl ReplayStage {
                 .get(block.parent_slot)
                 .map(|parent_bank| parent_bank.last_blockhash())
                 .unwrap_or([0u8; 32]);
-            self.signal_bus
-                .lock()
-                .unwrap()
-                .emit(ReplaySignal::SlotCompleted(SlotCompletedInfo {
-                    slot: block.slot,
-                    parent_slot: block.parent_slot,
-                    bank_hash: bank.hash(),
-                    block_hash: bank.last_blockhash(),
-                    parent_blockhash,
-                    epoch: finalization.epoch,
-                    is_epoch_boundary: finalization.epoch_boundary,
-                    transaction_count: outcome.transactions.len() as u64,
-                    executed_count: outcome.executed_count as u64,
-                    fee_lamports_collected: bank.execution_fees() + bank.priority_fees(),
-                    capitalization: bank.capitalization(),
-                    timestamp,
-                }));
+            self.emit_signal(ReplaySignal::SlotCompleted(SlotCompletedInfo {
+                slot: block.slot,
+                parent_slot: block.parent_slot,
+                bank_hash: bank.hash(),
+                block_hash: bank.last_blockhash(),
+                parent_blockhash,
+                epoch: finalization.epoch,
+                is_epoch_boundary: finalization.epoch_boundary,
+                transaction_count: outcome.transactions.len() as u64,
+                executed_count: outcome.executed_count as u64,
+                fee_lamports_collected: bank.execution_fees() + bank.priority_fees(),
+                capitalization: bank.capitalization(),
+                timestamp,
+            }));
         }
 
         // Step 6: Run consensus decision (vote + root progression)
@@ -421,13 +423,13 @@ impl ReplayStage {
                                         self.stats.lock().unwrap().record_root_progression();
 
                                         // Emit RootAdvanced signal.
-                                        self.signal_bus.lock().unwrap().emit(
-                                            ReplaySignal::RootAdvanced(RootAdvancedInfo {
+                                        self.emit_signal(ReplaySignal::RootAdvanced(
+                                            RootAdvancedInfo {
                                                 new_root,
                                                 previous_root,
                                                 pruned_slot_count: pruned_count,
-                                            }),
-                                        );
+                                            },
+                                        ));
 
                                         info!(new_root, "root progressed");
                                     }
@@ -437,7 +439,7 @@ impl ReplayStage {
                     }
                 }
                 Err(e) => {
-                    warn!(slot = block.slot, error = ?e, "consensus decision warning");
+                    error!(slot = block.slot, error = ?e, "consensus decision failed");
                 }
             }
         }

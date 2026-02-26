@@ -349,11 +349,11 @@ impl VoteIntegration {
                 .tower
                 .write()
                 .map_err(|_| VoteIntegrationError::LockFailed)?;
-            let _ = tower_w.push_vote(best_slot);
+            let new_root = tower_w.push_vote(best_slot);
             return Ok(ConsensusDecision {
                 reset_slot: best_slot,
                 vote_slot: Some(best_slot),
-                new_root: None,
+                new_root,
                 reason: DecisionReason::EmptyTower,
             });
         }
