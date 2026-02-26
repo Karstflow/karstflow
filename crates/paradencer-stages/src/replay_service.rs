@@ -7,7 +7,7 @@
 ///
 /// The service also owns a `ShredAssembler` so that raw shred batches can be
 /// assembled into blocks inline before replay, eliminating an extra hop.
-use crate::replay_stage::{ReplayConfig, ReplayStage, ReplayStats};
+use crate::replay_stage::{ReplayConfig, ReplayStage, ReplayStats, SignalBus};
 use crate::shred_assembler::{AssembledBlock, ShredAssembler, ShredAssemblyStats};
 use crate::StageError;
 use paradencer_consensus::{
@@ -200,6 +200,14 @@ impl ReplayService {
     /// Number of blocks waiting to be replayed.
     pub fn pending_count(&self) -> usize {
         self.pending_blocks.len()
+    }
+
+    /// Access the signal bus for subscribing to replay signals.
+    ///
+    /// Returns a shared reference to the signal bus. Callers should
+    /// lock and call `subscribe()` to get their own receiving channel.
+    pub fn signal_bus(&self) -> Arc<Mutex<SignalBus>> {
+        self.replay_stage.signal_bus()
     }
 }
 
@@ -422,5 +430,113 @@ mod tests {
         assert_eq!(config.max_blocks_per_tick, 4);
         assert!(config.replay_config.strict_ancestry_check);
         assert!(config.replay_config.process_votes);
+    }
+
+    #[test]
+    fn signal_bus_accessible_from_service() {
+        let (bank_forks, fork_choice, bridge, vote_proc, tower, commitment) =
+            create_test_infrastructure();
+        let (_, block_rx) = bounded_link::<AssembledBlock>(16);
+
+        let service = ReplayService::with_block_input(
+            ReplayServiceConfig::default(),
+            block_rx,
+            bank_forks,
+            fork_choice,
+            bridge,
+            vote_proc,
+            tower,
+            commitment,
+        );
+
+        let bus = service.signal_bus();
+        let rx = bus.lock().unwrap().subscribe();
+        assert!(rx.is_some(), "should be able to subscribe via signal_bus");
+    }
+
+    #[test]
+    fn signal_bus_receives_emitted_signals() {
+        use crate::replay_stage::{ReplaySignal, RootAdvancedInfo};
+
+        let (bank_forks, fork_choice, bridge, vote_proc, tower, commitment) =
+            create_test_infrastructure();
+        let (_, block_rx) = bounded_link::<AssembledBlock>(16);
+
+        let service = ReplayService::with_block_input(
+            ReplayServiceConfig::default(),
+            block_rx,
+            bank_forks,
+            fork_choice,
+            bridge,
+            vote_proc,
+            tower,
+            commitment,
+        );
+
+        // Subscribe via the service's signal bus.
+        let bus = service.signal_bus();
+        let rx = bus.lock().unwrap().subscribe().unwrap();
+
+        // Emit a signal through the bus and verify receipt.
+        bus.lock()
+            .unwrap()
+            .emit(ReplaySignal::RootAdvanced(RootAdvancedInfo {
+                new_root: 42,
+                previous_root: 10,
+                pruned_slot_count: 30,
+            }));
+
+        let received = rx.try_recv();
+        assert!(
+            received.is_ok(),
+            "should receive signal emitted through the bus"
+        );
+
+        match received.unwrap() {
+            ReplaySignal::RootAdvanced(info) => {
+                assert_eq!(info.new_root, 42);
+                assert_eq!(info.previous_root, 10);
+                assert_eq!(info.pruned_slot_count, 30);
+            }
+            _ => panic!("Expected RootAdvanced signal"),
+        }
+    }
+
+    #[test]
+    fn multiple_subscribers_via_service() {
+        use crate::replay_stage::ReplaySignal;
+
+        let (bank_forks, fork_choice, bridge, vote_proc, tower, commitment) =
+            create_test_infrastructure();
+        let (_, block_rx) = bounded_link::<AssembledBlock>(16);
+
+        let service = ReplayService::with_block_input(
+            ReplayServiceConfig::default(),
+            block_rx,
+            bank_forks,
+            fork_choice,
+            bridge,
+            vote_proc,
+            tower,
+            commitment,
+        );
+
+        let bus = service.signal_bus();
+        let rx1 = bus.lock().unwrap().subscribe().unwrap();
+        let rx2 = bus.lock().unwrap().subscribe().unwrap();
+
+        // Emit directly via the bus to verify both receive.
+        bus.lock().unwrap().emit(ReplaySignal::RootAdvanced(
+            crate::replay_stage::RootAdvancedInfo {
+                new_root: 100,
+                previous_root: 50,
+                pruned_slot_count: 45,
+            },
+        ));
+
+        let r1 = rx1.try_recv();
+        let r2 = rx2.try_recv();
+        assert!(r1.is_ok(), "subscriber 1 should receive signal");
+        assert!(r2.is_ok(), "subscriber 2 should receive signal");
     }
 }
