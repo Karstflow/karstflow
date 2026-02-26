@@ -96,9 +96,10 @@ pub use vote_state::{
 pub use sysvars::SysvarCache;
 
 pub use bank_executor::{
-    BatchExecutionSummary, CompiledInstruction, ExecutionBackend, InstructionInfo,
-    InstructionResult, ProcessedSibling, SanitizedTransaction, SlotContext,
-    TransactionExecutionError, TransactionExecutionResult, VoteUpdate,
+    resolve_address_lookups, AddressLookupError, BatchExecutionSummary, CompiledInstruction,
+    ExecutionBackend, InstructionInfo, InstructionResult, ProcessedSibling, ResolvedAddresses,
+    SanitizedTransaction, SlotContext, TransactionExecutionError, TransactionExecutionResult,
+    VoteUpdate,
 };
 pub use cost_tracker::{CostTracker, CostTrackerError, TransactionCost};
 pub use features::{FeatureActivation, FeatureSet};

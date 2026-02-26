@@ -1,7 +1,7 @@
 use crate::{AssembledBlock, Entry};
 use paradencer_consensus::{
-    Bank, CommitmentLevel, CommitmentTracker, CompiledInstruction, ExecutionBackend,
-    SanitizedTransaction, TransactionExecutionResult, VoteUpdate,
+    resolve_address_lookups, Bank, CommitmentLevel, CommitmentTracker, CompiledInstruction,
+    ExecutionBackend, SanitizedTransaction, TransactionExecutionResult, VoteUpdate,
 };
 use paradencer_constants::execution::MAX_COMPUTE_UNITS;
 use paradencer_constants::transaction as tx_const;
@@ -323,12 +323,31 @@ impl BlockProcessor {
         }
 
         // Deserialize transaction from wire format
-        let sanitized = match deserialize_transaction(tx_data) {
-            Ok(tx) => tx,
+        let mut deserialized = match deserialize_transaction(tx_data) {
+            Ok(d) => d,
             Err(msg) => {
                 return Ok(TransactionResult::failure(tx_index, msg));
             }
         };
+
+        // Resolve address lookup table references for V0 transactions.
+        if !deserialized.address_table_lookups.is_empty() {
+            let db = bank.accounts();
+            match resolve_address_lookups(&deserialized.address_table_lookups, |pubkey| {
+                db.get_published_account(pubkey)
+            }) {
+                Ok(resolved) => {
+                    deserialized.tx.num_writable_lookup_keys = resolved.writable.len();
+                    deserialized.tx.account_keys.extend(resolved.writable);
+                    deserialized.tx.account_keys.extend(resolved.readonly);
+                }
+                Err(e) => {
+                    return Ok(TransactionResult::failure(tx_index, e.to_string()));
+                }
+            }
+        }
+
+        let sanitized = deserialized.tx;
 
         // Execute through Bank pipeline (blockhash, sig verify, dedup, fees, instructions)
         let exec_result =
@@ -498,7 +517,17 @@ fn decode_compact_u16(data: &[u8]) -> Result<(usize, usize), String> {
 ///       [num_account_indices bytes: account indices]
 ///       [compact-u16: data_length]
 ///       [data_length bytes: instruction data]
-fn deserialize_transaction(data: &[u8]) -> Result<SanitizedTransaction, String> {
+/// Intermediate result of transaction deserialization.
+///
+/// Contains the partially-built transaction and any address lookup table
+/// references that need to be resolved before execution.
+struct DeserializedTransaction {
+    tx: SanitizedTransaction,
+    /// (table_key, writable_indices, readonly_indices) tuples from V0 messages.
+    address_table_lookups: Vec<(Pubkey, Vec<u8>, Vec<u8>)>,
+}
+
+fn deserialize_transaction(data: &[u8]) -> Result<DeserializedTransaction, String> {
     if data.len() < tx_const::MIN_TRANSACTION_SIZE {
         return Err(format!(
             "transaction too small: {} bytes (minimum {})",
@@ -541,6 +570,20 @@ fn deserialize_transaction(data: &[u8]) -> Result<SanitizedTransaction, String> 
     // --- Message ---
     let message_start = offset;
     let message_bytes = data[message_start..].to_vec();
+
+    if offset >= data.len() {
+        return Err("truncated message".to_string());
+    }
+
+    // Detect versioned message: high bit set on first byte means versioned.
+    let is_versioned = data[offset] & 0x80 != 0;
+    if is_versioned {
+        let version = data[offset] & 0x7F;
+        if version != 0 {
+            return Err(format!("unsupported message version: {version}"));
+        }
+        offset += 1; // consume version byte
+    }
 
     if data.len() < offset + 3 {
         return Err("truncated message header".to_string());
@@ -623,15 +666,62 @@ fn deserialize_transaction(data: &[u8]) -> Result<SanitizedTransaction, String> 
         });
     }
 
-    Ok(SanitizedTransaction {
-        account_keys,
-        recent_blockhash,
-        instructions,
-        num_signatures: num_required_signatures,
-        num_readonly_signed,
-        num_readonly_unsigned,
-        signatures,
-        message_bytes,
+    // Parse address table lookups for V0 messages.
+    let mut address_table_lookups = Vec::new();
+    if is_versioned {
+        let (lookup_count, compact_len) = decode_compact_u16(&data[offset..])?;
+        offset += compact_len;
+
+        for _ in 0..lookup_count {
+            // Table key (32 bytes)
+            if data.len() < offset + 32 {
+                return Err("truncated lookup table key".to_string());
+            }
+            let mut table_key = [0u8; 32];
+            table_key.copy_from_slice(&data[offset..offset + 32]);
+            offset += 32;
+
+            // Writable indices
+            let (num_writable, compact_len) = decode_compact_u16(&data[offset..])?;
+            offset += compact_len;
+            if data.len() < offset + num_writable {
+                return Err("truncated writable indices".to_string());
+            }
+            let writable_indices = data[offset..offset + num_writable].to_vec();
+            offset += num_writable;
+
+            // Readonly indices
+            let (num_readonly, compact_len) = decode_compact_u16(&data[offset..])?;
+            offset += compact_len;
+            if data.len() < offset + num_readonly {
+                return Err("truncated readonly indices".to_string());
+            }
+            let readonly_indices = data[offset..offset + num_readonly].to_vec();
+            offset += num_readonly;
+
+            address_table_lookups.push((
+                Pubkey::from(table_key),
+                writable_indices,
+                readonly_indices,
+            ));
+        }
+    }
+
+    let num_static = account_keys.len();
+    Ok(DeserializedTransaction {
+        tx: SanitizedTransaction {
+            account_keys,
+            recent_blockhash,
+            instructions,
+            num_signatures: num_required_signatures,
+            num_readonly_signed,
+            num_readonly_unsigned,
+            signatures,
+            message_bytes,
+            num_static_keys: num_static,
+            num_writable_lookup_keys: 0,
+        },
+        address_table_lookups,
     })
 }
 
@@ -1070,7 +1160,8 @@ mod tests {
 
         let wire_bytes =
             build_signed_wire_tx(&signing_key, &program, blockhash, instr_data.clone());
-        let tx = deserialize_transaction(&wire_bytes).unwrap();
+        let deserialized = deserialize_transaction(&wire_bytes).unwrap();
+        let tx = deserialized.tx;
 
         assert_eq!(tx.account_keys.len(), 2);
         assert_eq!(tx.account_keys[0], payer);
@@ -1082,6 +1173,7 @@ mod tests {
         assert_eq!(tx.instructions[0].program_id_index, 1);
         assert_eq!(tx.instructions[0].account_indices, vec![0]);
         assert_eq!(tx.instructions[0].data, instr_data);
+        assert!(deserialized.address_table_lookups.is_empty());
     }
 
     #[test]
@@ -1124,9 +1216,11 @@ mod tests {
             num_readonly_unsigned: 0,
             signatures: vec![[0u8; 64]],
             message_bytes: vec![],
+            num_static_keys: 0,
+            num_writable_lookup_keys: 0,
         };
         let wire = serialize_transaction(&tx);
-        let parsed = deserialize_transaction(&wire).unwrap();
+        let parsed = deserialize_transaction(&wire).unwrap().tx;
 
         assert_eq!(parsed.instructions.len(), 2);
         assert_eq!(parsed.instructions[0].account_indices, vec![0, 2]);

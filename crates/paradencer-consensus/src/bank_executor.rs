@@ -137,6 +137,10 @@ pub trait ExecutionBackend: Send + Sync {
 #[derive(Debug, Clone)]
 pub struct SanitizedTransaction {
     /// All account keys referenced by this transaction (fee payer first).
+    ///
+    /// For V0 transactions, this includes both static keys AND resolved
+    /// lookup table keys. The resolved keys are appended in order:
+    /// writable lookup keys first, then readonly lookup keys.
     pub account_keys: Vec<Pubkey>,
     /// Recent blockhash.
     pub recent_blockhash: [u8; 32],
@@ -146,15 +150,54 @@ pub struct SanitizedTransaction {
     pub num_signatures: u64,
     /// Number of read-only signed accounts.
     pub num_readonly_signed: u8,
-    /// Number of read-only unsigned accounts.
+    /// Number of read-only unsigned accounts (from static keys only).
     pub num_readonly_unsigned: u8,
     /// Ed25519 signatures (one per required signer).
     pub signatures: Vec<[u8; 64]>,
     /// Serialized message bytes for signature verification.
     pub message_bytes: Vec<u8>,
+    /// Number of static (non-lookup-table) account keys.
+    /// All keys from index `num_static_keys..` are resolved from lookup tables.
+    /// For legacy transactions, this equals `account_keys.len()`.
+    pub num_static_keys: usize,
+    /// Number of writable keys resolved from lookup tables.
+    /// These are at indices `[num_static_keys, num_static_keys + num_writable_lookup_keys)`.
+    /// Readonly lookup keys follow at `[num_static_keys + num_writable_lookup_keys..]`.
+    pub num_writable_lookup_keys: usize,
 }
 
 impl SanitizedTransaction {
+    /// Create a legacy (non-V0) sanitized transaction.
+    ///
+    /// Sets `num_static_keys` to the total number of account keys and
+    /// `num_writable_lookup_keys` to zero, since legacy transactions have
+    /// no address lookup table references.
+    #[allow(clippy::too_many_arguments)]
+    pub fn legacy(
+        account_keys: Vec<Pubkey>,
+        recent_blockhash: [u8; 32],
+        instructions: Vec<CompiledInstruction>,
+        num_signatures: u64,
+        num_readonly_signed: u8,
+        num_readonly_unsigned: u8,
+        signatures: Vec<[u8; 64]>,
+        message_bytes: Vec<u8>,
+    ) -> Self {
+        let num_static = account_keys.len();
+        Self {
+            account_keys,
+            recent_blockhash,
+            instructions,
+            num_signatures,
+            num_readonly_signed,
+            num_readonly_unsigned,
+            signatures,
+            message_bytes,
+            num_static_keys: num_static,
+            num_writable_lookup_keys: 0,
+        }
+    }
+
     /// Check if account at given index is a signer.
     ///
     /// Accounts `[0, num_signatures)` are signers.
@@ -162,25 +205,47 @@ impl SanitizedTransaction {
         index < self.num_signatures as usize
     }
 
+    /// Effective number of static account keys.
+    ///
+    /// Returns `num_static_keys` if explicitly set, otherwise treats all
+    /// keys as static (legacy transaction behavior).
+    fn static_key_count(&self) -> usize {
+        if self.num_static_keys > 0 {
+            self.num_static_keys
+        } else {
+            self.account_keys.len()
+        }
+    }
+
     /// Check if account at given index is writable according to the message.
     ///
-    /// Account layout:
+    /// Static account layout:
     /// - `[0, num_signatures - num_readonly_signed)` → writable signed
     /// - `[num_signatures - num_readonly_signed, num_signatures)` → readonly signed
-    /// - `[num_signatures, total - num_readonly_unsigned)` → writable unsigned
-    /// - `[total - num_readonly_unsigned, total)` → readonly unsigned
+    /// - `[num_signatures, static_keys - num_readonly_unsigned)` → writable unsigned
+    /// - `[static_keys - num_readonly_unsigned, static_keys)` → readonly unsigned
+    ///
+    /// Lookup-table resolved accounts:
+    /// - `[static_keys, static_keys + num_writable_lookup_keys)` → writable
+    /// - `[static_keys + num_writable_lookup_keys..)` → readonly
     pub fn is_writable_index(&self, index: usize) -> bool {
+        let static_keys = self.static_key_count();
+
+        if index >= static_keys {
+            // Lookup-table resolved account: writable if in the writable range
+            return index < static_keys + self.num_writable_lookup_keys;
+        }
+
         let num_sigs = self.num_signatures as usize;
         let ro_signed = self.num_readonly_signed as usize;
         let ro_unsigned = self.num_readonly_unsigned as usize;
-        let total = self.account_keys.len();
 
         if index < num_sigs {
             // Signed accounts: writable if before readonly boundary
             index < num_sigs.saturating_sub(ro_signed)
         } else {
             // Unsigned accounts: writable if before readonly boundary
-            index < total.saturating_sub(ro_unsigned)
+            index < static_keys.saturating_sub(ro_unsigned)
         }
     }
 }
@@ -731,6 +796,120 @@ fn is_account_writable(
     }
 
     true
+}
+
+// ---------------------------------------------------------------------------
+// Address lookup table resolution
+// ---------------------------------------------------------------------------
+
+/// Error returned when address lookup table resolution fails.
+#[derive(Debug, Clone)]
+pub enum AddressLookupError {
+    /// The lookup table account was not found.
+    TableNotFound(Pubkey),
+    /// The lookup table account data is too small for the metadata header.
+    InvalidTableData(Pubkey),
+    /// An index into the lookup table is out of range.
+    IndexOutOfRange {
+        table: Pubkey,
+        index: u8,
+        table_len: usize,
+    },
+}
+
+impl std::fmt::Display for AddressLookupError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::TableNotFound(pk) => write!(f, "address lookup table not found: {pk}"),
+            Self::InvalidTableData(pk) => {
+                write!(f, "invalid address lookup table data: {pk}")
+            }
+            Self::IndexOutOfRange {
+                table,
+                index,
+                table_len,
+            } => {
+                write!(
+                    f,
+                    "index {index} out of range for table {table} (len {table_len})"
+                )
+            }
+        }
+    }
+}
+
+/// Resolved addresses from address lookup tables.
+///
+/// Contains separate lists of writable and readonly addresses resolved
+/// from `MessageAddressTableLookup` entries in a V0 transaction.
+#[derive(Debug, Clone, Default)]
+pub struct ResolvedAddresses {
+    /// Writable addresses resolved from lookup tables.
+    pub writable: Vec<Pubkey>,
+    /// Read-only addresses resolved from lookup tables.
+    pub readonly: Vec<Pubkey>,
+}
+
+/// Resolve address lookup table references to concrete pubkeys.
+///
+/// For each lookup entry, reads the ALT account from `read_account`,
+/// parses the stored address list, and extracts the requested indices.
+/// The ALT account data format is: 56-byte metadata header followed by
+/// packed 32-byte pubkeys.
+pub fn resolve_address_lookups<F>(
+    lookups: &[(Pubkey, Vec<u8>, Vec<u8>)],
+    read_account: F,
+) -> Result<ResolvedAddresses, AddressLookupError>
+where
+    F: Fn(&Pubkey) -> Option<Account>,
+{
+    let mut resolved = ResolvedAddresses::default();
+
+    for (table_key, writable_indices, readonly_indices) in lookups {
+        let account =
+            read_account(table_key).ok_or(AddressLookupError::TableNotFound(*table_key))?;
+
+        let data = account.data.as_slice();
+        if data.len() < paradencer_constants::address_lookup_table::LOOKUP_TABLE_META_SIZE {
+            return Err(AddressLookupError::InvalidTableData(*table_key));
+        }
+
+        let addresses_data =
+            &data[paradencer_constants::address_lookup_table::LOOKUP_TABLE_META_SIZE..];
+        let num_addresses = addresses_data.len() / 32;
+
+        for &idx in writable_indices {
+            let i = idx as usize;
+            if i >= num_addresses {
+                return Err(AddressLookupError::IndexOutOfRange {
+                    table: *table_key,
+                    index: idx,
+                    table_len: num_addresses,
+                });
+            }
+            let start = i * 32;
+            let mut key = [0u8; 32];
+            key.copy_from_slice(&addresses_data[start..start + 32]);
+            resolved.writable.push(Pubkey::from(key));
+        }
+
+        for &idx in readonly_indices {
+            let i = idx as usize;
+            if i >= num_addresses {
+                return Err(AddressLookupError::IndexOutOfRange {
+                    table: *table_key,
+                    index: idx,
+                    table_len: num_addresses,
+                });
+            }
+            let start = i * 32;
+            let mut key = [0u8; 32];
+            key.copy_from_slice(&addresses_data[start..start + 32]);
+            resolved.readonly.push(Pubkey::from(key));
+        }
+    }
+
+    Ok(resolved)
 }
 
 // ---------------------------------------------------------------------------
@@ -2164,6 +2343,7 @@ mod tests {
             .map(|a| account_keys.iter().position(|k| k == a).unwrap() as u8)
             .collect();
 
+        let num_static = account_keys.len();
         SanitizedTransaction {
             account_keys,
             recent_blockhash: [0u8; 32],
@@ -2177,6 +2357,8 @@ mod tests {
             num_readonly_unsigned: 1, // program is readonly
             signatures: vec![],
             message_bytes: vec![],
+            num_static_keys: num_static,
+            num_writable_lookup_keys: 0,
         }
     }
 
@@ -2301,6 +2483,8 @@ mod tests {
             num_readonly_unsigned: 1, // only program is readonly
             signatures: vec![],
             message_bytes: vec![],
+            num_static_keys: 0,
+            num_writable_lookup_keys: 0,
         };
 
         let result = bank.process_transaction(&tx, &backend, MAX_COMPUTE_UNITS);
@@ -2424,6 +2608,8 @@ mod tests {
             num_readonly_unsigned: 0,
             signatures: vec![],
             message_bytes: vec![],
+            num_static_keys: 0,
+            num_writable_lookup_keys: 0,
         };
 
         let result = bank.process_transaction(&tx, &HeavyBackend, 1_000_000);
@@ -2468,6 +2654,8 @@ mod tests {
             num_readonly_unsigned: 0,
             signatures: vec![],
             message_bytes: vec![],
+            num_static_keys: 0,
+            num_writable_lookup_keys: 0,
         };
 
         let result = bank.process_transaction(&tx, &backend, MAX_COMPUTE_UNITS);
@@ -2528,6 +2716,8 @@ mod tests {
                 num_readonly_unsigned: 0,
                 signatures: vec![],
                 message_bytes: vec![],
+                num_static_keys: 0,
+                num_writable_lookup_keys: 0,
             });
         }
 
@@ -2607,6 +2797,8 @@ mod tests {
             num_readonly_unsigned: 0,
             signatures: vec![],
             message_bytes: vec![],
+            num_static_keys: 0,
+            num_writable_lookup_keys: 0,
         };
 
         let result = bank.process_transaction(&tx, &backend, MAX_COMPUTE_UNITS);
@@ -2647,6 +2839,8 @@ mod tests {
             num_readonly_unsigned: 0,
             signatures: vec![],
             message_bytes: vec![],
+            num_static_keys: 0,
+            num_writable_lookup_keys: 0,
         };
 
         let result = bank.process_transaction(&tx, &backend, MAX_COMPUTE_UNITS);
@@ -2787,6 +2981,8 @@ mod tests {
             num_readonly_unsigned: 0,
             signatures: vec![signature.to_bytes()],
             message_bytes,
+            num_static_keys: 0,
+            num_writable_lookup_keys: 0,
         };
 
         let result = bank.process_transaction(&tx, &backend, MAX_COMPUTE_UNITS);
@@ -2829,6 +3025,8 @@ mod tests {
             num_readonly_unsigned: 0,
             signatures: vec![signature.to_bytes()],
             message_bytes,
+            num_static_keys: 0,
+            num_writable_lookup_keys: 0,
         };
 
         let result = bank.process_transaction(&tx, &backend, MAX_COMPUTE_UNITS);
@@ -2872,6 +3070,8 @@ mod tests {
             num_readonly_unsigned: 0,
             signatures: vec![signature.to_bytes()],
             message_bytes,
+            num_static_keys: 0,
+            num_writable_lookup_keys: 0,
         };
 
         let result = bank.process_transaction(&tx, &backend, MAX_COMPUTE_UNITS);
@@ -2915,6 +3115,8 @@ mod tests {
             num_readonly_unsigned: 0,
             signatures: vec![sig1.to_bytes(), sig2.to_bytes()],
             message_bytes,
+            num_static_keys: 0,
+            num_writable_lookup_keys: 0,
         };
 
         let result = bank.process_transaction(&tx, &backend, MAX_COMPUTE_UNITS);
@@ -2952,6 +3154,8 @@ mod tests {
             num_readonly_unsigned: 0,
             signatures: vec![signature.to_bytes()],
             message_bytes,
+            num_static_keys: 0,
+            num_writable_lookup_keys: 0,
         };
 
         // First submission succeeds
@@ -2996,6 +3200,8 @@ mod tests {
             num_readonly_unsigned: 0,
             signatures: vec![sig1.to_bytes()],
             message_bytes: msg1,
+            num_static_keys: 0,
+            num_writable_lookup_keys: 0,
         };
 
         let msg2 = b"message two".to_vec();
@@ -3013,6 +3219,8 @@ mod tests {
             num_readonly_unsigned: 0,
             signatures: vec![sig2.to_bytes()],
             message_bytes: msg2,
+            num_static_keys: 0,
+            num_writable_lookup_keys: 0,
         };
 
         let result1 = bank.process_transaction(&tx1, &backend, MAX_COMPUTE_UNITS);
@@ -3331,6 +3539,8 @@ mod tests {
             num_readonly_unsigned: 0,
             signatures: vec![],
             message_bytes: vec![],
+            num_static_keys: 0,
+            num_writable_lookup_keys: 0,
         };
         let params = parse_compute_budget(&tx);
         assert_eq!(params.compute_unit_limit, MAX_COMPUTE_UNIT_LIMIT);
@@ -3363,6 +3573,8 @@ mod tests {
             num_readonly_unsigned: 0,
             signatures: vec![],
             message_bytes: vec![],
+            num_static_keys: 0,
+            num_writable_lookup_keys: 0,
         };
         let params = parse_compute_budget(&tx);
         assert_eq!(params.loaded_accounts_data_size_limit, 100_000);
@@ -3390,6 +3602,8 @@ mod tests {
             num_readonly_unsigned: 0,
             signatures: vec![],
             message_bytes: vec![],
+            num_static_keys: 0,
+            num_writable_lookup_keys: 0,
         };
         let params = parse_compute_budget(&tx);
         assert_eq!(
@@ -3420,6 +3634,8 @@ mod tests {
             num_readonly_unsigned: 0,
             signatures: vec![],
             message_bytes: vec![],
+            num_static_keys: 0,
+            num_writable_lookup_keys: 0,
         };
         let params = parse_compute_budget(&tx);
         assert_eq!(params.compute_unit_limit, 500_000);
@@ -3447,6 +3663,8 @@ mod tests {
             num_readonly_unsigned: 0,
             signatures: vec![],
             message_bytes: vec![],
+            num_static_keys: 0,
+            num_writable_lookup_keys: 0,
         };
         let params = parse_compute_budget(&tx);
         assert_eq!(params.compute_unit_limit, MAX_COMPUTE_UNIT_LIMIT);
@@ -3474,6 +3692,8 @@ mod tests {
             num_readonly_unsigned: 0,
             signatures: vec![],
             message_bytes: vec![],
+            num_static_keys: 0,
+            num_writable_lookup_keys: 0,
         };
         let params = parse_compute_budget(&tx);
         assert_eq!(params.compute_unit_price, 1_000_000);
@@ -3547,6 +3767,8 @@ mod tests {
             num_readonly_unsigned: 0,
             signatures: vec![],
             message_bytes: vec![],
+            num_static_keys: 0,
+            num_writable_lookup_keys: 0,
         };
 
         let result = bank.process_transaction(&tx, &backend, MAX_COMPUTE_UNITS);
@@ -3583,6 +3805,8 @@ mod tests {
             num_readonly_unsigned: 0,
             signatures: vec![],
             message_bytes: vec![],
+            num_static_keys: 0,
+            num_writable_lookup_keys: 0,
         };
 
         let result = bank.process_transaction(&tx, &backend, MAX_COMPUTE_UNITS);
@@ -3638,6 +3862,8 @@ mod tests {
             num_readonly_unsigned: 0,
             signatures: vec![],
             message_bytes: vec![],
+            num_static_keys: 0,
+            num_writable_lookup_keys: 0,
         };
 
         let result = bank.process_transaction(&tx, &backend, MAX_COMPUTE_UNITS);
@@ -3689,6 +3915,8 @@ mod tests {
             num_readonly_unsigned: 0,
             signatures: vec![],
             message_bytes: vec![],
+            num_static_keys: 0,
+            num_writable_lookup_keys: 0,
         };
 
         let result = bank.process_transaction(&tx, &backend, MAX_COMPUTE_UNITS);
@@ -3800,6 +4028,8 @@ mod tests {
             num_readonly_unsigned: 0,
             signatures: vec![],
             message_bytes: vec![],
+            num_static_keys: 0,
+            num_writable_lookup_keys: 0,
         };
 
         let result = bank.process_transaction(&tx, &backend, MAX_COMPUTE_UNITS);
@@ -3839,6 +4069,8 @@ mod tests {
             num_readonly_unsigned: 0,
             signatures: vec![],
             message_bytes: vec![],
+            num_static_keys: 0,
+            num_writable_lookup_keys: 0,
         };
 
         let result = bank.process_transaction(&tx, &backend, MAX_COMPUTE_UNITS);
@@ -3887,6 +4119,8 @@ mod tests {
             num_readonly_unsigned: 0,
             signatures: vec![],
             message_bytes: vec![],
+            num_static_keys: 0,
+            num_writable_lookup_keys: 0,
         };
 
         let result = bank.process_transaction(&tx, &backend, MAX_COMPUTE_UNITS);
@@ -4030,6 +4264,8 @@ mod tests {
             num_readonly_unsigned: 0,
             signatures: vec![],
             message_bytes: vec![],
+            num_static_keys: 0,
+            num_writable_lookup_keys: 0,
         };
         let err = super::validate_account_locks(&tx).unwrap_err();
         assert!(matches!(
@@ -4052,6 +4288,8 @@ mod tests {
             num_readonly_unsigned: 0,
             signatures: vec![],
             message_bytes: vec![],
+            num_static_keys: 0,
+            num_writable_lookup_keys: 0,
         };
         let err = super::validate_account_locks(&tx).unwrap_err();
         assert!(matches!(
@@ -4074,6 +4312,8 @@ mod tests {
             num_readonly_unsigned: 0,
             signatures: vec![],
             message_bytes: vec![],
+            num_static_keys: 0,
+            num_writable_lookup_keys: 0,
         };
         assert!(super::validate_account_locks(&tx).is_ok());
     }
@@ -4095,6 +4335,8 @@ mod tests {
             num_readonly_unsigned: 1,
             signatures: vec![],
             message_bytes: vec![],
+            num_static_keys: 0,
+            num_writable_lookup_keys: 0,
         };
 
         let mut pre_state = HashMap::new();
@@ -4123,6 +4365,8 @@ mod tests {
             num_readonly_unsigned: 1,
             signatures: vec![],
             message_bytes: vec![],
+            num_static_keys: 0,
+            num_writable_lookup_keys: 0,
         };
 
         let mut pre_state = HashMap::new();
@@ -4155,6 +4399,8 @@ mod tests {
             num_readonly_unsigned: 1, // readonly_acc is readonly
             signatures: vec![],
             message_bytes: vec![],
+            num_static_keys: 0,
+            num_writable_lookup_keys: 0,
         };
 
         let mut pre_state = HashMap::new();
@@ -4180,6 +4426,8 @@ mod tests {
             num_readonly_unsigned: 0,
             signatures: vec![],
             message_bytes: vec![],
+            num_static_keys: 0,
+            num_writable_lookup_keys: 0,
         };
         assert_eq!(super::count_precompile_signatures(&tx), 0);
     }
@@ -4199,6 +4447,8 @@ mod tests {
             num_readonly_unsigned: 0,
             signatures: vec![],
             message_bytes: vec![],
+            num_static_keys: 0,
+            num_writable_lookup_keys: 0,
         };
         assert_eq!(super::count_precompile_signatures(&tx), 3);
     }
@@ -4229,6 +4479,8 @@ mod tests {
             num_readonly_unsigned: 0,
             signatures: vec![],
             message_bytes: vec![],
+            num_static_keys: 0,
+            num_writable_lookup_keys: 0,
         };
         assert_eq!(super::count_precompile_signatures(&tx), 7); // 2 + 5
     }
@@ -4248,6 +4500,8 @@ mod tests {
             num_readonly_unsigned: 0,
             signatures: vec![],
             message_bytes: vec![],
+            num_static_keys: 0,
+            num_writable_lookup_keys: 0,
         };
         assert_eq!(super::count_precompile_signatures(&tx), 0);
     }
@@ -4267,6 +4521,8 @@ mod tests {
             num_readonly_unsigned: 0,
             signatures: vec![],
             message_bytes: vec![],
+            num_static_keys: 0,
+            num_writable_lookup_keys: 0,
         };
         assert_eq!(super::count_precompile_signatures(&tx), 0);
     }
@@ -4447,6 +4703,8 @@ mod tests {
             num_readonly_unsigned: 1,
             signatures: vec![],
             message_bytes: vec![],
+            num_static_keys: 0,
+            num_writable_lookup_keys: 0,
         };
 
         let result = bank.process_transaction(&tx, &PassthroughBackend, MAX_COMPUTE_UNITS);
@@ -4486,6 +4744,8 @@ mod tests {
             num_readonly_unsigned: 1,
             signatures: vec![],
             message_bytes: vec![],
+            num_static_keys: 0,
+            num_writable_lookup_keys: 0,
         };
 
         let result = bank.process_transaction(&tx, &PassthroughBackend, MAX_COMPUTE_UNITS);
@@ -4526,6 +4786,8 @@ mod tests {
             num_readonly_unsigned: 1,
             signatures: vec![],
             message_bytes: vec![],
+            num_static_keys: 0,
+            num_writable_lookup_keys: 0,
         };
 
         let result = bank.process_transaction(&tx, &PassthroughBackend, MAX_COMPUTE_UNITS);
@@ -4605,6 +4867,8 @@ mod tests {
             num_readonly_unsigned: 1,
             signatures: vec![],
             message_bytes: vec![],
+            num_static_keys: 0,
+            num_writable_lookup_keys: 0,
         };
 
         let _ = bank.process_transaction(&tx, &PassthroughBackend, MAX_COMPUTE_UNITS);
@@ -4662,6 +4926,8 @@ mod tests {
             num_readonly_unsigned: 1,
             signatures: vec![],
             message_bytes: vec![],
+            num_static_keys: 0,
+            num_writable_lookup_keys: 0,
         };
 
         let data = serialize_instructions_sysvar(&tx);
@@ -4761,6 +5027,8 @@ mod tests {
             num_readonly_unsigned: 1,
             signatures: vec![],
             message_bytes: vec![],
+            num_static_keys: 0,
+            num_writable_lookup_keys: 0,
         };
 
         let result =
@@ -5164,6 +5432,8 @@ mod tests {
             num_readonly_unsigned: 1,
             signatures: vec![],
             message_bytes: vec![],
+            num_static_keys: 0,
+            num_writable_lookup_keys: 0,
         };
 
         let result = bank.process_transaction(&tx, &backend, MAX_COMPUTE_UNITS);
@@ -5205,5 +5475,109 @@ mod tests {
         assert_eq!(captured[2][0].data, vec![0xAA]);
         assert_eq!(captured[2][1].data, vec![0xBB, 0xCC]);
         assert_eq!(captured[2][1].accounts, vec![payer, extra_account]);
+    }
+
+    // -----------------------------------------------------------------------
+    // Address lookup table resolution tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn resolve_address_lookups_extracts_addresses() {
+        use paradencer_constants::address_lookup_table::LOOKUP_TABLE_META_SIZE;
+
+        let addr0 = Pubkey::new_unique();
+        let addr1 = Pubkey::new_unique();
+        let addr2 = Pubkey::new_unique();
+
+        // Build a mock ALT account: 56 bytes header + 3 packed pubkeys
+        let mut alt_data = vec![0u8; LOOKUP_TABLE_META_SIZE];
+        alt_data.extend_from_slice(addr0.as_bytes());
+        alt_data.extend_from_slice(addr1.as_bytes());
+        alt_data.extend_from_slice(addr2.as_bytes());
+
+        let table_key = Pubkey::new_unique();
+        let alt_account = Account {
+            data: AccountData::new(alt_data),
+            ..Account::default()
+        };
+
+        let lookups = vec![(
+            table_key,
+            vec![0, 2], // writable: index 0, 2
+            vec![1],    // readonly: index 1
+        )];
+
+        let resolved = resolve_address_lookups(&lookups, |pk| {
+            if *pk == table_key {
+                Some(alt_account.clone())
+            } else {
+                None
+            }
+        })
+        .unwrap();
+
+        assert_eq!(resolved.writable.len(), 2);
+        assert_eq!(resolved.writable[0], addr0);
+        assert_eq!(resolved.writable[1], addr2);
+        assert_eq!(resolved.readonly.len(), 1);
+        assert_eq!(resolved.readonly[0], addr1);
+    }
+
+    #[test]
+    fn resolve_address_lookups_missing_table_errors() {
+        let table_key = Pubkey::new_unique();
+        let lookups = vec![(table_key, vec![0], vec![])];
+
+        let result = resolve_address_lookups(&lookups, |_| None);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn resolve_address_lookups_index_out_of_range_errors() {
+        use paradencer_constants::address_lookup_table::LOOKUP_TABLE_META_SIZE;
+
+        let table_key = Pubkey::new_unique();
+        let mut alt_data = vec![0u8; LOOKUP_TABLE_META_SIZE];
+        alt_data.extend_from_slice(&[0u8; 32]); // 1 address
+
+        let alt_account = Account {
+            data: AccountData::new(alt_data),
+            ..Account::default()
+        };
+
+        let lookups = vec![(table_key, vec![5], vec![])]; // index 5 out of range
+
+        let result = resolve_address_lookups(&lookups, |_| Some(alt_account.clone()));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn v0_writable_index_handles_lookup_accounts() {
+        let payer = Pubkey::new_unique();
+        let program = Pubkey::new_unique();
+        let lookup_writable = Pubkey::new_unique();
+        let lookup_readonly = Pubkey::new_unique();
+
+        let tx = SanitizedTransaction {
+            account_keys: vec![payer, program, lookup_writable, lookup_readonly],
+            recent_blockhash: [0u8; 32],
+            instructions: vec![],
+            num_signatures: 1,
+            num_readonly_signed: 0,
+            num_readonly_unsigned: 1, // program is readonly
+            signatures: vec![],
+            message_bytes: vec![],
+            num_static_keys: 2,          // payer + program are static
+            num_writable_lookup_keys: 1, // lookup_writable is writable
+        };
+
+        // payer (index 0) — writable signed
+        assert!(tx.is_writable_index(0));
+        // program (index 1) — readonly unsigned (static)
+        assert!(!tx.is_writable_index(1));
+        // lookup_writable (index 2) — writable lookup
+        assert!(tx.is_writable_index(2));
+        // lookup_readonly (index 3) — readonly lookup
+        assert!(!tx.is_writable_index(3));
     }
 }
