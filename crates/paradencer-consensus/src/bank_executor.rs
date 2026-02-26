@@ -8,6 +8,7 @@ use crate::cost_tracker::TransactionCost;
 use crate::nonce::{derive_durable_nonce, deserialize_nonce_state, serialize_nonce_state};
 use crate::transaction_cache::{extract_nonce_key_index, is_nonce_instruction};
 use crate::{Bank, BankStatus, FeeCalculator};
+use paradencer_constants::block_limits::MAX_TRANSACTION_ACCOUNT_LOCKS;
 use paradencer_constants::compute_budget_program::{
     INSTRUCTION_SET_COMPUTE_UNIT_LIMIT, INSTRUCTION_SET_COMPUTE_UNIT_PRICE,
     INSTRUCTION_SET_LOADED_ACCOUNTS_DATA_SIZE_LIMIT,
@@ -18,7 +19,8 @@ use paradencer_constants::execution::{
 };
 use paradencer_constants::ledger::NONCE_ACCOUNT_SIZE;
 use paradencer_ids::{
-    COMPUTE_BUDGET_PROGRAM_ID, INCINERATOR_ID, SYSTEM_PROGRAM_ID, VOTE_PROGRAM_ID,
+    COMPUTE_BUDGET_PROGRAM_ID, ED25519_PROGRAM_ID, INCINERATOR_ID, SECP256K1_PROGRAM_ID,
+    SECP256R1_PROGRAM_ID, SYSTEM_PROGRAM_ID, VOTE_PROGRAM_ID,
 };
 use paradencer_storage::{Account, Pubkey, TransactionId};
 use std::collections::HashMap;
@@ -209,6 +211,12 @@ pub enum TransactionExecutionError {
     BlockCostLimitExceeded(String),
     /// Total loaded accounts data size exceeds per-transaction limit.
     MaxLoadedAccountsDataSizeExceeded { loaded: u64, limit: u64 },
+    /// Transaction references too many account keys.
+    TooManyAccountLocks { count: usize, limit: usize },
+    /// Transaction contains the same account key more than once.
+    DuplicateAccountKey { account: Pubkey },
+    /// Total lamports across writable accounts changed during execution.
+    UnbalancedTransaction,
 }
 
 impl std::fmt::Display for TransactionExecutionError {
@@ -247,6 +255,13 @@ impl std::fmt::Display for TransactionExecutionError {
                     "loaded accounts data size exceeded: {loaded} bytes > {limit} byte limit"
                 )
             }
+            Self::TooManyAccountLocks { count, limit } => {
+                write!(f, "too many account locks: {count} > {limit}")
+            }
+            Self::DuplicateAccountKey { account } => {
+                write!(f, "duplicate account key: {account:?}")
+            }
+            Self::UnbalancedTransaction => write!(f, "transaction lamports not balanced"),
         }
     }
 }
@@ -339,6 +354,100 @@ fn calculate_data_size_delta(
         delta += post_len - pre_len;
     }
     delta
+}
+
+/// Validate account locks: check count limit and duplicate keys.
+///
+/// Rejects transactions that reference too many accounts or contain
+/// the same account key more than once. This prevents resource
+/// exhaustion and ensures consistent account locking behavior.
+fn validate_account_locks(
+    transaction: &SanitizedTransaction,
+) -> Result<(), TransactionExecutionError> {
+    let count = transaction.account_keys.len();
+    if count > MAX_TRANSACTION_ACCOUNT_LOCKS {
+        return Err(TransactionExecutionError::TooManyAccountLocks {
+            count,
+            limit: MAX_TRANSACTION_ACCOUNT_LOCKS,
+        });
+    }
+
+    // O(n^2) duplicate check — acceptable since MAX_TRANSACTION_ACCOUNT_LOCKS is 128.
+    for i in 0..count {
+        for j in (i + 1)..count {
+            if transaction.account_keys[i] == transaction.account_keys[j] {
+                return Err(TransactionExecutionError::DuplicateAccountKey {
+                    account: transaction.account_keys[i],
+                });
+            }
+        }
+    }
+
+    Ok(())
+}
+
+/// Verify that total lamports across writable accounts are conserved.
+///
+/// Uses 128-bit arithmetic to prevent overflow. Compares the sum of
+/// starting lamports to ending lamports for all writable accounts.
+/// Transactions that create or destroy lamports are rejected.
+fn verify_lamport_balance(
+    transaction: &SanitizedTransaction,
+    pre_state: &HashMap<Pubkey, Account>,
+    modified: &HashMap<Pubkey, Account>,
+) -> Result<(), TransactionExecutionError> {
+    let mut starting: u128 = 0;
+    let mut ending: u128 = 0;
+
+    for (idx, pubkey) in transaction.account_keys.iter().enumerate() {
+        // Only check writable accounts (same as the reference implementation).
+        if !transaction.is_writable_index(idx) {
+            continue;
+        }
+
+        let pre_lamports = pre_state.get(pubkey).map(|a| a.meta.lamports).unwrap_or(0);
+        starting += pre_lamports as u128;
+
+        let post_lamports = modified
+            .get(pubkey)
+            .map(|a| a.meta.lamports)
+            .or_else(|| pre_state.get(pubkey).map(|a| a.meta.lamports))
+            .unwrap_or(0);
+        ending += post_lamports as u128;
+    }
+
+    if starting != ending {
+        return Err(TransactionExecutionError::UnbalancedTransaction);
+    }
+    Ok(())
+}
+
+/// Count additional signatures from precompile instructions.
+///
+/// Ed25519, Secp256k1, and Secp256r1 precompile instructions encode
+/// a signature count in the first byte of their data. These signatures
+/// must be included in the fee calculation alongside the transaction's
+/// own Ed25519 signatures.
+fn count_precompile_signatures(transaction: &SanitizedTransaction) -> u64 {
+    let mut extra: u64 = 0;
+    for instruction in &transaction.instructions {
+        let program_id = match transaction
+            .account_keys
+            .get(instruction.program_id_index as usize)
+        {
+            Some(id) => *id,
+            None => continue,
+        };
+
+        let is_precompile = program_id == ED25519_PROGRAM_ID
+            || program_id == SECP256K1_PROGRAM_ID
+            || program_id == SECP256R1_PROGRAM_ID;
+
+        if is_precompile && !instruction.data.is_empty() {
+            extra = extra.saturating_add(instruction.data[0] as u64);
+        }
+    }
+    extra
 }
 
 // ---------------------------------------------------------------------------
@@ -784,6 +893,19 @@ impl Bank {
             };
         }
 
+        // Step 1a: Validate account locks (count limit + no duplicates).
+        if let Err(e) = validate_account_locks(transaction) {
+            return TransactionExecutionResult {
+                success: false,
+                compute_units_consumed: 0,
+                fee: 0,
+                modified_accounts: HashMap::new(),
+                logs: vec![],
+                error: Some(e),
+                vote_updates: vec![],
+            };
+        }
+
         // Step 1b: Validate blockhash or detect durable nonce transaction.
         //
         // If the blockhash is in the recent queue, this is a regular transaction.
@@ -907,7 +1029,9 @@ impl Bank {
         // Execution fees are subject to 50% burn, priority fees go
         // 100% to the slot leader.
         let fee_calculator = FeeCalculator::default();
-        let execution_fee = fee_calculator.calculate_fee(transaction.num_signatures);
+        let precompile_sigs = count_precompile_signatures(transaction);
+        let total_signatures = transaction.num_signatures.saturating_add(precompile_sigs);
+        let execution_fee = fee_calculator.calculate_fee(total_signatures);
         let fee = execution_fee.saturating_add(priority_fee);
         let rent = crate::Rent::default();
 
@@ -1109,6 +1233,14 @@ impl Bank {
                 exec_error = Some(TransactionExecutionError::InsufficientFundsForRent {
                     account: violating_account,
                 });
+            }
+        }
+
+        // Step 4c: Verify lamport conservation across writable accounts.
+        // Total lamports before execution must equal total lamports after.
+        if exec_error.is_none() {
+            if let Err(e) = verify_lamport_balance(transaction, &account_state, &modified) {
+                exec_error = Some(e);
             }
         }
 
@@ -1675,12 +1807,24 @@ mod tests {
         store_test_account(&bank, &payer, &payer_account);
 
         let transfer_amount = 1_000_000u64;
-        let tx = create_simple_transaction(
-            payer,
-            program,
-            vec![payer, recipient],
-            transfer_amount.to_le_bytes().to_vec(),
-        );
+
+        // Build transaction with proper account ordering:
+        // [payer (writable-signed), recipient (writable-unsigned), program (readonly-unsigned)]
+        // The instruction references payer (index 0) and recipient (index 1).
+        let tx = SanitizedTransaction {
+            account_keys: vec![payer, recipient, program],
+            recent_blockhash: [0u8; 32],
+            instructions: vec![CompiledInstruction {
+                program_id_index: 2,
+                account_indices: vec![0, 1],
+                data: transfer_amount.to_le_bytes().to_vec(),
+            }],
+            num_signatures: 1,
+            num_readonly_signed: 0,
+            num_readonly_unsigned: 1, // only program is readonly
+            signatures: vec![],
+            message_bytes: vec![],
+        };
 
         let result = bank.process_transaction(&tx, &backend, MAX_COMPUTE_UNITS);
         assert!(
@@ -3384,5 +3528,268 @@ mod tests {
             final_size >= initial_size,
             "accounts_data_size should be tracked"
         );
+    }
+
+    // ── account lock validation tests ─────────────────────────────────
+
+    #[test]
+    fn validate_account_locks_accepts_normal_transaction() {
+        let payer = Pubkey::new_unique();
+        let program = Pubkey::new_unique();
+        let tx = create_simple_transaction(payer, program, vec![], vec![]);
+        assert!(super::validate_account_locks(&tx).is_ok());
+    }
+
+    #[test]
+    fn validate_account_locks_rejects_duplicate_keys() {
+        let key = Pubkey::new_unique();
+        let tx = SanitizedTransaction {
+            account_keys: vec![key, key],
+            recent_blockhash: [0u8; 32],
+            instructions: vec![],
+            num_signatures: 1,
+            num_readonly_signed: 0,
+            num_readonly_unsigned: 0,
+            signatures: vec![],
+            message_bytes: vec![],
+        };
+        let err = super::validate_account_locks(&tx).unwrap_err();
+        assert!(matches!(
+            err,
+            TransactionExecutionError::DuplicateAccountKey { .. }
+        ));
+    }
+
+    #[test]
+    fn validate_account_locks_rejects_too_many_accounts() {
+        let keys: Vec<Pubkey> = (0..MAX_TRANSACTION_ACCOUNT_LOCKS + 1)
+            .map(|_| Pubkey::new_unique())
+            .collect();
+        let tx = SanitizedTransaction {
+            account_keys: keys,
+            recent_blockhash: [0u8; 32],
+            instructions: vec![],
+            num_signatures: 1,
+            num_readonly_signed: 0,
+            num_readonly_unsigned: 0,
+            signatures: vec![],
+            message_bytes: vec![],
+        };
+        let err = super::validate_account_locks(&tx).unwrap_err();
+        assert!(matches!(
+            err,
+            TransactionExecutionError::TooManyAccountLocks { .. }
+        ));
+    }
+
+    #[test]
+    fn validate_account_locks_allows_max_accounts() {
+        let keys: Vec<Pubkey> = (0..MAX_TRANSACTION_ACCOUNT_LOCKS)
+            .map(|_| Pubkey::new_unique())
+            .collect();
+        let tx = SanitizedTransaction {
+            account_keys: keys,
+            recent_blockhash: [0u8; 32],
+            instructions: vec![],
+            num_signatures: 1,
+            num_readonly_signed: 0,
+            num_readonly_unsigned: 0,
+            signatures: vec![],
+            message_bytes: vec![],
+        };
+        assert!(super::validate_account_locks(&tx).is_ok());
+    }
+
+    // ── lamport balance verification tests ────────────────────────────
+
+    #[test]
+    fn verify_lamport_balance_accepts_conserved_transfer() {
+        let payer = Pubkey::new_unique();
+        let recipient = Pubkey::new_unique();
+        let program = Pubkey::new_unique();
+
+        let tx = SanitizedTransaction {
+            account_keys: vec![payer, recipient, program],
+            recent_blockhash: [0u8; 32],
+            instructions: vec![],
+            num_signatures: 1,
+            num_readonly_signed: 0,
+            num_readonly_unsigned: 1,
+            signatures: vec![],
+            message_bytes: vec![],
+        };
+
+        let mut pre_state = HashMap::new();
+        pre_state.insert(payer, Account::new(1_000_000, vec![], Pubkey::default()));
+        pre_state.insert(recipient, Account::new(0, vec![], Pubkey::default()));
+
+        let mut modified = HashMap::new();
+        modified.insert(payer, Account::new(500_000, vec![], Pubkey::default()));
+        modified.insert(recipient, Account::new(500_000, vec![], Pubkey::default()));
+
+        assert!(super::verify_lamport_balance(&tx, &pre_state, &modified).is_ok());
+    }
+
+    #[test]
+    fn verify_lamport_balance_rejects_created_lamports() {
+        let payer = Pubkey::new_unique();
+        let recipient = Pubkey::new_unique();
+        let program = Pubkey::new_unique();
+
+        let tx = SanitizedTransaction {
+            account_keys: vec![payer, recipient, program],
+            recent_blockhash: [0u8; 32],
+            instructions: vec![],
+            num_signatures: 1,
+            num_readonly_signed: 0,
+            num_readonly_unsigned: 1,
+            signatures: vec![],
+            message_bytes: vec![],
+        };
+
+        let mut pre_state = HashMap::new();
+        pre_state.insert(payer, Account::new(1_000_000, vec![], Pubkey::default()));
+        pre_state.insert(recipient, Account::new(0, vec![], Pubkey::default()));
+
+        // Recipient gets lamports but payer doesn't lose them — unbalanced
+        let mut modified = HashMap::new();
+        modified.insert(payer, Account::new(1_000_000, vec![], Pubkey::default()));
+        modified.insert(recipient, Account::new(500_000, vec![], Pubkey::default()));
+
+        assert!(matches!(
+            super::verify_lamport_balance(&tx, &pre_state, &modified),
+            Err(TransactionExecutionError::UnbalancedTransaction)
+        ));
+    }
+
+    #[test]
+    fn verify_lamport_balance_ignores_readonly_accounts() {
+        let payer = Pubkey::new_unique();
+        let readonly_acc = Pubkey::new_unique();
+
+        // Readonly account is last in unsigned section
+        let tx = SanitizedTransaction {
+            account_keys: vec![payer, readonly_acc],
+            recent_blockhash: [0u8; 32],
+            instructions: vec![],
+            num_signatures: 1,
+            num_readonly_signed: 0,
+            num_readonly_unsigned: 1, // readonly_acc is readonly
+            signatures: vec![],
+            message_bytes: vec![],
+        };
+
+        let mut pre_state = HashMap::new();
+        pre_state.insert(payer, Account::new(1_000_000, vec![], Pubkey::default()));
+        pre_state.insert(readonly_acc, Account::new(0, vec![], Pubkey::default()));
+
+        // Payer balance unchanged among writable accounts (only payer is writable)
+        let modified = HashMap::new();
+
+        assert!(super::verify_lamport_balance(&tx, &pre_state, &modified).is_ok());
+    }
+
+    // ── precompile signature fee tests ────────────────────────────────
+
+    #[test]
+    fn count_precompile_signatures_empty_instructions() {
+        let tx = SanitizedTransaction {
+            account_keys: vec![Pubkey::new_unique()],
+            recent_blockhash: [0u8; 32],
+            instructions: vec![],
+            num_signatures: 1,
+            num_readonly_signed: 0,
+            num_readonly_unsigned: 0,
+            signatures: vec![],
+            message_bytes: vec![],
+        };
+        assert_eq!(super::count_precompile_signatures(&tx), 0);
+    }
+
+    #[test]
+    fn count_precompile_signatures_ed25519_instruction() {
+        let tx = SanitizedTransaction {
+            account_keys: vec![Pubkey::new_unique(), ED25519_PROGRAM_ID],
+            recent_blockhash: [0u8; 32],
+            instructions: vec![CompiledInstruction {
+                program_id_index: 1,
+                account_indices: vec![],
+                data: vec![3], // 3 signatures
+            }],
+            num_signatures: 1,
+            num_readonly_signed: 0,
+            num_readonly_unsigned: 0,
+            signatures: vec![],
+            message_bytes: vec![],
+        };
+        assert_eq!(super::count_precompile_signatures(&tx), 3);
+    }
+
+    #[test]
+    fn count_precompile_signatures_multiple_precompiles() {
+        let tx = SanitizedTransaction {
+            account_keys: vec![
+                Pubkey::new_unique(),
+                ED25519_PROGRAM_ID,
+                SECP256K1_PROGRAM_ID,
+            ],
+            recent_blockhash: [0u8; 32],
+            instructions: vec![
+                CompiledInstruction {
+                    program_id_index: 1,
+                    account_indices: vec![],
+                    data: vec![2], // 2 ed25519 signatures
+                },
+                CompiledInstruction {
+                    program_id_index: 2,
+                    account_indices: vec![],
+                    data: vec![5], // 5 secp256k1 signatures
+                },
+            ],
+            num_signatures: 1,
+            num_readonly_signed: 0,
+            num_readonly_unsigned: 0,
+            signatures: vec![],
+            message_bytes: vec![],
+        };
+        assert_eq!(super::count_precompile_signatures(&tx), 7); // 2 + 5
+    }
+
+    #[test]
+    fn count_precompile_signatures_empty_data_skipped() {
+        let tx = SanitizedTransaction {
+            account_keys: vec![Pubkey::new_unique(), ED25519_PROGRAM_ID],
+            recent_blockhash: [0u8; 32],
+            instructions: vec![CompiledInstruction {
+                program_id_index: 1,
+                account_indices: vec![],
+                data: vec![], // empty data
+            }],
+            num_signatures: 1,
+            num_readonly_signed: 0,
+            num_readonly_unsigned: 0,
+            signatures: vec![],
+            message_bytes: vec![],
+        };
+        assert_eq!(super::count_precompile_signatures(&tx), 0);
+    }
+
+    #[test]
+    fn count_precompile_signatures_non_precompile_ignored() {
+        let tx = SanitizedTransaction {
+            account_keys: vec![Pubkey::new_unique(), Pubkey::new_unique()],
+            recent_blockhash: [0u8; 32],
+            instructions: vec![CompiledInstruction {
+                program_id_index: 1,
+                account_indices: vec![],
+                data: vec![10], // non-precompile program, should be ignored
+            }],
+            num_signatures: 1,
+            num_readonly_signed: 0,
+            num_readonly_unsigned: 0,
+            signatures: vec![],
+            message_bytes: vec![],
+        };
+        assert_eq!(super::count_precompile_signatures(&tx), 0);
     }
 }

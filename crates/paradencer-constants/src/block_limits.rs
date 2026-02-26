@@ -45,6 +45,12 @@ pub const INSTRUCTION_BASE_COST: u64 = 200;
 // Pack / scheduler constants
 // ---------------------------------------------------------------------------
 
+/// Maximum number of account keys a transaction may lock.
+///
+/// With the `increase_tx_account_lock_limit` feature active, this is 128.
+/// The legacy limit (64) is not used in current protocol versions.
+pub const MAX_TRANSACTION_ACCOUNT_LOCKS: usize = 128;
+
 /// Maximum data bytes per block (derived from shred limits).
 pub const MAX_DATA_BYTES_PER_BLOCK: u64 = 27_539_200; // ~26.3 MiB
 
