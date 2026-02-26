@@ -69,7 +69,7 @@ pub use sysvar_snapshot::SysvarSnapshot;
 pub use token_2022_program::Token2022ProgramExecutor;
 pub use token_program::TokenProgramExecutor;
 pub use transaction_processor::{
-    AccountMeta as InstructionAccountMeta, CompiledInstruction, Transaction,
+    AccountMeta as InstructionAccountMeta, CompiledInstruction, MessageHeader, Transaction,
     TransactionInstruction, TransactionMessage, TransactionProcessor, TransactionResult,
 };
 pub use vm::{BytecodeVm, SbpfExecutionError, SbpfExecutionResult, SbpfVm, StubSbpfVm};

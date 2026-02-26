@@ -377,6 +377,11 @@ fn full_transaction_process_with_bpf_program() {
     let transaction = Transaction {
         signatures: vec![[0u8; 64]],
         message: TransactionMessage {
+            header: crate::transaction_processor::MessageHeader {
+                num_required_signatures: 1,
+                num_readonly_signed: 0,
+                num_readonly_unsigned: 0,
+            },
             account_keys: vec![program_id],
             recent_blockhash: [0u8; 32],
             instructions: vec![CompiledInstruction {

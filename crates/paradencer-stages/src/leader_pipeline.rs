@@ -95,6 +95,14 @@ impl SbpfExecutionEngine {
                 let sbpf_tx = SbpfTransaction {
                     signatures: parsed.signatures.iter().map(|s| s.to_bytes()).collect(),
                     message: SbpfTransactionMessage {
+                        header: paradencer_sbpf::MessageHeader {
+                            num_required_signatures: parsed.message.header.num_required_signatures,
+                            num_readonly_signed: parsed.message.header.num_readonly_signed_accounts,
+                            num_readonly_unsigned: parsed
+                                .message
+                                .header
+                                .num_readonly_unsigned_accounts,
+                        },
                         account_keys: account_keys.to_vec(),
                         recent_blockhash: parsed.message.recent_blockhash.to_bytes(),
                         instructions,
