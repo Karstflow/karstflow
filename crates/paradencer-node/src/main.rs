@@ -115,6 +115,13 @@ fn run_with_node_config(
                                 parent_slot: info.parent_slot,
                                 bank_hash: info.bank_hash,
                                 block_hash: info.block_hash,
+                                parent_blockhash: info.parent_blockhash,
+                                block_time: if info.timestamp != 0 {
+                                    Some(info.timestamp)
+                                } else {
+                                    None
+                                },
+                                block_height: Some(info.slot),
                                 transaction_count: info.transaction_count,
                                 executed_count: info.executed_count,
                                 fee_collected: info.fee_lamports_collected,

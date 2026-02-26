@@ -338,6 +338,14 @@ impl ReplayStage {
                 .sysvar_cache()
                 .map(|c| c.clock().unix_timestamp)
                 .unwrap_or(0);
+            let parent_blockhash = self
+                .bank_transition
+                .bank_forks
+                .read()
+                .unwrap()
+                .get(block.parent_slot)
+                .map(|parent_bank| parent_bank.last_blockhash())
+                .unwrap_or([0u8; 32]);
             self.signal_bus
                 .lock()
                 .unwrap()
@@ -346,6 +354,7 @@ impl ReplayStage {
                     parent_slot: block.parent_slot,
                     bank_hash: bank.hash(),
                     block_hash: bank.last_blockhash(),
+                    parent_blockhash,
                     epoch: finalization.epoch,
                     is_epoch_boundary: finalization.epoch_boundary,
                     transaction_count: outcome.transactions.len() as u64,

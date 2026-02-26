@@ -45,6 +45,8 @@ pub struct SlotCompletedInfo {
     pub bank_hash: [u8; 32],
     /// Block hash (last entry hash of the block).
     pub block_hash: [u8; 32],
+    /// Blockhash of the parent slot's bank.
+    pub parent_blockhash: [u8; 32],
     /// Epoch this slot belongs to.
     pub epoch: u64,
     /// Whether this slot is the first slot of a new epoch.
@@ -220,6 +222,7 @@ mod tests {
             parent_slot: 41,
             bank_hash: [1u8; 32],
             block_hash: [2u8; 32],
+            parent_blockhash: [3u8; 32],
             epoch: 0,
             is_epoch_boundary: false,
             transaction_count: 100,
@@ -337,6 +340,7 @@ mod tests {
             parent_slot: 99,
             bank_hash: [0xAA; 32],
             block_hash: [0xBB; 32],
+            parent_blockhash: [0xCC; 32],
             epoch: 5,
             is_epoch_boundary: true,
             transaction_count: 2000,
