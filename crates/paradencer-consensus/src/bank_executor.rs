@@ -1339,6 +1339,11 @@ impl Bank {
             self.add_execution_fee(execution_fee);
             self.add_priority_fee(priority_fee);
             self.add_signatures(transaction.num_signatures);
+            self.add_compute_units_used(total_compute);
+            self.record_failed_transaction();
+            if !is_vote {
+                self.record_nonvote_transaction();
+            }
 
             // Record failed transaction in dedup cache with Failed status.
             if durable_nonce.is_none() && !transaction.signatures.is_empty() {
@@ -1400,10 +1405,14 @@ impl Bank {
 
         self.write_accounts(&modified);
 
-        // Step 6: Record fees and signatures (execution + priority separately)
+        // Step 6: Record fees, signatures, and block-level metrics
         self.add_execution_fee(execution_fee);
         self.add_priority_fee(priority_fee);
         self.add_signatures(transaction.num_signatures);
+        self.add_compute_units_used(total_compute);
+        if !is_vote {
+            self.record_nonvote_transaction();
+        }
 
         // Step 7: Record transaction
         let _ = self.register_transaction();
@@ -4137,5 +4146,101 @@ mod tests {
             ),
             "should accept transaction at exact instruction limit"
         );
+    }
+
+    // ── block-level metrics tracking tests ────────────────────────────
+
+    #[test]
+    fn successful_nonvote_transaction_increments_metrics() {
+        let bank = create_test_bank();
+        let payer = Pubkey::new_unique();
+        let program = Pubkey::new_unique();
+        store_test_account(
+            &bank,
+            &payer,
+            &Account::new(100_000_000, vec![], Pubkey::default()),
+        );
+
+        let tx = create_simple_transaction(payer, program, vec![payer], vec![]);
+        let result = bank.process_transaction(&tx, &PassthroughBackend, MAX_COMPUTE_UNITS);
+        assert!(result.success);
+
+        assert_eq!(bank.nonvote_transaction_count(), 1);
+        assert_eq!(bank.failed_transaction_count(), 0);
+        assert!(bank.total_compute_units_used() > 0);
+    }
+
+    #[test]
+    fn failed_transaction_increments_failed_count() {
+        let bank = create_test_bank();
+        let payer = Pubkey::new_unique();
+        let program = Pubkey::new_unique();
+        store_test_account(
+            &bank,
+            &payer,
+            &Account::new(100_000_000, vec![], Pubkey::default()),
+        );
+
+        // FailingBackend causes instruction failure, which triggers lamport check
+        let tx = create_simple_transaction(payer, program, vec![payer], vec![]);
+        let result = bank.process_transaction(&tx, &FailingBackend, MAX_COMPUTE_UNITS);
+        assert!(!result.success);
+
+        assert_eq!(bank.failed_transaction_count(), 1);
+        assert_eq!(bank.nonvote_transaction_count(), 1); // still nonvote
+    }
+
+    #[test]
+    fn vote_transaction_not_counted_as_nonvote() {
+        let bank = create_test_bank();
+        let payer = Pubkey::new_unique();
+        let vote_account = Pubkey::new_unique();
+        store_test_account(
+            &bank,
+            &payer,
+            &Account::new(100_000_000, vec![], Pubkey::default()),
+        );
+
+        // Build a vote transaction (first instruction's program is VOTE_PROGRAM_ID)
+        let tx = SanitizedTransaction {
+            account_keys: vec![payer, VOTE_PROGRAM_ID, vote_account],
+            recent_blockhash: [0u8; 32],
+            instructions: vec![CompiledInstruction {
+                program_id_index: 1,
+                account_indices: vec![2],
+                data: vec![],
+            }],
+            num_signatures: 1,
+            num_readonly_signed: 0,
+            num_readonly_unsigned: 1,
+            signatures: vec![],
+            message_bytes: vec![],
+        };
+
+        let _ = bank.process_transaction(&tx, &PassthroughBackend, MAX_COMPUTE_UNITS);
+
+        // Vote transactions should NOT increment nonvote_transaction_count
+        assert_eq!(bank.nonvote_transaction_count(), 0);
+    }
+
+    #[test]
+    fn compute_units_accumulate_across_transactions() {
+        let bank = create_test_bank();
+        let program = Pubkey::new_unique();
+
+        for i in 0u8..3 {
+            let payer = Pubkey::new_unique();
+            store_test_account(
+                &bank,
+                &payer,
+                &Account::new(100_000_000 + i as u64, vec![], Pubkey::default()),
+            );
+            let tx = create_simple_transaction(payer, program, vec![payer], vec![i]);
+            bank.process_transaction(&tx, &PassthroughBackend, MAX_COMPUTE_UNITS);
+        }
+
+        assert_eq!(bank.transaction_count(), 3);
+        assert_eq!(bank.nonvote_transaction_count(), 3);
+        assert!(bank.total_compute_units_used() > 0);
     }
 }

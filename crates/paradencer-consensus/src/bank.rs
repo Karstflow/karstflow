@@ -68,6 +68,12 @@ pub struct Bank {
 
     accounts: Arc<AccountDatabase>,
     transaction_count: AtomicU64,
+    /// Non-vote transactions processed in this slot.
+    nonvote_transaction_count: AtomicU64,
+    /// Failed transactions (both vote and non-vote) in this slot.
+    failed_transaction_count: AtomicU64,
+    /// Total compute units consumed across all transactions in this slot.
+    total_compute_units_used: AtomicU64,
 
     // Fee collection
     execution_fees: AtomicU64,
@@ -174,6 +180,9 @@ impl Bank {
             leader_schedule,
             accounts,
             transaction_count: AtomicU64::new(0),
+            nonvote_transaction_count: AtomicU64::new(0),
+            failed_transaction_count: AtomicU64::new(0),
+            total_compute_units_used: AtomicU64::new(0),
             execution_fees: AtomicU64::new(0),
             priority_fees: AtomicU64::new(0),
             capitalization: AtomicU64::new(capitalization),
@@ -254,6 +263,9 @@ impl Bank {
             leader_schedule,
             accounts,
             transaction_count: AtomicU64::new(bank_state.transaction_count),
+            nonvote_transaction_count: AtomicU64::new(0),
+            failed_transaction_count: AtomicU64::new(0),
+            total_compute_units_used: AtomicU64::new(0),
             execution_fees: AtomicU64::new(0),
             priority_fees: AtomicU64::new(0),
             capitalization: AtomicU64::new(bank_state.capitalization),
@@ -334,6 +346,9 @@ impl Bank {
             leader_schedule: effective_schedule,
             accounts: parent.accounts.clone(),
             transaction_count: AtomicU64::new(0),
+            nonvote_transaction_count: AtomicU64::new(0),
+            failed_transaction_count: AtomicU64::new(0),
+            total_compute_units_used: AtomicU64::new(0),
             execution_fees: AtomicU64::new(0),
             priority_fees: AtomicU64::new(0),
             capitalization: AtomicU64::new(parent.capitalization.load(Ordering::Relaxed)),
@@ -407,6 +422,36 @@ impl Bank {
 
     pub fn transaction_count(&self) -> u64 {
         self.transaction_count.load(Ordering::Relaxed)
+    }
+
+    pub fn nonvote_transaction_count(&self) -> u64 {
+        self.nonvote_transaction_count.load(Ordering::Relaxed)
+    }
+
+    pub fn failed_transaction_count(&self) -> u64 {
+        self.failed_transaction_count.load(Ordering::Relaxed)
+    }
+
+    pub fn total_compute_units_used(&self) -> u64 {
+        self.total_compute_units_used.load(Ordering::Relaxed)
+    }
+
+    /// Record a non-vote transaction in this slot's metrics.
+    pub fn record_nonvote_transaction(&self) {
+        self.nonvote_transaction_count
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Record a failed transaction in this slot's metrics.
+    pub fn record_failed_transaction(&self) {
+        self.failed_transaction_count
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Add to the total compute units consumed in this slot.
+    pub fn add_compute_units_used(&self, cu: u64) {
+        self.total_compute_units_used
+            .fetch_add(cu, Ordering::Relaxed);
     }
 
     pub fn accounts(&self) -> &Arc<AccountDatabase> {
