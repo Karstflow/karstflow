@@ -321,6 +321,11 @@ impl BytecodeVm {
             instruction_data_offset: 0,
         };
 
+        let deplete_on_failure = paradencer_ids::features::is_feature_active(
+            &snapshot.active_features,
+            &paradencer_ids::features::DEPLETE_CU_METER_ON_VM_FAILURE,
+        );
+
         match interpreter::execute(
             program,
             memory,
@@ -344,9 +349,21 @@ impl BytecodeVm {
                 })
             }
             Err(VmError::ComputeBudgetExceeded) => Err(SbpfExecutionError::ComputeBudgetExceeded),
-            Err(e) => Err(SbpfExecutionError::ExecutionFailed {
-                message: e.to_string(),
-            }),
+            Err(e) => {
+                if deplete_on_failure {
+                    // When the feature is active, consume the entire budget
+                    // on non-syscall VM failures (illegal instruction, bad
+                    // memory access, etc.) and return a failed outcome.
+                    Ok(ExecutionOutcome::failure(
+                        context.compute_budget,
+                        e.to_string(),
+                    ))
+                } else {
+                    Err(SbpfExecutionError::ExecutionFailed {
+                        message: e.to_string(),
+                    })
+                }
+            }
         }
     }
 }
@@ -1002,5 +1019,82 @@ mod tests {
         let ids2 = vm.syscall_dispatch.registered_ids();
         assert!(ids2.contains(&murmur3_hash("sol_blake3")));
         assert!(ids2.contains(&murmur3_hash("sol_log_")));
+    }
+
+    #[test]
+    fn deplete_cu_on_vm_failure_returns_outcome_with_full_budget() {
+        use crate::instruction::{Instruction, Opcode};
+        use paradencer_ids::features;
+
+        let mut vm = BytecodeVm::new();
+
+        // Enable the deplete-on-failure feature
+        let mut snap = crate::sysvar_snapshot::SysvarSnapshot::default();
+        snap.active_features
+            .insert(*features::DEPLETE_CU_METER_ON_VM_FAILURE.as_bytes());
+        vm.set_sysvar_snapshot(snap);
+
+        let program_id = Pubkey::new_unique();
+
+        // Build a program that triggers runtime division by zero:
+        // mov r2, 0; div32 r1, r2 (runtime error, passes validation)
+        let elf = make_elf_program(&[
+            Instruction::new(Opcode::Mov64Imm as u8, 2, 0, 0, 0), // r2 = 0
+            Instruction::new(Opcode::Div32Reg as u8, 1, 2, 0, 0), // r1 / r2 → div by zero
+            Instruction::new(Opcode::Exit as u8, 0, 0, 0, 0),
+        ]);
+
+        let budget = 100_000u64;
+        let context = ExecutionContext {
+            program_id,
+            accounts: vec![(program_id, program_account(elf), false)],
+            instruction_data: vec![],
+            compute_budget: budget,
+            sysvar_snapshot: None,
+        };
+
+        let result = vm.execute(context);
+        match result {
+            Ok(outcome) => {
+                assert!(!outcome.success, "VM error should produce failure outcome");
+                assert_eq!(
+                    outcome.compute_units_consumed, budget,
+                    "Entire budget should be consumed on VM failure"
+                );
+            }
+            Err(_) => panic!("Should return Ok(failure) when deplete feature is active"),
+        }
+    }
+
+    #[test]
+    fn without_deplete_feature_vm_failure_returns_error() {
+        use crate::instruction::{Instruction, Opcode};
+
+        let mut vm = BytecodeVm::new();
+        // Set empty features (no deplete feature)
+        vm.set_sysvar_snapshot(crate::sysvar_snapshot::SysvarSnapshot::default());
+
+        let program_id = Pubkey::new_unique();
+
+        // Same runtime div-by-zero program
+        let elf = make_elf_program(&[
+            Instruction::new(Opcode::Mov64Imm as u8, 2, 0, 0, 0),
+            Instruction::new(Opcode::Div32Reg as u8, 1, 2, 0, 0),
+            Instruction::new(Opcode::Exit as u8, 0, 0, 0, 0),
+        ]);
+
+        let context = ExecutionContext {
+            program_id,
+            accounts: vec![(program_id, program_account(elf), false)],
+            instruction_data: vec![],
+            compute_budget: 100_000,
+            sysvar_snapshot: None,
+        };
+
+        let result = vm.execute(context);
+        assert!(
+            result.is_err(),
+            "Without deplete feature, VM error should return Err"
+        );
     }
 }
