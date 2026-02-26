@@ -19,12 +19,14 @@ use crate::stake::{deserialize_stake_state, StakeState};
 use crate::stake_history::{StakeHistory, StakeHistoryEntry};
 use crate::sysvars::SysvarCache;
 use crate::transaction_cache::SeedEntry;
+use crate::vote_account_cache::VoteAccountCache;
 use crate::{EpochSchedule, LeaderSchedule, StakeTracker};
 use paradencer_constants::block_limits::MESSAGE_HASH_PREFIX_BYTES;
-use paradencer_ids::{FEATURE_PROGRAM_ID, STAKE_PROGRAM_ID};
+use paradencer_ids::{FEATURE_PROGRAM_ID, STAKE_PROGRAM_ID, VOTE_PROGRAM_ID};
 use paradencer_storage::{
     AccountDatabase, GenesisConfig, RestoreResult, SnapshotBankState, StatusCacheEntry,
 };
+use paradencer_types::Pubkey;
 use std::sync::{Arc, RwLock};
 
 /// Result of a successful snapshot bootstrap.
@@ -40,6 +42,8 @@ pub struct BootstrapResult {
     pub transactions_seeded: usize,
     /// Stake initialization statistics.
     pub stake_init: StakeInitStats,
+    /// Vote account cache initialization statistics.
+    pub vote_init: VoteInitStats,
     /// Number of accounts included in the lattice hash computation.
     pub lthash_accounts: usize,
     /// Number of stake history epochs loaded.
@@ -82,6 +86,17 @@ pub struct StakeInitStats {
     pub total_delegated_lamports: u64,
     /// Number of unique vote accounts receiving delegation.
     pub vote_accounts_with_stake: usize,
+}
+
+/// Statistics from initializing vote accounts after snapshot restore.
+#[derive(Debug, Clone, Default)]
+pub struct VoteInitStats {
+    /// Total vote accounts scanned (owned by vote program).
+    pub vote_accounts_scanned: usize,
+    /// Number of vote accounts successfully loaded into the cache.
+    pub vote_accounts_loaded: usize,
+    /// Number of accounts that failed metadata parsing (skipped).
+    pub parse_errors: usize,
 }
 
 /// Errors that can occur during snapshot bootstrap.
@@ -145,6 +160,10 @@ pub fn bootstrap_from_snapshot(
     let (tracker, stake_init) = initialize_stakes(&accounts, bank_state.epoch);
     bank.set_stake_tracker(Arc::new(RwLock::new(tracker)));
 
+    // Step 3b: Initialize vote account cache from restored vote accounts.
+    let (vote_cache, vote_init) = initialize_vote_accounts(&accounts);
+    bank.set_vote_account_cache(Arc::new(RwLock::new(vote_cache)));
+
     // Step 4: Initialize stake history from snapshot.
     let stake_history = initialize_stake_history(&bank_state.stake_summary);
     let stake_history_entries = stake_history.len();
@@ -180,6 +199,7 @@ pub fn bootstrap_from_snapshot(
         total_lamports: restore_result.total_lamports,
         transactions_seeded,
         stake_init,
+        vote_init,
         lthash_accounts,
         stake_history_entries,
         feature_init,
@@ -201,6 +221,8 @@ pub struct GenesisBootstrapResult {
     pub total_lamports: u64,
     /// Stake initialization statistics.
     pub stake_init: StakeInitStats,
+    /// Vote account cache initialization statistics.
+    pub vote_init: VoteInitStats,
     /// Number of accounts included in the lattice hash computation.
     pub lthash_accounts: usize,
     /// Feature set initialization statistics.
@@ -272,6 +294,10 @@ pub fn bootstrap_from_genesis(
     let (tracker, stake_init) = initialize_stakes(&accounts, 0);
     bank.set_stake_tracker(Arc::new(RwLock::new(tracker)));
 
+    // Step 4b: Initialize vote account cache from genesis vote accounts.
+    let (vote_cache, vote_init) = initialize_vote_accounts(&accounts);
+    bank.set_vote_account_cache(Arc::new(RwLock::new(vote_cache)));
+
     // Step 5: Initialize empty stake history (no prior epochs at genesis).
     bank.set_stake_history(Arc::new(RwLock::new(StakeHistory::new())));
 
@@ -305,6 +331,7 @@ pub fn bootstrap_from_genesis(
         accounts_loaded,
         total_lamports,
         stake_init,
+        vote_init,
         lthash_accounts,
         feature_init,
     }
@@ -340,6 +367,82 @@ fn initialize_stakes(accounts: &AccountDatabase, epoch: u64) -> (StakeTracker, S
 
     stats.vote_accounts_with_stake = tracker.stake_by_vote_account().len();
     (tracker, stats)
+}
+
+/// Scan the account database for vote program accounts and build a VoteAccountCache.
+///
+/// Iterates all accounts owned by the vote program, extracts metadata
+/// (node identity, commission, last vote slot), and populates a cache
+/// for stake-weighted clock, leader schedule, and epoch processing.
+fn initialize_vote_accounts(accounts: &AccountDatabase) -> (VoteAccountCache, VoteInitStats) {
+    let vote_accounts = accounts.get_accounts_by_owner(&VOTE_PROGRAM_ID);
+    let mut cache = VoteAccountCache::with_capacity(vote_accounts.len());
+    let mut stats = VoteInitStats {
+        vote_accounts_scanned: vote_accounts.len(),
+        ..Default::default()
+    };
+
+    for (pubkey, account) in &vote_accounts {
+        match parse_vote_metadata(account.data.as_ref()) {
+            Some((node_pubkey, commission, last_vote_slot)) => {
+                cache.update_from_vote_state(
+                    *pubkey,
+                    node_pubkey,
+                    commission,
+                    last_vote_slot,
+                    0, // Timestamp not stored in binary format; updated at runtime.
+                );
+                stats.vote_accounts_loaded += 1;
+            }
+            None => {
+                stats.parse_errors += 1;
+            }
+        }
+    }
+
+    (cache, stats)
+}
+
+/// Extract node identity, commission, and last vote slot from vote account data.
+///
+/// Binary layout (matching the vote program serialization):
+/// - `[0..32]`   node_pubkey
+/// - `[32..64]`  authorized_voter
+/// - `[64..96]`  authorized_withdrawer
+/// - `[96]`      commission (1 byte)
+/// - `[97..101]` vote_count (u32 LE)
+/// - votes:      vote_count * 12 bytes (slot:u64 + confirmation:u32)
+///
+/// Returns `(node_pubkey, commission, last_vote_slot)` or `None` on parse failure.
+fn parse_vote_metadata(data: &[u8]) -> Option<(Pubkey, u8, u64)> {
+    // Minimum: 3 pubkeys (96) + commission (1) + vote_count (4) = 101
+    if data.len() < 101 {
+        return None;
+    }
+
+    let node_pubkey = Pubkey::new(data[0..32].try_into().ok()?);
+    let commission = data[96];
+
+    let vote_count = u32::from_le_bytes(data[97..101].try_into().ok()?) as usize;
+
+    // Extract the last vote slot from the votes array.
+    let last_vote_slot = if vote_count > 0 {
+        // Each vote entry is 12 bytes (slot:u64 + conf:u32).
+        // The last vote is at offset 101 + (vote_count - 1) * 12.
+        let last_vote_offset = 101 + (vote_count - 1) * 12;
+        if data.len() < last_vote_offset + 8 {
+            return None;
+        }
+        u64::from_le_bytes(
+            data[last_vote_offset..last_vote_offset + 8]
+                .try_into()
+                .ok()?,
+        )
+    } else {
+        0
+    };
+
+    Some((node_pubkey, commission, last_vote_slot))
 }
 
 /// Initialize the sysvar cache from snapshot bank state.
@@ -1661,5 +1764,238 @@ mod tests {
         let result = bootstrap_from_genesis(&genesis, leader_schedule);
         assert_eq!(result.accounts_loaded, 2);
         assert_eq!(result.total_lamports, 1_500_000);
+    }
+
+    // ── vote account cache initialization tests ─────────────────────────
+
+    /// Build minimal serialized vote account data for bootstrap.
+    fn make_vote_account_data(node_pubkey: &Pubkey, commission: u8, vote_slots: &[u64]) -> Vec<u8> {
+        let mut data = Vec::new();
+        // node_pubkey (32 bytes)
+        data.extend_from_slice(node_pubkey.as_bytes());
+        // authorized_voter (32 bytes)
+        data.extend_from_slice(&[1u8; 32]);
+        // authorized_withdrawer (32 bytes)
+        data.extend_from_slice(&[2u8; 32]);
+        // commission (1 byte)
+        data.push(commission);
+        // votes: count (u32 LE) + entries (slot:u64 + conf:u32 each)
+        data.extend_from_slice(&(vote_slots.len() as u32).to_le_bytes());
+        for (i, &slot) in vote_slots.iter().enumerate() {
+            data.extend_from_slice(&slot.to_le_bytes());
+            let conf = (vote_slots.len() - i) as u32;
+            data.extend_from_slice(&conf.to_le_bytes());
+        }
+        // root_slot: None
+        data.push(0);
+        // epoch credits: count=0
+        data.extend_from_slice(&0u32.to_le_bytes());
+        data
+    }
+
+    /// Insert a vote account into the database.
+    fn insert_vote_account(
+        db: &AccountDatabase,
+        vote_pubkey: &Pubkey,
+        node_pubkey: &Pubkey,
+        commission: u8,
+        vote_slots: &[u64],
+    ) {
+        let data = make_vote_account_data(node_pubkey, commission, vote_slots);
+        let account = Account {
+            data: data.into(),
+            meta: paradencer_storage::AccountMeta {
+                lamports: 1_000_000,
+                owner: VOTE_PROGRAM_ID,
+                executable: false,
+                rent_epoch: 0,
+            },
+        };
+        db.store_published_account(*vote_pubkey, account);
+    }
+
+    #[test]
+    fn parse_vote_metadata_extracts_fields() {
+        let node = Pubkey::new([0xAA; 32]);
+        let data = make_vote_account_data(&node, 10, &[100, 200, 300]);
+        let result = parse_vote_metadata(&data);
+        assert!(result.is_some());
+        let (parsed_node, commission, last_vote_slot) = result.unwrap();
+        assert_eq!(parsed_node, node);
+        assert_eq!(commission, 10);
+        assert_eq!(last_vote_slot, 300);
+    }
+
+    #[test]
+    fn parse_vote_metadata_zero_votes() {
+        let node = Pubkey::new([0xBB; 32]);
+        let data = make_vote_account_data(&node, 5, &[]);
+        let result = parse_vote_metadata(&data);
+        assert!(result.is_some());
+        let (parsed_node, commission, last_vote_slot) = result.unwrap();
+        assert_eq!(parsed_node, node);
+        assert_eq!(commission, 5);
+        assert_eq!(last_vote_slot, 0);
+    }
+
+    #[test]
+    fn parse_vote_metadata_rejects_short_data() {
+        let data = vec![0u8; 50]; // Too short
+        assert!(parse_vote_metadata(&data).is_none());
+    }
+
+    #[test]
+    fn bootstrap_initializes_vote_cache_empty() {
+        let db = Arc::new(AccountDatabase::new());
+        let result = make_restore_result(1000);
+        let leader_schedule = make_leader_schedule();
+
+        let bootstrap = bootstrap_from_snapshot(db, &result, leader_schedule).unwrap();
+        assert_eq!(bootstrap.vote_init.vote_accounts_scanned, 0);
+        assert_eq!(bootstrap.vote_init.vote_accounts_loaded, 0);
+        assert_eq!(bootstrap.vote_init.parse_errors, 0);
+
+        // Vote account cache should be attached to the bank.
+        let bank = bootstrap.bank_forks.working_bank();
+        assert!(bank.vote_account_cache().is_some());
+        let cache_lock = bank.vote_account_cache().unwrap();
+        let cache = cache_lock.read().unwrap();
+        assert!(cache.is_empty());
+    }
+
+    #[test]
+    fn bootstrap_loads_vote_accounts_into_cache() {
+        let db = Arc::new(AccountDatabase::new());
+        let vote_a = Pubkey::new_unique();
+        let vote_b = Pubkey::new_unique();
+        let node_a = Pubkey::new_unique();
+        let node_b = Pubkey::new_unique();
+
+        insert_vote_account(&db, &vote_a, &node_a, 8, &[100, 200, 300]);
+        insert_vote_account(&db, &vote_b, &node_b, 10, &[150, 250]);
+
+        let result = make_restore_result(1000);
+        let leader_schedule = make_leader_schedule();
+
+        let bootstrap = bootstrap_from_snapshot(db, &result, leader_schedule).unwrap();
+        assert_eq!(bootstrap.vote_init.vote_accounts_scanned, 2);
+        assert_eq!(bootstrap.vote_init.vote_accounts_loaded, 2);
+        assert_eq!(bootstrap.vote_init.parse_errors, 0);
+
+        // Verify cache contents.
+        let bank = bootstrap.bank_forks.working_bank();
+        let cache_lock = bank.vote_account_cache().unwrap();
+        let cache = cache_lock.read().unwrap();
+        assert_eq!(cache.len(), 2);
+
+        let entry_a = cache.get(&vote_a).unwrap();
+        assert_eq!(entry_a.node_pubkey, node_a);
+        assert_eq!(entry_a.commission, 8);
+        assert_eq!(entry_a.last_vote_slot, 300);
+
+        let entry_b = cache.get(&vote_b).unwrap();
+        assert_eq!(entry_b.node_pubkey, node_b);
+        assert_eq!(entry_b.commission, 10);
+        assert_eq!(entry_b.last_vote_slot, 250);
+    }
+
+    #[test]
+    fn bootstrap_counts_vote_parse_errors() {
+        let db = Arc::new(AccountDatabase::new());
+
+        // Insert a valid vote account.
+        let vote_ok = Pubkey::new_unique();
+        let node = Pubkey::new_unique();
+        insert_vote_account(&db, &vote_ok, &node, 5, &[100]);
+
+        // Insert an invalid vote-program-owned account.
+        let vote_bad = Pubkey::new_unique();
+        let account = Account {
+            data: vec![0xFF; 50].into(), // Too short to be valid
+            meta: paradencer_storage::AccountMeta {
+                lamports: 1_000_000,
+                owner: VOTE_PROGRAM_ID,
+                executable: false,
+                rent_epoch: 0,
+            },
+        };
+        db.store_published_account(vote_bad, account);
+
+        let result = make_restore_result(1000);
+        let leader_schedule = make_leader_schedule();
+
+        let bootstrap = bootstrap_from_snapshot(db, &result, leader_schedule).unwrap();
+        assert_eq!(bootstrap.vote_init.vote_accounts_scanned, 2);
+        assert_eq!(bootstrap.vote_init.vote_accounts_loaded, 1);
+        assert_eq!(bootstrap.vote_init.parse_errors, 1);
+    }
+
+    #[test]
+    fn bootstrap_vote_cache_inherits_to_child() {
+        let db = Arc::new(AccountDatabase::new());
+        let vote = Pubkey::new_unique();
+        let node = Pubkey::new_unique();
+        insert_vote_account(&db, &vote, &node, 7, &[500]);
+
+        let result = make_restore_result(1000);
+        let leader_schedule = make_leader_schedule();
+
+        let bootstrap = bootstrap_from_snapshot(db, &result, leader_schedule.clone()).unwrap();
+        let root_bank = bootstrap.bank_forks.working_bank();
+
+        // Child bank should inherit the vote account cache.
+        let child = Bank::new_from_parent(&root_bank, 1001, leader_schedule);
+        let child_cache = child.vote_account_cache().unwrap();
+        let cache = child_cache.read().unwrap();
+        assert_eq!(cache.len(), 1);
+        let entry = cache.get(&vote).unwrap();
+        assert_eq!(entry.node_pubkey, node);
+        assert_eq!(entry.commission, 7);
+    }
+
+    #[test]
+    fn genesis_bootstrap_initializes_vote_cache_empty() {
+        let genesis = make_genesis_config();
+        let leader_schedule = make_leader_schedule();
+
+        let result = bootstrap_from_genesis(&genesis, leader_schedule);
+        assert_eq!(result.vote_init.vote_accounts_scanned, 0);
+        assert_eq!(result.vote_init.vote_accounts_loaded, 0);
+
+        let bank = result.bank_forks.working_bank();
+        assert!(bank.vote_account_cache().is_some());
+    }
+
+    #[test]
+    fn genesis_bootstrap_with_vote_accounts() {
+        let mut genesis = make_genesis_config();
+        let vote_pubkey = Pubkey::new_unique();
+        let node_pubkey = Pubkey::new_unique();
+        let vote_data = make_vote_account_data(&node_pubkey, 12, &[0]);
+
+        genesis.accounts.push((
+            vote_pubkey,
+            GenesisAccount {
+                lamports: 1_000_000,
+                data: vote_data,
+                owner: VOTE_PROGRAM_ID,
+                executable: false,
+                rent_epoch: 0,
+            },
+        ));
+
+        let leader_schedule = make_leader_schedule();
+        let result = bootstrap_from_genesis(&genesis, leader_schedule);
+        assert_eq!(result.vote_init.vote_accounts_scanned, 1);
+        assert_eq!(result.vote_init.vote_accounts_loaded, 1);
+
+        let bank = result.bank_forks.working_bank();
+        let cache_lock = bank.vote_account_cache().unwrap();
+        let cache = cache_lock.read().unwrap();
+        assert_eq!(cache.len(), 1);
+        let entry = cache.get(&vote_pubkey).unwrap();
+        assert_eq!(entry.node_pubkey, node_pubkey);
+        assert_eq!(entry.commission, 12);
+        assert_eq!(entry.last_vote_slot, 0);
     }
 }
