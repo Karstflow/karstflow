@@ -62,7 +62,7 @@ pub use equivocation::{EquivocationDetector, EquivocationProof};
 pub use fee::{FeeCalculator, FeeCollector, FeeRateGovernor};
 pub use fork_choice::{ForkChoice, ForkChoiceStats, ForkInfo};
 pub use inflation::Inflation;
-pub use leader_schedule::{LeaderSchedule, LeaderScheduleError};
+pub use leader_schedule::{EpochLeaders, LeaderSchedule, LeaderScheduleError};
 pub use nonce::{Nonce, NonceAccount, NonceData, NonceError, NonceState};
 pub use rent::{CollectedRent, Rent, RentCollector, RentDue};
 pub use reward_application::{RewardApplicationResult, RewardApplicator};

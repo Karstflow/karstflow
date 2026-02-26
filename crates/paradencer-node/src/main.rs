@@ -12,7 +12,7 @@ use paradencer_control::{
     render_diagnostics_topology_line, render_preflight_readiness_issue_line,
     render_preflight_readiness_line, render_readiness_policy_line, resolve_validator_identity,
     run_diagnostics_phase, run_preflight_phase, run_preflight_phase_with_probe_report,
-    run_runtime_phase, start_gossip_service, BlockstoreShredProvider, ServiceBundle,
+    run_runtime_phase_with_consensus, start_gossip_service, BlockstoreShredProvider, ServiceBundle,
 };
 
 fn main() -> paradencer_control::Result<()> {
@@ -181,9 +181,12 @@ fn run_with_node_config(
     )?;
     let _repair_io = repair_bundle.io_handle;
 
+    // Keep a handle to bank forks for the live RPC snapshot provider.
+    let rpc_bank_forks = consensus.bank_forks.clone();
+
     // Build the vote broadcast service. Monitors the shared Tower for
     // new consensus decisions and pushes them to gossip as CrdsValue
-    // entries. Mirrors Firedancer's tower→txsend→gossip pipeline.
+    // entries.
     let vote_broadcast_bundle = build_vote_broadcast_service(
         &identity,
         consensus.tower,
@@ -201,7 +204,7 @@ fn run_with_node_config(
     // Keep gossip and plugins alive until run_runtime_phase returns.
     let _gossip = gossip_handle;
 
-    let result = run_runtime_phase(
+    let result = run_runtime_phase_with_consensus(
         &node_config,
         topology_pair.startup.services.as_mut_slice(),
         ServiceBundle {
@@ -210,6 +213,7 @@ fn run_with_node_config(
             link_count: runtime_topology.topology_spec.links.len(),
             services,
         },
+        Some(rpc_bank_forks),
     );
 
     // Cleanly shut down plugin service after runtime exits.
