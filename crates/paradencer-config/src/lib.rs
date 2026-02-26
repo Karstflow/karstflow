@@ -74,6 +74,9 @@ pub struct NodeConfig {
     /// Base directory for persistent storage (accounts, blockstore, snapshots).
     /// When `None`, the node runs in-memory only (no persistence across restarts).
     pub data_dir: Option<PathBuf>,
+    /// Paths to plugin configuration files (JSON format).
+    /// Each file specifies a plugin shared library and its settings.
+    pub plugin_config_files: Vec<PathBuf>,
 }
 
 #[derive(Debug, Clone)]
@@ -147,6 +150,8 @@ impl NodeConfig {
             parse_live_entrypoints(std::env::var("PARADENCER_LIVE_ENTRYPOINTS").ok())?;
         let gossip_bind_addr = parse_gossip_bind_addr_from_env()?;
         let data_dir = std::env::var("PARADENCER_DATA_DIR").ok().map(PathBuf::from);
+        let plugin_config_files =
+            parse_plugin_config_paths(std::env::var("PARADENCER_PLUGIN_CONFIG").ok());
 
         Ok(Self {
             cluster_mode,
@@ -169,6 +174,7 @@ impl NodeConfig {
             mainnet_readiness_policy: build_mainnet_readiness_policy(profile)?,
             network_config: build_network_config(profile.and_then(|p| p.network.as_ref())),
             data_dir,
+            plugin_config_files,
         })
     }
 
@@ -524,6 +530,21 @@ pub fn validate_metrics_target_preflight(
             Ok(())
         }
     }
+}
+
+/// Parse plugin config file paths from a comma-separated environment variable.
+pub fn parse_plugin_config_paths(value: Option<String>) -> Vec<PathBuf> {
+    let Some(raw) = value else {
+        return Vec::new();
+    };
+    if raw.trim().is_empty() {
+        return Vec::new();
+    }
+    raw.split(',')
+        .map(str::trim)
+        .filter(|entry| !entry.is_empty())
+        .map(PathBuf::from)
+        .collect()
 }
 
 #[cfg(test)]

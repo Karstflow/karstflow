@@ -19,6 +19,7 @@ members = [
   "crates/paradencer-ids",
   "crates/paradencer-crypto",
   "crates/paradencer-net",
+  "crates/paradencer-plugin",
 ]
 resolver = "2"
 
@@ -75,6 +76,7 @@ tempfile = "3.8"
 memmap2 = "0.9"
 
 # Internal crates
+libloading = "0.8"
 paradencer-constants = { path = "crates/paradencer-constants" }
 paradencer-types = { path = "crates/paradencer-types" }
 paradencer-crypto = { path = "crates/paradencer-crypto" }

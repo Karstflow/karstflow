@@ -64,4 +64,6 @@ pub enum ControlPlaneError {
     GossipServiceStartFailed { detail: String },
     #[error("bootstrap failed: {message}")]
     Bootstrap { message: String },
+    #[error("plugin failed: {message}")]
+    Plugin { message: String },
 }

@@ -1,3 +1,5 @@
+use paradencer_plugin::PluginService;
+
 use paradencer_control::{
     build_diagnostics_summary_from_probe, build_pipeline_service, build_repair_service,
     build_replay_service_with_block_input, build_turbine_service, build_vote_broadcast_service,
@@ -26,6 +28,24 @@ fn main() -> paradencer_control::Result<()> {
 fn run_with_node_config(
     node_config: paradencer_config::NodeConfig,
 ) -> paradencer_control::Result<()> {
+    // Initialize the plugin service. Loads external plugins from JSON config files
+    // specified via PARADENCER_PLUGIN_CONFIG env var (comma-separated paths).
+    let mut plugin_service = if node_config.plugin_config_files.is_empty() {
+        PluginService::empty()
+    } else {
+        let config_refs: Vec<&std::path::Path> = node_config
+            .plugin_config_files
+            .iter()
+            .map(|p| p.as_path())
+            .collect();
+        PluginService::new(&config_refs).map_err(|e| {
+            paradencer_control::ControlPlaneError::Plugin {
+                message: format!("failed to load plugins: {e}"),
+            }
+        })?
+    };
+    let _plugin_manager = plugin_service.manager();
+
     // Resolve the validator identity — loads from file in Live mode,
     // generates ephemeral keypair in Dev mode.
     let identity = resolve_validator_identity(&node_config)?;
@@ -115,10 +135,10 @@ fn run_with_node_config(
     services.push(repair_bundle.service);
     services.push(vote_broadcast_bundle.service);
 
-    // Keep gossip alive until run_runtime_phase returns.
+    // Keep gossip and plugins alive until run_runtime_phase returns.
     let _gossip = gossip_handle;
 
-    run_runtime_phase(
+    let result = run_runtime_phase(
         &node_config,
         topology_pair.startup.services.as_mut_slice(),
         ServiceBundle {
@@ -127,7 +147,11 @@ fn run_with_node_config(
             link_count: runtime_topology.topology_spec.links.len(),
             services,
         },
-    )
+    );
+
+    // Cleanly shut down plugin service after runtime exits.
+    plugin_service.shutdown();
+    result
 }
 
 fn preflight_with_node_config(
