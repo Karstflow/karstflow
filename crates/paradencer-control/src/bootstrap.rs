@@ -1211,12 +1211,11 @@ fn build_vote_transaction(
     root: Option<u64>,
     recent_blockhash: &[u8; 32],
 ) -> Vec<u8> {
-    // TowerSync instruction discriminant (vote program instruction type 12).
-    const TOWER_SYNC_DISCRIMINANT: u32 = 12;
-
     // Build TowerSync instruction data
     let mut instr_data = Vec::with_capacity(5 + 9 + votes.len() * 12 + 1);
-    instr_data.extend_from_slice(&TOWER_SYNC_DISCRIMINANT.to_le_bytes());
+    instr_data.extend_from_slice(
+        &paradencer_constants::vote_program::INSTRUCTION_TOWER_SYNC.to_le_bytes(),
+    );
     match root {
         Some(slot) => {
             instr_data.push(1);
