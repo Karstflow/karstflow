@@ -136,16 +136,16 @@ pub fn encode_account_data(data: &[u8], encoding: &str) -> Value {
     }
 }
 
-/// Simple base64 encoding
+/// Encode raw bytes to base64 (standard alphabet, padded).
 fn base64_encode(data: &[u8]) -> String {
-    // In production, use a proper base64 library
-    bs58::encode(data).into_string()
+    use base64::engine::general_purpose::STANDARD;
+    use base64::Engine;
+    STANDARD.encode(data)
 }
 
-/// Simple zstd compression placeholder
+/// Compress data with zstd at default compression level.
 fn compress_zstd(data: &[u8]) -> Vec<u8> {
-    // In production, use actual zstd compression
-    data.to_vec()
+    zstd::encode_all(data, 3).unwrap_or_else(|_| data.to_vec())
 }
 
 /// Calculate transaction fee based on signature count and compute units

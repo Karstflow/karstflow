@@ -109,11 +109,13 @@ fn matches_filter(account: &Account, filter: &RpcFilterType) -> bool {
     }
 }
 
-/// Decode base64 string
+/// Decode base64 string into raw bytes.
 fn decode_base64(s: &str) -> Result<Vec<u8>, String> {
-    // Simple base64 decode - in production use a proper library
-    // For now, just use the string bytes as a placeholder
-    Ok(s.as_bytes().to_vec())
+    use base64::engine::general_purpose::STANDARD;
+    use base64::Engine;
+    STANDARD
+        .decode(s)
+        .map_err(|e| format!("invalid base64: {e}"))
 }
 
 /// Build filter from JSON

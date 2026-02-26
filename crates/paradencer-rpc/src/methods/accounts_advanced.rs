@@ -355,8 +355,9 @@ fn serialize_account(account: &Account, encoding: &str) -> Value {
 }
 
 fn base64_encode(data: &[u8]) -> String {
-    // Simple base64 encoding - in production use a proper library
-    bs58::encode(data).into_string()
+    use base64::engine::general_purpose::STANDARD;
+    use base64::Engine;
+    STANDARD.encode(data)
 }
 
 #[cfg(test)]
