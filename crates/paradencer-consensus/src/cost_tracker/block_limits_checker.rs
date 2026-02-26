@@ -66,3 +66,94 @@ pub fn check_limits(
 
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn no_account_cost(_: &Pubkey) -> u64 {
+        0
+    }
+
+    fn simple_tx(cu: u64) -> TransactionCost {
+        TransactionCost::new(cu, false)
+    }
+
+    #[test]
+    fn within_all_limits() {
+        let tx = simple_tx(1_000);
+        let result = check_limits(0, 0, 0, &no_account_cost, &tx);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn exceeds_block_compute_limit() {
+        let tx = simple_tx(1_000);
+        let result = check_limits(MAX_BLOCK_COMPUTE_UNITS, 0, 0, &no_account_cost, &tx);
+        assert!(matches!(
+            result,
+            Err(CostTrackerError::BlockCostLimitExceeded { .. })
+        ));
+    }
+
+    #[test]
+    fn vote_exceeds_vote_limit() {
+        let mut tx = TransactionCost::new(1_000, true);
+        tx.is_vote = true;
+        let result = check_limits(0, MAX_VOTE_COMPUTE_UNITS, 0, &no_account_cost, &tx);
+        assert!(matches!(
+            result,
+            Err(CostTrackerError::VoteCostLimitExceeded { .. })
+        ));
+    }
+
+    #[test]
+    fn non_vote_ignores_vote_limit() {
+        let tx = simple_tx(1_000);
+        // Even if vote cost is at max, non-vote tx should pass
+        let result = check_limits(0, MAX_VOTE_COMPUTE_UNITS, 0, &no_account_cost, &tx);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn exceeds_per_account_write_cost() {
+        let mut tx = simple_tx(1_000);
+        let acct = Pubkey::new_unique();
+        tx.add_writable_account(acct, 1_000);
+
+        let cost_fn = |p: &Pubkey| {
+            if *p == acct {
+                MAX_WRITABLE_ACCOUNT_COMPUTE_UNITS
+            } else {
+                0
+            }
+        };
+        let result = check_limits(0, 0, 0, &cost_fn, &tx);
+        assert!(matches!(
+            result,
+            Err(CostTrackerError::AccountCostLimitExceeded { .. })
+        ));
+    }
+
+    #[test]
+    fn exceeds_data_size_delta() {
+        let mut tx = simple_tx(1_000);
+        tx.data_size_delta = 1;
+        let result = check_limits(0, 0, MAX_ACCOUNT_DATA_SIZE_DELTA, &no_account_cost, &tx);
+        assert!(matches!(
+            result,
+            Err(CostTrackerError::AccountDataSizeLimitExceeded { .. })
+        ));
+    }
+
+    #[test]
+    fn transaction_cost_total_includes_overhead() {
+        let mut tx = TransactionCost::new(10_000, false);
+        tx.signature_count = 2;
+        tx.add_writable_account(Pubkey::new_unique(), 500);
+
+        let total = tx.total_cost();
+        // Should include: compute_units + TRANSACTION_BASE_COST + signature costs + write lock costs
+        assert!(total > 10_000);
+    }
+}
