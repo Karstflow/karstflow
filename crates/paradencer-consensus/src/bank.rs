@@ -3693,4 +3693,83 @@ mod tests {
         assert_eq!(slot_counts.len(), 1);
         assert!(slot_counts.contains_key(&node));
     }
+
+    #[test]
+    fn to_snapshot_state_captures_bank_fields() {
+        let accounts = Arc::new(AccountDatabase::new());
+        let epoch_schedule = Arc::new(EpochSchedule::default());
+        let leader_schedule = create_test_leader_schedule(0);
+
+        let bank = Bank::new_genesis(accounts, epoch_schedule, leader_schedule);
+
+        // Register a blockhash and some ticks so there's non-trivial state.
+        bank.register_tick().unwrap();
+        bank.register_tick().unwrap();
+
+        let state = bank.to_snapshot_state();
+
+        // Slot and epoch should match genesis values.
+        assert_eq!(state.slot, GENESIS_SLOT);
+        assert_eq!(state.epoch, GENESIS_EPOCH);
+        assert_eq!(state.parent_slot, 0);
+
+        // Tick height should reflect the ticks we registered.
+        assert_eq!(state.tick_height, 2);
+        assert_eq!(state.max_tick_height, TICKS_PER_SLOT);
+
+        // Protocol constants should be populated.
+        assert_eq!(state.ticks_per_slot, TICKS_PER_SLOT);
+        assert!(state.hashes_per_tick.is_some());
+        assert!(state.ns_per_slot > 0);
+        assert!(state.slots_per_year > 0.0);
+
+        // Fee rate governor should have valid values.
+        assert!(state.fee_rate_governor.target_lamports_per_signature > 0);
+
+        // Rent config should be populated from bank.
+        assert!(state.rent.lamports_per_byte_year > 0);
+        assert!(state.rent.exemption_threshold > 0.0);
+
+        // Epoch schedule should match.
+        assert!(state.epoch_schedule.slots_per_epoch > 0);
+
+        // Inflation config should be populated.
+        assert!(state.inflation.initial > 0.0);
+        assert!(state.inflation.terminal > 0.0);
+
+        // Hash should be a valid 32-byte value (non-trivial after ticks).
+        assert_eq!(state.hash.len(), 32);
+
+        // Stake summary should have default values (no stakes registered).
+        assert_eq!(state.stake_summary.stake_delegation_count, 0);
+        assert_eq!(state.stake_summary.total_delegated_stake, 0);
+
+        // Blockhash queue may or may not have entries depending on
+        // whether genesis registers a blockhash.
+        assert!(state.max_blockhash_age > 0);
+    }
+
+    #[test]
+    fn to_snapshot_state_includes_blockhash_entries() {
+        let accounts = Arc::new(AccountDatabase::new());
+        let epoch_schedule = Arc::new(EpochSchedule::default());
+        let leader_schedule = create_test_leader_schedule(0);
+
+        let bank = Bank::new_genesis(accounts, epoch_schedule, leader_schedule);
+
+        // Complete the slot to trigger blockhash registration.
+        for _ in 0..TICKS_PER_SLOT {
+            bank.register_tick().unwrap();
+        }
+        bank.finish_slot().unwrap();
+
+        let state = bank.to_snapshot_state();
+
+        // After finishing a slot, the blockhash queue should have entries.
+        // The last_blockhash should be set.
+        assert!(state.last_blockhash.is_some());
+        assert_eq!(state.slot, GENESIS_SLOT);
+        // Genesis bank: is_delta depends on parent_slot being Some.
+        assert!(!state.is_delta, "genesis bank has no parent");
+    }
 }
