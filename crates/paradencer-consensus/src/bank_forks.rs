@@ -34,6 +34,11 @@ pub struct BankForks {
     /// and will be evicted on the next root advancement or eagerly via
     /// `mark_dead_and_evict()`.
     dead_slots: HashSet<u64>,
+    /// FIFO queue for ordered dead bank eviction. Banks are pruned from
+    /// the front; eviction stops at the first bank with external references
+    /// (`Arc` strong count > 1), preventing premature removal of banks
+    /// still used by in-flight operations.
+    dead_queue: VecDeque<u64>,
     /// Parent slot → direct children mapping for O(1) descendant queries.
     /// Maintained on insert/eviction to avoid O(n*h) ancestor scanning.
     child_index: HashMap<u64, Vec<u64>>,
@@ -52,6 +57,7 @@ impl BankForks {
             root_slot,
             working_bank: root_bank,
             dead_slots: HashSet::new(),
+            dead_queue: VecDeque::new(),
             child_index: HashMap::new(),
         }
     }
@@ -76,6 +82,7 @@ impl BankForks {
             root_slot,
             working_bank: bank,
             dead_slots: HashSet::new(),
+            dead_queue: VecDeque::new(),
             child_index: HashMap::new(),
         })
     }
@@ -183,6 +190,7 @@ impl BankForks {
 
         // Discard dead slot tracking for evicted banks.
         self.dead_slots.retain(|slot| self.banks.contains_key(slot));
+        self.dead_queue.retain(|slot| self.banks.contains_key(slot));
 
         self.root_slot = new_root_slot;
         Ok(report)
@@ -222,6 +230,7 @@ impl BankForks {
         while let Some(current) = queue.pop_front() {
             if self.dead_slots.insert(current) {
                 report.dead_slots.push(current);
+                self.dead_queue.push_back(current);
 
                 // Mark cost tracker dead to prevent new transaction scheduling.
                 if let Some(bank) = self.banks.get(&current) {
@@ -239,17 +248,10 @@ impl BankForks {
             }
         }
 
-        // Eagerly evict dead banks from memory.
-        for &dead_slot in &report.dead_slots {
-            self.banks.remove(&dead_slot);
-            self.child_index.remove(&dead_slot);
-        }
-
-        // Clean up child index references to evicted slots.
-        for children in self.child_index.values_mut() {
-            children.retain(|s| !report.dead_slots.contains(s));
-        }
-        self.child_index.retain(|_, children| !children.is_empty());
+        // Eagerly prune dead banks in FIFO order, respecting external
+        // references. Banks still held by in-flight operations remain
+        // in the map and dead_queue until their references are dropped.
+        self.try_prune_dead();
 
         report
     }
@@ -275,6 +277,7 @@ impl BankForks {
         while let Some(current) = queue.pop_front() {
             if self.dead_slots.insert(current) {
                 newly_dead.push(current);
+                self.dead_queue.push_back(current);
 
                 if let Some(bank) = self.banks.get(&current) {
                     bank.cost_tracker().mark_dead();
@@ -316,7 +319,67 @@ impl BankForks {
         }
         self.child_index.retain(|_, children| !children.is_empty());
 
+        // Sync dead tracking after forced eviction.
+        self.dead_queue.retain(|slot| self.banks.contains_key(slot));
+        self.dead_slots.retain(|slot| self.banks.contains_key(slot));
+
         before - self.banks.len()
+    }
+
+    /// Prune dead banks in FIFO order, stopping at the first bank that
+    /// is still referenced externally (`Arc` strong count > 1).
+    ///
+    /// This ensures banks held by in-flight operations (replay, RPC
+    /// handlers, etc.) are not removed from the fork map until their
+    /// callers drop their references. Later-queued dead banks are not
+    /// pruned either, preserving FIFO eviction ordering.
+    ///
+    /// Returns the number of banks actually evicted.
+    pub fn try_prune_dead(&mut self) -> usize {
+        let mut pruned = 0;
+
+        loop {
+            let Some(&slot) = self.dead_queue.front() else {
+                break;
+            };
+
+            // Bank already evicted (by set_root or a previous prune).
+            let Some(bank) = self.banks.get(&slot) else {
+                self.dead_queue.pop_front();
+                self.dead_slots.remove(&slot);
+                continue;
+            };
+
+            // Stop at the first bank with external references.
+            if Arc::strong_count(bank) > 1 {
+                break;
+            }
+
+            // Collect parent info before mutating.
+            let parent_slot = bank.parent_slot();
+
+            // Evict the bank.
+            self.dead_queue.pop_front();
+            self.dead_slots.remove(&slot);
+            self.banks.remove(&slot);
+
+            // Remove from parent's child list.
+            if let Some(ps) = parent_slot {
+                if let Some(children) = self.child_index.get_mut(&ps) {
+                    children.retain(|&s| s != slot);
+                    if children.is_empty() {
+                        self.child_index.remove(&ps);
+                    }
+                }
+            }
+
+            // Remove this bank's own child index entry.
+            self.child_index.remove(&slot);
+
+            pruned += 1;
+        }
+
+        pruned
     }
 
     /// Check whether a slot has been marked as dead.
@@ -327,6 +390,11 @@ impl BankForks {
     /// Number of slots currently marked dead.
     pub fn dead_slot_count(&self) -> usize {
         self.dead_slots.len()
+    }
+
+    /// Number of dead banks waiting in the eviction queue.
+    pub fn dead_queue_len(&self) -> usize {
+        self.dead_queue.len()
     }
 
     /// Direct children of a slot in the fork tree.
@@ -878,18 +946,28 @@ mod tests {
         let mut forks = BankForks::new(genesis);
         let leader_schedule = create_test_leader_schedule(0);
 
-        // Build chain: 0 → 1 → 2 → 3 and fork 0 → 4
-        let bank0 = forks.working_bank();
-        let bank1 = Bank::new_from_parent(&bank0, 1, leader_schedule.clone());
-        forks.insert(bank1).unwrap();
-        let bank1_ref = forks.get(1).unwrap();
-        let bank2 = Bank::new_from_parent(&bank1_ref, 2, leader_schedule.clone());
-        forks.insert(bank2).unwrap();
-        let bank2_ref = forks.get(2).unwrap();
-        let bank3 = Bank::new_from_parent(&bank2_ref, 3, leader_schedule.clone());
-        forks.insert(bank3).unwrap();
-        let bank4 = Bank::new_from_parent(&bank0, 4, leader_schedule);
-        forks.insert(bank4).unwrap();
+        // Build chain: 0 → 1 → 2 → 3 and fork 0 → 4.
+        // Intermediate Arc refs are scoped to prevent blocking eviction.
+        {
+            let bank0 = forks.working_bank();
+            let bank1 = Bank::new_from_parent(&bank0, 1, leader_schedule.clone());
+            forks.insert(bank1).unwrap();
+        }
+        {
+            let bank1_ref = forks.get(1).unwrap();
+            let bank2 = Bank::new_from_parent(&bank1_ref, 2, leader_schedule.clone());
+            forks.insert(bank2).unwrap();
+        }
+        {
+            let bank2_ref = forks.get(2).unwrap();
+            let bank3 = Bank::new_from_parent(&bank2_ref, 3, leader_schedule.clone());
+            forks.insert(bank3).unwrap();
+        }
+        {
+            let bank0 = forks.working_bank();
+            let bank4 = Bank::new_from_parent(&bank0, 4, leader_schedule);
+            forks.insert(bank4).unwrap();
+        }
 
         assert_eq!(forks.len(), 5);
 
@@ -900,7 +978,7 @@ mod tests {
         assert!(report.dead_slots.contains(&2));
         assert!(report.dead_slots.contains(&3));
 
-        // Banks immediately gone.
+        // Banks immediately gone (no external references).
         assert_eq!(forks.len(), 2);
         assert!(forks.get(0).is_some());
         assert!(forks.get(4).is_some());
@@ -1066,25 +1144,33 @@ mod tests {
         let genesis = create_genesis_bank();
         let mut forks = BankForks::new(genesis);
         let leader_schedule = create_test_leader_schedule(0);
-        let bank0 = forks.working_bank();
 
         // Build wide tree: 0 → {1, 2, 3, 4, 5}
-        for slot in 1..=5 {
-            let bank = Bank::new_from_parent(&bank0, slot, leader_schedule.clone());
-            forks.insert(bank).unwrap();
+        // Scope intermediate refs to allow reference-aware eviction.
+        {
+            let bank0 = forks.working_bank();
+            for slot in 1..=5 {
+                let bank = Bank::new_from_parent(&bank0, slot, leader_schedule.clone());
+                forks.insert(bank).unwrap();
+            }
         }
 
         // Add depth: 1 → 6 → 7, 2 → 8
-        let bank1 = forks.get(1).unwrap();
-        let bank6 = Bank::new_from_parent(&bank1, 6, leader_schedule.clone());
-        forks.insert(bank6).unwrap();
-        let bank6_ref = forks.get(6).unwrap();
-        let bank7 = Bank::new_from_parent(&bank6_ref, 7, leader_schedule.clone());
-        forks.insert(bank7).unwrap();
-
-        let bank2 = forks.get(2).unwrap();
-        let bank8 = Bank::new_from_parent(&bank2, 8, leader_schedule);
-        forks.insert(bank8).unwrap();
+        {
+            let bank1 = forks.get(1).unwrap();
+            let bank6 = Bank::new_from_parent(&bank1, 6, leader_schedule.clone());
+            forks.insert(bank6).unwrap();
+        }
+        {
+            let bank6_ref = forks.get(6).unwrap();
+            let bank7 = Bank::new_from_parent(&bank6_ref, 7, leader_schedule.clone());
+            forks.insert(bank7).unwrap();
+        }
+        {
+            let bank2 = forks.get(2).unwrap();
+            let bank8 = Bank::new_from_parent(&bank2, 8, leader_schedule);
+            forks.insert(bank8).unwrap();
+        }
 
         assert_eq!(forks.len(), 9); // 0..=8
 
@@ -1105,6 +1191,171 @@ mod tests {
         assert_eq!(children_0.len(), 4);
         assert!(!children_0.contains(&1)); // removed
         assert_eq!(forks.children(2), &[8]);
+    }
+
+    // -- FIFO dead bank eviction tests --
+
+    #[test]
+    fn try_prune_dead_respects_external_references() {
+        let genesis = create_genesis_bank();
+        let mut forks = BankForks::new(genesis);
+        let leader_schedule = create_test_leader_schedule(0);
+
+        // Build: 0 → 1 → 2, 0 → 3.
+        // Scope intermediate refs to avoid accidentally blocking eviction.
+        {
+            let bank0 = forks.working_bank();
+            let bank1 = Bank::new_from_parent(&bank0, 1, leader_schedule.clone());
+            forks.insert(bank1).unwrap();
+        }
+        {
+            let bank1_ref = forks.get(1).unwrap();
+            let bank2 = Bank::new_from_parent(&bank1_ref, 2, leader_schedule.clone());
+            forks.insert(bank2).unwrap();
+        }
+        {
+            let bank0 = forks.working_bank();
+            let bank3 = Bank::new_from_parent(&bank0, 3, leader_schedule);
+            forks.insert(bank3).unwrap();
+        }
+
+        // Hold external reference to bank 1 only.
+        let external_ref = forks.get(1).unwrap();
+
+        // Mark slot 1 dead (cascades to 2), then slot 3.
+        forks.mark_dead(1);
+        forks.mark_dead(3);
+        assert_eq!(forks.dead_slot_count(), 3);
+        assert_eq!(forks.dead_queue_len(), 3);
+
+        // try_prune_dead stops at bank 1 (held externally).
+        // Banks 2 and 3 are not pruned either (FIFO ordering).
+        let pruned = forks.try_prune_dead();
+        assert_eq!(pruned, 0);
+        assert_eq!(forks.len(), 4); // All banks still present.
+
+        // Drop the external reference.
+        drop(external_ref);
+
+        // Now all dead banks can be pruned in FIFO order.
+        let pruned = forks.try_prune_dead();
+        assert_eq!(pruned, 3);
+        assert_eq!(forks.len(), 1); // Only genesis remains.
+        assert_eq!(forks.dead_slot_count(), 0);
+        assert_eq!(forks.dead_queue_len(), 0);
+    }
+
+    #[test]
+    fn try_prune_dead_fifo_ordering() {
+        let genesis = create_genesis_bank();
+        let mut forks = BankForks::new(genesis);
+        let leader_schedule = create_test_leader_schedule(0);
+        let bank0 = forks.working_bank();
+
+        // Build: 0 → {1, 2, 3}
+        for slot in 1..=3 {
+            let bank = Bank::new_from_parent(&bank0, slot, leader_schedule.clone());
+            forks.insert(bank).unwrap();
+        }
+
+        // Mark dead in order: 1, 2, 3.
+        forks.mark_dead(1);
+        forks.mark_dead(2);
+        forks.mark_dead(3);
+
+        // Hold reference to slot 2 (middle of queue).
+        let ref2 = forks.get(2).unwrap();
+
+        // Prune: bank 1 evicted, bank 2 blocks, bank 3 stays.
+        let pruned = forks.try_prune_dead();
+        assert_eq!(pruned, 1);
+        assert!(forks.get(1).is_none());
+        assert!(forks.get(2).is_some()); // Still held.
+        assert!(forks.get(3).is_some()); // Behind bank 2 in queue.
+
+        // Drop ref, prune rest.
+        drop(ref2);
+        let pruned = forks.try_prune_dead();
+        assert_eq!(pruned, 2);
+        assert_eq!(forks.len(), 1); // Only genesis.
+    }
+
+    #[test]
+    fn try_prune_dead_skips_already_evicted() {
+        let genesis = create_genesis_bank();
+        let mut forks = BankForks::new(genesis);
+        let leader_schedule = create_test_leader_schedule(0);
+        let bank0 = forks.working_bank();
+
+        let bank1 = Bank::new_from_parent(&bank0, 1, leader_schedule.clone());
+        for _ in 0..paradencer_constants::ledger::TICKS_PER_SLOT {
+            bank1.register_tick().unwrap();
+        }
+        bank1.freeze().unwrap();
+        bank1.mark_rooted().unwrap();
+        forks.insert(bank1).unwrap();
+
+        let bank1_ref = forks.get(1).unwrap();
+        let bank2 = Bank::new_from_parent(&bank1_ref, 2, leader_schedule.clone());
+        forks.insert(bank2).unwrap();
+
+        let bank3 = Bank::new_from_parent(&bank0, 3, leader_schedule);
+        forks.insert(bank3).unwrap();
+
+        // Mark slot 3 dead and enqueue it.
+        forks.mark_dead(3);
+        assert_eq!(forks.dead_queue_len(), 1);
+
+        // Advance root to 1 — evicts slot 0 and dead slot 3.
+        let report = forks.set_root(1).unwrap();
+        assert!(report.dead_slots.contains(&3));
+        assert!(forks.get(3).is_none());
+
+        // Dead queue should be cleaned after set_root.
+        assert_eq!(forks.dead_queue_len(), 0);
+        assert_eq!(forks.dead_slot_count(), 0);
+
+        // try_prune_dead is a no-op (queue empty).
+        assert_eq!(forks.try_prune_dead(), 0);
+    }
+
+    #[test]
+    fn mark_dead_and_evict_defers_referenced_banks() {
+        let genesis = create_genesis_bank();
+        let mut forks = BankForks::new(genesis);
+        let leader_schedule = create_test_leader_schedule(0);
+
+        // Build: 0 → 1 → 2.
+        {
+            let bank0 = forks.working_bank();
+            let bank1 = Bank::new_from_parent(&bank0, 1, leader_schedule.clone());
+            forks.insert(bank1).unwrap();
+        }
+        {
+            let bank1_ref = forks.get(1).unwrap();
+            let bank2 = Bank::new_from_parent(&bank1_ref, 2, leader_schedule);
+            forks.insert(bank2).unwrap();
+        }
+
+        // Hold external reference to bank 1.
+        let external_ref = forks.get(1).unwrap();
+
+        // mark_dead_and_evict marks both dead but defers bank 1.
+        let report = forks.mark_dead_and_evict(1);
+        assert_eq!(report.dead_slots.len(), 2);
+        assert!(report.dead_slots.contains(&1));
+        assert!(report.dead_slots.contains(&2));
+
+        // Bank 1 still in map (held externally); bank 2 behind it in queue.
+        assert!(forks.get(1).is_some());
+        assert!(forks.get(2).is_some());
+        assert!(external_ref.cost_tracker().is_dead());
+
+        // Drop reference, prune succeeds.
+        drop(external_ref);
+        let pruned = forks.try_prune_dead();
+        assert_eq!(pruned, 2);
+        assert_eq!(forks.len(), 1); // Only genesis.
     }
 
     #[test]
