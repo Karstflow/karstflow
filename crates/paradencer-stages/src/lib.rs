@@ -110,8 +110,8 @@ pub use shred_network::{
 };
 pub use shred_verifier::{LeaderLookup, ShredVerifyResult};
 pub use tile_pipeline::{
-    PipelineConfig, ResolvTile, TransactionPipeline, ValidatorPipeline, ValidatorPipelineResult,
-    VerifyTile,
+    DedupTile, PipelineConfig, ResolvTile, TransactionPipeline, ValidatorPipeline,
+    ValidatorPipelineResult, VerifyTile,
 };
 pub use verify_service::{VerifyService, VerifyServiceStats};
 pub use verify_stage::{

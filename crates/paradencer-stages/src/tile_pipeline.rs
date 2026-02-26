@@ -4,7 +4,7 @@
 /// ResolvStage, PackScheduler, ExecStage) with the TileStem/StemInput
 /// zero-copy IPC system. Each tile runs in a poll-driven service loop:
 ///
-///   QuicTile → VerifyTile → ResolvTile → PackTile → ExecTile → PoH
+///   QuicTile → VerifyTile → DedupTile → ResolvTile → PackTile → ExecTile → PoH
 ///
 /// Raw transaction bytes flow through DataRegion shared memory with
 /// zero copies on the hot path. Fragment metadata carries sequence
@@ -13,6 +13,7 @@ use paradencer_mesh::fragment::{ctl_pack, FragmentMeta};
 use paradencer_mesh::stem::{InputResult, StemInput, StemOutputConfig, TileStem};
 use paradencer_mesh::tile::Tile;
 
+use crate::dedup_stage::TransactionCache;
 use crate::exec_stage::{ExecStage, ExecutionEngine, MockExecutionEngine};
 use crate::pack_stage::{PackScheduler, PackedTransaction};
 use crate::resolv_stage::{Blockhash, ResolvOutcome, ResolvStage, ResolvedTransaction};
@@ -170,6 +171,118 @@ impl Tile for VerifyTile {
                     let sig = payload_sig(&verified.payload);
                     self.output.publish(0, sig, &verified.payload, ctl, 0, 0);
                 }
+            }
+        }
+
+        processed
+    }
+}
+
+// ---------------------------------------------------------------------------
+// DedupTile
+// ---------------------------------------------------------------------------
+
+/// Deduplication tile that filters duplicate transactions between
+/// signature verification and blockhash resolution.
+///
+/// Uses `TransactionCache` (ring buffer + open-addressing hash map) for
+/// O(1) amortized duplicate detection. Transactions are identified by
+/// their signature fingerprint (first 8 bytes of signature), carried in
+/// the fragment's `sig` field.
+///
+/// Duplicate fragments are silently dropped. Unique fragments are
+/// forwarded to the downstream resolv tile with metadata preserved.
+pub struct DedupTile {
+    cache: TransactionCache,
+    input: StemInput,
+    output: TileStem,
+    /// Total fragments processed.
+    total_processed: u64,
+    /// Fragments dropped as duplicates.
+    duplicates_dropped: u64,
+}
+
+impl DedupTile {
+    /// Create a new dedup tile.
+    ///
+    /// # Safety
+    ///
+    /// The upstream stem that owns the input's resources must outlive
+    /// this tile. The caller must ensure SPSC access patterns.
+    pub unsafe fn new(depth: usize, input: StemInput, output_config: StemOutputConfig) -> Self {
+        Self {
+            cache: TransactionCache::new(depth),
+            input,
+            output: TileStem::new(&[output_config]),
+            total_processed: 0,
+            duplicates_dropped: 0,
+        }
+    }
+
+    /// Access the output stem (for wiring downstream consumers).
+    pub fn output_stem(&self) -> &TileStem {
+        &self.output
+    }
+
+    /// Number of fragments processed.
+    pub fn total_processed(&self) -> u64 {
+        self.total_processed
+    }
+
+    /// Number of duplicate fragments dropped.
+    pub fn duplicates_dropped(&self) -> u64 {
+        self.duplicates_dropped
+    }
+
+    /// Reset the dedup cache (e.g. at epoch boundary).
+    pub fn reset_cache(&mut self) {
+        self.cache.reset();
+    }
+}
+
+impl Tile for DedupTile {
+    fn name(&self) -> &str {
+        "dedup"
+    }
+
+    fn service(&mut self) -> usize {
+        let mut processed = 0usize;
+
+        self.output.refresh_all_credits();
+
+        loop {
+            if !self.output.has_credits() {
+                break;
+            }
+
+            match self.input.receive(1) {
+                InputResult::Ready { meta, payload } => {
+                    self.total_processed += 1;
+
+                    // Use the sig field as the dedup tag
+                    let tag = meta.sig;
+
+                    if self.cache.insert(tag) {
+                        // Duplicate — drop
+                        self.duplicates_dropped += 1;
+                    } else {
+                        // Unique — forward with same metadata
+                        self.output.publish(
+                            0,
+                            meta.sig,
+                            payload,
+                            meta.ctl,
+                            meta.sz.into(),
+                            meta.chunk,
+                        );
+                    }
+
+                    processed += 1;
+                }
+                InputResult::Overrun { .. } => {
+                    processed += 1;
+                }
+                InputResult::Empty => break,
             }
         }
 
@@ -461,20 +574,24 @@ impl Default for PipelineConfig {
     }
 }
 
-/// Wired transaction pipeline: Verify → Resolv → Pack.
+/// Wired transaction pipeline: Verify → Dedup → Resolv → Pack.
 ///
 /// Owns the tile stems and provides a unified `service()` method that
 /// drives all tiles in sequence. Transactions enter via `ingest()` and
 /// exit as PackedTransactions ready for the execution stage.
 ///
 /// The pipeline uses zero-copy IPC between tiles: raw transaction bytes
-/// flow through shared DataRegion memory without copying.
+/// flow through shared DataRegion memory without copying. The DedupTile
+/// sits between Verify and Resolv, filtering duplicate transactions
+/// before they consume resolv resources.
 pub struct TransactionPipeline {
     /// Ingress stem: external producers publish raw transactions here.
     ingress: TileStem,
     /// Verify tile: consumes from ingress, publishes verified txns.
     verify: VerifyTile,
-    /// Resolv tile: consumes from verify, publishes resolved txns.
+    /// Dedup tile: consumes from verify, filters duplicates.
+    dedup: DedupTile,
+    /// Resolv tile: consumes from dedup, publishes resolved txns.
     resolv: ResolvTile,
     /// Resolved transaction consumer: reads from resolv output.
     resolv_output: StemInput,
@@ -488,6 +605,8 @@ impl TransactionPipeline {
 
     /// Create a new transaction pipeline with the given configuration.
     pub fn with_config(config: PipelineConfig) -> Self {
+        use paradencer_constants::dedup::DEFAULT_CACHE_DEPTH;
+
         let link_config = StemOutputConfig {
             mtu: config.link_mtu,
             depth: config.link_depth,
@@ -503,9 +622,15 @@ impl TransactionPipeline {
         let verify =
             unsafe { VerifyTile::new(VerifyStage::new(), verify_input, link_config.clone()) };
 
-        // Resolv tile: consumes from verify's output 0.
-        // SAFETY: verify's stem outlives resolv (both owned by this struct).
-        let resolv_input = unsafe { verify.output_stem().create_input(0, 0) };
+        // Dedup tile: consumes from verify's output 0, filters duplicates.
+        // SAFETY: verify's stem outlives dedup (both owned by this struct).
+        let dedup_input = unsafe { verify.output_stem().create_input(0, 0) };
+        let dedup =
+            unsafe { DedupTile::new(DEFAULT_CACHE_DEPTH, dedup_input, link_config.clone()) };
+
+        // Resolv tile: consumes from dedup's output 0.
+        // SAFETY: dedup's stem outlives resolv (both owned by this struct).
+        let resolv_input = unsafe { dedup.output_stem().create_input(0, 0) };
         let resolv =
             unsafe { ResolvTile::new(ResolvStage::new(), resolv_input, link_config.clone()) };
 
@@ -516,6 +641,7 @@ impl TransactionPipeline {
         Self {
             ingress,
             verify,
+            dedup,
             resolv,
             resolv_output,
         }
@@ -555,7 +681,10 @@ impl TransactionPipeline {
         // Service verify: consume from ingress, publish to verify output.
         total += self.verify.service();
 
-        // Service resolv: consume from verify output, publish to resolv output.
+        // Service dedup: consume from verify output, filter duplicates.
+        total += self.dedup.service();
+
+        // Service resolv: consume from dedup output, publish to resolv output.
         total += self.resolv.service();
 
         total
@@ -704,14 +833,14 @@ fn resolved_to_packed(payload: Vec<u8>) -> PackedTransaction {
 
 /// Full validator transaction pipeline from ingress to block production.
 ///
-/// Combines zero-copy IPC for the hot path (Ingress → Verify → Resolv) with
-/// the LeaderPipeline for block production (Pack → Exec → PoH). Resolved
-/// transactions are automatically converted to PackedTransactions and fed
-/// to the pack scheduler.
+/// Combines zero-copy IPC for the hot path (Ingress → Verify → Dedup →
+/// Resolv) with the LeaderPipeline for block production (Pack → Exec → PoH).
+/// Resolved transactions are automatically converted to PackedTransactions
+/// and fed to the pack scheduler.
 ///
 /// ```text
-///   QuicTile → [IPC] → VerifyTile → [IPC] → ResolvTile → [IPC] →
-///     → resolved_to_packed() → PackScheduler → ExecStage → PoH
+///   QuicTile → [IPC] → VerifyTile → [IPC] → DedupTile → [IPC] →
+///     → ResolvTile → [IPC] → resolved_to_packed() → PackScheduler → ExecStage → PoH
 /// ```
 pub struct ValidatorPipeline {
     /// IPC pipeline: ingress → verify → resolv.
