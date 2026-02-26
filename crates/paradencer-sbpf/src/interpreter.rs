@@ -58,6 +58,10 @@ pub struct VmState {
     pub instruction_count: u64,
     /// Accumulated program logs.
     pub logs: Vec<String>,
+    /// Total bytes of log messages written (for truncation enforcement).
+    pub log_bytes_written: usize,
+    /// Whether log truncation has been signaled.
+    pub log_truncated: bool,
     /// Return data set by the program or syscalls.
     pub return_data: Option<Vec<u8>>,
     /// Current heap allocation position (bump allocator).
@@ -233,6 +237,8 @@ pub fn execute(
         compute_meter: compute_budget,
         instruction_count: 0,
         logs: Vec::new(),
+        log_bytes_written: 0,
+        log_truncated: false,
         return_data: None,
         heap_position: paradencer_constants::vm::REGION_HEAP_BASE,
         sysvar_snapshot,

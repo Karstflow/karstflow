@@ -1506,6 +1506,8 @@ impl Bank {
         let effective_compute_limit = compute_limit.min(budget_params.compute_unit_limit);
         let mut total_compute = 0u64;
         let mut all_logs = Vec::new();
+        let mut log_bytes_written: usize = 0;
+        let mut log_truncated = false;
         let mut modified = HashMap::new();
         let mut exec_error: Option<TransactionExecutionError> = None;
         let mut return_data: Option<(Pubkey, Vec<u8>)> = None;
@@ -1605,8 +1607,18 @@ impl Bank {
 
             total_compute = total_compute.saturating_add(result.compute_units_consumed);
 
-            for log in &result.logs {
-                all_logs.push(format!("[ix {}] {}", idx, log));
+            if !log_truncated {
+                for log in &result.logs {
+                    let entry = format!("[ix {}] {}", idx, log);
+                    let new_total = log_bytes_written.saturating_add(entry.len());
+                    if new_total > paradencer_constants::syscalls::MAX_LOG_COLLECTOR_SIZE {
+                        log_truncated = true;
+                        all_logs.push("Log truncated".to_string());
+                        break;
+                    }
+                    log_bytes_written = new_total;
+                    all_logs.push(entry);
+                }
             }
 
             if !result.success {
@@ -5579,5 +5591,82 @@ mod tests {
         assert!(tx.is_writable_index(2));
         // lookup_readonly (index 3) — readonly lookup
         assert!(!tx.is_writable_index(3));
+    }
+
+    #[test]
+    fn transaction_logs_truncated_at_limit() {
+        use paradencer_constants::syscalls::MAX_LOG_COLLECTOR_SIZE;
+
+        /// Backend that generates a configurable amount of log output per instruction.
+        struct VerboseBackend {
+            log_size: usize,
+        }
+        impl ExecutionBackend for VerboseBackend {
+            fn execute_instruction(
+                &self,
+                _instruction: &InstructionInfo,
+                _remaining: u64,
+            ) -> InstructionResult {
+                let msg = "x".repeat(self.log_size);
+                InstructionResult {
+                    success: true,
+                    compute_units_consumed: 100,
+                    modified_accounts: HashMap::new(),
+                    logs: vec![msg],
+                    error: None,
+                    return_data: None,
+                }
+            }
+        }
+
+        let bank = create_test_bank();
+        // Each instruction produces 6000 bytes of log. Two instructions should
+        // exceed MAX_LOG_COLLECTOR_SIZE (10000) and trigger truncation.
+        let backend = VerboseBackend { log_size: 6000 };
+        let payer = Pubkey::new_unique();
+        let program = Pubkey::new_unique();
+        let payer_account = Account::new(1_000_000, vec![], Pubkey::default());
+        store_test_account(&bank, &payer, &payer_account);
+
+        let tx = SanitizedTransaction {
+            account_keys: vec![payer, program],
+            recent_blockhash: [0u8; 32],
+            instructions: vec![
+                CompiledInstruction {
+                    program_id_index: 1,
+                    account_indices: vec![0],
+                    data: vec![],
+                },
+                CompiledInstruction {
+                    program_id_index: 1,
+                    account_indices: vec![0],
+                    data: vec![1],
+                },
+            ],
+            num_signatures: 0,
+            num_readonly_signed: 0,
+            num_readonly_unsigned: 0,
+            signatures: vec![],
+            message_bytes: vec![],
+            num_static_keys: 0,
+            num_writable_lookup_keys: 0,
+        };
+
+        let result = bank.process_transaction(&tx, &backend, MAX_COMPUTE_UNITS);
+
+        // Verify that logs were truncated
+        assert!(result.success);
+        let total_log_bytes: usize = result.logs.iter().map(|l| l.len()).sum();
+        // Should be under the limit (with some overhead for "[ix N] " prefix)
+        assert!(
+            total_log_bytes <= MAX_LOG_COLLECTOR_SIZE + 200,
+            "logs should be truncated: total={}, limit={}",
+            total_log_bytes,
+            MAX_LOG_COLLECTOR_SIZE
+        );
+        assert!(
+            result.logs.iter().any(|l| l.contains("Log truncated")),
+            "should contain truncation sentinel"
+        );
     }
 }

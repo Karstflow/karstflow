@@ -560,6 +560,26 @@ pub fn murmur3_hash(key: &str) -> u32 {
 // Built-in syscall handlers
 // ---------------------------------------------------------------------------
 
+/// Try to append a log message, enforcing the per-transaction log size limit.
+///
+/// Returns `true` if the message was appended, `false` if logs have been
+/// truncated. On first truncation, emits a "Log truncated" sentinel.
+fn try_append_log(vm: &mut VmState, msg: String) -> bool {
+    use paradencer_constants::syscalls::MAX_LOG_COLLECTOR_SIZE;
+
+    let new_total = vm.log_bytes_written.saturating_add(msg.len());
+    if new_total > MAX_LOG_COLLECTOR_SIZE {
+        if !vm.log_truncated {
+            vm.log_truncated = true;
+            vm.logs.push("Log truncated".to_string());
+        }
+        return false;
+    }
+    vm.log_bytes_written = new_total;
+    vm.logs.push(msg);
+    true
+}
+
 /// sol_log_: Log a UTF-8 string from VM memory.
 struct SolLogHandler;
 
@@ -586,7 +606,7 @@ impl SyscallHandler for SolLogHandler {
             .map_err(|e| VmError::MemoryError(e.to_string()))?;
 
         let msg = String::from_utf8_lossy(&data).to_string();
-        vm.logs.push(msg);
+        try_append_log(vm, msg);
 
         Ok(0)
     }
@@ -606,8 +626,10 @@ impl SyscallHandler for SolLog64Handler {
         r5: u64,
     ) -> Result<u64, VmError> {
         deduct_compute(vm, syscalls::LOG_BASE_COST)?;
-        vm.logs
-            .push(format!("Program log: {} {} {} {} {}", r1, r2, r3, r4, r5));
+        try_append_log(
+            vm,
+            format!("Program log: {} {} {} {} {}", r1, r2, r3, r4, r5),
+        );
         Ok(0)
     }
 }
@@ -626,10 +648,10 @@ impl SyscallHandler for SolLogComputeUnitsHandler {
         _r5: u64,
     ) -> Result<u64, VmError> {
         deduct_compute(vm, syscalls::LOG_COMPUTE_UNITS_COST)?;
-        vm.logs.push(format!(
-            "Program consumption: {} units remaining",
-            vm.compute_meter
-        ));
+        try_append_log(
+            vm,
+            format!("Program consumption: {} units remaining", vm.compute_meter),
+        );
         Ok(0)
     }
 }
@@ -648,7 +670,7 @@ impl SyscallHandler for SolLogDataHandler {
         _r5: u64,
     ) -> Result<u64, VmError> {
         deduct_compute(vm, syscalls::LOG_DATA_BASE_COST)?;
-        vm.logs.push("Program data: <encoded>".to_string());
+        try_append_log(vm, "Program data: <encoded>".to_string());
         Ok(0)
     }
 }
@@ -1904,7 +1926,7 @@ impl SyscallHandler for SolLogPubkeyHandler {
             .map_err(|e| VmError::MemoryError(e.to_string()))?;
 
         let encoded = bs58::encode(&pk_bytes).into_string();
-        vm.logs.push(format!("Program log: {}", encoded));
+        try_append_log(vm, format!("Program log: {}", encoded));
 
         Ok(0)
     }
@@ -2310,7 +2332,7 @@ impl SyscallHandler for SolInvokeHandler {
 
         // Enforce CPI depth limit using dedicated counter
         if vm.cpi_depth >= syscalls::MAX_CPI_DEPTH {
-            vm.logs.push("CPI depth limit exceeded".to_string());
+            try_append_log(vm, "CPI depth limit exceeded".to_string());
             return Ok(1);
         }
 
@@ -2329,12 +2351,11 @@ impl SyscallHandler for SolInvokeHandler {
 
         // Enforce limits
         if acct_metas_len > syscalls::MAX_CPI_INSTRUCTION_ACCOUNTS {
-            vm.logs
-                .push("Too many CPI instruction accounts".to_string());
+            try_append_log(vm, "Too many CPI instruction accounts".to_string());
             return Ok(1);
         }
         if data_len > syscalls::MAX_CPI_INSTRUCTION_SIZE {
-            vm.logs.push("CPI instruction data too large".to_string());
+            try_append_log(vm, "CPI instruction data too large".to_string());
             return Ok(1);
         }
 
@@ -2441,7 +2462,9 @@ impl SyscallHandler for SolInvokeHandler {
 
                 // Copy logs from callee
                 for log in &outcome.logs {
-                    vm.logs.push(log.clone());
+                    if !try_append_log(vm, log.clone()) {
+                        break;
+                    }
                 }
 
                 // Store return data if any
@@ -2520,7 +2543,7 @@ impl SyscallHandler for SolPanicHandler {
         let msg = std::str::from_utf8(&msg_bytes)
             .map_err(|_| VmError::SyscallError("panic: invalid UTF-8 string".to_string()))?;
 
-        vm.logs.push(format!("Program panic: {}", msg));
+        try_append_log(vm, format!("Program panic: {}", msg));
         Err(VmError::SyscallError(format!("panic: {}", msg)))
     }
 }
@@ -2737,6 +2760,31 @@ mod tests {
     }
 
     #[test]
+    fn log_truncation_enforces_limit() {
+        let mut vm = make_test_vm(1_000_000);
+
+        // Fill up to near the limit with large messages
+        let big_msg = "x".repeat(5000);
+        assert!(try_append_log(&mut vm, big_msg.clone()));
+        assert_eq!(vm.log_bytes_written, 5000);
+        assert!(!vm.log_truncated);
+
+        // This push would exceed 10_000 bytes
+        assert!(try_append_log(&mut vm, big_msg.clone()));
+        assert_eq!(vm.log_bytes_written, 10_000);
+
+        // Next push exceeds limit — should be truncated
+        assert!(!try_append_log(&mut vm, "one more".to_string()));
+        assert!(vm.log_truncated);
+        assert!(vm.logs.last().unwrap().contains("Log truncated"));
+
+        // Subsequent pushes are silently dropped
+        let count_before = vm.logs.len();
+        assert!(!try_append_log(&mut vm, "ignored".to_string()));
+        assert_eq!(vm.logs.len(), count_before);
+    }
+
+    #[test]
     fn sol_alloc_handler() {
         let dispatch = RuntimeSyscallDispatch::with_standard_syscalls();
         let alloc_id = murmur3_hash("sol_alloc_free_");
@@ -2943,6 +2991,8 @@ mod tests {
             call_stack: Vec::new(),
             compute_meter: 1_000_000,
             logs: Vec::new(),
+            log_bytes_written: 0,
+            log_truncated: false,
             return_data: None,
             heap_position: REGION_HEAP_BASE,
             sysvar_snapshot: snapshot,
@@ -3646,6 +3696,8 @@ mod tests {
             call_stack: Vec::new(),
             compute_meter: compute_budget,
             logs: Vec::new(),
+            log_bytes_written: 0,
+            log_truncated: false,
             return_data: None,
             heap_position: REGION_HEAP_BASE,
             sysvar_snapshot: crate::sysvar_snapshot::SysvarSnapshot::default(),

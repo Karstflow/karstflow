@@ -46,6 +46,8 @@ pub const LOG_BASE_COST: u64 = 100;
 pub const LOG_PER_BYTE_COST: u64 = 1;
 pub const LOG_DATA_BASE_COST: u64 = 100;
 pub const LOG_COMPUTE_UNITS_COST: u64 = 100;
+/// Maximum total bytes of log messages per transaction before truncation.
+pub const MAX_LOG_COLLECTOR_SIZE: usize = 10_000;
 
 // Compute costs for sysvar access
 pub const GET_SYSVAR_COST: u64 = 100;
