@@ -392,7 +392,10 @@ mod execution_pipeline_tests {
 
         let info = InstructionInfo {
             program_id: SYSTEM_PROGRAM_ID,
-            accounts: vec![(from, from_account, true), (to, to_account, true)],
+            accounts: vec![
+                (from, from_account, true, true),
+                (to, to_account, true, false),
+            ],
             data,
             slot_context: SlotContext::default(),
         };
@@ -427,7 +430,7 @@ mod execution_pipeline_tests {
 
         let info = InstructionInfo {
             program_id,
-            accounts: vec![(program_id, program_account, false)],
+            accounts: vec![(program_id, program_account, false, false)],
             data: vec![],
             slot_context: SlotContext::default(),
         };
@@ -467,7 +470,7 @@ mod execution_pipeline_tests {
 
         let info = InstructionInfo {
             program_id: VOTE_PROGRAM_ID,
-            accounts: vec![(vote_pubkey, vote_account, true)],
+            accounts: vec![(vote_pubkey, vote_account, true, false)],
             data: init_data,
             slot_context: SlotContext::default(),
         };
@@ -550,7 +553,10 @@ mod execution_pipeline_tests {
 
         let info = InstructionInfo {
             program_id: SYSTEM_PROGRAM_ID,
-            accounts: vec![(from, from_account, true), (to, to_account, true)],
+            accounts: vec![
+                (from, from_account, true, true),
+                (to, to_account, true, false),
+            ],
             data,
             slot_context: SlotContext::default(),
         };

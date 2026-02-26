@@ -84,13 +84,14 @@ fn to_execution_context(
     remaining_compute_units: u64,
 ) -> ExecutionContext {
     let snapshot = to_sysvar_snapshot(&instruction.slot_context);
-    ExecutionContext::new(
-        instruction.program_id,
-        instruction.accounts.clone(),
-        instruction.data.clone(),
-    )
-    .with_compute_budget(remaining_compute_units)
-    .with_sysvar_snapshot(snapshot)
+    let accounts = instruction
+        .accounts
+        .iter()
+        .map(|(k, a, w, _signer)| (*k, a.clone(), *w))
+        .collect();
+    ExecutionContext::new(instruction.program_id, accounts, instruction.data.clone())
+        .with_compute_budget(remaining_compute_units)
+        .with_sysvar_snapshot(snapshot)
 }
 
 /// Convert an sBPF `ExecutionOutcome` into a consensus `InstructionResult`.
@@ -182,7 +183,7 @@ mod tests {
 
         let instruction = InstructionInfo {
             program_id,
-            accounts: vec![(account_key, account.clone(), true)],
+            accounts: vec![(account_key, account.clone(), true, false)],
             data: data.clone(),
             slot_context: test_slot_context(),
         };
@@ -287,8 +288,8 @@ mod tests {
         let instruction = InstructionInfo {
             program_id: SYSTEM_PROGRAM_ID,
             accounts: vec![
-                (sender, sender_account, true),
-                (receiver, receiver_account, true),
+                (sender, sender_account, true, true),
+                (receiver, receiver_account, true, false),
             ],
             data,
             slot_context: SlotContext::default(),
@@ -331,8 +332,8 @@ mod tests {
         let instruction = InstructionInfo {
             program_id: SYSTEM_PROGRAM_ID,
             accounts: vec![
-                (sender, sender_account, true),
-                (receiver, Account::default(), true),
+                (sender, sender_account, true, true),
+                (receiver, Account::default(), true, false),
             ],
             data,
             slot_context: SlotContext::default(),

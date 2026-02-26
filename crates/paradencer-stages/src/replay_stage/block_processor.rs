@@ -546,8 +546,8 @@ fn deserialize_transaction(data: &[u8]) -> Result<SanitizedTransaction, String> 
     }
 
     let num_required_signatures = data[offset] as u64;
-    let _num_readonly_signed = data[offset + 1];
-    let _num_readonly_unsigned = data[offset + 2];
+    let num_readonly_signed = data[offset + 1];
+    let num_readonly_unsigned = data[offset + 2];
     offset += 3;
 
     // Account keys
@@ -627,6 +627,8 @@ fn deserialize_transaction(data: &[u8]) -> Result<SanitizedTransaction, String> 
         recent_blockhash,
         instructions,
         num_signatures: num_required_signatures,
+        num_readonly_signed,
+        num_readonly_unsigned,
         signatures,
         message_bytes,
     })
@@ -1117,6 +1119,8 @@ mod tests {
                 },
             ],
             num_signatures: 1,
+            num_readonly_signed: 0,
+            num_readonly_unsigned: 0,
             signatures: vec![[0u8; 64]],
             message_bytes: vec![],
         };
@@ -1151,7 +1155,7 @@ mod tests {
             let modified: HashMap<Pubkey, Account> = instruction
                 .accounts
                 .iter()
-                .map(|(k, a, _)| (*k, a.clone()))
+                .map(|(k, a, _, _)| (*k, a.clone()))
                 .collect();
             InstructionResult {
                 success: true,

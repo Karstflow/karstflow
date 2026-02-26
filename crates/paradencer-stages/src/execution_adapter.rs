@@ -59,13 +59,15 @@ impl ExecutionBackend for SbpfExecutionAdapter {
         use paradencer_sbpf::ExecutionContext;
 
         let snapshot = to_sysvar_snapshot(&instruction.slot_context);
-        let context = ExecutionContext::new(
-            instruction.program_id,
-            instruction.accounts.clone(),
-            instruction.data.clone(),
-        )
-        .with_compute_budget(remaining_compute_units)
-        .with_sysvar_snapshot(snapshot);
+        let accounts = instruction
+            .accounts
+            .iter()
+            .map(|(k, a, w, _signer)| (*k, a.clone(), *w))
+            .collect();
+        let context =
+            ExecutionContext::new(instruction.program_id, accounts, instruction.data.clone())
+                .with_compute_budget(remaining_compute_units)
+                .with_sysvar_snapshot(snapshot);
 
         let outcome = self.processor.execute_instruction(&context);
 
@@ -131,7 +133,10 @@ mod tests {
 
         let info = InstructionInfo {
             program_id: SYSTEM_PROGRAM_ID,
-            accounts: vec![(from, from_account, true), (to, to_account, true)],
+            accounts: vec![
+                (from, from_account, true, true),
+                (to, to_account, true, false),
+            ],
             data,
             slot_context: SlotContext::default(),
         };
@@ -193,7 +198,7 @@ mod tests {
 
         let info = InstructionInfo {
             program_id,
-            accounts: vec![(program_id, program_account, false)],
+            accounts: vec![(program_id, program_account, false, false)],
             data: vec![],
             slot_context: SlotContext::default(),
         };

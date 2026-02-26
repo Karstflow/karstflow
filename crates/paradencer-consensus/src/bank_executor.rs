@@ -54,8 +54,8 @@ pub struct SlotContext {
 pub struct InstructionInfo {
     /// Program that processes this instruction.
     pub program_id: Pubkey,
-    /// Accounts accessed by this instruction (pubkey, account, is_writable).
-    pub accounts: Vec<(Pubkey, Account, bool)>,
+    /// Accounts accessed by this instruction (pubkey, account, is_writable, is_signer).
+    pub accounts: Vec<(Pubkey, Account, bool, bool)>,
     /// Opaque instruction data.
     pub data: Vec<u8>,
     /// Sysvar context (slot, epoch, rent, etc.) for the current execution.
@@ -105,10 +105,45 @@ pub struct SanitizedTransaction {
     pub instructions: Vec<CompiledInstruction>,
     /// Number of required signatures.
     pub num_signatures: u64,
+    /// Number of read-only signed accounts.
+    pub num_readonly_signed: u8,
+    /// Number of read-only unsigned accounts.
+    pub num_readonly_unsigned: u8,
     /// Ed25519 signatures (one per required signer).
     pub signatures: Vec<[u8; 64]>,
     /// Serialized message bytes for signature verification.
     pub message_bytes: Vec<u8>,
+}
+
+impl SanitizedTransaction {
+    /// Check if account at given index is a signer.
+    ///
+    /// Accounts `[0, num_signatures)` are signers.
+    pub fn is_signer(&self, index: usize) -> bool {
+        index < self.num_signatures as usize
+    }
+
+    /// Check if account at given index is writable according to the message.
+    ///
+    /// Account layout:
+    /// - `[0, num_signatures - num_readonly_signed)` → writable signed
+    /// - `[num_signatures - num_readonly_signed, num_signatures)` → readonly signed
+    /// - `[num_signatures, total - num_readonly_unsigned)` → writable unsigned
+    /// - `[total - num_readonly_unsigned, total)` → readonly unsigned
+    pub fn is_writable_index(&self, index: usize) -> bool {
+        let num_sigs = self.num_signatures as usize;
+        let ro_signed = self.num_readonly_signed as usize;
+        let ro_unsigned = self.num_readonly_unsigned as usize;
+        let total = self.account_keys.len();
+
+        if index < num_sigs {
+            // Signed accounts: writable if before readonly boundary
+            index < num_sigs.saturating_sub(ro_signed)
+        } else {
+            // Unsigned accounts: writable if before readonly boundary
+            index < total.saturating_sub(ro_unsigned)
+        }
+    }
 }
 
 /// Instruction within a sanitized transaction (index-based references).
@@ -429,6 +464,66 @@ fn get_system_account_kind(account: &Account) -> Option<SystemAccountKind> {
     } else {
         None // Uninitialized nonce accounts cannot pay fees
     }
+}
+
+// ---------------------------------------------------------------------------
+// Account permission helpers
+// ---------------------------------------------------------------------------
+
+/// Check if an account is a reserved key that must always be read-only.
+///
+/// Reserved keys include all system programs, precompiles, and sysvar accounts.
+/// These accounts cannot be written to even if the transaction marks them writable.
+fn is_reserved_key(pubkey: &Pubkey) -> bool {
+    *pubkey == SYSTEM_PROGRAM_ID
+        || *pubkey == VOTE_PROGRAM_ID
+        || *pubkey == paradencer_ids::STAKE_PROGRAM_ID
+        || *pubkey == paradencer_ids::CONFIG_PROGRAM_ID
+        || *pubkey == COMPUTE_BUDGET_PROGRAM_ID
+        || *pubkey == paradencer_ids::BPF_LOADER_PROGRAM_ID
+        || *pubkey == paradencer_ids::BPF_LOADER_V2_PROGRAM_ID
+        || *pubkey == paradencer_ids::BPF_LOADER_DEPRECATED_PROGRAM_ID
+        || *pubkey == paradencer_ids::LOADER_V4_PROGRAM_ID
+        || *pubkey == paradencer_ids::ED25519_PROGRAM_ID
+        || *pubkey == paradencer_ids::SECP256K1_PROGRAM_ID
+        || *pubkey == paradencer_ids::SECP256R1_PROGRAM_ID
+        || *pubkey == paradencer_ids::SYSVAR_PROGRAM_ID
+        || *pubkey == paradencer_ids::FEATURE_PROGRAM_ID
+        || *pubkey == paradencer_ids::ADDRESS_LOOKUP_TABLE_PROGRAM_ID
+}
+
+/// Determine if an account is truly writable for a given instruction.
+///
+/// An account is writable only if:
+/// 1. The transaction message marks it as writable
+/// 2. It is NOT a reserved key (system programs, sysvars)
+/// 3. It is NOT the program being executed (programs execute read-only)
+fn is_account_writable(
+    tx: &SanitizedTransaction,
+    account_index: usize,
+    program_id: &Pubkey,
+) -> bool {
+    // Must be writable in the transaction message
+    if !tx.is_writable_index(account_index) {
+        return false;
+    }
+
+    let pubkey = match tx.account_keys.get(account_index) {
+        Some(k) => k,
+        None => return false,
+    };
+
+    // Reserved keys are never writable
+    if is_reserved_key(pubkey) {
+        return false;
+    }
+
+    // Program accounts are read-only during execution
+    if pubkey == program_id {
+        return false;
+    }
+
+    true
 }
 
 // ---------------------------------------------------------------------------
@@ -900,11 +995,12 @@ impl Bank {
                 }
             };
 
-            // Build instruction accounts
+            // Build instruction accounts with proper permission flags
             let mut instr_accounts = Vec::with_capacity(instruction.account_indices.len());
             let mut invalid_index = false;
             for &ai in &instruction.account_indices {
-                let pubkey = match transaction.account_keys.get(ai as usize) {
+                let acct_idx = ai as usize;
+                let pubkey = match transaction.account_keys.get(acct_idx) {
                     Some(k) => *k,
                     None => {
                         exec_error = Some(TransactionExecutionError::InstructionFailed {
@@ -922,7 +1018,9 @@ impl Bank {
                     .cloned()
                     .unwrap_or_default();
 
-                instr_accounts.push((pubkey, account, true));
+                let writable = is_account_writable(transaction, acct_idx, &program_id);
+                let signer = transaction.is_signer(acct_idx);
+                instr_accounts.push((pubkey, account, writable, signer));
             }
             if invalid_index {
                 break 'execution;
@@ -1282,7 +1380,7 @@ mod tests {
             let modified: HashMap<Pubkey, Account> = instruction
                 .accounts
                 .iter()
-                .map(|(k, a, _)| (*k, a.clone()))
+                .map(|(k, a, _, _)| (*k, a.clone()))
                 .collect();
 
             InstructionResult {
@@ -1340,8 +1438,8 @@ mod tests {
                 0
             };
 
-            let (src_key, mut src_account, _) = instruction.accounts[0].clone();
-            let (dst_key, mut dst_account, _) = instruction.accounts[1].clone();
+            let (src_key, mut src_account, _, _) = instruction.accounts[0].clone();
+            let (dst_key, mut dst_account, _, _) = instruction.accounts[1].clone();
 
             if src_account.meta.lamports < amount {
                 return InstructionResult {
@@ -1418,6 +1516,8 @@ mod tests {
                 data,
             }],
             num_signatures: 1,
+            num_readonly_signed: 0,
+            num_readonly_unsigned: 1, // program is readonly
             signatures: vec![],
             message_bytes: vec![],
         }
@@ -1650,6 +1750,8 @@ mod tests {
                 },
             ],
             num_signatures: 1,
+            num_readonly_signed: 0,
+            num_readonly_unsigned: 0,
             signatures: vec![],
             message_bytes: vec![],
         };
@@ -1692,6 +1794,8 @@ mod tests {
                 data: vote_data,
             }],
             num_signatures: 1,
+            num_readonly_signed: 0,
+            num_readonly_unsigned: 0,
             signatures: vec![],
             message_bytes: vec![],
         };
@@ -1750,6 +1854,8 @@ mod tests {
                     data: vote_data,
                 }],
                 num_signatures: 1,
+                num_readonly_signed: 0,
+                num_readonly_unsigned: 0,
                 signatures: vec![],
                 message_bytes: vec![],
             });
@@ -1827,6 +1933,8 @@ mod tests {
                 data: vec![],
             }],
             num_signatures: 1,
+            num_readonly_signed: 0,
+            num_readonly_unsigned: 0,
             signatures: vec![],
             message_bytes: vec![],
         };
@@ -1865,6 +1973,8 @@ mod tests {
                 data: vec![],
             }],
             num_signatures: 1,
+            num_readonly_signed: 0,
+            num_readonly_unsigned: 0,
             signatures: vec![],
             message_bytes: vec![],
         };
@@ -2003,6 +2113,8 @@ mod tests {
                 data: vec![],
             }],
             num_signatures: 1,
+            num_readonly_signed: 0,
+            num_readonly_unsigned: 0,
             signatures: vec![signature.to_bytes()],
             message_bytes,
         };
@@ -2043,6 +2155,8 @@ mod tests {
                 data: vec![],
             }],
             num_signatures: 1,
+            num_readonly_signed: 0,
+            num_readonly_unsigned: 0,
             signatures: vec![signature.to_bytes()],
             message_bytes,
         };
@@ -2084,6 +2198,8 @@ mod tests {
                 data: vec![],
             }],
             num_signatures: 1,
+            num_readonly_signed: 0,
+            num_readonly_unsigned: 0,
             signatures: vec![signature.to_bytes()],
             message_bytes,
         };
@@ -2125,6 +2241,8 @@ mod tests {
                 data: vec![],
             }],
             num_signatures: 2,
+            num_readonly_signed: 0,
+            num_readonly_unsigned: 0,
             signatures: vec![sig1.to_bytes(), sig2.to_bytes()],
             message_bytes,
         };
@@ -2160,6 +2278,8 @@ mod tests {
                 data: vec![],
             }],
             num_signatures: 1,
+            num_readonly_signed: 0,
+            num_readonly_unsigned: 0,
             signatures: vec![signature.to_bytes()],
             message_bytes,
         };
@@ -2202,6 +2322,8 @@ mod tests {
                 data: vec![],
             }],
             num_signatures: 1,
+            num_readonly_signed: 0,
+            num_readonly_unsigned: 0,
             signatures: vec![sig1.to_bytes()],
             message_bytes: msg1,
         };
@@ -2217,6 +2339,8 @@ mod tests {
                 data: vec![],
             }],
             num_signatures: 1,
+            num_readonly_signed: 0,
+            num_readonly_unsigned: 0,
             signatures: vec![sig2.to_bytes()],
             message_bytes: msg2,
         };
@@ -2533,6 +2657,8 @@ mod tests {
             recent_blockhash: [0; 32],
             instructions: vec![],
             num_signatures: 1,
+            num_readonly_signed: 0,
+            num_readonly_unsigned: 0,
             signatures: vec![],
             message_bytes: vec![],
         };
@@ -2563,6 +2689,8 @@ mod tests {
                 data,
             }],
             num_signatures: 1,
+            num_readonly_signed: 0,
+            num_readonly_unsigned: 0,
             signatures: vec![],
             message_bytes: vec![],
         };
@@ -2588,6 +2716,8 @@ mod tests {
                 data,
             }],
             num_signatures: 1,
+            num_readonly_signed: 0,
+            num_readonly_unsigned: 0,
             signatures: vec![],
             message_bytes: vec![],
         };
@@ -2616,6 +2746,8 @@ mod tests {
                 data,
             }],
             num_signatures: 1,
+            num_readonly_signed: 0,
+            num_readonly_unsigned: 0,
             signatures: vec![],
             message_bytes: vec![],
         };
@@ -2641,6 +2773,8 @@ mod tests {
                 data,
             }],
             num_signatures: 1,
+            num_readonly_signed: 0,
+            num_readonly_unsigned: 0,
             signatures: vec![],
             message_bytes: vec![],
         };
@@ -2666,6 +2800,8 @@ mod tests {
                 data,
             }],
             num_signatures: 1,
+            num_readonly_signed: 0,
+            num_readonly_unsigned: 0,
             signatures: vec![],
             message_bytes: vec![],
         };
@@ -2737,6 +2873,8 @@ mod tests {
                 },
             ],
             num_signatures: 0,
+            num_readonly_signed: 0,
+            num_readonly_unsigned: 0,
             signatures: vec![],
             message_bytes: vec![],
         };
@@ -2771,6 +2909,8 @@ mod tests {
                 data: vec![0; 4],
             }],
             num_signatures: 0,
+            num_readonly_signed: 0,
+            num_readonly_unsigned: 0,
             signatures: vec![],
             message_bytes: vec![],
         };
@@ -2824,6 +2964,8 @@ mod tests {
                 },
             ],
             num_signatures: 1,
+            num_readonly_signed: 0,
+            num_readonly_unsigned: 0,
             signatures: vec![],
             message_bytes: vec![],
         };
@@ -2873,6 +3015,8 @@ mod tests {
                 },
             ],
             num_signatures: 1,
+            num_readonly_signed: 0,
+            num_readonly_unsigned: 0,
             signatures: vec![],
             message_bytes: vec![],
         };
@@ -2982,6 +3126,8 @@ mod tests {
                 },
             ],
             num_signatures: 1,
+            num_readonly_signed: 0,
+            num_readonly_unsigned: 0,
             signatures: vec![],
             message_bytes: vec![],
         };
@@ -3019,6 +3165,8 @@ mod tests {
                 data: advance_data,
             }],
             num_signatures: 0,
+            num_readonly_signed: 0,
+            num_readonly_unsigned: 0,
             signatures: vec![],
             message_bytes: vec![],
         };
@@ -3065,6 +3213,8 @@ mod tests {
                 },
             ],
             num_signatures: 1,
+            num_readonly_signed: 0,
+            num_readonly_unsigned: 0,
             signatures: vec![],
             message_bytes: vec![],
         };
