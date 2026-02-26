@@ -141,3 +141,125 @@ pub struct EpochRewardsInfo {
     /// Block height at which distribution completes.
     pub distribution_complete_block_height: u64,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn ctx(budget: u64) -> SyscallContext {
+        SyscallContext::new(Pubkey::new([0u8; 32]), budget)
+    }
+
+    #[test]
+    fn get_clock_returns_default_values() {
+        let mut c = ctx(100_000);
+        let clock = get_clock(&mut c).unwrap();
+        assert_eq!(clock.slot, 0);
+        assert_eq!(clock.epoch, 0);
+        assert_eq!(clock.unix_timestamp, 0);
+    }
+
+    #[test]
+    fn get_clock_consumes_compute() {
+        let mut c = ctx(5);
+        assert!(get_clock(&mut c).is_err());
+    }
+
+    #[test]
+    fn get_epoch_schedule_returns_constants() {
+        let mut c = ctx(100_000);
+        let schedule = get_epoch_schedule(&mut c).unwrap();
+        assert_eq!(
+            schedule.slots_per_epoch,
+            paradencer_constants::ledger::SLOTS_PER_EPOCH
+        );
+        assert_eq!(
+            schedule.leader_schedule_slot_offset,
+            paradencer_constants::consensus::LEADER_SCHEDULE_SLOT_OFFSET
+        );
+        assert!(!schedule.warmup);
+    }
+
+    #[test]
+    fn get_epoch_schedule_consumes_compute() {
+        let mut c = ctx(5);
+        assert!(get_epoch_schedule(&mut c).is_err());
+    }
+
+    #[test]
+    fn get_rent_returns_configured_values() {
+        let mut c = ctx(100_000);
+        let rent = get_rent(&mut c).unwrap();
+        assert_eq!(
+            rent.lamports_per_byte_year,
+            paradencer_constants::economics::RENT_EXEMPTION_LAMPORTS_PER_BYTE
+        );
+        assert!((rent.exemption_threshold - 2.0).abs() < f64::EPSILON);
+        assert_eq!(
+            rent.burn_percent,
+            paradencer_constants::economics::DEFAULT_FEE_BURN_PERCENT
+        );
+    }
+
+    #[test]
+    fn get_rent_consumes_compute() {
+        let mut c = ctx(5);
+        assert!(get_rent(&mut c).is_err());
+    }
+
+    #[test]
+    fn get_stack_height_returns_current_depth() {
+        let mut c = ctx(100_000);
+        let height = get_stack_height(&mut c).unwrap();
+        assert_eq!(height, 0);
+
+        c.stack_depth = 3;
+        let height = get_stack_height(&mut c).unwrap();
+        assert_eq!(height, 3);
+    }
+
+    #[test]
+    fn get_stack_height_consumes_compute() {
+        let mut c = ctx(4);
+        assert!(get_stack_height(&mut c).is_err());
+    }
+
+    #[test]
+    fn get_processed_sibling_instruction_returns_none() {
+        let mut c = ctx(100_000);
+        let result = get_processed_sibling_instruction(&mut c, 0).unwrap();
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn get_processed_sibling_instruction_consumes_compute() {
+        let mut c = ctx(5);
+        assert!(get_processed_sibling_instruction(&mut c, 0).is_err());
+    }
+
+    #[test]
+    fn clock_info_equality() {
+        let c1 = ClockInfo {
+            slot: 100,
+            epoch: 5,
+            unix_timestamp: 1234567890,
+            leader_schedule_epoch: 6,
+            epoch_start_timestamp: 1234500000,
+        };
+        let c2 = c1.clone();
+        assert_eq!(c1, c2);
+    }
+
+    #[test]
+    fn epoch_rewards_info_construction() {
+        let info = EpochRewardsInfo {
+            active: true,
+            total_rewards: 1_000_000,
+            distributed_rewards: 500_000,
+            distribution_complete_block_height: 42,
+        };
+        assert!(info.active);
+        assert_eq!(info.total_rewards, 1_000_000);
+        assert_eq!(info.distributed_rewards, 500_000);
+    }
+}
