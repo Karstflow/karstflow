@@ -267,6 +267,17 @@ impl Shred {
         self.common_header.slot
     }
 
+    /// Compute the parent slot from the data shred header's parent offset.
+    ///
+    /// Returns `None` for coding shreds (which don't carry parent info).
+    pub fn parent_slot(&self) -> Option<u64> {
+        self.data_header().map(|h| {
+            self.common_header
+                .slot
+                .saturating_sub(h.parent_offset as u64)
+        })
+    }
+
     /// Get the shred index.
     pub fn index(&self) -> u32 {
         self.common_header.index
@@ -579,5 +590,76 @@ mod tests {
         assert!(shred.is_chained());
         assert!(shred.is_resigned());
         assert_eq!(shred.merkle_proof_count(), 8);
+    }
+
+    #[test]
+    fn test_parent_slot_data_shred() {
+        let variant_byte = SHRED_TYPE_LEGACY_DATA | SHRED_LEGACY_DATA_NIBBLE;
+        let common = ShredCommonHeader {
+            signature: [0; SIGNATURE_SIZE],
+            variant: variant_byte,
+            slot: 100,
+            index: 0,
+            version: 1,
+            fec_set_index: 0,
+        };
+        let data_header = DataShredHeader {
+            parent_offset: 3,
+            flags: 0,
+            size: 64,
+        };
+        let shred = Shred::new(common, ShredVariant::LegacyData(data_header), vec![0; 64]);
+
+        assert_eq!(shred.parent_slot(), Some(97)); // 100 - 3
+    }
+
+    #[test]
+    fn test_parent_slot_same_slot() {
+        // parent_offset == 0 means parent is the same slot (genesis-like)
+        let variant_byte = SHRED_TYPE_LEGACY_DATA | SHRED_LEGACY_DATA_NIBBLE;
+        let common = ShredCommonHeader {
+            signature: [0; SIGNATURE_SIZE],
+            variant: variant_byte,
+            slot: 50,
+            index: 0,
+            version: 1,
+            fec_set_index: 0,
+        };
+        let data_header = DataShredHeader {
+            parent_offset: 0,
+            flags: 0,
+            size: 64,
+        };
+        let shred = Shred::new(common, ShredVariant::LegacyData(data_header), vec![0; 64]);
+
+        assert_eq!(shred.parent_slot(), Some(50)); // 50 - 0
+    }
+
+    #[test]
+    fn test_parent_slot_coding_shred_returns_none() {
+        let variant_byte = SHRED_TYPE_MERKLE_CODE_CHAINED_RESIGNED | 4;
+        let common = ShredCommonHeader {
+            signature: [0; SIGNATURE_SIZE],
+            variant: variant_byte,
+            slot: 200,
+            index: 5,
+            version: 1,
+            fec_set_index: 0,
+        };
+        let coding_header = CodingShredHeader {
+            num_data_shreds: 32,
+            num_coding_shreds: 32,
+            position: 0,
+        };
+        let proof = MerkleProof {
+            proof: vec![[0; MERKLE_PROOF_NODE_BYTES]; 4],
+        };
+        let shred = Shred::new(
+            common,
+            ShredVariant::MerkleCoding(coding_header, proof),
+            vec![0; 256],
+        );
+
+        assert_eq!(shred.parent_slot(), None);
     }
 }

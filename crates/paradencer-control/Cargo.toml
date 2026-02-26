@@ -7,6 +7,7 @@ authors.workspace = true
 
 [dependencies]
 thiserror.workspace = true
+crossbeam-channel = { workspace = true }
 paradencer-config = { path = "../paradencer-config" }
 paradencer-consensus = { path = "../paradencer-consensus" }
 paradencer-constants = { path = "../paradencer-constants" }

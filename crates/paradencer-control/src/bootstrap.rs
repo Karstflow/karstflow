@@ -17,9 +17,10 @@ use paradencer_execution::ExecutionBridge;
 use paradencer_mesh::{bounded_link, InPort, OutPort};
 use paradencer_net::{
     ClusterInfo, ContactInfo, GossipConfig, GossipService, InMemoryShredStore, IngressMode, NodeId,
-    RepairCoordinator, RepairCoordinatorConfig, RepairService, RepairServiceConfig,
-    RetransmitService, RetransmitStats, ShredData, ShredIndex, ShredProvider, Slot, TurbineConfig,
-    TurbineStats, TurbineTreeBuilder, UdpShredTransport, ValidatorInfo,
+    OutboundRepair, RepairCoordinator, RepairCoordinatorConfig, RepairRequest, RepairService,
+    RepairServiceConfig, RepairTarget, RetransmitService, RetransmitStats, ShredData, ShredIndex,
+    ShredProvider, Slot, TurbineConfig, TurbineStats, TurbineTreeBuilder, UdpShredTransport,
+    ValidatorInfo,
 };
 use paradencer_observability::spawn_metrics_http_bridge;
 use paradencer_rpc::{metrics_file_provider, spawn_rpc_http_server};
@@ -27,7 +28,7 @@ use paradencer_runtime::{build_pinned_affinity_plan, run_services, Service, Serv
 use paradencer_stages::{
     ExecutionErrorHandlingPolicy, MetricsOutputTarget, PipelineHandle, PipelineServiceBuilder,
     PipelineServiceConfig, RawTransaction, ReplayService, ReplayServiceConfig,
-    SbpfExecutionAdapter, ShredCollector, ShredCollectorConfig,
+    SbpfExecutionAdapter, ShredArrival, ShredCollector, ShredCollectorConfig,
 };
 use paradencer_storage::{
     AccountDatabase, Blockstore, MaintenanceConfig, Pubkey, SnapshotAction, SnapshotConfig,
@@ -909,6 +910,9 @@ pub struct RepairBundle {
     pub service: Box<dyn Service>,
     /// Background I/O handle — must be kept alive.
     pub io_handle: RepairHandle,
+    /// Sender for shred arrival notifications. Attach to the ShredCollector
+    /// via `set_repair_notifier()` so the repair forest tracks received shreds.
+    pub shred_arrival_tx: crossbeam_channel::Sender<ShredArrival>,
 }
 
 /// Service adapter that wraps the poll-driven RepairCoordinator.
@@ -925,7 +929,13 @@ struct RepairServiceAdapter {
     coordinator: RepairCoordinator,
     cluster_info: Arc<ClusterInfo>,
     vote_processor: Arc<Mutex<VoteProcessor>>,
+    bank_forks: Arc<RwLock<BankForks>>,
+    /// Channel for forwarding outbound repair requests to the I/O thread.
+    outbound_tx: crossbeam_channel::Sender<OutboundRepair>,
+    /// Channel for receiving shred arrival notifications from the collector.
+    shred_arrival_rx: crossbeam_channel::Receiver<ShredArrival>,
     ticks_since_peer_sync: u32,
+    last_root: u64,
 }
 
 impl Service for RepairServiceAdapter {
@@ -951,10 +961,31 @@ impl Service for RepairServiceAdapter {
         &mut self,
         _context: &paradencer_runtime::ServiceContext,
     ) -> paradencer_runtime::RuntimeResult<()> {
-        // Generate repair requests. In the full implementation these
-        // would be forwarded to the background RepairRequester for
-        // actual network transmission.
-        let _outbound = self.coordinator.service();
+        // Advance the repair root when consensus root moves forward.
+        let current_root = self.bank_forks.read().unwrap().root_slot();
+        if current_root > self.last_root {
+            self.coordinator.advance_root(current_root);
+            self.last_root = current_root;
+        }
+
+        // Drain shred arrival notifications from the collector. Each
+        // notification tells the forest about a turbine-received shred
+        // so it can track slot progress and avoid redundant requests.
+        while let Ok(arrival) = self.shred_arrival_rx.try_recv() {
+            self.coordinator.receive_turbine_shred(
+                arrival.slot,
+                arrival.shred_index,
+                arrival.is_last_in_slot,
+                arrival.parent_slot,
+            );
+        }
+
+        // Generate repair requests and forward to the I/O thread for
+        // actual network transmission via UDP.
+        let outbound = self.coordinator.service();
+        for repair in outbound {
+            let _ = self.outbound_tx.try_send(repair);
+        }
 
         // Periodically sync peers from gossip (~every 1 second at 5ms tick).
         self.ticks_since_peer_sync += 1;
@@ -1064,6 +1095,32 @@ impl ShredProvider for BlockstoreShredProvider {
     }
 }
 
+/// Convert a forest-generated `RepairTarget` into a wire `RepairRequest`.
+fn convert_repair_target_to_request(
+    requester: NodeId,
+    target: &RepairTarget,
+    nonce: u64,
+) -> RepairRequest {
+    match *target {
+        RepairTarget::Shred { slot, index } => RepairRequest::Shred {
+            requester,
+            slot,
+            index,
+            nonce,
+        },
+        RepairTarget::HighestShred { slot } => RepairRequest::HighestShred {
+            requester,
+            slot,
+            nonce,
+        },
+        RepairTarget::Orphan { slot } => RepairRequest::Orphan {
+            requester,
+            slot,
+            nonce,
+        },
+    }
+}
+
 /// Build the repair coordinator and background I/O service.
 ///
 /// The repair system has two parts:
@@ -1079,15 +1136,27 @@ pub fn build_repair_service(
     node_id: NodeId,
     cluster_info: Arc<ClusterInfo>,
     vote_processor: Arc<Mutex<VoteProcessor>>,
+    bank_forks: Arc<RwLock<BankForks>>,
     shred_provider: Option<Arc<dyn ShredProvider>>,
 ) -> Result<RepairBundle> {
-    let coordinator = RepairCoordinator::new(0, RepairCoordinatorConfig::default());
+    let root_slot = bank_forks.read().unwrap().root_slot();
+    let coordinator = RepairCoordinator::new(root_slot, RepairCoordinatorConfig::default());
+
+    // Channel for forwarding outbound repair requests to the I/O thread.
+    let (outbound_tx, outbound_rx) = crossbeam_channel::bounded::<OutboundRepair>(256);
+
+    // Channel for receiving shred arrival notifications from the collector.
+    let (shred_arrival_tx, shred_arrival_rx) = crossbeam_channel::bounded::<ShredArrival>(4096);
 
     let adapter = RepairServiceAdapter {
         coordinator,
         cluster_info: Arc::clone(&cluster_info),
         vote_processor,
+        bank_forks,
+        outbound_tx,
+        shred_arrival_rx,
         ticks_since_peer_sync: 0,
+        last_root: root_slot,
     };
 
     let provider: Arc<dyn ShredProvider> =
@@ -1096,6 +1165,7 @@ pub fn build_repair_service(
     // Spawn background thread for repair network I/O.
     let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
 
+    let io_cluster_info = Arc::clone(&cluster_info);
     let thread_handle = std::thread::Builder::new()
         .name("repair-io".to_string())
         .spawn(move || {
@@ -1107,19 +1177,53 @@ pub fn build_repair_service(
             rt.block_on(async move {
                 let config = RepairServiceConfig::default();
 
-                let mut service =
-                    match RepairService::new(node_id, cluster_info, config, provider).await {
-                        Ok(s) => s,
-                        Err(e) => {
-                            error!(error = %e, "repair service failed to start");
-                            return;
-                        }
-                    };
+                let mut service = match RepairService::new(
+                    node_id,
+                    Arc::clone(&io_cluster_info),
+                    config,
+                    provider,
+                )
+                .await
+                {
+                    Ok(s) => s,
+                    Err(e) => {
+                        error!(error = %e, "repair service failed to start");
+                        return;
+                    }
+                };
 
                 if let Err(e) = service.start().await {
                     error!(error = %e, "repair service loops failed to start");
                     return;
                 }
+
+                // Spawn a task that forwards outbound repairs from the
+                // coordinator (poll-driven) to the requester (async UDP).
+                let request_sender = service.requester().get_request_sender();
+                let fwd_cluster_info = Arc::clone(&io_cluster_info);
+                tokio::spawn(async move {
+                    loop {
+                        let mut forwarded = 0u32;
+                        while let Ok(repair) = outbound_rx.try_recv() {
+                            let peer_id = NodeId(repair.peer);
+                            if let Some(contact) = fwd_cluster_info.get(&peer_id) {
+                                let request = convert_repair_target_to_request(
+                                    node_id,
+                                    &repair.target,
+                                    repair.nonce,
+                                );
+                                let (response_tx, _response_rx) = tokio::sync::oneshot::channel();
+                                let _ = request_sender
+                                    .send((request, contact.repair_addr, response_tx))
+                                    .await;
+                                forwarded += 1;
+                            }
+                        }
+                        if forwarded == 0 {
+                            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                        }
+                    }
+                });
 
                 // Park until shutdown.
                 let _ = shutdown_rx.await;
@@ -1135,6 +1239,7 @@ pub fn build_repair_service(
             shutdown_tx: Some(shutdown_tx),
             _thread_handle: thread_handle,
         },
+        shred_arrival_tx,
     })
 }
 
@@ -1652,6 +1757,7 @@ pub struct ShredPipelineBundle {
 pub fn build_shred_pipeline(
     config: ShredCollectorConfig,
     blockstore: Option<Arc<Blockstore>>,
+    repair_notifier: Option<crossbeam_channel::Sender<ShredArrival>>,
 ) -> ShredPipelineBundle {
     let shred_channel_depth = config.max_shreds_per_slot.max(256);
     let block_channel_depth = config.max_buffered_slots.max(64);
@@ -1663,6 +1769,9 @@ pub fn build_shred_pipeline(
     let mut collector = ShredCollector::with_config(shred_rx, block_tx, config);
     if let Some(bs) = blockstore {
         collector.set_blockstore(bs);
+    }
+    if let Some(notifier) = repair_notifier {
+        collector.set_repair_notifier(notifier);
     }
 
     ShredPipelineBundle {
@@ -2412,7 +2521,7 @@ mod tests {
         use paradencer_runtime::{ServiceContext, ShutdownSwitch};
         use paradencer_stages::ShredCollectorConfig;
 
-        let bundle = build_shred_pipeline(ShredCollectorConfig::default(), None);
+        let bundle = build_shred_pipeline(ShredCollectorConfig::default(), None, None);
         assert_eq!(bundle.service.name(), "shred-collector");
 
         // Service ticks without error (no shreds pending).
@@ -2434,6 +2543,7 @@ mod tests {
         let bundle = build_shred_pipeline(
             ShredCollectorConfig::default(),
             Some(Arc::clone(&blockstore)),
+            None,
         );
 
         // Send a shred through the pipeline.
@@ -2984,5 +3094,65 @@ mod tests {
         let restored = saved.to_tower();
         assert_eq!(restored.last_vote_slot(), Some(101));
         assert_eq!(restored.votes().len(), 2);
+    }
+
+    #[test]
+    fn convert_repair_target_to_request_all_variants() {
+        use paradencer_net::{repair::RepairRequest, repair::RepairTarget, NodeId};
+
+        let requester = NodeId([42u8; 32]);
+
+        // Shred variant
+        let target = RepairTarget::Shred {
+            slot: 100,
+            index: 5,
+        };
+        let req = super::convert_repair_target_to_request(requester, &target, 999);
+        match req {
+            RepairRequest::Shred {
+                requester: r,
+                slot,
+                index,
+                nonce,
+            } => {
+                assert_eq!(r.0, [42u8; 32]);
+                assert_eq!(slot, 100);
+                assert_eq!(index, 5);
+                assert_eq!(nonce, 999);
+            }
+            _ => panic!("expected Shred variant"),
+        }
+
+        // HighestShred variant
+        let target = RepairTarget::HighestShred { slot: 200 };
+        let req = super::convert_repair_target_to_request(requester, &target, 1000);
+        match req {
+            RepairRequest::HighestShred {
+                requester: r,
+                slot,
+                nonce,
+            } => {
+                assert_eq!(r.0, [42u8; 32]);
+                assert_eq!(slot, 200);
+                assert_eq!(nonce, 1000);
+            }
+            _ => panic!("expected HighestShred variant"),
+        }
+
+        // Orphan variant
+        let target = RepairTarget::Orphan { slot: 300 };
+        let req = super::convert_repair_target_to_request(requester, &target, 1001);
+        match req {
+            RepairRequest::Orphan {
+                requester: r,
+                slot,
+                nonce,
+            } => {
+                assert_eq!(r.0, [42u8; 32]);
+                assert_eq!(slot, 300);
+                assert_eq!(nonce, 1001);
+            }
+            _ => panic!("expected Orphan variant"),
+        }
     }
 }

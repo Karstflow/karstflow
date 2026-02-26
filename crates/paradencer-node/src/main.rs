@@ -294,9 +294,15 @@ fn run_with_node_config(
         node_id,
         cluster_info.clone(),
         consensus.vote_processor.clone(),
+        consensus.bank_forks.clone(),
         shred_provider,
     )?;
     let _repair_io = repair_bundle.io_handle;
+    // TODO: wire repair_bundle.shred_arrival_tx to the ShredCollector
+    // once the topology materializer supports post-creation wiring.
+    // Without this, the repair forest makes redundant requests for
+    // shreds already received via turbine — functional but suboptimal.
+    let _shred_arrival_tx = repair_bundle.shred_arrival_tx;
 
     // Keep a handle to bank forks for the live RPC snapshot provider.
     let rpc_bank_forks = consensus.bank_forks.clone();

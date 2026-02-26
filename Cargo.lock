@@ -1468,6 +1468,7 @@ version = "0.1.0"
 name = "paradencer-control"
 version = "0.1.0"
 dependencies = [
+ "crossbeam-channel",
  "paradencer-config",
  "paradencer-consensus",
  "paradencer-constants",

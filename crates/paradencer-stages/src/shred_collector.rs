@@ -62,6 +62,19 @@ pub struct ShredCollectorStats {
     pub blockstore_write_errors: u64,
 }
 
+/// Notification sent when a data shred arrives from turbine.
+///
+/// The repair coordinator uses these to track which slots have been seen
+/// and which shred indices are present, so it avoids requesting shreds
+/// that are already in-flight or received.
+#[derive(Debug, Clone, Copy)]
+pub struct ShredArrival {
+    pub slot: u64,
+    pub shred_index: u32,
+    pub is_last_in_slot: bool,
+    pub parent_slot: Option<u64>,
+}
+
 pub struct ShredCollector {
     config: ShredCollectorConfig,
     incoming_shreds: InPort<Shred>,
@@ -70,6 +83,8 @@ pub struct ShredCollector {
     block_output: OutPort<AssembledBlock>,
     /// Optional persistent storage for write-through shred persistence.
     blockstore: Option<Arc<Blockstore>>,
+    /// Optional channel to notify the repair coordinator about received data shreds.
+    repair_notifier: Option<crossbeam_channel::Sender<ShredArrival>>,
     slot_buffers: BTreeMap<u64, SlotBuffer>,
     assembler: ShredAssembler,
     stats: ShredCollectorStats,
@@ -96,6 +111,7 @@ impl ShredCollector {
             incoming_fec_sets: Some(incoming_fec_sets),
             block_output,
             blockstore: None,
+            repair_notifier: None,
             slot_buffers: BTreeMap::new(),
             assembler: ShredAssembler::new(),
             stats: ShredCollectorStats::default(),
@@ -113,6 +129,7 @@ impl ShredCollector {
             incoming_fec_sets: None,
             block_output,
             blockstore: None,
+            repair_notifier: None,
             slot_buffers: BTreeMap::new(),
             assembler: ShredAssembler::new(),
             stats: ShredCollectorStats::default(),
@@ -126,6 +143,15 @@ impl ShredCollector {
     /// service to serve shreds from disk and provides crash recovery.
     pub fn set_blockstore(&mut self, blockstore: Arc<Blockstore>) {
         self.blockstore = Some(blockstore);
+    }
+
+    /// Attach a repair notification channel.
+    ///
+    /// When set, the collector sends a `ShredArrival` for each data shred
+    /// received (both raw and FEC-recovered). The repair coordinator drains
+    /// this channel to keep its forest in sync with turbine-received shreds.
+    pub fn set_repair_notifier(&mut self, tx: crossbeam_channel::Sender<ShredArrival>) {
+        self.repair_notifier = Some(tx);
     }
 
     pub fn stats(&self) -> &ShredCollectorStats {
@@ -146,6 +172,22 @@ impl ShredCollector {
         }
     }
 
+    /// Notify the repair coordinator about a received data shred.
+    ///
+    /// Best-effort: if the channel is full or disconnected, the notification
+    /// is silently dropped. The repair forest will eventually discover the
+    /// shred through other means.
+    fn notify_repair(&self, shred: &Shred) {
+        if let Some(ref tx) = self.repair_notifier {
+            let _ = tx.try_send(ShredArrival {
+                slot: shred.slot(),
+                shred_index: shred.index(),
+                is_last_in_slot: shred.is_last_in_slot(),
+                parent_slot: shred.parent_slot(),
+            });
+        }
+    }
+
     /// Insert a completed FEC set's data shreds into the slot buffers.
     ///
     /// This is the primary integration point with `ShredNetworkStage`.
@@ -156,9 +198,10 @@ impl ShredCollector {
         let slot = fec_set.slot;
         let max_shreds = self.config.max_shreds_per_slot;
 
-        // Persist shreds to blockstore before buffering.
+        // Persist shreds to blockstore before buffering and notify repair.
         for shred in &fec_set.data_shreds {
             self.persist_shred(shred);
+            self.notify_repair(shred);
         }
 
         let buffer = self.slot_buffers.entry(slot).or_insert_with(|| SlotBuffer {
@@ -223,6 +266,7 @@ impl ShredCollector {
             let is_last = shred.is_last_in_slot();
 
             self.persist_shred(&shred);
+            self.notify_repair(&shred);
 
             let buffer = self.slot_buffers.entry(slot).or_insert_with(|| SlotBuffer {
                 shreds: Vec::new(),
@@ -468,5 +512,86 @@ mod tests {
         assert!(blockstore.get_data_shred(7, 0).unwrap().is_some());
         // In-memory buffer also has it.
         assert_eq!(collector.slot_buffers.get(&7).unwrap().shreds.len(), 1);
+    }
+
+    #[test]
+    fn collector_sends_repair_notifications_on_drain() {
+        let (shred_tx, shred_rx) = bounded_link::<Shred>(64);
+        let (block_tx, _block_rx) = bounded_link::<AssembledBlock>(8);
+
+        let (repair_tx, repair_rx) = crossbeam_channel::bounded::<ShredArrival>(64);
+
+        let mut collector = ShredCollector::new(shred_rx, block_tx);
+        collector.set_repair_notifier(repair_tx);
+
+        // Send two shreds: one normal, one last-in-slot.
+        shred_tx.try_send(make_data_shred(42, 0, false)).unwrap();
+        shred_tx.try_send(make_data_shred(42, 1, true)).unwrap();
+
+        collector.drain_incoming().unwrap();
+
+        // Should have received two notifications.
+        let arrival0 = repair_rx.try_recv().unwrap();
+        assert_eq!(arrival0.slot, 42);
+        assert_eq!(arrival0.shred_index, 0);
+        assert!(!arrival0.is_last_in_slot);
+        // parent_offset=1 → parent_slot=41
+        assert_eq!(arrival0.parent_slot, Some(41));
+
+        let arrival1 = repair_rx.try_recv().unwrap();
+        assert_eq!(arrival1.slot, 42);
+        assert_eq!(arrival1.shred_index, 1);
+        assert!(arrival1.is_last_in_slot);
+        assert_eq!(arrival1.parent_slot, Some(41));
+
+        // No more notifications.
+        assert!(repair_rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn collector_sends_repair_notifications_for_fec_sets() {
+        let (_shred_tx, shred_rx) = bounded_link::<Shred>(64);
+        let (block_tx, _block_rx) = bounded_link::<AssembledBlock>(8);
+
+        let (repair_tx, repair_rx) = crossbeam_channel::bounded::<ShredArrival>(64);
+
+        let mut collector = ShredCollector::new(shred_rx, block_tx);
+        collector.set_repair_notifier(repair_tx);
+
+        let fec_set = CompletedFecSet {
+            slot: 99,
+            fec_set_index: 0,
+            data_shreds: vec![make_data_shred(99, 0, false), make_data_shred(99, 1, true)],
+            was_recovered: false,
+        };
+
+        collector.insert_completed_fec_set(fec_set);
+
+        // Should have received two notifications.
+        let a0 = repair_rx.try_recv().unwrap();
+        assert_eq!(a0.slot, 99);
+        assert_eq!(a0.shred_index, 0);
+        assert!(!a0.is_last_in_slot);
+
+        let a1 = repair_rx.try_recv().unwrap();
+        assert_eq!(a1.slot, 99);
+        assert_eq!(a1.shred_index, 1);
+        assert!(a1.is_last_in_slot);
+
+        assert!(repair_rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn collector_works_without_repair_notifier() {
+        let (shred_tx, shred_rx) = bounded_link::<Shred>(64);
+        let (block_tx, _block_rx) = bounded_link::<AssembledBlock>(8);
+
+        // No repair notifier — should not panic.
+        let mut collector = ShredCollector::new(shred_rx, block_tx);
+
+        shred_tx.try_send(make_data_shred(5, 0, false)).unwrap();
+        collector.drain_incoming().unwrap();
+
+        assert_eq!(collector.stats.shreds_received, 1);
     }
 }

@@ -40,7 +40,7 @@ pub use gossip::{
 pub use repair::{
     InMemoryShredStore, OutboundRepair, PeerId, RepairCoordinator, RepairCoordinatorConfig,
     RepairRequest, RepairRequester, RepairResponse, RepairServer, RepairServerConfig,
-    RepairService, RepairServiceConfig, ShredData, ShredIndex, ShredProvider, Slot,
+    RepairService, RepairServiceConfig, RepairTarget, ShredData, ShredIndex, ShredProvider, Slot,
     WireRepairProtocol, WireRepairRequestHeader,
 };
 
