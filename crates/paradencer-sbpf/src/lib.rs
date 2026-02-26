@@ -58,7 +58,9 @@ pub use paradencer_constants::execution::{
     COMPUTE_UNIT_COST_ACCOUNT_WRITEBACK, COMPUTE_UNIT_COST_PER_ACCOUNT,
     COMPUTE_UNIT_COST_PER_DATA_BYTE, DEFAULT_INSTRUCTION_BASE_COST, MAX_COMPUTE_UNITS,
 };
-pub use precompiles::{Ed25519PrecompileExecutor, Secp256k1PrecompileExecutor};
+pub use precompiles::{
+    Ed25519PrecompileExecutor, Secp256k1PrecompileExecutor, Secp256r1PrecompileExecutor,
+};
 pub use program_cache::{CacheError, CachedProgram, ProgramCache};
 pub use stake::StakeProgramExecutor;
 pub use syscall_dispatch::InstructionExecutor;

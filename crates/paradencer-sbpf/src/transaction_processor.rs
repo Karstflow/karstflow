@@ -4,8 +4,9 @@ use crate::{
     AddressLookupTableExecutor, AssociatedTokenProgramExecutor, BpfLoaderExecutor,
     ComputeBudgetProgramExecutor, ConfigProgramExecutor, Ed25519PrecompileExecutor,
     ExecutionContext, ExecutionOutcome, LoaderV4Executor, MemoProgramExecutor,
-    Secp256k1PrecompileExecutor, StakeProgramExecutor, SystemProgramExecutor,
-    Token2022ProgramExecutor, TokenProgramExecutor, VoteProgramExecutor, MAX_COMPUTE_UNITS,
+    Secp256k1PrecompileExecutor, Secp256r1PrecompileExecutor, StakeProgramExecutor,
+    SystemProgramExecutor, Token2022ProgramExecutor, TokenProgramExecutor, VoteProgramExecutor,
+    MAX_COMPUTE_UNITS,
 };
 use paradencer_ids::{
     features::{is_feature_active, ENABLE_LOADER_V4, ENABLE_SECP256R1_PRECOMPILE},
@@ -82,6 +83,7 @@ pub struct TransactionProcessor {
     loader_v4: LoaderV4Executor,
     ed25519_precompile: Ed25519PrecompileExecutor,
     secp256k1_precompile: Secp256k1PrecompileExecutor,
+    secp256r1_precompile: Secp256r1PrecompileExecutor,
     bytecode_vm: BytecodeVm,
     max_compute_units: u64,
 }
@@ -104,6 +106,7 @@ impl TransactionProcessor {
             loader_v4: LoaderV4Executor::new(200),
             ed25519_precompile: Ed25519PrecompileExecutor::new(200),
             secp256k1_precompile: Secp256k1PrecompileExecutor::new(200),
+            secp256r1_precompile: Secp256r1PrecompileExecutor::new(200),
             bytecode_vm: BytecodeVm::new(),
             max_compute_units: MAX_COMPUTE_UNITS,
         }
@@ -344,8 +347,9 @@ impl TransactionProcessor {
             {
                 return rejection;
             }
-            // TODO: Implement Secp256r1PrecompileExecutor
-            ExecutionOutcome::failure(0, "Secp256r1 precompile not yet implemented".to_string())
+            self.secp256r1_precompile
+                .execute(context)
+                .unwrap_or_else(|err| ExecutionOutcome::failure(200, err))
         } else {
             // Try executing as a deployed BPF program via BytecodeVm
             self.try_execute_bpf(context)
@@ -991,9 +995,8 @@ mod tests {
 
         let outcome = processor.execute_instruction(&ctx);
 
-        // Should fail with "not yet implemented" rather than "not available"
-        assert!(!outcome.success);
-        assert!(outcome.logs[0].contains("not yet implemented"));
+        // With empty instruction data, the precompile succeeds (0 signatures)
+        assert!(outcome.success);
     }
 
     #[test]

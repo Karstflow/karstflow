@@ -1622,6 +1622,7 @@ dependencies = [
  "ed25519-dalek",
  "k256",
  "light-poseidon",
+ "p256",
  "paradencer-constants",
  "paradencer-ids",
  "paradencer-types",

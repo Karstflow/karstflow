@@ -6,6 +6,8 @@
 
 mod ed25519;
 mod secp256k1;
+mod secp256r1;
 
 pub use ed25519::Ed25519PrecompileExecutor;
 pub use secp256k1::Secp256k1PrecompileExecutor;
+pub use secp256r1::Secp256r1PrecompileExecutor;
