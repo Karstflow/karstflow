@@ -226,3 +226,127 @@ impl BlockstoreBackend {
         matches!(&self.inner, BackendInner::Persistent { .. })
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn backend() -> BlockstoreBackend {
+        BlockstoreBackend::in_memory()
+    }
+
+    #[test]
+    fn in_memory_is_not_persistent() {
+        let b = backend();
+        assert!(!b.is_persistent());
+    }
+
+    #[test]
+    fn put_and_get() {
+        let b = backend();
+        b.put(CF_SLOT_META, b"slot_1", b"meta_1").unwrap();
+        let val = b.get(CF_SLOT_META, b"slot_1").unwrap();
+        assert_eq!(val, Some(b"meta_1".to_vec()));
+    }
+
+    #[test]
+    fn get_missing_key_returns_none() {
+        let b = backend();
+        let val = b.get(CF_SLOT_META, b"nonexistent").unwrap();
+        assert!(val.is_none());
+    }
+
+    #[test]
+    fn put_overwrites() {
+        let b = backend();
+        b.put(CF_SLOT_META, b"key", b"v1").unwrap();
+        b.put(CF_SLOT_META, b"key", b"v2").unwrap();
+        let val = b.get(CF_SLOT_META, b"key").unwrap();
+        assert_eq!(val, Some(b"v2".to_vec()));
+    }
+
+    #[test]
+    fn delete_removes_key() {
+        let b = backend();
+        b.put(CF_SLOT_META, b"key", b"val").unwrap();
+        b.delete(CF_SLOT_META, b"key").unwrap();
+        assert!(b.get(CF_SLOT_META, b"key").unwrap().is_none());
+    }
+
+    #[test]
+    fn delete_nonexistent_is_ok() {
+        let b = backend();
+        b.delete(CF_SLOT_META, b"nonexistent").unwrap();
+    }
+
+    #[test]
+    fn unknown_cf_returns_error() {
+        let b = backend();
+        assert!(b.get("not_a_cf", b"key").is_err());
+        assert!(b.put("not_a_cf", b"key", b"val").is_err());
+        assert!(b.delete("not_a_cf", b"key").is_err());
+    }
+
+    #[test]
+    fn prefix_scan() {
+        let b = backend();
+        b.put(CF_DATA_SHRED, b"slot_1_shred_0", b"d0").unwrap();
+        b.put(CF_DATA_SHRED, b"slot_1_shred_1", b"d1").unwrap();
+        b.put(CF_DATA_SHRED, b"slot_2_shred_0", b"d2").unwrap();
+
+        let results = b.prefix_scan(CF_DATA_SHRED, b"slot_1_").unwrap();
+        assert_eq!(results.len(), 2);
+    }
+
+    #[test]
+    fn prefix_scan_empty() {
+        let b = backend();
+        let results = b.prefix_scan(CF_DATA_SHRED, b"nothing").unwrap();
+        assert!(results.is_empty());
+    }
+
+    #[test]
+    fn delete_prefix() {
+        let b = backend();
+        b.put(CF_DATA_SHRED, b"slot_1_0", b"v0").unwrap();
+        b.put(CF_DATA_SHRED, b"slot_1_1", b"v1").unwrap();
+        b.put(CF_DATA_SHRED, b"slot_2_0", b"v2").unwrap();
+
+        let count = b.delete_prefix(CF_DATA_SHRED, b"slot_1_").unwrap();
+        assert_eq!(count, 2);
+
+        // slot_2 still exists
+        assert!(b.get(CF_DATA_SHRED, b"slot_2_0").unwrap().is_some());
+        // slot_1 entries gone
+        assert!(b.get(CF_DATA_SHRED, b"slot_1_0").unwrap().is_none());
+    }
+
+    #[test]
+    fn all_keys() {
+        let b = backend();
+        b.put(CF_SLOT_META, b"k1", b"v1").unwrap();
+        b.put(CF_SLOT_META, b"k2", b"v2").unwrap();
+
+        let keys = b.all_keys(CF_SLOT_META).unwrap();
+        assert_eq!(keys.len(), 2);
+    }
+
+    #[test]
+    fn flush_in_memory_is_noop() {
+        let b = backend();
+        b.flush().unwrap();
+    }
+
+    #[test]
+    fn cross_cf_isolation() {
+        let b = backend();
+        b.put(CF_SLOT_META, b"key", b"meta").unwrap();
+        b.put(CF_DATA_SHRED, b"key", b"shred").unwrap();
+
+        assert_eq!(b.get(CF_SLOT_META, b"key").unwrap(), Some(b"meta".to_vec()));
+        assert_eq!(
+            b.get(CF_DATA_SHRED, b"key").unwrap(),
+            Some(b"shred".to_vec())
+        );
+    }
+}

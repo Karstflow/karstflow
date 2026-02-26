@@ -174,3 +174,70 @@ impl TransactionProcessor {
         Ok(results)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn pk(n: u8) -> Pubkey {
+        Pubkey::new([n; 32])
+    }
+
+    fn acct(lamports: u64) -> Account {
+        Account::new(lamports, vec![], Pubkey::new([0u8; 32]))
+    }
+
+    #[test]
+    fn loaded_accounts_new_is_empty() {
+        let la = LoadedAccounts::new();
+        assert!(la.writable_keys.is_empty());
+        assert!(la.get(&pk(1)).is_none());
+    }
+
+    #[test]
+    fn insert_read_only() {
+        let mut la = LoadedAccounts::new();
+        la.insert(pk(1), acct(100), false);
+        assert!(la.get(&pk(1)).is_some());
+        assert_eq!(la.get(&pk(1)).unwrap().meta.lamports, 100);
+        assert!(la.writable_keys.is_empty());
+    }
+
+    #[test]
+    fn insert_writable() {
+        let mut la = LoadedAccounts::new();
+        la.insert(pk(2), acct(200), true);
+        assert!(la.get(&pk(2)).is_some());
+        assert_eq!(la.writable_keys.len(), 1);
+        assert_eq!(la.writable_keys[0], pk(2));
+    }
+
+    #[test]
+    fn get_mut_modifies() {
+        let mut la = LoadedAccounts::new();
+        la.insert(pk(3), acct(300), true);
+        la.get_mut(&pk(3)).unwrap().meta.lamports = 999;
+        assert_eq!(la.get(&pk(3)).unwrap().meta.lamports, 999);
+    }
+
+    #[test]
+    fn into_writeback_returns_writable_only() {
+        let mut la = LoadedAccounts::new();
+        la.insert(pk(1), acct(100), false); // read-only
+        la.insert(pk(2), acct(200), true); // writable
+        la.insert(pk(3), acct(300), true); // writable
+
+        let writeback = la.into_writeback();
+        assert_eq!(writeback.len(), 2);
+        let keys: Vec<Pubkey> = writeback.iter().map(|(k, _)| *k).collect();
+        assert!(keys.contains(&pk(2)));
+        assert!(keys.contains(&pk(3)));
+        assert!(!keys.contains(&pk(1)));
+    }
+
+    #[test]
+    fn default_is_empty() {
+        let la: LoadedAccounts = Default::default();
+        assert!(la.writable_keys.is_empty());
+    }
+}
