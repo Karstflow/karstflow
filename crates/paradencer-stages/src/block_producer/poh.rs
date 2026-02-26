@@ -20,7 +20,7 @@
 //! - `Leading`: Active leader, mixing in microblocks and publishing ticks
 
 use paradencer_constants::ledger::{
-    DEFAULT_HASHES_PER_TICK, MAX_MICROBLOCKS_PER_SLOT, TICKS_PER_SLOT,
+    DEFAULT_HASHES_PER_TICK, HASHCNT_DURATION_NS, MAX_MICROBLOCKS_PER_SLOT, TICKS_PER_SLOT,
 };
 use paradencer_types::Hash;
 use serde::{Deserialize, Serialize};
@@ -250,6 +250,18 @@ pub struct PohService {
     /// Tick hashes accumulated during non-leader slots for proof-of-skipping.
     skipped_tick_hashes: Vec<Hash>,
 
+    // -- Clock synchronization --
+    /// Wall-clock timestamp (nanoseconds) when the hash chain was last reset.
+    /// Used by `advance_to_clock()` to compute the target hash count from
+    /// elapsed time.
+    reset_start_ns: i64,
+
+    /// Wall-clock timestamp (nanoseconds) when the current leader slot began.
+    leader_slot_start_ns: i64,
+
+    /// Duration per hash in nanoseconds (from constants, cached for fast access).
+    hashcnt_duration_ns: u64,
+
     /// Statistics.
     stats: PohStats,
 }
@@ -308,6 +320,9 @@ impl PohService {
             hashcnt_per_slot: hashes_per_tick * ticks_per_slot,
             max_microblocks_per_slot,
             skipped_tick_hashes: Vec::new(),
+            reset_start_ns: 0,
+            leader_slot_start_ns: 0,
+            hashcnt_duration_ns: HASHCNT_DURATION_NS,
             stats: PohStats::default(),
         }
     }
@@ -434,6 +449,89 @@ impl PohService {
         self.hashcnt_per_slot.saturating_sub(self.hashcnt)
     }
 
+    /// Remaining ticks in the current slot.
+    fn remaining_ticks(&self) -> u64 {
+        let current_tick = self.hashcnt / self.hashes_per_tick;
+        self.ticks_per_slot.saturating_sub(current_tick)
+    }
+
+    /// Number of microblocks that can still be mixed into this slot.
+    fn max_microblocks_remaining(&self) -> u64 {
+        self.max_microblocks_per_slot
+            .saturating_sub(self.microblocks_in_slot)
+    }
+
+    // -----------------------------------------------------------------------
+    // Clock-based advancement
+    // -----------------------------------------------------------------------
+
+    /// Set the wall-clock reference point for `advance_to_clock()`.
+    ///
+    /// Should be called after `reset()` to anchor the hash chain to
+    /// wall-clock time. The timestamp is in nanoseconds (e.g. from
+    /// `std::time::SystemTime` or a monotonic clock).
+    pub fn set_clock_reference(&mut self, timestamp_ns: i64) {
+        self.reset_start_ns = timestamp_ns;
+    }
+
+    /// Set the leader slot start timestamp for clock-relative pacing.
+    pub fn set_leader_clock(&mut self, timestamp_ns: i64) {
+        self.leader_slot_start_ns = timestamp_ns;
+    }
+
+    /// Get the clock reference timestamp.
+    pub fn clock_reference_ns(&self) -> i64 {
+        self.reset_start_ns
+    }
+
+    /// Advance the PoH hash chain to match the current wall clock.
+    ///
+    /// Computes the target hash count from elapsed nanoseconds since
+    /// `reset_start_ns`, clamps by `restricted_hashcnt()` to preserve
+    /// space for remaining microblocks, then delegates to `advance()`.
+    ///
+    /// Returns entries produced (tick entries at tick boundaries).
+    /// Returns empty Vec if current hashcnt is already at or past
+    /// the target.
+    pub fn advance_to_clock(&mut self, now_ns: i64) -> Vec<Entry> {
+        let elapsed_ns = (now_ns - self.reset_start_ns).max(0) as u64;
+        let raw_target = elapsed_ns / self.hashcnt_duration_ns;
+
+        // Clamp to slot boundary
+        let slot_max = self.hashcnt_per_slot;
+        let raw_target = raw_target.min(slot_max);
+
+        // Clamp by space reservation for remaining microblocks
+        let restricted = self.restricted_hashcnt();
+        let target = raw_target.min(restricted);
+
+        if target <= self.hashcnt {
+            return vec![];
+        }
+
+        self.advance(target - self.hashcnt)
+    }
+
+    /// Calculate the maximum hashcnt this leader should advance to,
+    /// reserving space for remaining microblocks in the slot.
+    ///
+    /// Each microblock needs at least 1 hashcnt for its mixin entry.
+    /// This ensures we don't exhaust all hashcnts before all expected
+    /// microblocks have been mixed in.
+    ///
+    /// When `slot_done` is true (pack has signaled completion), no
+    /// reservation is needed — the leader can hash to the slot end.
+    pub fn restricted_hashcnt(&self) -> u64 {
+        if self.slot_done {
+            // Pack is done — no reservation needed
+            return self.hashcnt_per_slot;
+        }
+
+        let remaining_mb = self.max_microblocks_remaining();
+        // Reserve 1 hashcnt per remaining microblock
+        self.hashcnt_per_slot.saturating_sub(remaining_mb)
+    }
+
     // -----------------------------------------------------------------------
     // Legacy convenience methods (used by EntryCreator / BlockProducer)
     // -----------------------------------------------------------------------
@@ -500,6 +598,7 @@ impl PohService {
         self.expect_pack_idx = 0;
         self.next_leader_slot = next_leader_slot;
         self.skipped_tick_hashes.clear();
+        // Note: reset_start_ns is set separately via set_clock_reference()
 
         self.state = if next_leader_slot == self.slot {
             // We're the next leader but need bank info from replay first.
@@ -538,7 +637,17 @@ impl PohService {
         self.microblocks_lower_bound = 0;
         self.slot_done = false;
         self.expect_pack_idx = 0;
+        self.leader_slot_start_ns = 0; // Set via set_leader_clock() when timestamp is known
         self.state = PohState::Leading;
+    }
+
+    /// Begin leading a slot with a wall-clock timestamp.
+    ///
+    /// Same as `begin_leader()` but also records the wall-clock time
+    /// for use by `advance_to_clock()`.
+    pub fn begin_leader_at(&mut self, leader_slot: u64, now_ns: i64) {
+        self.begin_leader(leader_slot);
+        self.leader_slot_start_ns = now_ns;
     }
 
     /// Signal that pack is done sending microblocks for this slot.
@@ -1224,5 +1333,154 @@ mod tests {
 
         poh.set_leader_bank(1, 10);
         assert!(poh.can_accept_microblock(0));
+    }
+
+    // --- Clock-based advancement tests ---
+
+    #[test]
+    fn advance_to_clock_basic() {
+        // hashes_per_tick=10, ticks_per_slot=4 → hashcnt_per_slot=40
+        // hashcnt_duration_ns=100 → 1000ns = 10 hashes = 1 tick
+        let mut poh = PohService::with_config(zero_hash(), 10, 4, 100);
+        reset_as_leader(&mut poh, 0, zero_hash(), 1);
+        poh.set_clock_reference(0);
+        poh.done_packing(0); // No microblocks expected
+
+        // Advance 1000ns = 10 hashes = 1 tick
+        let entries = poh.advance_to_clock(1_000);
+        assert_eq!(poh.hashcnt(), 10);
+        assert_eq!(entries.len(), 1); // One tick
+        assert!(entries[0].is_tick());
+    }
+
+    #[test]
+    fn advance_to_clock_no_regression() {
+        let mut poh = PohService::with_config(zero_hash(), 10, 4, 100);
+        reset_as_leader(&mut poh, 0, zero_hash(), 1);
+        poh.set_clock_reference(0);
+        poh.done_packing(0);
+
+        poh.advance_to_clock(1_000);
+        let hc = poh.hashcnt();
+
+        // Calling again with same or earlier timestamp produces nothing
+        let entries = poh.advance_to_clock(1_000);
+        assert!(entries.is_empty());
+        assert_eq!(poh.hashcnt(), hc);
+
+        let entries = poh.advance_to_clock(500);
+        assert!(entries.is_empty());
+        assert_eq!(poh.hashcnt(), hc);
+    }
+
+    #[test]
+    fn advance_to_clock_clamps_to_slot_boundary() {
+        // hashcnt_per_slot = 10 * 4 = 40, at 100ns each → full slot = 4000ns
+        let mut poh = PohService::with_config(zero_hash(), 10, 4, 100);
+        reset_as_leader(&mut poh, 0, zero_hash(), 1);
+        poh.set_clock_reference(0);
+        poh.done_packing(0);
+
+        // Try to advance 10_000ns = 100 hashes, but slot max is 40
+        let entries = poh.advance_to_clock(10_000);
+        assert_eq!(poh.hashcnt(), 40);
+        assert_eq!(entries.len(), 4); // 4 ticks
+    }
+
+    #[test]
+    fn restricted_hashcnt_reserves_space() {
+        // max_microblocks_per_slot=100, hashcnt_per_slot=40
+        let mut poh = PohService::with_config(zero_hash(), 10, 4, 100);
+        reset_as_leader(&mut poh, 0, zero_hash(), 1);
+
+        // With no microblocks mixed in, restricted = 40 - 100 = 0 (saturating)
+        // because there are more potential microblocks than hashcnts
+        let restricted = poh.restricted_hashcnt();
+        assert_eq!(restricted, 0);
+    }
+
+    #[test]
+    fn restricted_hashcnt_no_reservation_when_done() {
+        let mut poh = PohService::with_config(zero_hash(), 10, 4, 100);
+        reset_as_leader(&mut poh, 0, zero_hash(), 1);
+
+        // Before done_packing: restricted
+        let before = poh.restricted_hashcnt();
+
+        // After done_packing: full slot available
+        poh.done_packing(0);
+        let after = poh.restricted_hashcnt();
+        assert_eq!(after, 40); // full hashcnt_per_slot
+        assert!(after >= before);
+    }
+
+    #[test]
+    fn restricted_hashcnt_decreases_with_fewer_remaining() {
+        // Use a config where max_microblocks < hashcnt_per_slot so reservation is meaningful
+        let mut poh = PohService::with_config(zero_hash(), 10, 4, 10);
+        reset_as_leader(&mut poh, 0, zero_hash(), 1);
+
+        // hashcnt_per_slot=40, max_microblocks=10 → restricted = 40-10 = 30
+        assert_eq!(poh.restricted_hashcnt(), 30);
+
+        // Mix in 5 microblocks → remaining = 5 → restricted = 40-5 = 35
+        for _ in 0..5 {
+            poh.advance(1);
+            poh.mixin(&[42u8; 32], 1);
+        }
+        assert_eq!(poh.restricted_hashcnt(), 35);
+    }
+
+    #[test]
+    fn clock_advance_with_mixin() {
+        let mut poh = PohService::with_config(zero_hash(), 10, 4, 100);
+        reset_as_leader(&mut poh, 0, zero_hash(), 1);
+        poh.set_clock_reference(0);
+        poh.done_packing(0);
+
+        // Advance 300ns = 3 hashes
+        poh.advance_to_clock(300);
+        assert_eq!(poh.hashcnt(), 3);
+
+        // Mix in a microblock
+        let mb = poh.mixin(&[1u8; 32], 2);
+        assert!(mb.is_some());
+        assert_eq!(poh.hashcnt(), 4);
+
+        // Advance to 1000ns = 10 hashes total → need 6 more
+        let entries = poh.advance_to_clock(1_000);
+        assert_eq!(poh.hashcnt(), 10);
+        // Should have hit tick boundary at hashcnt=10
+        assert_eq!(entries.len(), 1);
+        assert!(entries[0].is_tick());
+    }
+
+    #[test]
+    fn reset_does_not_clear_clock_reference() {
+        let mut poh = PohService::with_config(zero_hash(), 10, 4, 100);
+        poh.set_clock_reference(12345);
+        assert_eq!(poh.clock_reference_ns(), 12345);
+
+        poh.reset(0, zero_hash(), 5);
+        // reset_start_ns is not cleared by reset — must be set explicitly
+        assert_eq!(poh.clock_reference_ns(), 12345);
+    }
+
+    #[test]
+    fn set_clock_reference_updates_ns() {
+        let mut poh = PohService::with_config(zero_hash(), 10, 4, 100);
+        poh.set_clock_reference(999_000_000);
+        assert_eq!(poh.clock_reference_ns(), 999_000_000);
+
+        poh.set_clock_reference(1_000_000_000);
+        assert_eq!(poh.clock_reference_ns(), 1_000_000_000);
+    }
+
+    #[test]
+    fn begin_leader_at_records_timestamp() {
+        let mut poh = PohService::with_config(zero_hash(), 10, 4, 100);
+        poh.begin_leader_at(5, 42_000_000);
+        assert_eq!(poh.leader_slot_start_ns, 42_000_000);
+        assert_eq!(poh.state(), PohState::Leading);
     }
 }
