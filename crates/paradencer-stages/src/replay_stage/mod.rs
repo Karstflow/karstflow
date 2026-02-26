@@ -378,49 +378,54 @@ impl ReplayStage {
                         if self.config.enable_root_progression {
                             let mut bank_forks = self.bank_transition.bank_forks.write().unwrap();
                             if new_root > bank_forks.root_slot() {
-                                if let Err(e) = bank_forks.set_root(new_root).map(|_| ()) {
-                                    eprintln!("Root progression failed: {:?}", e);
-                                } else {
-                                    drop(bank_forks);
-                                    // Prune old vote data
-                                    let mut vote_processor =
-                                        self.vote_integration.vote_processor.lock().unwrap();
-                                    vote_processor.prune_below_root(new_root);
-
-                                    self.block_processor
-                                        .commitment_tracker
-                                        .lock()
-                                        .unwrap()
-                                        .update_root(new_root);
-
-                                    // Flush account storage at root boundary for
-                                    // crash-consistent durability checkpoint.
-                                    let bank_forks_r =
-                                        self.bank_transition.bank_forks.read().unwrap();
-                                    if let Some(root_bank) = bank_forks_r.root_bank() {
-                                        if let Err(e) =
-                                            root_bank.accounts().notify_root_advanced(new_root)
-                                        {
-                                            eprintln!(
-                                                "Storage flush at root {} failed: {:?}",
-                                                new_root, e
-                                            );
-                                        }
+                                let previous_root = bank_forks.root_slot();
+                                match bank_forks.set_root(new_root) {
+                                    Err(e) => {
+                                        eprintln!("Root progression failed: {:?}", e);
                                     }
-                                    drop(bank_forks_r);
+                                    Ok(eviction_report) => {
+                                        let pruned_count = eviction_report.total_evicted() as u64;
+                                        drop(bank_forks);
+                                        // Prune old vote data
+                                        let mut vote_processor =
+                                            self.vote_integration.vote_processor.lock().unwrap();
+                                        vote_processor.prune_below_root(new_root);
 
-                                    self.stats.lock().unwrap().record_root_progression();
+                                        self.block_processor
+                                            .commitment_tracker
+                                            .lock()
+                                            .unwrap()
+                                            .update_root(new_root);
 
-                                    // Emit RootAdvanced signal.
-                                    self.signal_bus.lock().unwrap().emit(
-                                        ReplaySignal::RootAdvanced(RootAdvancedInfo {
-                                            new_root,
-                                            previous_root: block.parent_slot, // approximate
-                                            pruned_slot_count: 0, // TODO: track actual pruned count from set_root
-                                        }),
-                                    );
+                                        // Flush account storage at root boundary for
+                                        // crash-consistent durability checkpoint.
+                                        let bank_forks_r =
+                                            self.bank_transition.bank_forks.read().unwrap();
+                                        if let Some(root_bank) = bank_forks_r.root_bank() {
+                                            if let Err(e) =
+                                                root_bank.accounts().notify_root_advanced(new_root)
+                                            {
+                                                eprintln!(
+                                                    "Storage flush at root {} failed: {:?}",
+                                                    new_root, e
+                                                );
+                                            }
+                                        }
+                                        drop(bank_forks_r);
 
-                                    println!("Root progressed to slot {}", new_root);
+                                        self.stats.lock().unwrap().record_root_progression();
+
+                                        // Emit RootAdvanced signal.
+                                        self.signal_bus.lock().unwrap().emit(
+                                            ReplaySignal::RootAdvanced(RootAdvancedInfo {
+                                                new_root,
+                                                previous_root,
+                                                pruned_slot_count: pruned_count,
+                                            }),
+                                        );
+
+                                        println!("Root progressed to slot {}", new_root);
+                                    }
                                 }
                             }
                         }

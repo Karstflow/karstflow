@@ -19,6 +19,40 @@ use thiserror::Error;
 pub const DEFAULT_FEC_DATA: usize = 32;
 pub const DEFAULT_FEC_CODING: usize = 32;
 
+/// Compute the Merkle proof depth for a FEC set.
+///
+/// Returns `ceil(log2(total_shreds))` — the number of non-root nodes
+/// in the binary Merkle inclusion proof. This value is encoded in the
+/// low 4 bits of the shred variant byte for Merkle-type shreds.
+///
+/// Returns 0 for 0 or 1 shreds (no proof needed).
+fn merkle_proof_depth(total_shreds: usize) -> u8 {
+    if total_shreds <= 1 {
+        return 0;
+    }
+    // ceil(log2(n)) = floor(log2(n-1)) + 1
+    let msb = usize::BITS - (total_shreds - 1).leading_zeros();
+    msb as u8
+}
+
+/// Compute Merkle proof depth and patch the variant byte of all shreds
+/// in a FEC set.
+///
+/// Call this after both data and coding shreds have been created to
+/// encode the correct proof depth in each shred's variant nibble.
+/// Only affects Merkle-type shreds; legacy shreds are left unchanged.
+pub fn finalize_merkle_fec_set(data_shreds: &mut [Shred], coding_shreds: &mut [Shred]) {
+    let total = data_shreds.len() + coding_shreds.len();
+    let depth = merkle_proof_depth(total);
+    for shred in data_shreds.iter_mut().chain(coding_shreds.iter_mut()) {
+        let type_nibble = shred.common_header.variant & 0xF0;
+        // Only patch Merkle-type shreds (high nibble != 0x50/0xA0 legacy).
+        if type_nibble != SHRED_TYPE_LEGACY_DATA && type_nibble != SHRED_TYPE_LEGACY_CODE {
+            shred.common_header.variant = type_nibble | depth;
+        }
+    }
+}
+
 /// Errors that can occur during shredding
 #[derive(Debug, Error)]
 pub enum ShredderError {
@@ -193,9 +227,9 @@ impl EntryShredder {
             size: data.len() as u16,
         };
 
-        // TODO: When producing Merkle shreds, the lower nibble should encode the proof depth.
-        // For now we use depth=0 as placeholder; real production will set the proof depth
-        // after computing the Merkle tree for the FEC set.
+        // Merkle shreds get depth=0 initially; the caller must invoke
+        // `finalize_merkle_fec_set()` after creating both data and coding
+        // shreds to patch in the correct proof depth.
         let variant_byte = if self.config.use_merkle_proofs {
             SHRED_TYPE_MERKLE_DATA
         } else {
@@ -560,6 +594,84 @@ mod tests {
                 panic!("Expected coding header");
             }
         }
+    }
+
+    #[test]
+    fn test_merkle_proof_depth_calculation() {
+        assert_eq!(merkle_proof_depth(0), 0);
+        assert_eq!(merkle_proof_depth(1), 0);
+        assert_eq!(merkle_proof_depth(2), 1);
+        assert_eq!(merkle_proof_depth(3), 2);
+        assert_eq!(merkle_proof_depth(4), 2);
+        assert_eq!(merkle_proof_depth(5), 3);
+        assert_eq!(merkle_proof_depth(8), 3);
+        assert_eq!(merkle_proof_depth(9), 4);
+        assert_eq!(merkle_proof_depth(16), 4);
+        assert_eq!(merkle_proof_depth(17), 5);
+        assert_eq!(merkle_proof_depth(32), 5);
+        assert_eq!(merkle_proof_depth(33), 6);
+        assert_eq!(merkle_proof_depth(64), 6);
+        assert_eq!(merkle_proof_depth(65), 7);
+    }
+
+    #[test]
+    fn test_finalize_merkle_fec_set_patches_variant() {
+        let pubkey = Pubkey::new_unique();
+        let config = ShredderConfig {
+            use_merkle_proofs: true,
+            fec_data_shreds: 4,
+            fec_coding_shreds: 4,
+            ..Default::default()
+        };
+        let mut shredder = EntryShredder::new(pubkey, None, 100, config).unwrap();
+
+        let entry = create_test_entry(1);
+        let mut data_shreds = shredder.create_data_shreds(&[entry]).unwrap();
+        let mut coding_shreds = shredder.create_coding_shreds(&data_shreds).unwrap();
+
+        // Before finalization: Merkle shreds have depth=0 in variant.
+        for shred in &data_shreds {
+            assert_eq!(shred.common_header.variant & 0x0F, 0);
+        }
+
+        finalize_merkle_fec_set(&mut data_shreds, &mut coding_shreds);
+
+        // After finalization: all shreds have the correct proof depth.
+        let total = data_shreds.len() + coding_shreds.len();
+        let expected_depth = merkle_proof_depth(total);
+        assert!(
+            expected_depth > 0,
+            "should have a non-zero depth for {} shreds",
+            total
+        );
+
+        for shred in data_shreds.iter().chain(coding_shreds.iter()) {
+            let depth = shred.common_header.variant & 0x0F;
+            assert_eq!(
+                depth, expected_depth,
+                "depth should be {} for {} total shreds",
+                expected_depth, total
+            );
+        }
+    }
+
+    #[test]
+    fn test_finalize_does_not_patch_legacy_shreds() {
+        let pubkey = Pubkey::new_unique();
+        let mut shredder = EntryShredder::with_defaults(pubkey, None, 100).unwrap();
+
+        let entry = create_test_entry(1);
+        let mut data_shreds = shredder.create_data_shreds(&[entry]).unwrap();
+        let mut coding_shreds = shredder.create_coding_shreds(&data_shreds).unwrap();
+
+        let data_variant_before = data_shreds[0].common_header.variant;
+        let code_variant_before = coding_shreds[0].common_header.variant;
+
+        finalize_merkle_fec_set(&mut data_shreds, &mut coding_shreds);
+
+        // Legacy shreds should be unchanged.
+        assert_eq!(data_shreds[0].common_header.variant, data_variant_before);
+        assert_eq!(coding_shreds[0].common_header.variant, code_variant_before);
     }
 
     #[test]

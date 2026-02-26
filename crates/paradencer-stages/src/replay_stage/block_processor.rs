@@ -194,6 +194,16 @@ pub struct BlockProcessor {
     /// When > 1, uses the dependency-aware dispatcher to identify
     /// independent transactions that can execute concurrently.
     pub lane_count: usize,
+
+    // --- Cumulative statistics ---
+    /// Total blocks successfully processed.
+    blocks_processed: u64,
+    /// Total transactions executed (successful + failed).
+    transactions_executed: u64,
+    /// Total compute units consumed across all blocks.
+    compute_units_consumed: u64,
+    /// Running sum of per-block success rates for computing the average.
+    success_rate_sum: f64,
 }
 
 impl BlockProcessor {
@@ -215,6 +225,10 @@ impl BlockProcessor {
             commitment_tracker,
             verify_poh: true,
             lane_count: 1,
+            blocks_processed: 0,
+            transactions_executed: 0,
+            compute_units_consumed: 0,
+            success_rate_sum: 0.0,
         }
     }
 
@@ -256,6 +270,12 @@ impl BlockProcessor {
 
         // Update commitment tracker
         self.update_commitment(&block, &outcome)?;
+
+        // Record cumulative stats.
+        self.blocks_processed += 1;
+        self.transactions_executed += outcome.transactions.len() as u64;
+        self.compute_units_consumed += outcome.total_compute_units;
+        self.success_rate_sum += outcome.success_rate();
 
         Ok(outcome)
     }
@@ -611,14 +631,18 @@ impl BlockProcessor {
         Ok(())
     }
 
-    /// Get statistics about processed blocks
+    /// Get cumulative statistics about processed blocks.
     pub fn get_processing_stats(&self) -> BlockProcessingStats {
-        // In a real implementation, this would track cumulative statistics
+        let average_success_rate = if self.blocks_processed > 0 {
+            self.success_rate_sum / self.blocks_processed as f64
+        } else {
+            0.0
+        };
         BlockProcessingStats {
-            total_blocks_processed: 0,
-            total_transactions_executed: 0,
-            total_compute_units: 0,
-            average_success_rate: 0.0,
+            total_blocks_processed: self.blocks_processed,
+            total_transactions_executed: self.transactions_executed,
+            total_compute_units: self.compute_units_consumed,
+            average_success_rate,
         }
     }
 }
