@@ -52,6 +52,12 @@ pub struct SlotContext {
     pub last_restart_slot: u64,
     pub recent_blockhash: [u8; 32],
     pub lamports_per_signature: u64,
+    /// Whether partitioned epoch rewards distribution is currently active.
+    pub epoch_rewards_active: bool,
+    /// Raw serialized sysvar account data keyed by sysvar address.
+    /// Populated from the sysvar cache so `sol_get_sysvar` can serve
+    /// programs without a dependency on the consensus layer at runtime.
+    pub sysvar_data: HashMap<[u8; 32], Vec<u8>>,
     /// Active feature gate IDs (as raw 32-byte keys) at this slot.
     /// Execution layer uses this to check feature-gated behavior.
     pub active_features: HashSet<[u8; 32]>,

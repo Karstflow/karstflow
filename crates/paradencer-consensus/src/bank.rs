@@ -588,6 +588,16 @@ impl Bank {
             std::collections::HashSet::new()
         };
 
+        // Snapshot epoch rewards and raw sysvar data for the execution layer.
+        let (epoch_rewards_active, sysvar_data) = if let Some(ref sysvars) = self.sysvars {
+            (
+                sysvars.is_epoch_rewards_active(),
+                sysvars.serialize_all_sysvars(),
+            )
+        } else {
+            (false, std::collections::HashMap::new())
+        };
+
         crate::bank_executor::SlotContext {
             slot,
             epoch,
@@ -605,6 +615,8 @@ impl Bank {
             last_restart_slot: 0,
             recent_blockhash: *self.last_blockhash.read().unwrap(),
             lamports_per_signature: self.lamports_per_signature(),
+            epoch_rewards_active,
+            sysvar_data,
             active_features,
         }
     }

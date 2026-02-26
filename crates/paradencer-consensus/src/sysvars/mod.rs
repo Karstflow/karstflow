@@ -239,6 +239,32 @@ impl SysvarCache {
         ))
     }
 
+    /// Serialize all sysvar data into a map keyed by sysvar address bytes.
+    ///
+    /// Used to populate the execution context's `sysvar_data` so that the
+    /// `sol_get_sysvar` syscall can serve programs without round-tripping
+    /// through the consensus layer.
+    pub fn serialize_all_sysvars(&self) -> std::collections::HashMap<[u8; 32], Vec<u8>> {
+        let mut map = std::collections::HashMap::new();
+        let ids = [
+            CLOCK_SYSVAR_ID,
+            EPOCH_SCHEDULE_SYSVAR_ID,
+            RENT_SYSVAR_ID,
+            SLOT_HASHES_SYSVAR_ID,
+            SLOT_HISTORY_SYSVAR_ID,
+            STAKE_HISTORY_SYSVAR_ID,
+            RECENT_BLOCKHASHES_SYSVAR_ID,
+            EPOCH_REWARDS_SYSVAR_ID,
+            LAST_RESTART_SLOT_SYSVAR_ID,
+        ];
+        for id in &ids {
+            if let Some(data) = self.serialize_sysvar(id) {
+                map.insert(*id.as_bytes(), data);
+            }
+        }
+        map
+    }
+
     /// Serialize just the data portion of the requested sysvar.
     fn serialize_sysvar(&self, pubkey: &Pubkey) -> Option<Vec<u8>> {
         if *pubkey == CLOCK_SYSVAR_ID {
