@@ -47,7 +47,7 @@ pub trait SbpfVm: Send + Sync {
     fn execute(&self, context: ExecutionContext) -> SbpfExecutionResult;
 }
 
-pub struct StubSbpfVm {
+pub(crate) struct StubSbpfVm {
     system_program: SystemProgramExecutor,
     vote_program: VoteProgramExecutor,
 }

@@ -72,7 +72,7 @@ pub use transaction_processor::{
     AccountMeta as InstructionAccountMeta, CompiledInstruction, MessageHeader, Transaction,
     TransactionInstruction, TransactionMessage, TransactionProcessor, TransactionResult,
 };
-pub use vm::{BytecodeVm, SbpfExecutionError, SbpfExecutionResult, SbpfVm, StubSbpfVm};
+pub use vm::{BytecodeVm, SbpfExecutionError, SbpfExecutionResult, SbpfVm};
 pub use vote::VoteProgramExecutor;
 
 use paradencer_types::{Account, Pubkey};

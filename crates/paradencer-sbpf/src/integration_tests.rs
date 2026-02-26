@@ -1,4 +1,5 @@
-use super::{ExecutionContext, SbpfVm, StubSbpfVm};
+use super::{ExecutionContext, SbpfVm};
+use crate::vm::StubSbpfVm;
 use paradencer_ids::{STAKE_PROGRAM_ID, SYSTEM_PROGRAM_ID, VOTE_PROGRAM_ID};
 use paradencer_types::{Account, AccountData, AccountMeta, Pubkey};
 
