@@ -30,8 +30,8 @@ use paradencer_stages::{
     SbpfExecutionAdapter, ShredCollector, ShredCollectorConfig,
 };
 use paradencer_storage::{
-    AccountDatabase, Blockstore, MaintenanceConfig, Pubkey, SnapshotRestorer, StorageEngine,
-    StorageMaintenanceService,
+    AccountDatabase, Blockstore, MaintenanceConfig, Pubkey, SnapshotAction, SnapshotConfig,
+    SnapshotCreator, SnapshotRestorer, SnapshotScheduler, StorageEngine, StorageMaintenanceService,
 };
 use paradencer_topology::{materialize_services_with_blockstore, MaterializedTopology};
 use std::collections::HashSet;
@@ -104,6 +104,9 @@ pub struct ConsensusBundle {
     pub commitment_tracker: Arc<Mutex<CommitmentTracker>>,
     /// Persistent storage engine. `None` when running in-memory only.
     pub storage_engine: Option<Arc<StorageEngine>>,
+    /// Shared account database for snapshot creation.
+    /// `None` when running in-memory only.
+    pub accounts: Option<Arc<AccountDatabase>>,
 }
 
 /// Result of building the replay service.
@@ -204,6 +207,13 @@ pub fn build_consensus_infrastructure(
         (Arc::new(AccountDatabase::new()), None)
     };
 
+    // Keep a reference for snapshot creation before accounts moves into the bank.
+    let accounts_for_snapshot = if storage_engine.is_some() {
+        Some(Arc::clone(&accounts))
+    } else {
+        None
+    };
+
     let epoch_schedule = Arc::new(EpochSchedule::default());
     let validator = match validator_pubkey {
         Some(pk) => Pubkey::from(*pk),
@@ -256,6 +266,7 @@ pub fn build_consensus_infrastructure(
         tower,
         commitment_tracker,
         storage_engine,
+        accounts: accounts_for_snapshot,
     })
 }
 
@@ -275,6 +286,7 @@ pub fn build_consensus_from_bank_forks(
     storage_engine: Option<Arc<StorageEngine>>,
     data_dir: Option<&Path>,
     validator_identity: Option<&Pubkey>,
+    accounts: Option<Arc<AccountDatabase>>,
 ) -> ConsensusBundle {
     let working_bank = bank_forks.working_bank();
 
@@ -319,6 +331,7 @@ pub fn build_consensus_from_bank_forks(
         tower,
         commitment_tracker,
         storage_engine,
+        accounts,
     }
 }
 
@@ -525,6 +538,13 @@ pub fn restore_from_snapshot_archive(
         "leader schedule built from snapshot stake data",
     );
 
+    // Keep a reference for snapshot creation before accounts moves into bootstrap.
+    let accounts_for_snapshot = if storage_engine.is_some() {
+        Some(Arc::clone(&accounts))
+    } else {
+        None
+    };
+
     let bootstrap_result = bootstrap_from_snapshot(accounts, &restore_result, leader_schedule)
         .map_err(|e| ControlPlaneError::Bootstrap {
             message: format!("consensus bootstrap from snapshot failed: {e}"),
@@ -555,6 +575,7 @@ pub fn restore_from_snapshot_archive(
         storage_engine,
         data_dir,
         validator_identity,
+        accounts_for_snapshot,
     ))
 }
 
@@ -1375,6 +1396,122 @@ pub fn build_vote_broadcast_service(
     VoteBroadcastBundle {
         service: Box::new(adapter),
     }
+}
+
+// ---------------------------------------------------------------------------
+// Snapshot creation: periodic full and incremental snapshots
+// ---------------------------------------------------------------------------
+
+/// Spawn a background thread that creates snapshots on root advancement.
+///
+/// Listens for `RootAdvanced` signals from the replay stage and checks
+/// the snapshot scheduler to decide whether a full or incremental snapshot
+/// is due. Full snapshots capture the complete account state; incremental
+/// snapshots capture only accounts modified since the last full snapshot.
+///
+/// Snapshots are written to `snapshot_dir` as compressed archives.
+/// The scheduler automatically manages retention and expiration.
+///
+/// Returns `None` if accounts database is not available (in-memory mode).
+pub fn spawn_snapshot_thread(
+    signal_bus: &Arc<Mutex<paradencer_stages::SignalBus>>,
+    accounts: Option<Arc<AccountDatabase>>,
+    snapshot_dir: std::path::PathBuf,
+    config: SnapshotConfig,
+) -> Option<std::thread::JoinHandle<()>> {
+    let accounts = accounts?;
+
+    let signal_rx = signal_bus
+        .lock()
+        .unwrap()
+        .subscribe()
+        .expect("signal bus subscriber limit not reached");
+
+    let handle = std::thread::Builder::new()
+        .name("snapshot-creator".into())
+        .spawn(move || {
+            let mut scheduler = SnapshotScheduler::new(config.clone());
+            let creator = SnapshotCreator::new(config);
+
+            // Ensure snapshot directory exists.
+            if let Err(e) = std::fs::create_dir_all(&snapshot_dir) {
+                error!("failed to create snapshot directory: {e}");
+                return;
+            }
+
+            while let Ok(signal) = signal_rx.recv() {
+                let paradencer_stages::ReplaySignal::RootAdvanced(root_info) = signal else {
+                    continue;
+                };
+
+                let slot = root_info.new_root;
+                match scheduler.check_slot(slot) {
+                    SnapshotAction::None => {}
+                    SnapshotAction::Full => {
+                        info!(slot, "creating full snapshot");
+                        match creator.create_full_snapshot(&accounts, slot, &snapshot_dir) {
+                            Ok(manifest) => {
+                                let path = snapshot_dir.join(format!("snapshot-{slot}"));
+                                info!(
+                                    slot,
+                                    accounts = manifest.metadata.total_accounts,
+                                    lamports = manifest.metadata.total_lamports,
+                                    "full snapshot created",
+                                );
+                                scheduler.record_full(slot, path);
+                            }
+                            Err(e) => {
+                                error!(slot, error = %e, "full snapshot creation failed");
+                            }
+                        }
+                    }
+                    SnapshotAction::Incremental { base_slot } => {
+                        info!(slot, base_slot, "creating incremental snapshot");
+                        match creator.create_incremental_from_dirty_set(
+                            &accounts,
+                            slot,
+                            base_slot,
+                            &snapshot_dir,
+                        ) {
+                            Ok((_manifest, stats)) => {
+                                let path = snapshot_dir
+                                    .join(format!("incremental-snapshot-{base_slot}-{slot}"));
+                                info!(
+                                    slot,
+                                    base_slot,
+                                    dirty_tracked = stats.dirty_pubkeys_tracked,
+                                    accounts_included = stats.accounts_included,
+                                    "incremental snapshot created",
+                                );
+                                scheduler.record_incremental(slot, path);
+                            }
+                            Err(e) => {
+                                error!(
+                                    slot,
+                                    base_slot,
+                                    error = %e,
+                                    "incremental snapshot creation failed",
+                                );
+                            }
+                        }
+                    }
+                }
+
+                // Clean up expired snapshots after each creation cycle.
+                let expired = scheduler.expired_snapshots();
+                for path in &expired {
+                    if let Err(e) = std::fs::remove_file(path) {
+                        warn!(path = %path.display(), error = %e, "failed to remove expired snapshot");
+                    }
+                }
+                if !expired.is_empty() {
+                    scheduler.purge_expired();
+                }
+            }
+        })
+        .expect("failed to spawn snapshot-creator thread");
+
+    Some(handle)
 }
 
 // ---------------------------------------------------------------------------
@@ -2710,7 +2847,7 @@ mod tests {
         let bank_forks = BankForks::new(bank);
 
         // Build consensus bundle from the pre-initialized BankForks.
-        let consensus = build_consensus_from_bank_forks(bank_forks, None, None, None);
+        let consensus = build_consensus_from_bank_forks(bank_forks, None, None, None, None);
 
         // Verify ForkChoice was initialized with real total stake.
         let fork_choice = consensus.fork_choice.lock().unwrap();
@@ -2737,7 +2874,7 @@ mod tests {
         let bank_forks = BankForks::new(bank);
 
         // No stake tracker set → should use fallback stake of 1.
-        let consensus = build_consensus_from_bank_forks(bank_forks, None, None, None);
+        let consensus = build_consensus_from_bank_forks(bank_forks, None, None, None, None);
         let fork_choice = consensus.fork_choice.lock().unwrap();
         assert_eq!(fork_choice.stats().total_stake, 1);
     }

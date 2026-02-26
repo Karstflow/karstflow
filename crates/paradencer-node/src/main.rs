@@ -14,8 +14,8 @@ use paradencer_control::{
     render_preflight_readiness_issue_line, render_preflight_readiness_line,
     render_readiness_policy_line, resolve_validator_identity, restore_from_snapshot_archive,
     run_diagnostics_phase, run_preflight_phase, run_preflight_phase_with_probe_report,
-    run_runtime_phase_with_consensus, save_tower_to_disk, start_gossip_service,
-    BlockstoreShredProvider, ServiceBundle,
+    run_runtime_phase_with_consensus, save_tower_to_disk, spawn_snapshot_thread,
+    start_gossip_service, BlockstoreShredProvider, ServiceBundle,
 };
 
 fn main() -> paradencer_control::Result<()> {
@@ -129,6 +129,20 @@ fn run_with_node_config(
             })
             .expect("failed to spawn tower-persist thread");
     }
+
+    // Snapshot creation: periodically create full and incremental snapshots
+    // when the root advances. Only runs when persistent storage is available.
+    let _snapshot_thread = if node_config.data_dir.is_some() {
+        let snapshot_dir = node_config.data_dir.as_ref().unwrap().join("snapshots");
+        spawn_snapshot_thread(
+            &replay_bundle.signal_bus,
+            consensus.accounts.clone(),
+            snapshot_dir,
+            paradencer_storage::SnapshotConfig::new(),
+        )
+    } else {
+        None
+    };
 
     // Wire replay signals to the plugin service.
     // Subscribe to the SignalBus, then start the plugin observer that

@@ -47,10 +47,11 @@ pub use shred_window::{
 pub use snapshot::{
     AppendVecAccount, AppendVecError, AppendVecIter, CompressionType, EpochScheduleConfig,
     FeeRateConfig, InflationConfig, LoadProgress, LoadProgressInfo, LoadedSnapshot,
-    RecentBlockhash, RentConfig, RestoreResult, SerializedAccount, SnapshotArchive,
+    RecentBlockhash, RentConfig, RestoreResult, SerializedAccount, SnapshotAction, SnapshotArchive,
     SnapshotArchiveEntry, SnapshotBankState, SnapshotConfig, SnapshotCreator, SnapshotData,
     SnapshotLoader, SnapshotManifest, SnapshotMetadata, SnapshotProgress, SnapshotProgressInfo,
-    SnapshotRestorer, StakeHistoryRecord, StakeSummary, StatusCacheEntry, StatusCacheParseResult,
+    SnapshotRestorer, SnapshotScheduler, StakeHistoryRecord, StakeSummary, StatusCacheEntry,
+    StatusCacheParseResult,
 };
 pub use types::{CommittedFragmentRecord, SnapshotImage};
 
