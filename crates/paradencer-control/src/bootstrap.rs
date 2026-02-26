@@ -356,9 +356,10 @@ pub fn build_replay_service_with_consensus(
     config: ReplayServiceConfig,
     block_input: InPort<paradencer_stages::AssembledBlock>,
     consensus: ConsensusBundle,
+    validator_identity: Option<[u8; 32]>,
 ) -> ReplayBundleWithExternalInput {
     let backend = Arc::new(SbpfExecutionAdapter::with_defaults());
-    let service = ReplayService::with_backend(
+    let mut service = ReplayService::with_backend(
         config,
         block_input,
         Arc::clone(&consensus.bank_forks),
@@ -369,6 +370,10 @@ pub fn build_replay_service_with_consensus(
         Arc::clone(&consensus.tower),
         Arc::clone(&consensus.commitment_tracker),
     );
+
+    if let Some(identity) = validator_identity {
+        service.set_validator_identity(identity);
+    }
 
     let signal_bus = service.signal_bus();
 
@@ -2706,8 +2711,12 @@ mod tests {
         let consensus = build_consensus_infrastructure(1_000_000, None, None).unwrap();
         let (_tx, rx) = bounded_link::<paradencer_stages::AssembledBlock>(16);
 
-        let bundle =
-            build_replay_service_with_consensus(ReplayServiceConfig::default(), rx, consensus);
+        let bundle = build_replay_service_with_consensus(
+            ReplayServiceConfig::default(),
+            rx,
+            consensus,
+            None,
+        );
         assert_eq!(bundle.service.name(), "replay-service");
     }
 

@@ -210,6 +210,14 @@ impl ReplayService {
     pub fn signal_bus(&self) -> Arc<Mutex<SignalBus>> {
         self.replay_stage.signal_bus()
     }
+
+    /// Set the validator identity for leader schedule detection.
+    ///
+    /// When set, the replay stage will emit BecameLeader signals after
+    /// each completed slot if the next slot belongs to this validator.
+    pub fn set_validator_identity(&mut self, identity: [u8; 32]) {
+        self.replay_stage.set_validator_identity(identity);
+    }
 }
 
 impl Service for ReplayService {

@@ -154,6 +154,11 @@ pub struct ReplayStage {
     stats: Arc<Mutex<ReplayStats>>,
     /// Signal bus for structured replay event broadcast.
     signal_bus: Arc<Mutex<SignalBus>>,
+    /// Validator identity for leader schedule detection.
+    /// When set, the replay stage emits BecameLeader signals.
+    validator_identity: Option<[u8; 32]>,
+    /// Last leader slot range end we emitted (avoids duplicate signals).
+    last_leader_signal_end: Option<u64>,
 }
 
 impl ReplayStage {
@@ -197,7 +202,17 @@ impl ReplayStage {
             vote_integration,
             stats: Arc::new(Mutex::new(ReplayStats::new())),
             signal_bus: Arc::new(Mutex::new(SignalBus::new())),
+            validator_identity: None,
+            last_leader_signal_end: None,
         }
+    }
+
+    /// Set the validator identity for leader schedule detection.
+    ///
+    /// When set, the replay stage will emit BecameLeader signals whenever
+    /// a completed slot is followed by a leader range for this validator.
+    pub fn set_validator_identity(&mut self, identity: [u8; 32]) {
+        self.validator_identity = Some(identity);
     }
 
     /// Create a replay stage with a real execution backend for instruction
@@ -225,6 +240,8 @@ impl ReplayStage {
             vote_integration,
             stats: Arc::new(Mutex::new(ReplayStats::new())),
             signal_bus: Arc::new(Mutex::new(SignalBus::new())),
+            validator_identity: None,
+            last_leader_signal_end: None,
         }
     }
 
@@ -369,6 +386,40 @@ impl ReplayStage {
                 capitalization: bank.capitalization(),
                 timestamp,
             }));
+
+            // Step 5b: Check if this validator is the leader for upcoming slots.
+            // Emit BecameLeader so the pipeline activates block production.
+            if let Some(identity) = self.validator_identity {
+                let next_slot = block.slot + 1;
+                let identity_pubkey = paradencer_storage::Pubkey::new(identity);
+                let schedule = bank.leader_schedule();
+                let epoch_schedule = bank.epoch_schedule();
+                let is_our_slot = schedule
+                    .leader_for_absolute_slot(next_slot, epoch_schedule)
+                    .map(|leader| leader == identity_pubkey)
+                    .unwrap_or(false);
+                if is_our_slot {
+                    // Scan forward for contiguous leader range.
+                    let mut end_slot = next_slot;
+                    while schedule
+                        .leader_for_absolute_slot(end_slot + 1, epoch_schedule)
+                        .map(|leader| leader == identity_pubkey)
+                        .unwrap_or(false)
+                    {
+                        end_slot += 1;
+                    }
+                    // Only emit if we haven't already signaled this range.
+                    if self.last_leader_signal_end != Some(end_slot) {
+                        self.last_leader_signal_end = Some(end_slot);
+                        self.emit_signal(ReplaySignal::BecameLeader(BecameLeaderInfo {
+                            start_slot: next_slot,
+                            end_slot,
+                            epoch: finalization.epoch,
+                            identity_pubkey: identity,
+                        }));
+                    }
+                }
+            }
         }
 
         // Step 6: Run consensus decision (vote + root progression)

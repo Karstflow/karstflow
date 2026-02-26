@@ -82,6 +82,7 @@ fn run_with_node_config(
             paradencer_stages::ReplayServiceConfig::default(),
             shred_block_input,
             consensus,
+            Some(*identity.pubkey()),
         )
     } else {
         build_replay_service_with_block_input(
