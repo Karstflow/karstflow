@@ -13,4 +13,5 @@ paradencer-config = { path = "../paradencer-config" }
 paradencer-net = { path = "../paradencer-net" }
 paradencer-plugin = { path = "../paradencer-plugin" }
 paradencer-stages = { path = "../paradencer-stages" }
+paradencer-storage = { path = "../paradencer-storage" }
 paradencer-topology = { path = "../paradencer-topology" }

@@ -14,7 +14,8 @@ use paradencer_control::{
     render_preflight_readiness_issue_line, render_preflight_readiness_line,
     render_readiness_policy_line, resolve_validator_identity, restore_from_snapshot_archive,
     run_diagnostics_phase, run_preflight_phase, run_preflight_phase_with_probe_report,
-    run_runtime_phase_with_consensus, start_gossip_service, BlockstoreShredProvider, ServiceBundle,
+    run_runtime_phase_with_consensus, save_tower_to_disk, start_gossip_service,
+    BlockstoreShredProvider, ServiceBundle,
 };
 
 fn main() -> paradencer_control::Result<()> {
@@ -76,8 +77,12 @@ fn run_with_node_config(
     // When PARADENCER_SNAPSHOT_ARCHIVE is set, restore from a Solana snapshot
     // to join an existing network. Otherwise bootstrap from genesis state.
     let replay_bundle = if let Some(ref archive_path) = node_config.snapshot_archive_path {
-        let consensus =
-            restore_from_snapshot_archive(archive_path, node_config.data_dir.as_deref())?;
+        let identity_pubkey = paradencer_storage::Pubkey::from(*identity.pubkey());
+        let consensus = restore_from_snapshot_archive(
+            archive_path,
+            node_config.data_dir.as_deref(),
+            Some(&identity_pubkey),
+        )?;
         build_replay_service_with_consensus(
             paradencer_stages::ReplayServiceConfig::default(),
             shred_block_input,
@@ -92,6 +97,38 @@ fn run_with_node_config(
         )
     };
     let consensus = replay_bundle.consensus;
+
+    // Clone the tower handle for persistence (tower Arc moves into vote broadcast later).
+    let tower_for_persist = std::sync::Arc::clone(&consensus.tower);
+
+    // Tower persistence: save voting state to disk on every root advance.
+    // This ensures tower lockouts survive validator restarts without losing
+    // more than one root advance worth of progress.
+    if let Some(ref data_dir) = node_config.data_dir {
+        let tower_save_rx = replay_bundle
+            .signal_bus
+            .lock()
+            .unwrap()
+            .subscribe()
+            .expect("signal bus subscriber limit not reached");
+        let tower_arc = std::sync::Arc::clone(&tower_for_persist);
+        let identity_pubkey = paradencer_storage::Pubkey::from(*identity.pubkey());
+        let save_dir = data_dir.clone();
+
+        std::thread::Builder::new()
+            .name("tower-persist".into())
+            .spawn(move || {
+                while let Ok(signal) = tower_save_rx.recv() {
+                    if let paradencer_stages::ReplaySignal::RootAdvanced(_) = signal {
+                        let tower_r = tower_arc.read().unwrap();
+                        if let Err(e) = save_tower_to_disk(&tower_r, &save_dir, &identity_pubkey) {
+                            warn!(error = %e, "failed to persist tower on root advance");
+                        }
+                    }
+                }
+            })
+            .expect("failed to spawn tower-persist thread");
+    }
 
     // Wire replay signals to the plugin service.
     // Subscribe to the SignalBus, then start the plugin observer that
@@ -281,6 +318,21 @@ fn run_with_node_config(
         },
         Some(rpc_bank_forks),
     );
+
+    // Save tower state to disk before shutdown so lockouts survive restarts.
+    if let Some(ref data_dir) = node_config.data_dir {
+        let tower_r = tower_for_persist.read().unwrap();
+        let identity_pubkey = paradencer_storage::Pubkey::from(*identity.pubkey());
+        if let Err(e) = save_tower_to_disk(&tower_r, data_dir, &identity_pubkey) {
+            warn!(error = %e, "failed to save tower on shutdown");
+        } else {
+            info!(
+                root = ?tower_r.root(),
+                last_vote = ?tower_r.last_vote_slot(),
+                "tower state saved to disk on shutdown",
+            );
+        }
+    }
 
     // Cleanly shut down plugin service after runtime exits.
     plugin_service.shutdown();

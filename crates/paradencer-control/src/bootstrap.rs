@@ -9,8 +9,8 @@ use crate::{
 use paradencer_config::{NodeConfig, ValidatorIdentity};
 use paradencer_consensus::{
     bootstrap_from_snapshot, collect_validator_stakes, Bank, BankForks, CommitmentTracker,
-    EpochSchedule, ForkChoice, LeaderSchedule, StakeTracker, Tower, VoteProcessor,
-    VoteProcessorConfig,
+    EpochSchedule, ForkChoice, LeaderSchedule, SavedTower, StakeTracker, Tower,
+    TowerPersistenceError, VoteProcessor, VoteProcessorConfig,
 };
 use paradencer_core::{ExecutionMode, LinkKind, PinnedCorePolicy, StageKind};
 use paradencer_execution::ExecutionBridge;
@@ -116,6 +116,56 @@ pub struct ReplayBundle {
     pub block_input: OutPort<paradencer_stages::AssembledBlock>,
 }
 
+/// Attempt to load tower state from disk for crash recovery.
+///
+/// If a saved tower exists and belongs to the specified validator, the
+/// voting history is restored. On first start (no saved tower) or on
+/// any load error, returns a fresh empty tower so the node can proceed.
+fn try_load_tower(data_dir: Option<&Path>, validator_identity: Option<&Pubkey>) -> Tower {
+    let (Some(dir), Some(identity)) = (data_dir, validator_identity) else {
+        return Tower::new();
+    };
+
+    match SavedTower::load_and_verify(dir, identity) {
+        Ok(saved) => {
+            let tower = saved.to_tower();
+            info!(
+                root = ?tower.root(),
+                last_vote = ?tower.last_vote_slot(),
+                votes = tower.votes().len(),
+                "restored tower from disk",
+            );
+            tower
+        }
+        Err(TowerPersistenceError::NotFound(_)) => {
+            info!("no saved tower found, starting fresh");
+            Tower::new()
+        }
+        Err(e) => {
+            warn!(error = %e, "failed to load saved tower, starting fresh");
+            Tower::new()
+        }
+    }
+}
+
+/// Save the current tower state to disk for crash recovery.
+///
+/// Snapshots the tower under the validator's identity and writes it
+/// atomically to `data_dir/tower.bin`. Errors are returned but should
+/// typically be logged rather than treated as fatal.
+pub fn save_tower_to_disk(
+    tower: &Tower,
+    data_dir: &Path,
+    validator_identity: &Pubkey,
+) -> Result<()> {
+    let saved = SavedTower::from_tower(tower, *validator_identity);
+    saved
+        .save_to_directory(data_dir)
+        .map_err(|e| ControlPlaneError::Bootstrap {
+            message: format!("failed to save tower: {e}"),
+        })
+}
+
 /// Build consensus infrastructure from genesis state.
 ///
 /// Creates all shared consensus components (BankForks, ForkChoice, Tower,
@@ -191,7 +241,11 @@ pub fn build_consensus_infrastructure(
         VoteProcessorConfig::default(),
         vote_processor_tracker,
     )));
-    let tower = Arc::new(RwLock::new(Tower::new()));
+    let identity_pubkey = validator_pubkey.map(|pk| Pubkey::from(*pk));
+    let tower = Arc::new(RwLock::new(try_load_tower(
+        data_dir,
+        identity_pubkey.as_ref(),
+    )));
     let commitment_tracker = Arc::new(Mutex::new(CommitmentTracker::default()));
 
     Ok(ConsensusBundle {
@@ -219,6 +273,8 @@ pub fn build_consensus_infrastructure(
 pub fn build_consensus_from_bank_forks(
     bank_forks: BankForks,
     storage_engine: Option<Arc<StorageEngine>>,
+    data_dir: Option<&Path>,
+    validator_identity: Option<&Pubkey>,
 ) -> ConsensusBundle {
     let working_bank = bank_forks.working_bank();
 
@@ -252,7 +308,7 @@ pub fn build_consensus_from_bank_forks(
         VoteProcessorConfig::default(),
         vote_processor_tracker,
     )));
-    let tower = Arc::new(RwLock::new(Tower::new()));
+    let tower = Arc::new(RwLock::new(try_load_tower(data_dir, validator_identity)));
     let commitment_tracker = Arc::new(Mutex::new(CommitmentTracker::default()));
 
     ConsensusBundle {
@@ -398,6 +454,7 @@ pub fn build_replay_service_with_consensus(
 pub fn restore_from_snapshot_archive(
     archive_path: &Path,
     data_dir: Option<&Path>,
+    validator_identity: Option<&Pubkey>,
 ) -> Result<ConsensusBundle> {
     info!(path = %archive_path.display(), "restoring from snapshot archive");
 
@@ -496,6 +553,8 @@ pub fn restore_from_snapshot_archive(
     Ok(build_consensus_from_bank_forks(
         bootstrap_result.bank_forks,
         storage_engine,
+        data_dir,
+        validator_identity,
     ))
 }
 
@@ -2651,7 +2710,7 @@ mod tests {
         let bank_forks = BankForks::new(bank);
 
         // Build consensus bundle from the pre-initialized BankForks.
-        let consensus = build_consensus_from_bank_forks(bank_forks, None);
+        let consensus = build_consensus_from_bank_forks(bank_forks, None, None, None);
 
         // Verify ForkChoice was initialized with real total stake.
         let fork_choice = consensus.fork_choice.lock().unwrap();
@@ -2678,7 +2737,7 @@ mod tests {
         let bank_forks = BankForks::new(bank);
 
         // No stake tracker set → should use fallback stake of 1.
-        let consensus = build_consensus_from_bank_forks(bank_forks, None);
+        let consensus = build_consensus_from_bank_forks(bank_forks, None, None, None);
         let fork_choice = consensus.fork_choice.lock().unwrap();
         assert_eq!(fork_choice.stats().total_stake, 1);
     }
@@ -2688,8 +2747,11 @@ mod tests {
         use super::restore_from_snapshot_archive;
         use std::path::Path;
 
-        let result =
-            restore_from_snapshot_archive(Path::new("/nonexistent/snapshot-123456.tar.zst"), None);
+        let result = restore_from_snapshot_archive(
+            Path::new("/nonexistent/snapshot-123456.tar.zst"),
+            None,
+            None,
+        );
         match result {
             Err(ControlPlaneError::Bootstrap { message }) => {
                 assert!(
@@ -2727,5 +2789,63 @@ mod tests {
         let handle = start_gossip_service(&node_config, &identity).unwrap();
         assert_eq!(&handle.node_id.0, identity.pubkey());
         drop(handle);
+    }
+
+    #[test]
+    fn tower_loaded_from_disk_on_startup() {
+        use paradencer_consensus::{SavedTower, Tower};
+        use paradencer_storage::Pubkey;
+
+        let dir = tempfile::tempdir().expect("tmpdir");
+        let identity = Pubkey::new_unique();
+
+        // Create a tower with some vote history and save it.
+        let mut tower = Tower::new();
+        tower.push_vote(10);
+        tower.push_vote(11);
+        tower.push_vote(12);
+        let saved = SavedTower::from_tower(&tower, identity);
+        saved.save_to_directory(dir.path()).unwrap();
+
+        // Build consensus with data_dir pointing to the saved tower.
+        let consensus = super::build_consensus_infrastructure(
+            1_000_000,
+            Some(dir.path()),
+            Some(identity.as_bytes()),
+        )
+        .unwrap();
+
+        let loaded = consensus.tower.read().unwrap();
+        assert_eq!(loaded.last_vote_slot(), Some(12));
+        assert_eq!(loaded.votes().len(), 3);
+    }
+
+    #[test]
+    fn tower_starts_fresh_without_data_dir() {
+        let consensus = super::build_consensus_infrastructure(1_000_000, None, None).unwrap();
+        let tower = consensus.tower.read().unwrap();
+        assert_eq!(tower.last_vote_slot(), None);
+        assert!(tower.votes().is_empty());
+    }
+
+    #[test]
+    fn save_tower_to_disk_roundtrip() {
+        use paradencer_consensus::{SavedTower, Tower};
+        use paradencer_storage::Pubkey;
+
+        let dir = tempfile::tempdir().expect("tmpdir");
+        let identity = Pubkey::new_unique();
+
+        let mut tower = Tower::new();
+        tower.push_vote(100);
+        tower.push_vote(101);
+
+        super::save_tower_to_disk(&tower, dir.path(), &identity).unwrap();
+
+        // Verify the file was written and can be loaded back.
+        let saved = SavedTower::load_and_verify(dir.path(), &identity).unwrap();
+        let restored = saved.to_tower();
+        assert_eq!(restored.last_vote_slot(), Some(101));
+        assert_eq!(restored.votes().len(), 2);
     }
 }
