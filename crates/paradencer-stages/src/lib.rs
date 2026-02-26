@@ -43,6 +43,7 @@ pub mod shred_verifier;
 mod stats;
 #[cfg(test)]
 mod testsuite;
+mod tile_metrics;
 mod tile_pipeline;
 mod tx_filter;
 mod types;
@@ -111,6 +112,7 @@ pub use shred_network::{
 };
 pub use shred_store_service::{ShredStoreConfig, ShredStoreService, ShredStoreStats};
 pub use shred_verifier::{LeaderLookup, ShredVerifyResult};
+pub use tile_metrics::{SignalBusHealthTracker, TickTimer, TickTimerSnapshot};
 pub use tile_pipeline::{
     DedupTile, PipelineConfig, ResolvTile, TransactionPipeline, ValidatorPipeline,
     ValidatorPipelineResult, VerifyTile,

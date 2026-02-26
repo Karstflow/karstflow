@@ -173,14 +173,21 @@ impl SignalBus {
     ///
     /// Non-blocking: if a subscriber's channel is full, the signal is
     /// dropped for that subscriber. Disconnected subscribers are removed.
-    pub fn emit(&mut self, signal: ReplaySignal) {
+    ///
+    /// Returns the number of subscribers whose channel was full (drops).
+    pub fn emit(&mut self, signal: ReplaySignal) -> usize {
+        let mut drops = 0;
         self.senders.retain(|sender| {
             match sender.try_send(signal.clone()) {
                 Ok(()) => true,
-                Err(TrySendError::Full(_)) => true, // keep subscriber, just skip
+                Err(TrySendError::Full(_)) => {
+                    drops += 1;
+                    true // keep subscriber, just skip
+                }
                 Err(TrySendError::Disconnected(_)) => false, // remove dead subscriber
             }
         });
+        drops
     }
 
     /// Number of active subscribers.
