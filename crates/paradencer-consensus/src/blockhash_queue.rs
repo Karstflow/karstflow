@@ -160,6 +160,14 @@ impl BlockhashQueue {
         }
     }
 
+    /// Return a snapshot of all entries in the queue (oldest-first order).
+    ///
+    /// Each entry contains the blockhash, fee rate, and originating slot.
+    /// Used for serializing blockhash queue state into snapshot manifests.
+    pub fn entries(&self) -> impl Iterator<Item = &BlockhashInfo> {
+        self.queue.iter()
+    }
+
     /// Clear all blockhashes from the queue.
     pub fn clear(&mut self) {
         self.queue.clear();

@@ -1501,6 +1501,9 @@ pub fn build_vote_broadcast_service(
 // Snapshot creation: periodic full and incremental snapshots
 // ---------------------------------------------------------------------------
 
+/// Maximum accounts per AppendVec file in Solana-compatible archives.
+const SNAPSHOT_MAX_ACCOUNTS_PER_VEC: usize = 10_000;
+
 /// Spawn a background thread that creates snapshots on root advancement.
 ///
 /// Listens for `RootAdvanced` signals from the replay stage and checks
@@ -1508,13 +1511,17 @@ pub fn build_vote_broadcast_service(
 /// is due. Full snapshots capture the complete account state; incremental
 /// snapshots capture only accounts modified since the last full snapshot.
 ///
-/// Snapshots are written to `snapshot_dir` as compressed archives.
+/// Snapshots are written as Solana-compatible tar.zst archives with the
+/// full bank state manifest. This ensures other validators can bootstrap
+/// from these snapshots.
+///
 /// The scheduler automatically manages retention and expiration.
 ///
 /// Returns `None` if accounts database is not available (in-memory mode).
 pub fn spawn_snapshot_thread(
     signal_bus: &Arc<Mutex<paradencer_stages::SignalBus>>,
     accounts: Option<Arc<AccountDatabase>>,
+    bank_forks: Arc<RwLock<BankForks>>,
     snapshot_dir: std::path::PathBuf,
     config: SnapshotConfig,
 ) -> Option<std::thread::JoinHandle<()>> {
@@ -1548,16 +1555,25 @@ pub fn spawn_snapshot_thread(
                     SnapshotAction::None => {}
                     SnapshotAction::Full => {
                         info!(slot, "creating full snapshot");
-                        match creator.create_full_snapshot(&accounts, slot, &snapshot_dir) {
-                            Ok(manifest) => {
-                                let path = snapshot_dir.join(format!("snapshot-{slot}"));
+                        // Extract bank state from the root bank for the manifest.
+                        let bank_state = extract_bank_state_for_slot(&bank_forks, slot);
+                        match creator.create_solana_archive_with_state(
+                            &accounts,
+                            slot,
+                            &snapshot_dir,
+                            SNAPSHOT_MAX_ACCOUNTS_PER_VEC,
+                            bank_state.as_ref(),
+                        ) {
+                            Ok(stats) => {
                                 info!(
                                     slot,
-                                    accounts = manifest.metadata.total_accounts,
-                                    lamports = manifest.metadata.total_lamports,
+                                    accounts = stats.total_accounts,
+                                    lamports = stats.total_lamports,
+                                    compressed_bytes = stats.compressed_size,
+                                    has_manifest = bank_state.is_some(),
                                     "full snapshot created",
                                 );
-                                scheduler.record_full(slot, path);
+                                scheduler.record_full(slot, stats.archive_path);
                             }
                             Err(e) => {
                                 error!(slot, error = %e, "full snapshot creation failed");
@@ -1566,23 +1582,26 @@ pub fn spawn_snapshot_thread(
                     }
                     SnapshotAction::Incremental { base_slot } => {
                         info!(slot, base_slot, "creating incremental snapshot");
-                        match creator.create_incremental_from_dirty_set(
+                        let bank_state = extract_bank_state_for_slot(&bank_forks, slot);
+                        match creator.create_incremental_solana_archive(
                             &accounts,
                             slot,
                             base_slot,
                             &snapshot_dir,
+                            SNAPSHOT_MAX_ACCOUNTS_PER_VEC,
+                            bank_state.as_ref(),
                         ) {
-                            Ok((_manifest, stats)) => {
-                                let path = snapshot_dir
-                                    .join(format!("incremental-snapshot-{base_slot}-{slot}"));
+                            Ok((stats, incr_stats)) => {
                                 info!(
                                     slot,
                                     base_slot,
-                                    dirty_tracked = stats.dirty_pubkeys_tracked,
-                                    accounts_included = stats.accounts_included,
+                                    dirty_tracked = incr_stats.dirty_pubkeys_tracked,
+                                    accounts_included = incr_stats.accounts_included,
+                                    compressed_bytes = stats.compressed_size,
+                                    has_manifest = bank_state.is_some(),
                                     "incremental snapshot created",
                                 );
-                                scheduler.record_incremental(slot, path);
+                                scheduler.record_incremental(slot, stats.archive_path);
                             }
                             Err(e) => {
                                 error!(
@@ -1611,6 +1630,21 @@ pub fn spawn_snapshot_thread(
         .expect("failed to spawn snapshot-creator thread");
 
     Some(handle)
+}
+
+/// Extract bank state for a specific slot from BankForks.
+///
+/// Looks up the bank at the given slot and calls `to_snapshot_state()`
+/// to produce the manifest data. Returns `None` if the bank is not
+/// found (already pruned) — the snapshot will still be created but
+/// without a manifest, which limits its usefulness for bootstrap.
+fn extract_bank_state_for_slot(
+    bank_forks: &Arc<RwLock<BankForks>>,
+    slot: u64,
+) -> Option<paradencer_storage::SnapshotBankState> {
+    let forks = bank_forks.read().ok()?;
+    let bank = forks.get(slot)?;
+    Some(bank.to_snapshot_state())
 }
 
 // ---------------------------------------------------------------------------

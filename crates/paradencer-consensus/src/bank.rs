@@ -15,7 +15,11 @@ use paradencer_constants::economics::{DEFAULT_TARGET_SIGNATURES_PER_SLOT, LAMPOR
 use paradencer_constants::ledger::{GENESIS_EPOCH, GENESIS_SLOT, TICKS_PER_SLOT};
 use paradencer_crypto::lthash::{self, LatticeHashValue};
 use paradencer_ids::SYSTEM_PROGRAM_ID;
-use paradencer_storage::{Account, AccountDatabase, Pubkey, SnapshotBankState};
+use paradencer_storage::{
+    Account, AccountDatabase, EpochScheduleConfig as StorageEpochScheduleConfig, FeeRateConfig,
+    InflationConfig, Pubkey, RecentBlockhash, RentConfig, SnapshotBankState, StakeHistoryRecord,
+    StakeSummary,
+};
 use std::sync::atomic::{AtomicI64, AtomicU64, AtomicU8, Ordering};
 use std::sync::{Arc, RwLock};
 
@@ -1454,6 +1458,147 @@ impl Bank {
             * (epoch_slots as f64 / slots_per_year)) as u64;
 
         (validator_rewards, validator_rate, foundation_rate)
+    }
+
+    /// Extract the current bank state into a snapshot-compatible representation.
+    ///
+    /// Produces a `SnapshotBankState` that contains all the fields needed
+    /// to serialize a Solana-compatible snapshot manifest. This enables
+    /// other validators to bootstrap from snapshots created by this node.
+    ///
+    /// Reads atomics, locks blockhash queue and stake tracker, so call
+    /// this on a frozen (rooted) bank to avoid contention.
+    pub fn to_snapshot_state(&self) -> SnapshotBankState {
+        use paradencer_constants::economics::{
+            DEFAULT_FEE_BURN_PERCENT, DEFAULT_SLOTS_PER_YEAR, DEFAULT_TARGET_SIGNATURES_PER_SLOT,
+            LAMPORTS_PER_SIGNATURE, MAX_LAMPORTS_PER_SIGNATURE, MIN_LAMPORTS_PER_SIGNATURE,
+        };
+        use paradencer_constants::ledger::{
+            DEFAULT_HASHES_PER_TICK, DEFAULT_TICK_DURATION_NS, TICKS_PER_SLOT,
+        };
+
+        let bh_queue = self.blockhash_queue.read().unwrap();
+        let recent_blockhashes: Vec<RecentBlockhash> = bh_queue
+            .entries()
+            .enumerate()
+            .map(|(idx, info)| RecentBlockhash {
+                hash: *info.hash.as_bytes(),
+                lamports_per_signature: info.lamports_per_signature,
+                hash_index: idx as u64,
+                timestamp: 0,
+            })
+            .collect();
+        let max_blockhash_age = bh_queue.max_age() as u64;
+        let last_blockhash_index = if !bh_queue.is_empty() {
+            bh_queue.len() as u64 - 1
+        } else {
+            0
+        };
+        drop(bh_queue);
+
+        let last_blockhash = Some(self.last_blockhash());
+        let ns_per_slot = (TICKS_PER_SLOT as u128) * (DEFAULT_TICK_DURATION_NS as u128);
+
+        let genesis_creation_time = self
+            .sysvars
+            .as_ref()
+            .map(|c| c.clock().epoch_start_timestamp)
+            .unwrap_or(0);
+
+        // Build stake summary from tracker if available.
+        let stake_summary = self.build_stake_summary_for_snapshot();
+
+        let es = self.epoch_schedule.config();
+
+        SnapshotBankState {
+            recent_blockhashes,
+            last_blockhash,
+            max_blockhash_age,
+            last_blockhash_index,
+            slot: self.slot,
+            parent_slot: self.parent_slot.unwrap_or(0),
+            block_height: self.slot,
+            epoch: self.epoch,
+            hash: self.hash(),
+            parent_hash: self.parent_hash,
+            transaction_count: self.transaction_count.load(Ordering::Relaxed),
+            tick_height: self.tick_height.load(Ordering::Relaxed),
+            max_tick_height: self.max_tick_height,
+            signature_count: self.signature_count.load(Ordering::Relaxed),
+            capitalization: self.capitalization.load(Ordering::Relaxed),
+            accounts_data_len: self.accounts_data_size.load(Ordering::Acquire).max(0) as u64,
+            hashes_per_tick: Some(DEFAULT_HASHES_PER_TICK),
+            ticks_per_slot: TICKS_PER_SLOT,
+            ns_per_slot,
+            genesis_creation_time,
+            slots_per_year: DEFAULT_SLOTS_PER_YEAR,
+            collector_id: [0u8; 32],
+            collector_fees: 0,
+            fee_rate_governor: FeeRateConfig {
+                target_lamports_per_signature: LAMPORTS_PER_SIGNATURE,
+                target_signatures_per_slot: DEFAULT_TARGET_SIGNATURES_PER_SLOT,
+                min_lamports_per_signature: MIN_LAMPORTS_PER_SIGNATURE,
+                max_lamports_per_signature: MAX_LAMPORTS_PER_SIGNATURE,
+                burn_percent: DEFAULT_FEE_BURN_PERCENT,
+            },
+            rent: RentConfig {
+                lamports_per_byte_year: self.rent.lamports_per_byte_year,
+                exemption_threshold: self.rent.exemption_threshold,
+                burn_percent: self.rent.burn_percent,
+                collector_epoch: self.epoch,
+                collector_slots_per_year: DEFAULT_SLOTS_PER_YEAR,
+            },
+            collected_rent: 0,
+            epoch_schedule: StorageEpochScheduleConfig {
+                slots_per_epoch: es.slots_per_epoch,
+                leader_schedule_slot_offset: es.leader_schedule_slot_offset,
+                warmup: es.warmup,
+                first_normal_epoch: es.first_normal_epoch,
+                first_normal_slot: es.first_normal_slot,
+            },
+            inflation: InflationConfig {
+                initial: self.inflation.initial_rate,
+                terminal: self.inflation.terminal_rate,
+                taper: self.inflation.tapering_rate,
+                foundation: self.inflation.foundation_portion,
+                foundation_term: self.inflation.foundation_duration_years,
+            },
+            hard_forks: vec![],
+            ancestor_count: 0,
+            stake_summary,
+            is_delta: self.parent_slot.is_some(),
+        }
+    }
+
+    /// Build a stake summary from the bank's stake tracker and history.
+    fn build_stake_summary_for_snapshot(&self) -> StakeSummary {
+        let mut summary = StakeSummary::default();
+
+        if let Some(ref tracker_lock) = self.stake_tracker {
+            if let Ok(tracker) = tracker_lock.read() {
+                summary.stake_delegation_count = tracker.delegation_count() as u64;
+                summary.total_delegated_stake = tracker.stake_by_vote_account().values().sum();
+                summary.vote_account_count = tracker.stake_by_vote_account().len() as u64;
+                summary.stakes_epoch = self.epoch;
+            }
+        }
+
+        if let Some(ref history_lock) = self.stake_history {
+            if let Ok(history) = history_lock.read() {
+                summary.stake_history_entries = history.len() as u64;
+                summary.stake_history = history
+                    .iter()
+                    .map(|ese| StakeHistoryRecord {
+                        epoch: ese.epoch,
+                        effective: ese.entry.effective,
+                        activating: ese.entry.activating,
+                        deactivating: ese.entry.deactivating,
+                    })
+                    .collect();
+            }
+        }
+
+        summary
     }
 
     /// Compute the bank hash for this slot.

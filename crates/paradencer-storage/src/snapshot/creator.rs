@@ -318,7 +318,6 @@ impl SnapshotCreator {
     }
 
     /// Create a Solana-compatible snapshot archive with an explicit bank state manifest.
-    #[allow(dead_code)]
     pub fn create_solana_archive_with_state(
         &self,
         db: &AccountDatabase,
@@ -364,7 +363,6 @@ impl SnapshotCreator {
     /// Only includes accounts modified since `base_slot`. The archive filename
     /// encodes both the incremental slot and the base slot for identification.
     /// Dirty slots through `snapshot_slot` are drained after creation.
-    #[allow(dead_code)]
     pub fn create_incremental_solana_archive(
         &self,
         db: &AccountDatabase,

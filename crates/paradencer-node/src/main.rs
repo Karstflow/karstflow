@@ -158,6 +158,7 @@ fn run_with_node_config(
         spawn_snapshot_thread(
             &replay_bundle.signal_bus,
             consensus.accounts.clone(),
+            consensus.bank_forks.clone(),
             snapshot_dir,
             paradencer_storage::SnapshotConfig::new(),
         )
