@@ -1,5 +1,6 @@
 use super::{Clock, EpochSchedule, Inflation, LeaderSchedule, Rent};
 use crate::blockhash_queue::{BlockhashInfo, BlockhashQueue};
+use crate::clock::calculate_stake_weighted_timestamp;
 use crate::epoch_processing::{AccountDatabaseVoteReader, EpochProcessor};
 use crate::epoch_schedule::EpochScheduleConfig;
 use crate::features::{process_feature_activations, FeatureSet};
@@ -521,6 +522,43 @@ impl Bank {
         self.vote_account_cache.as_ref()
     }
 
+    /// Estimate network timestamp using stake-weighted vote timestamps.
+    ///
+    /// Collects the last vote timestamp and current stake from each entry
+    /// in the vote account cache, then computes a stake-weighted median.
+    /// Falls back to system time when the cache is empty or not attached.
+    fn estimate_network_timestamp(&self) -> i64 {
+        let fallback = || {
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs() as i64)
+                .unwrap_or(0)
+        };
+
+        let cache_lock = match &self.vote_account_cache {
+            Some(c) => c,
+            None => return fallback(),
+        };
+
+        let cache = cache_lock.read().unwrap();
+        let total_stake = cache.total_epoch_stake();
+        if total_stake == 0 {
+            return fallback();
+        }
+
+        let vote_timestamps: Vec<(i64, u64)> = cache
+            .iter()
+            .filter(|(_, entry)| entry.stake > 0 && entry.last_vote_timestamp > 0)
+            .map(|(_, entry)| (entry.last_vote_timestamp, entry.stake))
+            .collect();
+
+        if vote_timestamps.is_empty() {
+            return fallback();
+        }
+
+        calculate_stake_weighted_timestamp(vote_timestamps, total_stake)
+    }
+
     /// Build a slot context for instruction execution from current bank state.
     ///
     /// Populates slot, epoch, timestamps and schedule info from the sysvar
@@ -890,10 +928,7 @@ impl Bank {
 
         // Update sysvars for this slot
         if let Some(sysvars) = &self.sysvars {
-            let timestamp = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_secs() as i64)
-                .unwrap_or(0);
+            let timestamp = self.estimate_network_timestamp();
             sysvars.update_clock(self.slot, self.epoch, timestamp);
             sysvars.update_slot_hashes(self.slot, self.hash());
             sysvars.update_slot_history(self.slot);
@@ -938,8 +973,8 @@ impl Bank {
     ///
     /// Called when the bank's epoch differs from its parent's epoch.
     /// Performs feature activation, epoch rewards calculation, immediate
-    /// vote reward distribution, leader schedule regeneration, and
-    /// queues partitioned stake reward distribution.
+    /// vote reward distribution, vote cache rotation, leader schedule
+    /// regeneration, and queues partitioned stake reward distribution.
     fn process_epoch_boundary(&self) {
         // Note: Rent fee collection is disabled on modern protocol.
         // The `disable_rent_fees_collection` feature is always active,
@@ -953,8 +988,37 @@ impl Bank {
         // Step 2: Epoch rewards — calculate and prepare distribution
         self.calculate_and_prepare_rewards();
 
-        // Step 3: Regenerate leader schedule for the next epoch
+        // Step 3: Rotate vote account cache and populate with new epoch stakes
+        self.refresh_vote_account_cache();
+
+        // Step 4: Regenerate leader schedule for the next epoch
         self.regenerate_leader_schedule();
+    }
+
+    /// Rotate vote account cache epoch stakes and repopulate from delegations.
+    ///
+    /// At epoch boundaries, shifts current stake → previous → two-epochs-ago,
+    /// then re-populates current epoch stakes from the stake tracker's
+    /// delegation map. This keeps the three-epoch stake window accurate
+    /// for tower consensus, leader schedule, and clock calculations.
+    fn refresh_vote_account_cache(&self) {
+        let (cache_lock, tracker_lock) = match (&self.vote_account_cache, &self.stake_tracker) {
+            (Some(c), Some(t)) => (c, t),
+            _ => return,
+        };
+
+        let tracker = tracker_lock.read().unwrap();
+        let stake_by_voter = tracker.stake_by_vote_account();
+
+        let mut cache = cache_lock.write().unwrap();
+
+        // Rotate: current → prev → prev_prev, then zero current
+        cache.rotate_epoch();
+
+        // Populate current epoch stakes from delegations
+        for (vote_pubkey, &total_stake) in &stake_by_voter {
+            cache.set_stake(vote_pubkey, total_stake);
+        }
     }
 
     /// Zero out the incinerator account and reduce capitalization.
@@ -2989,5 +3053,172 @@ mod tests {
         let acct = bank.accounts().get_published_account(&pk).unwrap();
         assert_eq!(acct.meta.lamports, 5000);
         assert_eq!(acct.data.as_slice(), &[1, 2, 3]);
+    }
+
+    // -----------------------------------------------------------------------
+    // Vote account cache epoch integration tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn estimate_timestamp_uses_vote_cache() {
+        let accounts = Arc::new(AccountDatabase::new());
+        let epoch_schedule = Arc::new(EpochSchedule::default());
+        let leader_schedule = create_test_leader_schedule(0);
+
+        let mut bank = Bank::new_genesis_with_config(
+            accounts,
+            epoch_schedule,
+            leader_schedule,
+            0,
+            Rent::default(),
+            Inflation::default(),
+        );
+
+        let cache = VoteAccountCache::new();
+        let cache = Arc::new(RwLock::new(cache));
+        bank.set_vote_account_cache(cache.clone());
+
+        // With empty cache (no staked entries), falls back to system time
+        let ts = bank.estimate_network_timestamp();
+        assert!(ts > 0);
+
+        // Populate cache with two validators with known timestamps
+        let v1 = Pubkey::new_unique();
+        let v2 = Pubkey::new_unique();
+        let node = Pubkey::new_unique();
+        {
+            let mut c = cache.write().unwrap();
+            c.update_from_vote_state(v1, node, 5, 100, 1_700_000_000);
+            c.update_from_vote_state(v2, node, 5, 200, 1_700_000_010);
+            c.set_stake(&v1, 600);
+            c.set_stake(&v2, 400);
+        }
+
+        let ts = bank.estimate_network_timestamp();
+        // v1 has 60% stake, v2 has 40%. Sorted: [v1=1700000000, v2=1700000010]
+        // Cumulative at v1: 600 >= 500 (half of 1000), so median is v1's timestamp
+        assert_eq!(ts, 1_700_000_000);
+    }
+
+    #[test]
+    fn estimate_timestamp_returns_system_time_without_cache() {
+        let accounts = Arc::new(AccountDatabase::new());
+        let epoch_schedule = Arc::new(EpochSchedule::default());
+        let leader_schedule = create_test_leader_schedule(0);
+
+        let bank = Bank::new_genesis(accounts, epoch_schedule, leader_schedule);
+        // No vote cache attached
+        let ts = bank.estimate_network_timestamp();
+        // Should be current system time (positive)
+        assert!(ts > 0);
+    }
+
+    #[test]
+    fn refresh_vote_cache_rotates_and_populates() {
+        let accounts = Arc::new(AccountDatabase::new());
+        let epoch_schedule = Arc::new(EpochSchedule::default());
+        let leader_schedule = create_test_leader_schedule(0);
+
+        let mut bank = Bank::new_genesis_with_config(
+            accounts,
+            epoch_schedule,
+            leader_schedule,
+            1_000_000,
+            Rent::default(),
+            Inflation::default(),
+        );
+
+        // Set up vote cache with initial stakes
+        let cache = Arc::new(RwLock::new(VoteAccountCache::new()));
+        let v1 = Pubkey::new_unique();
+        let node = Pubkey::new_unique();
+        {
+            let mut c = cache.write().unwrap();
+            c.update_from_vote_state(v1, node, 5, 0, 0);
+            c.set_stake(&v1, 1000);
+        }
+        bank.set_vote_account_cache(cache.clone());
+
+        // Set up stake tracker with different stakes for new epoch
+        let tracker = Arc::new(RwLock::new(StakeTracker::new(1)));
+        {
+            let mut t = tracker.write().unwrap();
+            t.add_delegation(Pubkey::new_unique(), crate::Delegation::new(v1, 2000, 0));
+        }
+        bank.set_stake_tracker(tracker);
+
+        // Call refresh — should rotate old stakes and populate new ones
+        bank.refresh_vote_account_cache();
+
+        let c = cache.read().unwrap();
+        let entry = c.get(&v1).unwrap();
+        // After rotation: old 1000 moved to stake_prev, new 2000 set as current
+        assert_eq!(entry.stake_prev, 1000);
+        assert_eq!(entry.stake, 2000);
+        assert_eq!(entry.stake_prev_prev, 0);
+        assert_eq!(c.total_epoch_stake(), 2000);
+    }
+
+    #[test]
+    fn refresh_vote_cache_multiple_rotations() {
+        let accounts = Arc::new(AccountDatabase::new());
+        let epoch_schedule = Arc::new(EpochSchedule::default());
+        let leader_schedule = create_test_leader_schedule(0);
+
+        let mut bank = Bank::new_genesis(accounts, epoch_schedule, leader_schedule);
+
+        let cache = Arc::new(RwLock::new(VoteAccountCache::new()));
+        let v1 = Pubkey::new_unique();
+        let node = Pubkey::new_unique();
+        {
+            let mut c = cache.write().unwrap();
+            c.update_from_vote_state(v1, node, 5, 0, 0);
+            c.set_stake(&v1, 500);
+        }
+        bank.set_vote_account_cache(cache.clone());
+
+        // First rotation with 1000 stake
+        let tracker = Arc::new(RwLock::new(StakeTracker::new(1)));
+        {
+            let mut t = tracker.write().unwrap();
+            t.add_delegation(Pubkey::new_unique(), crate::Delegation::new(v1, 1000, 0));
+        }
+        bank.set_stake_tracker(tracker.clone());
+        bank.refresh_vote_account_cache();
+
+        {
+            let c = cache.read().unwrap();
+            let e = c.get(&v1).unwrap();
+            assert_eq!(e.stake, 1000);
+            assert_eq!(e.stake_prev, 500);
+            assert_eq!(e.stake_prev_prev, 0);
+        }
+
+        // Second rotation with 1500 stake
+        {
+            let mut t = tracker.write().unwrap();
+            *t = StakeTracker::new(2);
+            t.add_delegation(Pubkey::new_unique(), crate::Delegation::new(v1, 1500, 0));
+        }
+        bank.refresh_vote_account_cache();
+
+        {
+            let c = cache.read().unwrap();
+            let e = c.get(&v1).unwrap();
+            assert_eq!(e.stake, 1500);
+            assert_eq!(e.stake_prev, 1000);
+            assert_eq!(e.stake_prev_prev, 500);
+        }
+    }
+
+    #[test]
+    fn refresh_vote_cache_noop_without_cache() {
+        let accounts = Arc::new(AccountDatabase::new());
+        let epoch_schedule = Arc::new(EpochSchedule::default());
+        let leader_schedule = create_test_leader_schedule(0);
+
+        let bank = Bank::new_genesis(accounts, epoch_schedule, leader_schedule);
+        // No cache or tracker attached — should be a no-op, not panic
+        bank.refresh_vote_account_cache();
     }
 }
