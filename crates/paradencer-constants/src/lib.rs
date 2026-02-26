@@ -458,6 +458,7 @@ pub mod quic {
     pub const PROCESSOR_BATCH_SIZE: usize = 256;
 }
 
+pub mod dedup;
 pub mod durable_store;
 pub mod gossip;
 pub mod ipc;

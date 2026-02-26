@@ -19,6 +19,7 @@
 
 mod block_assembler;
 mod block_producer;
+mod dedup_stage;
 mod edge_intake;
 mod errors;
 mod exec_stage;
@@ -48,6 +49,7 @@ mod verify_service;
 mod verify_stage;
 
 pub use block_assembler::BlockAssembler;
+pub use dedup_stage::{DedupOutcome, DedupStage, DedupStats, TransactionCache};
 pub use edge_intake::EdgeIntake;
 pub use errors::StageError;
 pub use execution_adapter::SbpfExecutionAdapter;
