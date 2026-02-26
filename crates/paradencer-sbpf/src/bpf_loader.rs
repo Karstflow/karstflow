@@ -1,5 +1,8 @@
 use super::{ExecutionContext, ExecutionOutcome};
 use paradencer_constants::bpf_loader_program as constants;
+use paradencer_ids::features::{
+    is_feature_active, ENABLE_BPF_LOADER_SET_AUTHORITY_CHECKED, ENABLE_EXTEND_PROGRAM_CHECKED,
+};
 use paradencer_ids::BPF_LOADER_PROGRAM_ID;
 use paradencer_types::{Account, AccountData, Pubkey};
 use std::collections::HashMap;
@@ -279,10 +282,31 @@ impl BpfLoaderExecutor {
                 constants::COMPUTE_COST_EXTEND_PROGRAM
             }
             constants::INSTRUCTION_SET_AUTHORITY_CHECKED => {
+                // Requires enable_bpf_loader_set_authority_checked_ix feature gate.
+                if let Some(ref snap) = context.sysvar_snapshot {
+                    if !is_feature_active(
+                        &snap.active_features,
+                        &ENABLE_BPF_LOADER_SET_AUTHORITY_CHECKED,
+                    ) {
+                        return Err(
+                            "SetAuthorityChecked instruction not available: feature gate not active"
+                                .into(),
+                        );
+                    }
+                }
                 self.execute_set_authority_checked(context, &mut modified_accounts, &mut logs)?;
                 constants::COMPUTE_COST_SET_AUTHORITY_CHECKED
             }
             constants::INSTRUCTION_EXTEND_PROGRAM_CHECKED => {
+                // Requires enable_extend_program_checked feature gate.
+                if let Some(ref snap) = context.sysvar_snapshot {
+                    if !is_feature_active(&snap.active_features, &ENABLE_EXTEND_PROGRAM_CHECKED) {
+                        return Err(
+                            "ExtendProgramChecked instruction not available: feature gate not active"
+                                .into(),
+                        );
+                    }
+                }
                 self.execute_extend_program(context, &mut modified_accounts, &mut logs)?;
                 constants::COMPUTE_COST_EXTEND_PROGRAM
             }
@@ -2001,5 +2025,91 @@ mod tests {
         );
         let result = executor.execute(&context);
         assert!(result.is_err());
+    }
+
+    // ── Feature gate tests ────────────────────────────────────────────
+
+    fn context_with_disc_and_features(
+        disc: u32,
+        features: std::collections::HashSet<[u8; 32]>,
+    ) -> ExecutionContext {
+        use crate::SysvarSnapshot;
+
+        let old_auth = Pubkey::new_unique();
+        let new_auth = Pubkey::new_unique();
+        let buffer_pubkey = Pubkey::new_unique();
+        let buffer_account = make_buffer_account(old_auth, 100);
+
+        let snapshot = SysvarSnapshot {
+            active_features: features,
+            ..SysvarSnapshot::default()
+        };
+        ExecutionContext::new(
+            BPF_LOADER_PROGRAM_ID,
+            vec![
+                (buffer_pubkey, buffer_account, true),
+                (old_auth, Account::default(), false),
+                (new_auth, Account::default(), false),
+            ],
+            disc.to_le_bytes().to_vec(),
+        )
+        .with_sysvar_snapshot(snapshot)
+    }
+
+    #[test]
+    fn set_authority_checked_rejected_without_feature() {
+        let executor = BpfLoaderExecutor::new(150);
+        let ctx = context_with_disc_and_features(
+            constants::INSTRUCTION_SET_AUTHORITY_CHECKED,
+            std::collections::HashSet::new(),
+        );
+
+        let result = executor.execute(&ctx);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("feature gate not active"));
+    }
+
+    #[test]
+    fn set_authority_checked_allowed_with_feature() {
+        let executor = BpfLoaderExecutor::new(150);
+        let mut features = std::collections::HashSet::new();
+        features.insert(*ENABLE_BPF_LOADER_SET_AUTHORITY_CHECKED.as_bytes());
+        let ctx =
+            context_with_disc_and_features(constants::INSTRUCTION_SET_AUTHORITY_CHECKED, features);
+
+        let result = executor.execute(&ctx);
+        // May fail for other reasons (missing signers etc.) but should NOT
+        // fail with "feature gate not active".
+        if let Err(msg) = &result {
+            assert!(!msg.contains("feature gate not active"));
+        }
+    }
+
+    #[test]
+    fn extend_program_checked_rejected_without_feature() {
+        let executor = BpfLoaderExecutor::new(150);
+        let ctx = context_with_disc_and_features(
+            constants::INSTRUCTION_EXTEND_PROGRAM_CHECKED,
+            std::collections::HashSet::new(),
+        );
+
+        let result = executor.execute(&ctx);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("feature gate not active"));
+    }
+
+    #[test]
+    fn extend_program_checked_allowed_with_feature() {
+        let executor = BpfLoaderExecutor::new(150);
+        let mut features = std::collections::HashSet::new();
+        features.insert(*ENABLE_EXTEND_PROGRAM_CHECKED.as_bytes());
+        let ctx =
+            context_with_disc_and_features(constants::INSTRUCTION_EXTEND_PROGRAM_CHECKED, features);
+
+        let result = executor.execute(&ctx);
+        // May fail for other reasons but should NOT fail with "feature gate".
+        if let Err(msg) = &result {
+            assert!(!msg.contains("feature gate not active"));
+        }
     }
 }
