@@ -427,9 +427,16 @@ impl RuntimeSyscallDispatch {
             dispatch.register_by_name("sol_get_epoch_stake", Box::new(SolGetEpochStakeHandler));
         }
 
-        // TODO: remaining compute units syscall (sol_remaining_compute_units)
-        // Requires REMAINING_COMPUTE_UNITS_SYSCALL_ENABLED feature gate
-        // and SolRemainingComputeUnitsHandler implementation.
+        // Feature-gated: remaining compute units query
+        if features::is_feature_active(
+            active_features,
+            &features::REMAINING_COMPUTE_UNITS_SYSCALL_ENABLED,
+        ) {
+            dispatch.register_by_name(
+                "sol_remaining_compute_units",
+                Box::new(SolRemainingComputeUnitsHandler),
+            );
+        }
 
         dispatch
     }
@@ -2594,6 +2601,28 @@ impl SyscallHandler for SolCurvePairingMapHandler {
 }
 
 // ---------------------------------------------------------------------------
+// Remaining compute units syscall
+// ---------------------------------------------------------------------------
+
+/// sol_remaining_compute_units: Returns the number of compute units remaining.
+struct SolRemainingComputeUnitsHandler;
+
+impl SyscallHandler for SolRemainingComputeUnitsHandler {
+    fn call(
+        &self,
+        vm: &mut VmState,
+        _r1: u64,
+        _r2: u64,
+        _r3: u64,
+        _r4: u64,
+        _r5: u64,
+    ) -> Result<u64, VmError> {
+        deduct_compute(vm, syscalls::GET_REMAINING_COMPUTE_UNITS_COST)?;
+        Ok(vm.compute_meter)
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Helper
 // ---------------------------------------------------------------------------
 
@@ -3806,5 +3835,41 @@ mod tests {
 
         // sol_get_sysvar is always enabled (gated at consensus layer)
         assert!(ids.contains(&murmur3_hash("sol_get_sysvar")));
+    }
+
+    #[test]
+    fn remaining_compute_units_returns_meter_value() {
+        let handler = SolRemainingComputeUnitsHandler;
+        let mut vm = make_sysvar_test_vm(crate::sysvar_snapshot::SysvarSnapshot::default());
+        vm.compute_meter = 50_000;
+
+        let result = handler.call(&mut vm, 0, 0, 0, 0, 0).unwrap();
+        // After deducting 100 CU cost, remaining should be 49900
+        assert_eq!(result, 50_000 - syscalls::GET_REMAINING_COMPUTE_UNITS_COST);
+        assert_eq!(
+            vm.compute_meter,
+            50_000 - syscalls::GET_REMAINING_COMPUTE_UNITS_COST
+        );
+    }
+
+    #[test]
+    fn remaining_compute_units_feature_gated() {
+        use paradencer_ids::features;
+
+        // Without the feature, syscall is not registered
+        let empty: std::collections::HashSet<[u8; 32]> = std::collections::HashSet::new();
+        let dispatch = RuntimeSyscallDispatch::with_active_feature_ids(&empty);
+        assert!(!dispatch
+            .registered_ids()
+            .contains(&murmur3_hash("sol_remaining_compute_units")));
+
+        // With the feature, syscall is registered
+        let mut features_set: std::collections::HashSet<[u8; 32]> =
+            std::collections::HashSet::new();
+        features_set.insert(*features::REMAINING_COMPUTE_UNITS_SYSCALL_ENABLED.as_bytes());
+        let dispatch = RuntimeSyscallDispatch::with_active_feature_ids(&features_set);
+        assert!(dispatch
+            .registered_ids()
+            .contains(&murmur3_hash("sol_remaining_compute_units")));
     }
 }

@@ -166,8 +166,15 @@ impl BytecodeVm {
         }
     }
 
-    /// Set the sysvar snapshot for this VM.
+    /// Set the sysvar snapshot and rebuild the syscall dispatcher.
+    ///
+    /// The syscall dispatcher is rebuilt with feature-gated syscall
+    /// registration based on the active features in the snapshot.
+    /// This must be called whenever the active feature set changes
+    /// (typically once per slot).
     pub fn set_sysvar_snapshot(&mut self, snapshot: SysvarSnapshot) {
+        self.syscall_dispatch =
+            RuntimeSyscallDispatch::with_active_feature_ids(&snapshot.active_features);
         self.sysvar_snapshot = snapshot;
     }
 
@@ -965,5 +972,35 @@ mod tests {
             let mut cache = vm.cache.lock().unwrap();
             assert!(cache.get(&program_id, 0).is_none());
         }
+    }
+
+    #[test]
+    fn set_sysvar_snapshot_rebuilds_dispatcher() {
+        use crate::syscall_dispatch::murmur3_hash;
+        use paradencer_ids::features;
+
+        let mut vm = BytecodeVm::new();
+
+        // Default new() uses with_standard_syscalls which registers everything.
+        // After set_sysvar_snapshot with empty features, only always-on syscalls present.
+        let snap = crate::sysvar_snapshot::SysvarSnapshot::default();
+        vm.set_sysvar_snapshot(snap);
+
+        let ids = vm.syscall_dispatch.registered_ids();
+        // blake3 should NOT be registered (feature-gated, no features active)
+        assert!(!ids.contains(&murmur3_hash("sol_blake3")));
+        // sol_log_ should always be registered
+        assert!(ids.contains(&murmur3_hash("sol_log_")));
+
+        // Now set a snapshot with blake3 feature active
+        let mut snap2 = crate::sysvar_snapshot::SysvarSnapshot::default();
+        snap2
+            .active_features
+            .insert(*features::BLAKE3_SYSCALL_ENABLED.as_bytes());
+        vm.set_sysvar_snapshot(snap2);
+
+        let ids2 = vm.syscall_dispatch.registered_ids();
+        assert!(ids2.contains(&murmur3_hash("sol_blake3")));
+        assert!(ids2.contains(&murmur3_hash("sol_log_")));
     }
 }

@@ -63,6 +63,7 @@ pub const GET_EPOCH_REWARDS_SYSVAR_COST: u64 = 100;
 pub const GET_GENERIC_SYSVAR_BASE_COST: u64 = 100;
 pub const GET_GENERIC_SYSVAR_PER_BYTE_COST: u64 = 1;
 pub const GET_EPOCH_STAKE_COST: u64 = 100;
+pub const GET_REMAINING_COMPUTE_UNITS_COST: u64 = 100;
 
 /// Maximum length for a single generic sysvar read.
 pub const MAX_GENERIC_SYSVAR_READ_LEN: usize = 10 * 1024;
