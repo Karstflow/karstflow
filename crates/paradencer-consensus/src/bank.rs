@@ -767,6 +767,7 @@ impl Bank {
     ///
     /// If a rewards distributor is active and has rewards for this slot,
     /// credits the corresponding accounts and marks the slot distributed.
+    /// When all partitions are complete, clears the EpochRewards sysvar.
     pub fn distribute_slot_rewards(&self) -> u64 {
         let mut guard = self.rewards_distributor.write().unwrap();
         if let Some(ref mut distributor) = *guard {
@@ -780,6 +781,14 @@ impl Bank {
             );
             self.capitalization
                 .fetch_add(result.total_distributed, Ordering::Relaxed);
+
+            // Clear EpochRewards sysvar once all partitions are distributed.
+            if distributor.is_complete() {
+                if let Some(ref sysvars) = self.sysvars {
+                    sysvars.clear_epoch_rewards();
+                }
+            }
+
             result.total_distributed
         } else {
             0
@@ -1104,7 +1113,9 @@ impl Bank {
     /// Calculate epoch rewards and apply vote rewards immediately.
     ///
     /// Stake rewards are queued in the rewards distributor for
-    /// partitioned distribution over subsequent slots.
+    /// partitioned distribution over subsequent slots. Updates both
+    /// the internal stake history and the sysvar cache, and activates
+    /// the EpochRewards sysvar for the duration of partitioned distribution.
     fn calculate_and_prepare_rewards(&self) {
         let (tracker, mut history) = match (&self.stake_tracker, &self.stake_history) {
             (Some(t), Some(h)) => {
@@ -1123,12 +1134,18 @@ impl Bank {
             Some(&vote_reader),
         );
 
-        // Write back updated stake history
+        // Write back updated stake history to internal tracker
         if let Some(ref h) = self.stake_history {
             *h.write().unwrap() = history;
         }
 
         if let Ok(ctx) = result {
+            // Propagate stake history update to the sysvar cache so programs
+            // can read the latest StakeHistory sysvar account data.
+            if let (Some(ref sysvars), Some(entry)) = (&self.sysvars, ctx.stake_snapshot) {
+                sysvars.on_epoch_boundary(ctx.previous_epoch, entry);
+            }
+
             // Apply vote rewards immediately
             if !ctx.validator_rewards.is_empty() {
                 let vote_rewards: Vec<_> = ctx
@@ -1153,8 +1170,22 @@ impl Bank {
                     .fetch_add(result.total_distributed, Ordering::Relaxed);
             }
 
-            // Store the rewards distributor for partitioned stake distribution
+            // Store the rewards distributor for partitioned stake distribution.
+            // Activate EpochRewards sysvar to signal ongoing distribution.
             if let Some(distributor) = ctx.rewards_distributor {
+                if let Some(ref sysvars) = self.sysvars {
+                    let total_rewards: u64 =
+                        ctx.validator_rewards.iter().map(|vr| vr.total_reward).sum();
+                    sysvars.set_epoch_rewards(crate::EpochRewards {
+                        total_rewards,
+                        validator_rewards: total_rewards,
+                        foundation_rewards: 0,
+                        capitalization: ctx.capitalization,
+                        epoch_duration_years: 0.0,
+                        validator_rate: 0.0,
+                        foundation_rate: 0.0,
+                    });
+                }
                 *self.rewards_distributor.write().unwrap() = Some(distributor);
             }
         }
@@ -2185,6 +2216,121 @@ mod tests {
         // No rewards distributor set
         assert!(!bank.has_pending_rewards());
         assert_eq!(bank.distribute_slot_rewards(), 0);
+    }
+
+    // -----------------------------------------------------------------------
+    // Phase 3b: Sysvar cache wiring at epoch boundaries
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn epoch_boundary_updates_sysvar_stake_history() {
+        let (child, _tracker, _history) = make_bank_with_epoch_state(1_000_000_000_000);
+
+        // The sysvar cache should exist (inherited from genesis parent).
+        assert!(child.sysvar_cache().is_some());
+
+        // Before processing, stake history in the sysvar cache should be empty.
+        let sysvars = child.sysvar_cache().unwrap();
+        let history_before = sysvars.stake_history();
+        assert!(
+            history_before.get(0).is_none(),
+            "Sysvar stake history should not have epoch 0 entry before epoch processing"
+        );
+
+        // Process epoch boundary.
+        for _ in 0..TICKS_PER_SLOT {
+            child.register_tick().unwrap();
+        }
+        child.finish_slot().unwrap();
+
+        // After processing, the sysvar cache should contain a StakeHistory entry
+        // for the previous epoch (epoch 0).
+        let history_after = sysvars.stake_history();
+        let entry = history_after.get(0);
+        assert!(
+            entry.is_some(),
+            "Sysvar stake history should have epoch 0 entry after epoch boundary"
+        );
+        let entry = entry.unwrap();
+        assert!(entry.effective > 0, "Effective stake should be non-zero");
+    }
+
+    #[test]
+    fn epoch_boundary_activates_epoch_rewards_sysvar() {
+        let (child, _tracker, _history) = make_bank_with_epoch_state(1_000_000_000_000);
+
+        // Before processing, epoch rewards sysvar should be inactive.
+        let sysvars = child.sysvar_cache().unwrap();
+        assert!(
+            !sysvars.is_epoch_rewards_active(),
+            "EpochRewards should be inactive before epoch processing"
+        );
+
+        // Process epoch boundary — this should activate rewards.
+        for _ in 0..TICKS_PER_SLOT {
+            child.register_tick().unwrap();
+        }
+        child.finish_slot().unwrap();
+
+        // If a rewards distributor was created, epoch rewards should be active.
+        if child.has_pending_rewards() {
+            assert!(
+                sysvars.is_epoch_rewards_active(),
+                "EpochRewards should be active when distributor is pending"
+            );
+        }
+    }
+
+    #[test]
+    fn distribute_slot_rewards_clears_epoch_rewards_on_completion() {
+        let accounts = Arc::new(AccountDatabase::new());
+        let epoch_schedule = Arc::new(EpochSchedule::default());
+        let leader_schedule = create_test_leader_schedule(0);
+
+        let bank = Bank::new_genesis_with_config(
+            accounts.clone(),
+            epoch_schedule,
+            leader_schedule,
+            1_000_000_000_000,
+            Rent::default(),
+            Inflation::default(),
+        );
+
+        // Manually activate epoch rewards via the sysvar cache.
+        let sysvars = bank.sysvar_cache().unwrap();
+        sysvars.set_epoch_rewards(crate::EpochRewards {
+            total_rewards: 100_000,
+            validator_rewards: 100_000,
+            foundation_rewards: 0,
+            capitalization: 1_000_000_000_000,
+            epoch_duration_years: 0.0,
+            validator_rate: 0.0,
+            foundation_rate: 0.0,
+        });
+        assert!(sysvars.is_epoch_rewards_active());
+
+        // Set up a single-slot rewards distributor.
+        let target = Pubkey::new_unique();
+        accounts.store_published_account(
+            target,
+            paradencer_storage::Account::new(1_000, vec![], Pubkey::default()),
+        );
+        let reward = crate::rewards_distribution::PendingReward {
+            account: target,
+            amount: 5_000,
+            reward_type: crate::epoch_processing::RewardType::Staking,
+        };
+        let distributor =
+            crate::rewards_distribution::RewardsDistributor::new(vec![reward], 1, bank.slot());
+        *bank.rewards_distributor.write().unwrap() = Some(distributor);
+
+        // Distribute — this should complete the single partition and clear rewards.
+        let distributed = bank.distribute_slot_rewards();
+        assert!(distributed > 0);
+        assert!(
+            !sysvars.is_epoch_rewards_active(),
+            "EpochRewards should be cleared after distribution completes"
+        );
     }
 
     // -- Lattice hash accumulator tests --
