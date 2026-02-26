@@ -67,6 +67,20 @@ pub struct SlotContext {
     pub active_features: HashSet<[u8; 32]>,
 }
 
+/// A previously processed instruction within the same transaction.
+///
+/// Populated by the bank executor and passed to each subsequent instruction
+/// so that `sol_get_processed_sibling_instruction` returns correct data.
+#[derive(Debug, Clone)]
+pub struct ProcessedSibling {
+    /// Program ID that processed this instruction.
+    pub program_id: Pubkey,
+    /// Instruction data.
+    pub data: Vec<u8>,
+    /// Account keys referenced by this instruction.
+    pub accounts: Vec<Pubkey>,
+}
+
 /// Compiled instruction passed to the execution backend.
 #[derive(Debug, Clone)]
 pub struct InstructionInfo {
@@ -78,6 +92,9 @@ pub struct InstructionInfo {
     pub data: Vec<u8>,
     /// Sysvar context (slot, epoch, rent, etc.) for the current execution.
     pub slot_context: SlotContext,
+    /// Previously processed instructions in this transaction.
+    /// Empty for the first instruction; grows with each successfully executed instruction.
+    pub sibling_instructions: Vec<ProcessedSibling>,
 }
 
 /// Result produced by executing a single instruction.
@@ -1330,6 +1347,8 @@ impl Bank {
             None
         };
 
+        let mut sibling_instructions: Vec<ProcessedSibling> = Vec::new();
+
         'execution: for (idx, instruction) in transaction.instructions.iter().enumerate() {
             // Resolve program id
             let program_id = match transaction
@@ -1399,6 +1418,7 @@ impl Bank {
                 accounts: instr_accounts,
                 data: instruction.data.clone(),
                 slot_context: self.slot_context(),
+                sibling_instructions: sibling_instructions.clone(),
             };
 
             let remaining = effective_compute_limit.saturating_sub(total_compute);
@@ -1425,6 +1445,18 @@ impl Bank {
             for (k, v) in result.modified_accounts {
                 modified.insert(k, v);
             }
+
+            // Record this instruction as a sibling for subsequent instructions.
+            let sibling_accounts = instruction
+                .account_indices
+                .iter()
+                .filter_map(|&ai| transaction.account_keys.get(ai as usize).copied())
+                .collect();
+            sibling_instructions.push(ProcessedSibling {
+                program_id,
+                data: instruction.data.clone(),
+                accounts: sibling_accounts,
+            });
 
             // Capture return data from the last instruction that set it
             if result.return_data.is_some() {
@@ -5050,5 +5082,128 @@ mod tests {
         modified.insert(vote_key, account);
         bank.write_accounts(&modified);
         // Should not panic
+    }
+
+    /// Backend that captures sibling instructions from each call.
+    struct SiblingCapturingBackend {
+        captured: std::sync::Mutex<Vec<Vec<ProcessedSibling>>>,
+    }
+
+    impl SiblingCapturingBackend {
+        fn new() -> Self {
+            Self {
+                captured: std::sync::Mutex::new(Vec::new()),
+            }
+        }
+    }
+
+    impl ExecutionBackend for SiblingCapturingBackend {
+        fn execute_instruction(
+            &self,
+            instruction: &InstructionInfo,
+            _remaining: u64,
+        ) -> InstructionResult {
+            self.captured
+                .lock()
+                .unwrap()
+                .push(instruction.sibling_instructions.clone());
+
+            let modified: HashMap<Pubkey, Account> = instruction
+                .accounts
+                .iter()
+                .map(|(k, a, _, _)| (*k, a.clone()))
+                .collect();
+
+            InstructionResult {
+                success: true,
+                compute_units_consumed: 100,
+                modified_accounts: modified,
+                logs: vec![],
+                error: None,
+                return_data: None,
+            }
+        }
+    }
+
+    #[test]
+    fn sibling_instructions_accumulate_across_instructions() {
+        let bank = create_test_bank();
+        let backend = SiblingCapturingBackend::new();
+
+        let payer = Pubkey::new_unique();
+        let program = Pubkey::new_unique();
+        let extra_account = Pubkey::new_unique();
+
+        let payer_account = Account::new(10_000_000, vec![], Pubkey::default());
+        store_test_account(&bank, &payer, &payer_account);
+
+        // Transaction with 3 instructions from the same program.
+        // account_keys: [payer(0), program(1), extra(2)]
+        let tx = SanitizedTransaction {
+            account_keys: vec![payer, program, extra_account],
+            recent_blockhash: [0u8; 32],
+            instructions: vec![
+                CompiledInstruction {
+                    program_id_index: 1,
+                    account_indices: vec![0],
+                    data: vec![0xAA],
+                },
+                CompiledInstruction {
+                    program_id_index: 1,
+                    account_indices: vec![0, 2],
+                    data: vec![0xBB, 0xCC],
+                },
+                CompiledInstruction {
+                    program_id_index: 1,
+                    account_indices: vec![2],
+                    data: vec![0xDD],
+                },
+            ],
+            num_signatures: 1,
+            num_readonly_signed: 0,
+            num_readonly_unsigned: 1,
+            signatures: vec![],
+            message_bytes: vec![],
+        };
+
+        let result = bank.process_transaction(&tx, &backend, MAX_COMPUTE_UNITS);
+        assert!(
+            result.success,
+            "multi-instruction tx should succeed: {:?}",
+            result.error
+        );
+
+        let captured = backend.captured.lock().unwrap();
+        assert_eq!(
+            captured.len(),
+            3,
+            "should have captured 3 instruction calls"
+        );
+
+        // First instruction: no siblings.
+        assert!(
+            captured[0].is_empty(),
+            "first instruction should have no siblings"
+        );
+
+        // Second instruction: 1 sibling (the first instruction).
+        assert_eq!(
+            captured[1].len(),
+            1,
+            "second instruction should have 1 sibling"
+        );
+        assert_eq!(captured[1][0].program_id, program);
+        assert_eq!(captured[1][0].data, vec![0xAA]);
+        assert_eq!(captured[1][0].accounts, vec![payer]);
+
+        // Third instruction: 2 siblings.
+        assert_eq!(
+            captured[2].len(),
+            2,
+            "third instruction should have 2 siblings"
+        );
+        assert_eq!(captured[2][0].data, vec![0xAA]);
+        assert_eq!(captured[2][1].data, vec![0xBB, 0xCC]);
+        assert_eq!(captured[2][1].accounts, vec![payer, extra_account]);
     }
 }

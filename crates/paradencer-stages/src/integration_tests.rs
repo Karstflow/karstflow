@@ -398,6 +398,7 @@ mod execution_pipeline_tests {
             ],
             data,
             slot_context: SlotContext::default(),
+            sibling_instructions: vec![],
         };
 
         let result = adapter.execute_instruction(&info, MAX_COMPUTE_UNITS);
@@ -433,6 +434,7 @@ mod execution_pipeline_tests {
             accounts: vec![(program_id, program_account, false, false)],
             data: vec![],
             slot_context: SlotContext::default(),
+            sibling_instructions: vec![],
         };
 
         let result = adapter.execute_instruction(&info, MAX_COMPUTE_UNITS);
@@ -473,6 +475,7 @@ mod execution_pipeline_tests {
             accounts: vec![(vote_pubkey, vote_account, true, false)],
             data: init_data,
             slot_context: SlotContext::default(),
+            sibling_instructions: vec![],
         };
 
         let result = adapter.execute_instruction(&info, MAX_COMPUTE_UNITS);
@@ -521,6 +524,7 @@ mod execution_pipeline_tests {
                 accounts: vec![],
                 data: vec![],
                 slot_context: SlotContext::default(),
+                sibling_instructions: vec![],
             };
 
             // Should not panic — adapter routes to all builtins
@@ -559,6 +563,7 @@ mod execution_pipeline_tests {
             ],
             data,
             slot_context: SlotContext::default(),
+            sibling_instructions: vec![],
         };
 
         let result = adapter.execute_instruction(&info, MAX_COMPUTE_UNITS);

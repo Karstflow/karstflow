@@ -6,8 +6,12 @@
 /// adapter that converts consensus types (`InstructionInfo`, `SlotContext`)
 /// into sBPF types (`ExecutionContext`, `SysvarSnapshot`) and maps execution
 /// results back.
-use paradencer_consensus::{ExecutionBackend, InstructionInfo, InstructionResult, SlotContext};
-use paradencer_sbpf::{ExecutionContext, ExecutionOutcome, SysvarSnapshot, TransactionProcessor};
+use paradencer_consensus::{
+    ExecutionBackend, InstructionInfo, InstructionResult, ProcessedSibling, SlotContext,
+};
+use paradencer_sbpf::{
+    ExecutionContext, ExecutionOutcome, SiblingInstruction, SysvarSnapshot, TransactionProcessor,
+};
 
 /// Instruction execution backend backed by the sBPF `TransactionProcessor`.
 ///
@@ -87,7 +91,8 @@ fn to_execution_context(
     instruction: &InstructionInfo,
     remaining_compute_units: u64,
 ) -> ExecutionContext {
-    let snapshot = to_sysvar_snapshot(&instruction.slot_context);
+    let mut snapshot = to_sysvar_snapshot(&instruction.slot_context);
+    snapshot.sibling_instructions = to_sibling_instructions(&instruction.sibling_instructions);
     let accounts = instruction
         .accounts
         .iter()
@@ -96,6 +101,18 @@ fn to_execution_context(
     ExecutionContext::new(instruction.program_id, accounts, instruction.data.clone())
         .with_compute_budget(remaining_compute_units)
         .with_sysvar_snapshot(snapshot)
+}
+
+/// Convert consensus `ProcessedSibling` list into sBPF `SiblingInstruction` list.
+fn to_sibling_instructions(siblings: &[ProcessedSibling]) -> Vec<SiblingInstruction> {
+    siblings
+        .iter()
+        .map(|s| SiblingInstruction {
+            program_id: *s.program_id.as_bytes(),
+            data: s.data.clone(),
+            accounts: s.accounts.iter().map(|a| *a.as_bytes()).collect(),
+        })
+        .collect()
 }
 
 /// Convert an sBPF `ExecutionOutcome` into a consensus `InstructionResult`.
@@ -198,6 +215,7 @@ mod tests {
             accounts: vec![(account_key, account.clone(), true, false)],
             data: data.clone(),
             slot_context: test_slot_context(),
+            sibling_instructions: vec![],
         };
 
         let ctx = to_execution_context(&instruction, 200_000);
@@ -305,6 +323,7 @@ mod tests {
             ],
             data,
             slot_context: SlotContext::default(),
+            sibling_instructions: vec![],
         };
 
         let result = backend.execute_instruction(&instruction, 200_000);
@@ -349,6 +368,7 @@ mod tests {
             ],
             data,
             slot_context: SlotContext::default(),
+            sibling_instructions: vec![],
         };
 
         let result = backend.execute_instruction(&instruction, 200_000);
@@ -371,8 +391,47 @@ mod tests {
             accounts: vec![],
             data: vec![],
             slot_context: SlotContext::default(),
+            sibling_instructions: vec![],
         };
         // Verify trait object dispatch works without panicking.
         let _result = backend.execute_instruction(&instruction, 100_000);
+    }
+
+    #[test]
+    fn sibling_instructions_bridged_to_sysvar_snapshot() {
+        let program_id = Pubkey::new_unique();
+        let account_key = Pubkey::new_unique();
+
+        let instruction = InstructionInfo {
+            program_id,
+            accounts: vec![],
+            data: vec![],
+            slot_context: test_slot_context(),
+            sibling_instructions: vec![
+                ProcessedSibling {
+                    program_id: Pubkey::new_unique(),
+                    data: vec![0xAA, 0xBB],
+                    accounts: vec![account_key],
+                },
+                ProcessedSibling {
+                    program_id,
+                    data: vec![0xCC],
+                    accounts: vec![],
+                },
+            ],
+        };
+
+        let ctx = to_execution_context(&instruction, 100_000);
+        let snap = ctx.sysvar_snapshot.unwrap();
+
+        assert_eq!(snap.sibling_instructions.len(), 2);
+        assert_eq!(snap.sibling_instructions[0].data, vec![0xAA, 0xBB]);
+        assert_eq!(snap.sibling_instructions[0].accounts.len(), 1);
+        assert_eq!(
+            snap.sibling_instructions[0].accounts[0],
+            *account_key.as_bytes()
+        );
+        assert_eq!(snap.sibling_instructions[1].data, vec![0xCC]);
+        assert!(snap.sibling_instructions[1].accounts.is_empty());
     }
 }

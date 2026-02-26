@@ -65,7 +65,7 @@ pub use program_cache::{CacheError, CachedProgram, ProgramCache};
 pub use stake::StakeProgramExecutor;
 pub use syscall_dispatch::InstructionExecutor;
 pub use system_program::SystemProgramExecutor;
-pub use sysvar_snapshot::SysvarSnapshot;
+pub use sysvar_snapshot::{SiblingInstruction, SysvarSnapshot};
 pub use token_2022_program::Token2022ProgramExecutor;
 pub use token_program::TokenProgramExecutor;
 pub use transaction_processor::{

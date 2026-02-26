@@ -143,6 +143,7 @@ mod tests {
             ],
             data,
             slot_context: SlotContext::default(),
+            sibling_instructions: vec![],
         };
 
         let result = adapter.execute_instruction(&info, MAX_COMPUTE_UNITS);
@@ -163,6 +164,7 @@ mod tests {
             accounts: vec![],
             data: vec![],
             slot_context: SlotContext::default(),
+            sibling_instructions: vec![],
         };
 
         let result = adapter.execute_instruction(&info, MAX_COMPUTE_UNITS);
@@ -205,6 +207,7 @@ mod tests {
             accounts: vec![(program_id, program_account, false, false)],
             data: vec![],
             slot_context: SlotContext::default(),
+            sibling_instructions: vec![],
         };
 
         let result = adapter.execute_instruction(&info, MAX_COMPUTE_UNITS);
