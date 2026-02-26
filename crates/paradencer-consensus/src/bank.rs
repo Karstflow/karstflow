@@ -1162,13 +1162,39 @@ impl Bank {
 
     /// Regenerate leader schedule for the next epoch based on current stakes.
     ///
+    /// Maps vote account stakes to node identities via the vote account cache,
+    /// then aggregates total stake per node. Multiple vote accounts owned by
+    /// the same validator node are merged. Falls back to vote account pubkeys
+    /// as identities when the cache is unavailable.
+    ///
     /// The computed schedule is stored in `next_leader_schedule` so that
     /// `new_from_parent` can propagate it to child banks in the next epoch.
     fn regenerate_leader_schedule(&self) {
         if let Some(ref tracker_lock) = self.stake_tracker {
             let tracker = tracker_lock.read().unwrap();
             let stakes = tracker.stake_by_vote_account();
-            let validators: Vec<(Pubkey, u64)> = stakes.into_iter().collect();
+
+            // Map vote account stakes to node identities via the vote cache.
+            let mut stake_by_node: std::collections::HashMap<Pubkey, u64> =
+                std::collections::HashMap::new();
+
+            if let Some(ref cache_lock) = self.vote_account_cache {
+                let cache = cache_lock.read().unwrap();
+                for (vote_pubkey, stake) in &stakes {
+                    let node = cache
+                        .node_pubkey(vote_pubkey)
+                        .copied()
+                        .unwrap_or(*vote_pubkey);
+                    *stake_by_node.entry(node).or_insert(0) += stake;
+                }
+            } else {
+                // No vote cache — use vote account pubkeys as fallback.
+                for (vote_pubkey, stake) in &stakes {
+                    *stake_by_node.entry(*vote_pubkey).or_insert(0) += stake;
+                }
+            }
+
+            let validators: Vec<(Pubkey, u64)> = stake_by_node.into_iter().collect();
 
             if !validators.is_empty() {
                 let next_epoch = self.epoch + 1;
@@ -3220,5 +3246,132 @@ mod tests {
         let bank = Bank::new_genesis(accounts, epoch_schedule, leader_schedule);
         // No cache or tracker attached — should be a no-op, not panic
         bank.refresh_vote_account_cache();
+    }
+
+    #[test]
+    fn regenerate_leader_schedule_uses_node_identities() {
+        let accounts = Arc::new(AccountDatabase::new());
+        let epoch_schedule = Arc::new(EpochSchedule::default());
+        let leader_schedule = create_test_leader_schedule(0);
+
+        let vote_a = Pubkey::new_unique();
+        let vote_b = Pubkey::new_unique();
+        let node_a = Pubkey::new_unique();
+        let node_b = Pubkey::new_unique();
+
+        // Set up stake tracker with two vote accounts
+        let mut tracker = StakeTracker::new(1);
+        tracker.add_delegation(
+            Pubkey::new_unique(),
+            crate::Delegation::new(vote_a, 3_000_000_000, 0),
+        );
+        tracker.add_delegation(
+            Pubkey::new_unique(),
+            crate::Delegation::new(vote_b, 7_000_000_000, 0),
+        );
+
+        // Set up vote cache mapping vote accounts → node identities
+        let mut vote_cache = VoteAccountCache::new();
+        vote_cache.update_from_vote_state(vote_a, node_a, 5, 100, 0);
+        vote_cache.update_from_vote_state(vote_b, node_b, 8, 200, 0);
+
+        // Store vote accounts in DB (needed for rewards path)
+        let empty_account = paradencer_storage::Account::new(1_000_000, vec![], Pubkey::default());
+        accounts.store_published_account(vote_a, empty_account.clone());
+        accounts.store_published_account(vote_b, empty_account);
+
+        let mut parent = Bank::new_genesis_with_config(
+            accounts,
+            epoch_schedule.clone(),
+            leader_schedule,
+            1_000_000_000_000,
+            Rent::default(),
+            Inflation::default(),
+        );
+        parent.set_stake_tracker(Arc::new(RwLock::new(tracker)));
+        parent.set_stake_history(Arc::new(RwLock::new(StakeHistory::new())));
+        parent.set_vote_account_cache(Arc::new(RwLock::new(vote_cache)));
+
+        // Create child at epoch boundary to trigger schedule regeneration
+        let slot = epoch_schedule.get_first_slot_in_epoch(1);
+        let child_schedule = create_test_leader_schedule(1);
+        let child = Bank::new_from_parent(&parent, slot, child_schedule);
+
+        // Process epoch boundary (triggers regenerate_leader_schedule)
+        for _ in 0..TICKS_PER_SLOT {
+            child.register_tick().unwrap();
+        }
+        child.finish_slot().unwrap();
+
+        let next = child.next_leader_schedule().unwrap();
+
+        // The schedule should contain node identities, not vote pubkeys
+        let slot_counts = next.validator_slot_counts();
+        assert!(
+            slot_counts.contains_key(&node_a) || slot_counts.contains_key(&node_b),
+            "Leader schedule should contain node identities"
+        );
+        assert!(
+            !slot_counts.contains_key(&vote_a) && !slot_counts.contains_key(&vote_b),
+            "Leader schedule should NOT contain vote account pubkeys"
+        );
+    }
+
+    #[test]
+    fn regenerate_leader_schedule_aggregates_same_node() {
+        let accounts = Arc::new(AccountDatabase::new());
+        let epoch_schedule = Arc::new(EpochSchedule::default());
+        let leader_schedule = create_test_leader_schedule(0);
+
+        let vote_a = Pubkey::new_unique();
+        let vote_b = Pubkey::new_unique();
+        let node = Pubkey::new_unique(); // Same node for both vote accounts
+
+        let mut tracker = StakeTracker::new(1);
+        tracker.add_delegation(
+            Pubkey::new_unique(),
+            crate::Delegation::new(vote_a, 3_000_000_000, 0),
+        );
+        tracker.add_delegation(
+            Pubkey::new_unique(),
+            crate::Delegation::new(vote_b, 7_000_000_000, 0),
+        );
+
+        // Both vote accounts owned by the same node
+        let mut vote_cache = VoteAccountCache::new();
+        vote_cache.update_from_vote_state(vote_a, node, 5, 100, 0);
+        vote_cache.update_from_vote_state(vote_b, node, 8, 200, 0);
+
+        let empty_account = paradencer_storage::Account::new(1_000_000, vec![], Pubkey::default());
+        accounts.store_published_account(vote_a, empty_account.clone());
+        accounts.store_published_account(vote_b, empty_account);
+
+        let mut parent = Bank::new_genesis_with_config(
+            accounts,
+            epoch_schedule.clone(),
+            leader_schedule,
+            1_000_000_000_000,
+            Rent::default(),
+            Inflation::default(),
+        );
+        parent.set_stake_tracker(Arc::new(RwLock::new(tracker)));
+        parent.set_stake_history(Arc::new(RwLock::new(StakeHistory::new())));
+        parent.set_vote_account_cache(Arc::new(RwLock::new(vote_cache)));
+
+        let slot = epoch_schedule.get_first_slot_in_epoch(1);
+        let child_schedule = create_test_leader_schedule(1);
+        let child = Bank::new_from_parent(&parent, slot, child_schedule);
+
+        for _ in 0..TICKS_PER_SLOT {
+            child.register_tick().unwrap();
+        }
+        child.finish_slot().unwrap();
+
+        let next = child.next_leader_schedule().unwrap();
+        let slot_counts = next.validator_slot_counts();
+
+        // Only one validator (node), with combined 10B stake → gets all slots
+        assert_eq!(slot_counts.len(), 1);
+        assert!(slot_counts.contains_key(&node));
     }
 }
