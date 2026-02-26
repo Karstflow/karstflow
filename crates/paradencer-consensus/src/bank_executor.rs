@@ -79,6 +79,10 @@ pub struct InstructionResult {
     pub logs: Vec<String>,
     /// Error description when `success` is false.
     pub error: Option<String>,
+    /// Return data set by the program via `set_return_data` syscall.
+    /// Contains the program ID and the returned bytes. Only the last
+    /// instruction's return data is preserved in the transaction result.
+    pub return_data: Option<(Pubkey, Vec<u8>)>,
 }
 
 /// Pluggable backend for executing transaction instructions.
@@ -182,6 +186,9 @@ pub struct TransactionExecutionResult {
     pub error: Option<TransactionExecutionError>,
     /// Vote updates extracted from vote program instructions.
     pub vote_updates: Vec<VoteUpdate>,
+    /// Return data from the last instruction that set it.
+    /// Contains the program ID that produced the data and the bytes.
+    pub return_data: Option<(Pubkey, Vec<u8>)>,
 }
 
 /// Errors that can occur during transaction execution.
@@ -928,6 +935,7 @@ impl Bank {
                 logs: vec![],
                 error: Some(TransactionExecutionError::BankNotProcessing),
                 vote_updates: vec![],
+                return_data: None,
             };
         }
 
@@ -941,6 +949,7 @@ impl Bank {
                 logs: vec![],
                 error: Some(e),
                 vote_updates: vec![],
+                return_data: None,
             };
         }
 
@@ -957,6 +966,7 @@ impl Bank {
                     limit: MAX_INSTRUCTIONS_PER_TRANSACTION,
                 }),
                 vote_updates: vec![],
+                return_data: None,
             };
         }
 
@@ -987,6 +997,7 @@ impl Bank {
                         logs: vec![],
                         error: Some(TransactionExecutionError::BlockhashNotRecent),
                         vote_updates: vec![],
+                        return_data: None,
                     };
                 }
             }
@@ -1003,6 +1014,7 @@ impl Bank {
                     logs: vec![],
                     error: Some(err),
                     vote_updates: vec![],
+                    return_data: None,
                 };
             }
         }
@@ -1023,6 +1035,7 @@ impl Bank {
                     logs: vec![],
                     error: Some(TransactionExecutionError::DuplicateTransaction),
                     vote_updates: vec![],
+                    return_data: None,
                 };
             }
         }
@@ -1052,6 +1065,7 @@ impl Bank {
                     e
                 ))),
                 vote_updates: vec![],
+                return_data: None,
             };
         }
 
@@ -1073,6 +1087,7 @@ impl Bank {
                     logs: vec![],
                     error: Some(err),
                     vote_updates: vec![],
+                    return_data: None,
                 };
             }
         };
@@ -1101,6 +1116,7 @@ impl Bank {
                     logs: vec![],
                     error: Some(TransactionExecutionError::FeePayerNotFound),
                     vote_updates: vec![],
+                    return_data: None,
                 };
             }
         };
@@ -1117,6 +1133,7 @@ impl Bank {
                     logs: vec![],
                     error: Some(TransactionExecutionError::InvalidAccountForFee),
                     vote_updates: vec![],
+                    return_data: None,
                 };
             }
         };
@@ -1141,6 +1158,7 @@ impl Bank {
                     available: available_for_fee,
                 }),
                 vote_updates: vec![],
+                return_data: None,
             };
         }
 
@@ -1161,6 +1179,7 @@ impl Bank {
                     account: *fee_payer,
                 }),
                 vote_updates: vec![],
+                return_data: None,
             };
         }
 
@@ -1175,6 +1194,7 @@ impl Bank {
         let mut all_logs = Vec::new();
         let mut modified = HashMap::new();
         let mut exec_error: Option<TransactionExecutionError> = None;
+        let mut return_data: Option<(Pubkey, Vec<u8>)> = None;
 
         'execution: for (idx, instruction) in transaction.instructions.iter().enumerate() {
             // Resolve program id
@@ -1256,6 +1276,11 @@ impl Bank {
             // Merge modified accounts
             for (k, v) in result.modified_accounts {
                 modified.insert(k, v);
+            }
+
+            // Capture return data from the last instruction that set it
+            if result.return_data.is_some() {
+                return_data = result.return_data;
             }
 
             // Check compute budget
@@ -1365,6 +1390,7 @@ impl Bank {
                 logs: all_logs,
                 error: Some(error),
                 vote_updates: vec![],
+                return_data: None,
             };
         }
 
@@ -1441,6 +1467,7 @@ impl Bank {
             logs: all_logs,
             error: None,
             vote_updates,
+            return_data,
         }
     }
 
@@ -1658,6 +1685,7 @@ mod tests {
                 modified_accounts: modified,
                 logs: vec!["ok".to_string()],
                 error: None,
+                return_data: None,
             }
         }
     }
@@ -1677,6 +1705,7 @@ mod tests {
                 modified_accounts: HashMap::new(),
                 logs: vec!["error: custom program error".to_string()],
                 error: Some("custom program error".to_string()),
+                return_data: None,
             }
         }
     }
@@ -1697,6 +1726,7 @@ mod tests {
                     modified_accounts: HashMap::new(),
                     logs: vec![],
                     error: Some("need at least 2 accounts".to_string()),
+                    return_data: None,
                 };
             }
 
@@ -1717,6 +1747,7 @@ mod tests {
                     modified_accounts: HashMap::new(),
                     logs: vec!["insufficient balance".to_string()],
                     error: Some("insufficient balance".to_string()),
+                    return_data: None,
                 };
             }
 
@@ -1733,6 +1764,7 @@ mod tests {
                 modified_accounts: modified,
                 logs: vec![format!("transferred {amount} lamports")],
                 error: None,
+                return_data: None,
             }
         }
     }
@@ -2000,6 +2032,7 @@ mod tests {
                     modified_accounts: HashMap::new(),
                     logs: vec![],
                     error: None,
+                    return_data: None,
                 }
             }
         }
@@ -3908,6 +3941,7 @@ mod tests {
                     modified_accounts: modified,
                     logs: vec![],
                     error: None,
+                    return_data: None,
                 }
             }
         }

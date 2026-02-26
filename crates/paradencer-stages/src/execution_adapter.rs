@@ -89,6 +89,9 @@ impl ExecutionBackend for SbpfExecutionAdapter {
             modified_accounts: outcome.modified_accounts,
             logs: outcome.logs,
             error,
+            return_data: outcome
+                .return_data
+                .map(|data| (instruction.program_id, data)),
         }
     }
 }

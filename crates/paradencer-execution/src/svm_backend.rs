@@ -47,7 +47,7 @@ impl ExecutionBackend for SbpfBackend {
     ) -> InstructionResult {
         let context = to_execution_context(instruction, remaining_compute_units);
         let outcome = self.processor.execute_instruction(&context);
-        to_instruction_result(outcome)
+        to_instruction_result(outcome, instruction.program_id)
     }
 }
 
@@ -95,7 +95,10 @@ fn to_execution_context(
 }
 
 /// Convert an sBPF `ExecutionOutcome` into a consensus `InstructionResult`.
-fn to_instruction_result(outcome: ExecutionOutcome) -> InstructionResult {
+fn to_instruction_result(
+    outcome: ExecutionOutcome,
+    program_id: paradencer_storage::Pubkey,
+) -> InstructionResult {
     let error = if outcome.success {
         None
     } else {
@@ -114,6 +117,7 @@ fn to_instruction_result(outcome: ExecutionOutcome) -> InstructionResult {
         modified_accounts: outcome.modified_accounts,
         logs: outcome.logs,
         error,
+        return_data: outcome.return_data.map(|data| (program_id, data)),
     }
 }
 
@@ -214,7 +218,7 @@ mod tests {
             return_data: Some(vec![0xFF]),
         };
 
-        let result = to_instruction_result(outcome);
+        let result = to_instruction_result(outcome, Pubkey::default());
 
         assert!(result.success);
         assert_eq!(result.compute_units_consumed, 1_500);
@@ -237,7 +241,7 @@ mod tests {
             return_data: None,
         };
 
-        let result = to_instruction_result(outcome);
+        let result = to_instruction_result(outcome, Pubkey::default());
 
         assert!(!result.success);
         assert_eq!(result.compute_units_consumed, 500);
@@ -257,7 +261,7 @@ mod tests {
             return_data: None,
         };
 
-        let result = to_instruction_result(outcome);
+        let result = to_instruction_result(outcome, Pubkey::default());
 
         assert!(!result.success);
         assert_eq!(

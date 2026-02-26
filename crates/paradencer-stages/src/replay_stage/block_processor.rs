@@ -81,6 +81,7 @@ impl ExecutionBackend for NoopBackend {
             modified_accounts: std::collections::HashMap::new(),
             logs: vec!["no execution backend configured".to_string()],
             error: Some("no execution backend configured".to_string()),
+            return_data: None,
         }
     }
 }
@@ -1163,6 +1164,7 @@ mod tests {
                 modified_accounts: modified,
                 logs: vec!["ok".to_string()],
                 error: None,
+                return_data: None,
             }
         }
     }
