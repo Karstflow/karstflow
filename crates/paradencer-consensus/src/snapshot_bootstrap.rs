@@ -127,6 +127,48 @@ impl From<BankForksError> for BootstrapError {
 
 /// Bootstrap a validator from a snapshot restore result.
 ///
+/// Collect (validator_identity, total_stake) pairs from snapshot accounts.
+///
+/// Scans stake and vote accounts to build a mapping from each validator's
+/// node identity to their total delegated stake. This is used to construct
+/// the leader schedule before full bootstrap, since `bootstrap_from_snapshot`
+/// requires a leader schedule parameter.
+///
+/// Returns a sorted (descending by stake) vector. Returns an empty vector
+/// if no delegated stake accounts are found.
+pub fn collect_validator_stakes(accounts: &AccountDatabase) -> Vec<(Pubkey, u64)> {
+    use std::collections::HashMap;
+
+    // Step 1: Build vote_pubkey → node_identity map from vote accounts.
+    let vote_accounts = accounts.get_accounts_by_owner(&VOTE_PROGRAM_ID);
+    let mut vote_to_node: HashMap<Pubkey, Pubkey> = HashMap::with_capacity(vote_accounts.len());
+    for (vote_pubkey, account) in &vote_accounts {
+        if let Some((node_pubkey, _commission, _last_vote)) =
+            parse_vote_metadata(account.data.as_ref())
+        {
+            vote_to_node.insert(*vote_pubkey, node_pubkey);
+        }
+    }
+
+    // Step 2: Aggregate stake per node identity via stake delegations.
+    let stake_accounts = accounts.get_accounts_by_owner(&STAKE_PROGRAM_ID);
+    let mut node_stakes: HashMap<Pubkey, u64> = HashMap::new();
+    for (_pubkey, account) in &stake_accounts {
+        if let Ok(StakeState::Delegated(_meta, stake, _flags)) =
+            deserialize_stake_state(account.data.as_ref())
+        {
+            if let Some(&node) = vote_to_node.get(&stake.delegation.voter_pubkey) {
+                *node_stakes.entry(node).or_insert(0) += stake.delegation.stake_amount;
+            }
+        }
+    }
+
+    // Sort descending by stake for deterministic schedule generation.
+    let mut result: Vec<(Pubkey, u64)> = node_stakes.into_iter().collect();
+    result.sort_by(|a, b| b.1.cmp(&a.1));
+    result
+}
+
 /// This function performs the complete initialization sequence:
 /// 1. Constructs a `Bank` from the snapshot bank state
 /// 2. Computes the cumulative lattice hash from all restored accounts
@@ -1997,5 +2039,69 @@ mod tests {
         assert_eq!(entry.node_pubkey, node_pubkey);
         assert_eq!(entry.commission, 12);
         assert_eq!(entry.last_vote_slot, 0);
+    }
+
+    #[test]
+    fn collect_validator_stakes_from_accounts() {
+        let accounts = AccountDatabase::new();
+        let node_a = Pubkey::new_unique();
+        let node_b = Pubkey::new_unique();
+        let vote_a = Pubkey::new_unique();
+        let vote_b = Pubkey::new_unique();
+
+        // Create two vote accounts (node_a at vote_a, node_b at vote_b).
+        fn make_vote_data(node: &Pubkey, commission: u8) -> Vec<u8> {
+            let mut data = vec![0u8; 101];
+            data[..32].copy_from_slice(node.as_ref());
+            data[96] = commission;
+            // zero votes (u32 at 97..101 already zeroed)
+            data
+        }
+        accounts.store_published_account(
+            vote_a,
+            Account::new(1_000_000, make_vote_data(&node_a, 10), VOTE_PROGRAM_ID),
+        );
+        accounts.store_published_account(
+            vote_b,
+            Account::new(1_000_000, make_vote_data(&node_b, 5), VOTE_PROGRAM_ID),
+        );
+
+        // Create stake delegations: 3M to vote_a, 7M to vote_b.
+        let meta = Meta::new(
+            2_282_880,
+            Authorized::new(Pubkey::new_unique(), Pubkey::new_unique()),
+            Lockup::default(),
+        );
+        let stake_a = StakeAccount::new(Delegation::new(vote_a, 3_000_000, 0), 0);
+        let data_a = serialize_stake_state(&StakeState::Delegated(
+            meta.clone(),
+            stake_a,
+            Default::default(),
+        ));
+        accounts.store_published_account(
+            Pubkey::new_unique(),
+            Account::new(3_000_000 + 2_282_880, data_a, STAKE_PROGRAM_ID),
+        );
+
+        let stake_b = StakeAccount::new(Delegation::new(vote_b, 7_000_000, 0), 0);
+        let data_b =
+            serialize_stake_state(&StakeState::Delegated(meta, stake_b, Default::default()));
+        accounts.store_published_account(
+            Pubkey::new_unique(),
+            Account::new(7_000_000 + 2_282_880, data_b, STAKE_PROGRAM_ID),
+        );
+
+        let stakes = collect_validator_stakes(&accounts);
+        assert_eq!(stakes.len(), 2);
+        // Sorted descending by stake.
+        assert_eq!(stakes[0], (node_b, 7_000_000));
+        assert_eq!(stakes[1], (node_a, 3_000_000));
+    }
+
+    #[test]
+    fn collect_validator_stakes_empty_when_no_delegations() {
+        let accounts = AccountDatabase::new();
+        let stakes = collect_validator_stakes(&accounts);
+        assert!(stakes.is_empty());
     }
 }

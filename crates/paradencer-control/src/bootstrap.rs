@@ -8,8 +8,9 @@ use crate::{
 };
 use paradencer_config::{NodeConfig, ValidatorIdentity};
 use paradencer_consensus::{
-    bootstrap_from_snapshot, Bank, BankForks, CommitmentTracker, EpochSchedule, ForkChoice,
-    LeaderSchedule, StakeTracker, Tower, VoteProcessor, VoteProcessorConfig,
+    bootstrap_from_snapshot, collect_validator_stakes, Bank, BankForks, CommitmentTracker,
+    EpochSchedule, ForkChoice, LeaderSchedule, StakeTracker, Tower, VoteProcessor,
+    VoteProcessorConfig,
 };
 use paradencer_core::{ExecutionMode, LinkKind, PinnedCorePolicy, StageKind};
 use paradencer_execution::ExecutionBridge;
@@ -438,14 +439,28 @@ pub fn restore_from_snapshot_archive(
         });
     }
 
-    // Create a temporary leader schedule for the restored epoch.
-    // The bootstrap_from_snapshot function requires a schedule for the Bank.
-    // This uses a placeholder identity; the replay service will compute the
-    // real schedule from stake data once consensus is running.
-    let placeholder_validator = Pubkey::new([1u8; 32]);
+    // Build the initial leader schedule from stake delegations in the snapshot.
+    // Scans stake + vote accounts to map validator identities to their
+    // delegated stake, then generates a weighted leader schedule for the
+    // restored epoch.
+    let mut validators = collect_validator_stakes(&accounts);
+    if validators.is_empty() {
+        // Fallback for snapshots with no delegated stake (e.g., single-node devnet).
+        // Use a zeroed pubkey; the replay service will recompute the schedule
+        // from live stake data once consensus is running.
+        validators.push((Pubkey::zeroed(), 1));
+        warn!("no delegated stake found in snapshot, using fallback for leader schedule");
+    }
     let leader_schedule = Arc::new(
-        LeaderSchedule::new(restore_result.slot, &[(placeholder_validator, 1)])
-            .expect("single-validator schedule should not fail"),
+        LeaderSchedule::new(restore_result.slot, &validators).map_err(|e| {
+            ControlPlaneError::Bootstrap {
+                message: format!("failed to build leader schedule from snapshot stakes: {e:?}"),
+            }
+        })?,
+    );
+    info!(
+        validators = validators.len(),
+        "leader schedule built from snapshot stake data",
     );
 
     let bootstrap_result = bootstrap_from_snapshot(accounts, &restore_result, leader_schedule)

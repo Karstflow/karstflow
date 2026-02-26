@@ -104,7 +104,7 @@ pub use bank_executor::{
 pub use cost_tracker::{CostTracker, CostTrackerError, TransactionCost};
 pub use features::{FeatureActivation, FeatureSet};
 pub use snapshot_bootstrap::{
-    bootstrap_from_genesis, bootstrap_from_snapshot, BootstrapError, BootstrapResult,
-    FeatureInitStats, GenesisBootstrapResult, StakeInitStats,
+    bootstrap_from_genesis, bootstrap_from_snapshot, collect_validator_stakes, BootstrapError,
+    BootstrapResult, FeatureInitStats, GenesisBootstrapResult, StakeInitStats,
 };
 pub use transaction_cache::{SeedEntry, TransactionCache};
