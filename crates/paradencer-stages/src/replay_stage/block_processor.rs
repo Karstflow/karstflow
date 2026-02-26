@@ -162,6 +162,12 @@ pub enum BlockProcessorError {
         expected: [u8; 32],
         actual: [u8; 32],
     },
+    /// Block did not contain enough tick entries to complete the slot.
+    IncompleteBlock {
+        slot: u64,
+        ticks_registered: u64,
+        ticks_required: u64,
+    },
     /// Commitment tracking error
     CommitmentError(String),
 }
@@ -530,13 +536,35 @@ impl BlockProcessor {
         Ok(TransactionResult::from_execution(tx_index, &exec_result))
     }
 
-    /// Complete remaining ticks for a slot
+    /// Complete remaining ticks for a slot.
+    ///
+    /// In production (PoH verification enabled), all tick entries must come
+    /// from the block's PoH chain — the bank should already be complete
+    /// after processing every entry. A block that leaves ticks unregistered
+    /// is malformed and rejected.
+    ///
+    /// With PoH verification disabled (tests), remaining ticks are padded
+    /// using deterministic placeholder hashes so tests that create minimal
+    /// blocks (transactions only) can still run.
     fn complete_slot_ticks(
         &self,
         bank: &Arc<Bank>,
         block: &AssembledBlock,
     ) -> Result<(), BlockProcessorError> {
-        // Register any remaining ticks to complete the slot
+        if bank.is_complete() {
+            return Ok(());
+        }
+
+        if self.verify_poh {
+            // Production: block must contain all tick entries.
+            return Err(BlockProcessorError::IncompleteBlock {
+                slot: block.slot,
+                ticks_registered: bank.tick_height(),
+                ticks_required: bank.max_tick_height(),
+            });
+        }
+
+        // Test mode: pad remaining ticks with synthetic hashes.
         while !bank.is_complete() {
             if let Err(e) = bank.register_tick() {
                 return Err(BlockProcessorError::TickRegistrationFailed {
@@ -565,13 +593,18 @@ impl BlockProcessor {
         Ok(())
     }
 
-    /// Process a tick entry (entry with no transactions)
-    pub fn process_tick(&self, bank: &Arc<Bank>) -> Result<(), BlockProcessorError> {
-        bank.register_tick()
-            .map_err(|e| BlockProcessorError::TickRegistrationFailed {
+    /// Process a tick entry with its verified PoH hash.
+    pub fn process_tick(
+        &self,
+        bank: &Arc<Bank>,
+        poh_hash: [u8; 32],
+    ) -> Result<(), BlockProcessorError> {
+        bank.register_tick_with_hash(poh_hash).map_err(|e| {
+            BlockProcessorError::TickRegistrationFailed {
                 slot: bank.slot(),
                 error: format!("{:?}", e),
-            })
+            }
+        })
     }
 
     /// Verify the PoH hash chain of entries in a block.
@@ -1679,11 +1712,13 @@ mod tests {
 
     #[test]
     fn process_block_verifies_poh_chain() {
+        use paradencer_constants::ledger::TICKS_PER_SLOT;
+
         let bank = create_test_bank();
         let initial_hash = bank.last_blockhash();
 
-        // Create a block with valid PoH chain
-        let block = create_poh_block(0, initial_hash, 3);
+        // Create a complete block with TICKS_PER_SLOT valid PoH tick entries.
+        let block = create_poh_block(0, initial_hash, TICKS_PER_SLOT as usize);
 
         let mut processor = BlockProcessor::new(
             Arc::new(ExecutionBridge::new()),
@@ -1692,7 +1727,7 @@ mod tests {
         assert!(processor.verify_poh); // verify enabled by default
 
         let outcome = processor.process_block(block, bank).unwrap();
-        assert_eq!(outcome.entry_count, 3);
+        assert_eq!(outcome.entry_count, TICKS_PER_SLOT as usize);
     }
 
     #[test]
@@ -1751,6 +1786,36 @@ mod tests {
         // Should succeed because PoH is disabled
         let outcome = processor.process_block(block, bank).unwrap();
         assert_eq!(outcome.entry_count, 1);
+    }
+
+    #[test]
+    fn process_block_rejects_incomplete_block_with_poh_enabled() {
+        let bank = create_test_bank();
+        let initial_hash = bank.last_blockhash();
+
+        // Create a valid PoH chain with only 3 ticks — fewer than TICKS_PER_SLOT.
+        let block = create_poh_block(0, initial_hash, 3);
+
+        let mut processor = BlockProcessor::new(
+            Arc::new(ExecutionBridge::new()),
+            Arc::new(Mutex::new(CommitmentTracker::default())),
+        );
+        assert!(processor.verify_poh);
+
+        let result = processor.process_block(block, bank);
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            BlockProcessorError::IncompleteBlock {
+                slot,
+                ticks_registered,
+                ticks_required,
+            } => {
+                assert_eq!(slot, 0);
+                assert_eq!(ticks_registered, 3);
+                assert_eq!(ticks_required, 64);
+            }
+            other => panic!("expected IncompleteBlock, got: {:?}", other),
+        }
     }
 
     #[test]
