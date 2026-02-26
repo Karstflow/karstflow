@@ -11,6 +11,7 @@ tracing.workspace = true
 paradencer-control = { path = "../paradencer-control" }
 paradencer-config = { path = "../paradencer-config" }
 paradencer-net = { path = "../paradencer-net" }
+paradencer-observability = { path = "../paradencer-observability" }
 paradencer-plugin = { path = "../paradencer-plugin" }
 paradencer-stages = { path = "../paradencer-stages" }
 paradencer-storage = { path = "../paradencer-storage" }

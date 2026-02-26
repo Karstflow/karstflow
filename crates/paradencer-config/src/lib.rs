@@ -81,6 +81,17 @@ pub struct NodeConfig {
     /// When set, the validator restores accounts from this archive on startup
     /// and initializes consensus from the snapshot bank state instead of genesis.
     pub snapshot_archive_path: Option<PathBuf>,
+    /// Minimum log level for stderr output. Defaults to "info".
+    /// Can be overridden by `RUST_LOG` environment variable.
+    pub log_stderr_level: String,
+    /// Path to persistent log file. When `None`, only stderr is used.
+    pub log_file_path: Option<PathBuf>,
+    /// Minimum log level for the log file. Defaults to "info".
+    pub log_file_level: String,
+    /// Use ANSI color codes in stderr output. Defaults to true.
+    pub log_colorize: bool,
+    /// Use JSON format for the log file. Defaults to false.
+    pub log_json_file: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -160,6 +171,18 @@ impl NodeConfig {
             .ok()
             .map(PathBuf::from);
 
+        let log_stderr_level =
+            std::env::var("PARADENCER_LOG_STDERR_LEVEL").unwrap_or_else(|_| "info".to_string());
+        let log_file_path = std::env::var("PARADENCER_LOG_FILE").ok().map(PathBuf::from);
+        let log_file_level =
+            std::env::var("PARADENCER_LOG_FILE_LEVEL").unwrap_or_else(|_| "info".to_string());
+        let log_colorize = std::env::var("PARADENCER_LOG_COLORIZE")
+            .map(|v| v != "false" && v != "0")
+            .unwrap_or(true);
+        let log_json_file = std::env::var("PARADENCER_LOG_JSON_FILE")
+            .map(|v| v == "true" || v == "1")
+            .unwrap_or(false);
+
         Ok(Self {
             cluster_mode,
             identity_keypair_path,
@@ -183,6 +206,11 @@ impl NodeConfig {
             data_dir,
             plugin_config_files,
             snapshot_archive_path,
+            log_stderr_level,
+            log_file_path,
+            log_file_level,
+            log_colorize,
+            log_json_file,
         })
     }
 

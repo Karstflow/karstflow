@@ -1,3 +1,4 @@
+use paradencer_observability::{init_tracing, TracingConfig};
 use paradencer_plugin::PluginService;
 use tracing::{info, warn};
 
@@ -28,9 +29,24 @@ fn main() -> paradencer_control::Result<()> {
     )
 }
 
+fn init_tracing_from_config(
+    node_config: &paradencer_config::NodeConfig,
+) -> paradencer_control::Result<paradencer_observability::TracingGuard> {
+    let tracing_config = TracingConfig {
+        stderr_level: node_config.log_stderr_level.clone(),
+        file_level: node_config.log_file_level.clone(),
+        log_file_path: node_config.log_file_path.clone(),
+        colorize_stderr: node_config.log_colorize,
+        json_file_format: node_config.log_json_file,
+    };
+    init_tracing(&tracing_config).map_err(paradencer_control::ControlPlaneError::from)
+}
+
 fn run_with_node_config(
     node_config: paradencer_config::NodeConfig,
 ) -> paradencer_control::Result<()> {
+    let _tracing_guard = init_tracing_from_config(&node_config)?;
+
     // Initialize the plugin service. Loads external plugins from JSON config files
     // specified via PARADENCER_PLUGIN_CONFIG env var (comma-separated paths).
     let mut plugin_service = if node_config.plugin_config_files.is_empty() {
@@ -365,6 +381,7 @@ fn preflight_with_node_config(
     probe_ticks: u32,
     mainnet_readiness: bool,
 ) -> paradencer_control::Result<()> {
+    let _tracing_guard = init_tracing_from_config(&node_config)?;
     let mut materialized_topology = materialize_services_from_config(&node_config)?;
     if !mainnet_readiness {
         return run_preflight_phase(
@@ -410,6 +427,7 @@ fn diagnostics_with_node_config(
     probe_ticks: u32,
     mainnet_readiness: bool,
 ) -> paradencer_control::Result<()> {
+    let _tracing_guard = init_tracing_from_config(&node_config)?;
     let mut materialized_topology = materialize_services_from_config(&node_config)?;
     let diagnostics_summary = run_diagnostics_phase(
         &node_config,

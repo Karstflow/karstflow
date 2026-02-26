@@ -11,4 +11,6 @@ pub enum ObservabilityError {
     },
     #[error("failed to spawn metrics HTTP bridge thread: {0}")]
     MetricsHttpThreadSpawn(std::io::Error),
+    #[error("failed to initialize tracing subscriber: {0}")]
+    TracingInit(String),
 }
