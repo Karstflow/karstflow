@@ -78,3 +78,72 @@ pub fn secp256k1_recover(
     result.copy_from_slice(&bytes[1..]);
     Ok(result)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use paradencer_types::Pubkey;
+
+    fn ctx(budget: u64) -> SyscallContext {
+        SyscallContext::new(Pubkey::new([0u8; 32]), budget)
+    }
+
+    #[test]
+    fn sha256_deterministic() {
+        let mut c1 = ctx(100_000);
+        let mut c2 = ctx(100_000);
+        let h1 = sha256(&mut c1, b"test data").unwrap();
+        let h2 = sha256(&mut c2, b"test data").unwrap();
+        assert_eq!(h1, h2);
+    }
+
+    #[test]
+    fn sha256_different_inputs_differ() {
+        let mut c1 = ctx(100_000);
+        let mut c2 = ctx(100_000);
+        let h1 = sha256(&mut c1, b"aaa").unwrap();
+        let h2 = sha256(&mut c2, b"bbb").unwrap();
+        assert_ne!(h1, h2);
+    }
+
+    #[test]
+    fn sha256_consumes_compute() {
+        let mut c = ctx(5);
+        assert!(sha256(&mut c, b"hello").is_err());
+    }
+
+    #[test]
+    fn keccak256_deterministic() {
+        let mut c1 = ctx(100_000);
+        let mut c2 = ctx(100_000);
+        let h1 = keccak256(&mut c1, b"test data").unwrap();
+        let h2 = keccak256(&mut c2, b"test data").unwrap();
+        assert_eq!(h1, h2);
+    }
+
+    #[test]
+    fn keccak256_different_inputs_differ() {
+        let mut c1 = ctx(100_000);
+        let mut c2 = ctx(100_000);
+        let h1 = keccak256(&mut c1, b"aaa").unwrap();
+        let h2 = keccak256(&mut c2, b"bbb").unwrap();
+        assert_ne!(h1, h2);
+    }
+
+    #[test]
+    fn sha256_and_keccak256_differ() {
+        let mut c1 = ctx(100_000);
+        let mut c2 = ctx(100_000);
+        let h1 = sha256(&mut c1, b"hello").unwrap();
+        let h2 = keccak256(&mut c2, b"hello").unwrap();
+        assert_ne!(h1, h2);
+    }
+
+    #[test]
+    fn secp256k1_recover_rejects_bad_recovery_id() {
+        let mut c = ctx(100_000);
+        let hash = [0u8; 32];
+        let sig = [0u8; 64];
+        assert!(secp256k1_recover(&mut c, &hash, 4, &sig).is_err());
+    }
+}

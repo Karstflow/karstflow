@@ -97,3 +97,75 @@ fn encode_base64(data: &[u8]) -> String {
 
     result
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use paradencer_types::Pubkey;
+
+    fn ctx(budget: u64) -> SyscallContext {
+        SyscallContext::new(Pubkey::new([0u8; 32]), budget)
+    }
+
+    #[test]
+    fn sol_log_appends_message() {
+        let mut c = ctx(100_000);
+        sol_log(&mut c, "hello world").unwrap();
+        assert_eq!(c.logs.len(), 1);
+        assert!(c.logs[0].contains("hello world"));
+    }
+
+    #[test]
+    fn sol_log_consumes_compute() {
+        let mut c = ctx(5);
+        assert!(sol_log(&mut c, "this message exceeds budget").is_err());
+    }
+
+    #[test]
+    fn sol_log_data_encodes_base64() {
+        let mut c = ctx(100_000);
+        sol_log_data(&mut c, &[b"test"]).unwrap();
+        assert_eq!(c.logs.len(), 1);
+        assert!(c.logs[0].starts_with("Program data: "));
+    }
+
+    #[test]
+    fn sol_log_data_multiple_slices() {
+        let mut c = ctx(100_000);
+        sol_log_data(&mut c, &[b"ab", b"cd"]).unwrap();
+        assert_eq!(c.logs.len(), 1);
+        // Should have two base64 parts separated by space
+        let data_part = c.logs[0].strip_prefix("Program data: ").unwrap();
+        assert_eq!(data_part.split(' ').count(), 2);
+    }
+
+    #[test]
+    fn sol_log_compute_units_reports_remaining() {
+        let mut c = ctx(50_000);
+        sol_log_compute_units(&mut c).unwrap();
+        assert_eq!(c.logs.len(), 1);
+        assert!(c.logs[0].contains("remaining"));
+    }
+
+    #[test]
+    fn sol_log_pubkey_logs_base58() {
+        let mut c = ctx(100_000);
+        let pk = [1u8; 32];
+        sol_log_pubkey(&mut c, &pk).unwrap();
+        assert_eq!(c.logs.len(), 1);
+        // base58 of [1;32] is a specific string
+        assert!(c.logs[0].starts_with("Program log: "));
+    }
+
+    #[test]
+    fn encode_base64_empty() {
+        assert_eq!(encode_base64(b""), "");
+    }
+
+    #[test]
+    fn encode_base64_known_values() {
+        assert_eq!(encode_base64(b"f"), "Zg==");
+        assert_eq!(encode_base64(b"fo"), "Zm8=");
+        assert_eq!(encode_base64(b"foo"), "Zm9v");
+    }
+}

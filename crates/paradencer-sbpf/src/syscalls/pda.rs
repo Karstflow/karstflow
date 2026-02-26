@@ -105,3 +105,115 @@ pub fn try_find_program_address(
 
     Err(SyscallError::InvalidProgramAddress)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn ctx(budget: u64) -> SyscallContext {
+        SyscallContext::new(Pubkey::new([0u8; 32]), budget)
+    }
+
+    fn program_id() -> Pubkey {
+        Pubkey::new([1u8; 32])
+    }
+
+    #[test]
+    fn create_program_address_with_known_bump() {
+        // Use try_find to get a valid seed+bump, then verify create_program_address works
+        let mut c = ctx(10_000_000);
+        let pid = program_id();
+        let (pda, bump) = try_find_program_address(&mut c, &[b"test"], &pid).unwrap();
+        let mut c2 = ctx(1_000_000);
+        let pda2 = create_program_address(&mut c2, &[b"test", &[bump]], &pid).unwrap();
+        assert_eq!(pda, pda2);
+    }
+
+    #[test]
+    fn create_program_address_deterministic() {
+        let mut c1 = ctx(10_000_000);
+        let pid = program_id();
+        let (_, bump) = try_find_program_address(&mut c1, &[b"det"], &pid).unwrap();
+        let mut c2 = ctx(1_000_000);
+        let mut c3 = ctx(1_000_000);
+        let pda1 = create_program_address(&mut c2, &[b"det", &[bump]], &pid).unwrap();
+        let pda2 = create_program_address(&mut c3, &[b"det", &[bump]], &pid).unwrap();
+        assert_eq!(pda1, pda2);
+    }
+
+    #[test]
+    fn create_program_address_different_seeds_differ() {
+        let mut c = ctx(20_000_000);
+        let pid = program_id();
+        let (_, bump_a) = try_find_program_address(&mut c, &[b"diff_a"], &pid).unwrap();
+        let (_, bump_b) = try_find_program_address(&mut c, &[b"diff_b"], &pid).unwrap();
+        let mut c1 = ctx(1_000_000);
+        let mut c2 = ctx(1_000_000);
+        let pda1 = create_program_address(&mut c1, &[b"diff_a", &[bump_a]], &pid).unwrap();
+        let pda2 = create_program_address(&mut c2, &[b"diff_b", &[bump_b]], &pid).unwrap();
+        assert_ne!(pda1, pda2);
+    }
+
+    #[test]
+    fn create_program_address_rejects_too_many_seeds() {
+        let mut c = ctx(1_000_000);
+        let pid = program_id();
+        let seeds: Vec<&[u8]> = (0..MAX_SIGNER_SEEDS + 1).map(|_| b"x" as &[u8]).collect();
+        assert!(matches!(
+            create_program_address(&mut c, &seeds, &pid),
+            Err(SyscallError::InvalidSeeds)
+        ));
+    }
+
+    #[test]
+    fn create_program_address_rejects_oversized_seed() {
+        let mut c = ctx(1_000_000);
+        let pid = program_id();
+        let big_seed = vec![0u8; MAX_SEED_BYTES + 1];
+        assert!(matches!(
+            create_program_address(&mut c, &[&big_seed], &pid),
+            Err(SyscallError::InvalidSeeds)
+        ));
+    }
+
+    #[test]
+    fn try_find_program_address_returns_pda_and_bump() {
+        let mut c = ctx(10_000_000);
+        let pid = program_id();
+        let (pda, bump) = try_find_program_address(&mut c, &[b"find_me"], &pid).unwrap();
+        assert!(!pda.as_bytes().iter().all(|&b| b == 0));
+        // The bump should produce the same PDA via create_program_address
+        let mut c2 = ctx(1_000_000);
+        let pda2 = create_program_address(&mut c2, &[b"find_me", &[bump]], &pid).unwrap();
+        assert_eq!(pda, pda2);
+    }
+
+    #[test]
+    fn try_find_rejects_too_many_seeds() {
+        let mut c = ctx(1_000_000);
+        let pid = program_id();
+        // MAX_SIGNER_SEEDS seeds → adding bump would exceed limit
+        let seeds: Vec<&[u8]> = (0..MAX_SIGNER_SEEDS).map(|_| b"x" as &[u8]).collect();
+        assert!(matches!(
+            try_find_program_address(&mut c, &seeds, &pid),
+            Err(SyscallError::InvalidSeeds)
+        ));
+    }
+
+    #[test]
+    fn is_on_curve_accepts_identity() {
+        // The identity point of ed25519 (compressed form: [1, 0, ..., 0])
+        let mut bytes = [0u8; 32];
+        bytes[0] = 1;
+        assert!(is_on_ed25519_curve(&bytes));
+    }
+
+    #[test]
+    fn is_on_curve_rejects_invalid_point() {
+        // y=2 yields a non-quadratic-residue for x² on the ed25519 curve,
+        // so no valid point exists with this compressed encoding.
+        let mut bytes = [0u8; 32];
+        bytes[0] = 2;
+        assert!(!is_on_ed25519_curve(&bytes));
+    }
+}

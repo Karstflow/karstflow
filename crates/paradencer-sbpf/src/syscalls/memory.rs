@@ -117,3 +117,123 @@ pub fn sol_memset(
     dst[..len].fill(val);
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use paradencer_types::Pubkey;
+
+    fn ctx(budget: u64) -> SyscallContext {
+        SyscallContext::new(Pubkey::new([0u8; 32]), budget)
+    }
+
+    #[test]
+    fn memcpy_copies_bytes() {
+        let mut c = ctx(100_000);
+        let src = [1, 2, 3, 4, 5];
+        let mut dst = [0u8; 5];
+        sol_memcpy(&mut c, &mut dst, &src, 5).unwrap();
+        assert_eq!(dst, [1, 2, 3, 4, 5]);
+    }
+
+    #[test]
+    fn memcpy_partial() {
+        let mut c = ctx(100_000);
+        let src = [10, 20, 30];
+        let mut dst = [0u8; 5];
+        sol_memcpy(&mut c, &mut dst, &src, 2).unwrap();
+        assert_eq!(dst[..2], [10, 20]);
+        assert_eq!(dst[2], 0);
+    }
+
+    #[test]
+    fn memcpy_rejects_dst_too_small() {
+        let mut c = ctx(100_000);
+        let src = [1, 2, 3];
+        let mut dst = [0u8; 2];
+        assert!(sol_memcpy(&mut c, &mut dst, &src, 3).is_err());
+    }
+
+    #[test]
+    fn memcpy_rejects_src_too_small() {
+        let mut c = ctx(100_000);
+        let src = [1, 2];
+        let mut dst = [0u8; 5];
+        assert!(sol_memcpy(&mut c, &mut dst, &src, 3).is_err());
+    }
+
+    #[test]
+    fn memcpy_consumes_compute() {
+        let mut c = ctx(10);
+        let src = [0u8; 100];
+        let mut dst = [0u8; 100];
+        // Should exceed budget
+        assert!(sol_memcpy(&mut c, &mut dst, &src, 100).is_err());
+    }
+
+    #[test]
+    fn memcmp_equal() {
+        let mut c = ctx(100_000);
+        assert_eq!(sol_memcmp(&mut c, b"abc", b"abc", 3).unwrap(), 0);
+    }
+
+    #[test]
+    fn memcmp_less() {
+        let mut c = ctx(100_000);
+        let result = sol_memcmp(&mut c, b"abc", b"abd", 3).unwrap();
+        assert!(result < 0);
+    }
+
+    #[test]
+    fn memcmp_greater() {
+        let mut c = ctx(100_000);
+        let result = sol_memcmp(&mut c, b"abd", b"abc", 3).unwrap();
+        assert!(result > 0);
+    }
+
+    #[test]
+    fn memcmp_partial() {
+        let mut c = ctx(100_000);
+        assert_eq!(sol_memcmp(&mut c, b"abx", b"aby", 2).unwrap(), 0);
+    }
+
+    #[test]
+    fn memmove_copies_bytes() {
+        let mut c = ctx(100_000);
+        let src = [5, 6, 7];
+        let mut dst = [0u8; 3];
+        sol_memmove(&mut c, &mut dst, &src, 3).unwrap();
+        assert_eq!(dst, [5, 6, 7]);
+    }
+
+    #[test]
+    fn memmove_rejects_dst_too_small() {
+        let mut c = ctx(100_000);
+        let src = [1, 2, 3];
+        let mut dst = [0u8; 2];
+        assert!(sol_memmove(&mut c, &mut dst, &src, 3).is_err());
+    }
+
+    #[test]
+    fn memset_fills_value() {
+        let mut c = ctx(100_000);
+        let mut dst = [0u8; 5];
+        sol_memset(&mut c, &mut dst, 0xAB, 5).unwrap();
+        assert_eq!(dst, [0xAB; 5]);
+    }
+
+    #[test]
+    fn memset_partial() {
+        let mut c = ctx(100_000);
+        let mut dst = [0u8; 5];
+        sol_memset(&mut c, &mut dst, 0xFF, 3).unwrap();
+        assert_eq!(dst, [0xFF, 0xFF, 0xFF, 0, 0]);
+    }
+
+    #[test]
+    fn memset_rejects_dst_too_small() {
+        let mut c = ctx(100_000);
+        let mut dst = [0u8; 2];
+        assert!(sol_memset(&mut c, &mut dst, 0, 5).is_err());
+    }
+}
