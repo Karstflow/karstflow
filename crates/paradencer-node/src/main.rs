@@ -72,6 +72,11 @@ fn run_with_node_config(
         .expect("topology must provide shred block receiver");
     // Keep the direct shred sender alive so ShredCollector's input doesn't close.
     let _direct_shred_sender = runtime_topology.direct_shred_sender;
+    // Shred arrival receiver feeds the repair coordinator with turbine
+    // progress information so it avoids requesting shreds already received.
+    let shred_arrival_rx = runtime_topology
+        .shred_arrival_receiver
+        .unwrap_or_else(|| crossbeam_channel::bounded(1).1);
 
     // Choose bootstrap path: snapshot archive or genesis.
     // When PARADENCER_SNAPSHOT_ARCHIVE is set, restore from a Solana snapshot
@@ -296,13 +301,9 @@ fn run_with_node_config(
         consensus.vote_processor.clone(),
         consensus.bank_forks.clone(),
         shred_provider,
+        shred_arrival_rx,
     )?;
     let _repair_io = repair_bundle.io_handle;
-    // TODO: wire repair_bundle.shred_arrival_tx to the ShredCollector
-    // once the topology materializer supports post-creation wiring.
-    // Without this, the repair forest makes redundant requests for
-    // shreds already received via turbine — functional but suboptimal.
-    let _shred_arrival_tx = repair_bundle.shred_arrival_tx;
 
     // Keep a handle to bank forks for the live RPC snapshot provider.
     let rpc_bank_forks = consensus.bank_forks.clone();

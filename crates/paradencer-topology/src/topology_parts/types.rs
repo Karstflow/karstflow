@@ -1,7 +1,7 @@
 use paradencer_core::TopologySpec;
 use paradencer_mesh::{InPort, OutPort};
 use paradencer_runtime::Service;
-use paradencer_stages::{AssembledBlock, RawTransaction};
+use paradencer_stages::{AssembledBlock, RawTransaction, ShredArrival};
 use paradencer_types::shred::Shred;
 
 pub struct MaterializedTopology {
@@ -17,4 +17,8 @@ pub struct MaterializedTopology {
     /// Used by repair/catch-up paths to inject already-verified shreds directly.
     /// Must be kept alive to prevent the ShredCollector's input channel from closing.
     pub direct_shred_sender: Option<OutPort<Shred>>,
+    /// Receiver for shred arrival notifications from the ShredCollector.
+    /// Connect this to the repair coordinator so it tracks which shreds
+    /// have been received via turbine and avoids redundant requests.
+    pub shred_arrival_receiver: Option<crossbeam_channel::Receiver<ShredArrival>>,
 }

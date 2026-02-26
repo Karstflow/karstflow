@@ -9,8 +9,8 @@ use paradencer_runtime::Service;
 use paradencer_stages::{
     AssembledBlock, BlockAssembler, BlockAssemblyStats, CompletedFecSet, EdgeIntake, InboundPacket,
     IngressFilterStats, LinkTelemetryStats, MetricsOutputFormat, MetricsOutputTarget,
-    MetricsReporter, RawTransaction, SanitizedTransaction, ShredCollector, ShredFilter,
-    ShredFilterStats, ShredNetworkConfig, ShredNetworkService, StageTelemetryStats,
+    MetricsReporter, RawTransaction, SanitizedTransaction, ShredArrival, ShredCollector,
+    ShredFilter, ShredFilterStats, ShredNetworkConfig, ShredNetworkService, StageTelemetryStats,
     StorageRuntimePolicy, TxFilter,
 };
 use paradencer_storage::Blockstore;
@@ -130,6 +130,11 @@ pub fn materialize_services_with_blockstore(
     let (assembled_block_tx, assembled_block_rx) =
         bounded_link::<AssembledBlock>(block_pipeline_capacity);
 
+    // Channel for shred arrival notifications from the collector to the
+    // repair coordinator. The collector sends a ShredArrival for each
+    // received data shred so the repair forest can track turbine progress.
+    let (shred_arrival_tx, shred_arrival_rx) = crossbeam_channel::bounded::<ShredArrival>(4096);
+
     let ingress_filter_stats = Arc::new(IngressFilterStats::default());
     let shred_filter_stats = Arc::new(ShredFilterStats::default());
     let block_assembly_stats = Arc::new(BlockAssemblyStats::default());
@@ -197,6 +202,7 @@ pub fn materialize_services_with_blockstore(
                     if let Some(ref bs) = blockstore {
                         collector.set_blockstore(Arc::clone(bs));
                     }
+                    collector.set_repair_notifier(shred_arrival_tx.clone());
                     services.push(Box::new(collector));
                     shred_collector_added = true;
                 }
@@ -256,6 +262,11 @@ pub fn materialize_services_with_blockstore(
         pipeline_inputs,
         direct_shred_sender: if shred_collector_added {
             Some(direct_shred_tx)
+        } else {
+            None
+        },
+        shred_arrival_receiver: if shred_collector_added {
+            Some(shred_arrival_rx)
         } else {
             None
         },

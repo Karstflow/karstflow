@@ -1724,6 +1724,7 @@ dependencies = [
 name = "paradencer-topology"
 version = "0.1.0"
 dependencies = [
+ "crossbeam-channel",
  "paradencer-constants",
  "paradencer-core",
  "paradencer-mesh",

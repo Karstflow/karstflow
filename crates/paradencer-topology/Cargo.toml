@@ -8,6 +8,7 @@ authors.workspace = true
 [dependencies]
 thiserror.workspace = true
 toml.workspace = true
+crossbeam-channel = { workspace = true }
 paradencer-core = { path = "../paradencer-core" }
 paradencer-net = { path = "../paradencer-net" }
 paradencer-runtime = { path = "../paradencer-runtime" }

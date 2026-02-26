@@ -910,9 +910,6 @@ pub struct RepairBundle {
     pub service: Box<dyn Service>,
     /// Background I/O handle — must be kept alive.
     pub io_handle: RepairHandle,
-    /// Sender for shred arrival notifications. Attach to the ShredCollector
-    /// via `set_repair_notifier()` so the repair forest tracks received shreds.
-    pub shred_arrival_tx: crossbeam_channel::Sender<ShredArrival>,
 }
 
 /// Service adapter that wraps the poll-driven RepairCoordinator.
@@ -1138,15 +1135,13 @@ pub fn build_repair_service(
     vote_processor: Arc<Mutex<VoteProcessor>>,
     bank_forks: Arc<RwLock<BankForks>>,
     shred_provider: Option<Arc<dyn ShredProvider>>,
+    shred_arrival_rx: crossbeam_channel::Receiver<ShredArrival>,
 ) -> Result<RepairBundle> {
     let root_slot = bank_forks.read().unwrap().root_slot();
     let coordinator = RepairCoordinator::new(root_slot, RepairCoordinatorConfig::default());
 
     // Channel for forwarding outbound repair requests to the I/O thread.
     let (outbound_tx, outbound_rx) = crossbeam_channel::bounded::<OutboundRepair>(256);
-
-    // Channel for receiving shred arrival notifications from the collector.
-    let (shred_arrival_tx, shred_arrival_rx) = crossbeam_channel::bounded::<ShredArrival>(4096);
 
     let adapter = RepairServiceAdapter {
         coordinator,
@@ -1239,7 +1234,6 @@ pub fn build_repair_service(
             shutdown_tx: Some(shutdown_tx),
             _thread_handle: thread_handle,
         },
-        shred_arrival_tx,
     })
 }
 
