@@ -1754,6 +1754,92 @@ mod tests {
     }
 
     #[test]
+    fn dispatched_execution_produces_correct_results() {
+        let blockhash = [0u8; 32];
+        let bank = create_test_bank_with_blockhash(blockhash);
+
+        // Create three independent payers with funded accounts.
+        let keys: Vec<SigningKey> = (1..=3).map(|i| SigningKey::from_bytes(&[i; 32])).collect();
+        let payers: Vec<Pubkey> = keys
+            .iter()
+            .map(|k| Pubkey::from(k.verifying_key().to_bytes()))
+            .collect();
+
+        let program = Pubkey::new_unique();
+        let funded = Account::new(100_000_000, vec![], Pubkey::default());
+        for payer in &payers {
+            store_test_account(&bank, payer, &funded);
+        }
+
+        let backend: Arc<dyn ConsensusExecutionBackend> = Arc::new(TestPassthroughBackend);
+        let mut processor = BlockProcessor::with_backend(
+            Arc::new(ExecutionBridge::new()),
+            Arc::new(Mutex::new(CommitmentTracker::default())),
+            backend,
+        );
+        processor.verify_poh = false;
+        processor.lane_count = 2;
+
+        // Build three independent wire transactions.
+        let wire_txs: Vec<Vec<u8>> = keys
+            .iter()
+            .enumerate()
+            .map(|(i, key)| build_signed_wire_tx(key, &program, blockhash, vec![i as u8]))
+            .collect();
+
+        let mut vote_updates = Vec::new();
+        let results = processor
+            .apply_transactions(&wire_txs, &bank, 0, &mut vote_updates)
+            .expect("dispatched execution should not fail");
+
+        assert_eq!(results.len(), 3);
+        for (i, r) in results.iter().enumerate() {
+            assert!(r.success, "transaction {} should succeed: {:?}", i, r.error);
+            assert!(r.compute_units > 0);
+            assert_eq!(r.index, i);
+        }
+    }
+
+    #[test]
+    fn dispatched_execution_respects_dependency_order() {
+        let blockhash = [0u8; 32];
+        let bank = create_test_bank_with_blockhash(blockhash);
+
+        // Single payer — all transactions write to the payer account,
+        // creating WAW dependencies that force serial dispatch.
+        let signing_key = SigningKey::from_bytes(&[1u8; 32]);
+        let payer = Pubkey::from(signing_key.verifying_key().to_bytes());
+        let program = Pubkey::new_unique();
+        let funded = Account::new(100_000_000, vec![], Pubkey::default());
+        store_test_account(&bank, &payer, &funded);
+
+        let backend: Arc<dyn ConsensusExecutionBackend> = Arc::new(TestPassthroughBackend);
+        let mut processor = BlockProcessor::with_backend(
+            Arc::new(ExecutionBridge::new()),
+            Arc::new(Mutex::new(CommitmentTracker::default())),
+            backend,
+        );
+        processor.verify_poh = false;
+        processor.lane_count = 4;
+
+        // Three transactions from the same payer → all dependent via WAW on payer account.
+        let wire_txs: Vec<Vec<u8>> = (0..3)
+            .map(|i| build_signed_wire_tx(&signing_key, &program, blockhash, vec![i]))
+            .collect();
+
+        let mut vote_updates = Vec::new();
+        let results = processor
+            .apply_transactions(&wire_txs, &bank, 10, &mut vote_updates)
+            .expect("dispatched execution should not fail");
+
+        // All should execute (even though dependent) and preserve original order.
+        assert_eq!(results.len(), 3);
+        for (i, r) in results.iter().enumerate() {
+            assert_eq!(r.index, 10 + i);
+        }
+    }
+
+    #[test]
     fn tick_entry_updates_bank_last_blockhash() {
         let bank = create_test_bank();
         let initial_hash = bank.last_blockhash();

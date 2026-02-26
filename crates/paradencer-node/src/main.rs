@@ -90,7 +90,12 @@ fn run_with_node_config(
                 None
             }
         });
-    let repair_bundle = build_repair_service(node_id, cluster_info.clone(), shred_provider)?;
+    let repair_bundle = build_repair_service(
+        node_id,
+        cluster_info.clone(),
+        consensus.vote_processor.clone(),
+        shred_provider,
+    )?;
     let _repair_io = repair_bundle.io_handle;
 
     // Build the vote broadcast service. Monitors the shared Tower for

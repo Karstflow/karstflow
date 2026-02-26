@@ -599,6 +599,7 @@ pub struct RepairBundle {
 struct RepairServiceAdapter {
     coordinator: RepairCoordinator,
     cluster_info: Arc<ClusterInfo>,
+    vote_processor: Arc<Mutex<VoteProcessor>>,
     ticks_since_peer_sync: u32,
 }
 
@@ -650,12 +651,20 @@ impl Service for RepairServiceAdapter {
 
 impl RepairServiceAdapter {
     /// Sync the coordinator's peer list from gossip ClusterInfo.
+    ///
+    /// Builds a node identity → stake mapping from the vote processor's
+    /// registered vote accounts and their delegated stake, then adds
+    /// each gossip peer with its real stake weight.  Peers whose
+    /// identity does not appear in the stake map receive a fallback
+    /// weight of 1 so they still participate in repair.
     fn sync_peers_from_gossip(&mut self) {
+        let node_stakes = self.vote_processor.lock().unwrap().stake_by_node_identity();
         let all_peers = self.cluster_info.get_all();
         for contact in all_peers {
             let peer_id = contact.node_id.0;
-            // TODO: use actual stake from consensus/vote account data
-            self.coordinator.add_peer(peer_id, 1);
+            let node_key = paradencer_types::Pubkey::new(peer_id);
+            let stake = node_stakes.get(&node_key).copied().unwrap_or(1);
+            self.coordinator.add_peer(peer_id, stake);
         }
     }
 }
@@ -744,6 +753,7 @@ impl ShredProvider for BlockstoreShredProvider {
 pub fn build_repair_service(
     node_id: NodeId,
     cluster_info: Arc<ClusterInfo>,
+    vote_processor: Arc<Mutex<VoteProcessor>>,
     shred_provider: Option<Arc<dyn ShredProvider>>,
 ) -> Result<RepairBundle> {
     let coordinator = RepairCoordinator::new(0, RepairCoordinatorConfig::default());
@@ -751,6 +761,7 @@ pub fn build_repair_service(
     let adapter = RepairServiceAdapter {
         coordinator,
         cluster_info: Arc::clone(&cluster_info),
+        vote_processor,
         ticks_since_peer_sync: 0,
     };
 

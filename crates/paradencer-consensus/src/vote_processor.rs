@@ -429,6 +429,24 @@ impl VoteProcessor {
         self.total_stake
     }
 
+    /// Build a map from validator node identity to aggregated stake.
+    ///
+    /// Iterates all registered vote accounts, resolves each one's
+    /// `node_pubkey` (the validator's identity key), and sums the
+    /// effective stake delegated through each vote account.  The
+    /// result is suitable for weighting peers by stake in repair,
+    /// turbine, and gossip protocol logic.
+    pub fn stake_by_node_identity(&self) -> HashMap<Pubkey, u64> {
+        let mut result = HashMap::new();
+        for (vote_account, vote_state) in &self.vote_states {
+            let stake = self.stake_tracker.total_stake_for_voter(vote_account);
+            if stake > 0 {
+                *result.entry(vote_state.node_pubkey).or_insert(0) += stake;
+            }
+        }
+        result
+    }
+
     /// Get a list of vote accounts that have voted on a slot.
     pub fn voters_for_slot(&self, slot: u64) -> Vec<Pubkey> {
         self.slot_votes
@@ -927,5 +945,53 @@ mod tests {
         let stats = processor.get_stats();
         assert_eq!(stats.slots_propagated, 1); // slot 101 only (100 removed by fork switch)
         assert_eq!(stats.slots_with_supermajority, 1);
+    }
+
+    #[test]
+    fn stake_by_node_identity_aggregates_correctly() {
+        let mut processor = create_test_vote_processor();
+
+        // Two vote accounts for the SAME node identity.
+        let shared_node = Pubkey::new_unique();
+
+        let vote_a = Pubkey::new_unique();
+        let vote_b = Pubkey::new_unique();
+        let voter = Pubkey::new_unique();
+        let withdrawer = Pubkey::new_unique();
+
+        processor.register_vote_account(vote_a, VoteState::new(shared_node, voter, withdrawer, 5));
+        processor.register_vote_account(vote_b, VoteState::new(shared_node, voter, withdrawer, 5));
+
+        // Delegate stake through each vote account.
+        let d1 = Delegation::new(vote_a, 700, u64::MAX);
+        processor
+            .stake_tracker
+            .add_delegation(Pubkey::new_unique(), d1);
+        let d2 = Delegation::new(vote_b, 300, u64::MAX);
+        processor
+            .stake_tracker
+            .add_delegation(Pubkey::new_unique(), d2);
+
+        let by_node = processor.stake_by_node_identity();
+        assert_eq!(by_node.len(), 1);
+        assert_eq!(*by_node.get(&shared_node).unwrap(), 1000);
+    }
+
+    #[test]
+    fn stake_by_node_identity_excludes_zero_stake() {
+        let mut processor = create_test_vote_processor();
+
+        let (_vote_account, node) = setup_vote_account(&mut processor, 500);
+        // Register another vote account with no stake delegation.
+        let zero_node = Pubkey::new_unique();
+        processor.register_vote_account(
+            Pubkey::new_unique(),
+            VoteState::new(zero_node, Pubkey::new_unique(), Pubkey::new_unique(), 5),
+        );
+
+        let by_node = processor.stake_by_node_identity();
+        assert_eq!(by_node.len(), 1);
+        assert!(by_node.contains_key(&node));
+        assert!(!by_node.contains_key(&zero_node));
     }
 }

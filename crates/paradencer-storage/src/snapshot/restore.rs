@@ -191,10 +191,20 @@ impl SnapshotRestorer {
                             slot = state.slot;
                             bank_state = Some(state);
                         }
-                        Err(_) => {
-                            // TODO: Log manifest parse failure. Non-fatal for
-                            // account restoration — accounts can still be loaded
-                            // even if the manifest is unparseable (version mismatch, etc.)
+                        Err(e) => {
+                            eprintln!(
+                                "warning: snapshot manifest parse failed \
+                                 (version={}, data_len={}): {}. \
+                                 Account restoration will continue without \
+                                 bank state metadata.",
+                                if version.is_empty() {
+                                    "<unknown>"
+                                } else {
+                                    &version
+                                },
+                                data.len(),
+                                e,
+                            );
                         }
                     }
                 }
@@ -203,9 +213,12 @@ impl SnapshotRestorer {
                         Ok(result) => {
                             status_cache = Some(result);
                         }
-                        Err(_) => {
-                            // Non-fatal — accounts can still be loaded without
-                            // the status cache. Transaction dedup will start empty.
+                        Err(e) => {
+                            eprintln!(
+                                "warning: status cache parse failed: {}. \
+                                 Transaction dedup will start empty.",
+                                e,
+                            );
                         }
                     }
                 }
