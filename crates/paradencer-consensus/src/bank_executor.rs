@@ -19,11 +19,12 @@ use paradencer_constants::execution::{
 };
 use paradencer_constants::ledger::NONCE_ACCOUNT_SIZE;
 use paradencer_constants::system_program::MAX_ACCOUNT_DATA_SIZE;
+use paradencer_constants::sysvars::MAX_INSTRUCTIONS_PER_TRANSACTION;
 use paradencer_ids::{
     COMPUTE_BUDGET_PROGRAM_ID, ED25519_PROGRAM_ID, INCINERATOR_ID, SECP256K1_PROGRAM_ID,
     SECP256R1_PROGRAM_ID, SYSTEM_PROGRAM_ID, VOTE_PROGRAM_ID,
 };
-use paradencer_storage::{Account, Pubkey, TransactionId};
+use paradencer_storage::{Account, AccountData, Pubkey, TransactionId};
 use std::collections::HashMap;
 
 // ---------------------------------------------------------------------------
@@ -224,6 +225,8 @@ pub enum TransactionExecutionError {
         size: u64,
         limit: u64,
     },
+    /// Transaction exceeds the static instruction count limit.
+    TooManyInstructions { count: usize, limit: usize },
 }
 
 impl std::fmt::Display for TransactionExecutionError {
@@ -278,6 +281,9 @@ impl std::fmt::Display for TransactionExecutionError {
                     f,
                     "account {account:?} data too large: {size} bytes > {limit} byte limit"
                 )
+            }
+            Self::TooManyInstructions { count, limit } => {
+                write!(f, "too many instructions: {count} > {limit}")
             }
         }
     }
@@ -371,6 +377,21 @@ fn calculate_data_size_delta(
         delta += post_len - pre_len;
     }
     delta
+}
+
+/// Reclaim zero-lamport accounts by clearing their data and owner.
+///
+/// After transaction execution, any writable account that has been
+/// reduced to zero lamports is normalized: data is truncated to empty
+/// and owner is reset to the default (system program). This prevents
+/// stale metadata from persisting on deleted accounts.
+fn reclaim_zero_lamport_accounts(modified: &mut HashMap<Pubkey, Account>) {
+    for account in modified.values_mut() {
+        if account.meta.lamports == 0 {
+            account.data = AccountData::empty();
+            account.meta.owner = Pubkey::default();
+        }
+    }
 }
 
 /// Validate account locks: check count limit and duplicate keys.
@@ -923,6 +944,22 @@ impl Bank {
             };
         }
 
+        // Step 1a2: Enforce static instruction count limit (SIMD-0160).
+        if transaction.instructions.len() > MAX_INSTRUCTIONS_PER_TRANSACTION {
+            return TransactionExecutionResult {
+                success: false,
+                compute_units_consumed: 0,
+                fee: 0,
+                modified_accounts: HashMap::new(),
+                logs: vec![],
+                error: Some(TransactionExecutionError::TooManyInstructions {
+                    count: transaction.instructions.len(),
+                    limit: MAX_INSTRUCTIONS_PER_TRANSACTION,
+                }),
+                vote_updates: vec![],
+            };
+        }
+
         // Step 1b: Validate blockhash or detect durable nonce transaction.
         //
         // If the blockhash is in the recent queue, this is a regular transaction.
@@ -1341,7 +1378,13 @@ impl Bank {
                 .or_insert_with(|| nonce_info.rollback_account.clone());
         }
 
-        // Step 5c: Calculate accounts data size delta for block-level tracking.
+        // Step 5c: Reclaim zero-lamport accounts. Accounts reduced to zero
+        // lamports are normalized: data is cleared and owner reset to default.
+        // This must happen before the data-size delta calculation so that
+        // reclaimed data is correctly reflected in the block-level tracking.
+        reclaim_zero_lamport_accounts(&mut modified);
+
+        // Step 5d: Calculate accounts data size delta for block-level tracking.
         // Compare post-execution data sizes to pre-execution sizes for all
         // modified accounts. New accounts contribute their full data size;
         // deleted accounts (zero lamports) subtract their original size.
@@ -3914,5 +3957,185 @@ mod tests {
 
         // Child's fee rate should be higher than the default
         assert!(child.lamports_per_signature() > LAMPORTS_PER_SIGNATURE);
+    }
+
+    // ── account reclamation tests ─────────────────────────────────────
+
+    #[test]
+    fn reclaim_clears_data_and_owner_on_zero_lamport_account() {
+        let pubkey = Pubkey::new_unique();
+        let account = Account::new(0, vec![1, 2, 3], Pubkey::new_unique());
+        assert!(!account.data.is_empty());
+        assert_ne!(account.meta.owner, Pubkey::default());
+
+        let mut modified = HashMap::new();
+        modified.insert(pubkey, account);
+
+        super::reclaim_zero_lamport_accounts(&mut modified);
+
+        let reclaimed = &modified[&pubkey];
+        assert!(reclaimed.data.is_empty());
+        assert_eq!(reclaimed.meta.owner, Pubkey::default());
+        assert_eq!(reclaimed.meta.lamports, 0);
+    }
+
+    #[test]
+    fn reclaim_preserves_nonzero_lamport_accounts() {
+        let pubkey = Pubkey::new_unique();
+        let owner = Pubkey::new_unique();
+        let account = Account::new(100, vec![1, 2, 3], owner);
+
+        let mut modified = HashMap::new();
+        modified.insert(pubkey, account);
+
+        super::reclaim_zero_lamport_accounts(&mut modified);
+
+        let kept = &modified[&pubkey];
+        assert_eq!(kept.data.len(), 3);
+        assert_eq!(kept.meta.owner, owner);
+        assert_eq!(kept.meta.lamports, 100);
+    }
+
+    #[test]
+    fn reclaim_handles_mixed_accounts() {
+        let zero_key = Pubkey::new_unique();
+        let live_key = Pubkey::new_unique();
+
+        let mut modified = HashMap::new();
+        modified.insert(
+            zero_key,
+            Account::new(0, vec![10, 20], Pubkey::new_unique()),
+        );
+        modified.insert(
+            live_key,
+            Account::new(500, vec![30, 40, 50], Pubkey::new_unique()),
+        );
+
+        super::reclaim_zero_lamport_accounts(&mut modified);
+
+        assert!(modified[&zero_key].data.is_empty());
+        assert_eq!(modified[&zero_key].meta.owner, Pubkey::default());
+        assert_eq!(modified[&live_key].data.len(), 3);
+        assert_eq!(modified[&live_key].meta.lamports, 500);
+    }
+
+    // ── static instruction limit tests ────────────────────────────────
+
+    #[test]
+    fn transaction_within_instruction_limit_accepted() {
+        let bank = create_test_bank();
+        let payer = Pubkey::new_unique();
+        let program = Pubkey::new_unique();
+        store_test_account(
+            &bank,
+            &payer,
+            &Account::new(100_000_000, vec![], Pubkey::default()),
+        );
+
+        // 3 instructions — well within the 64 limit
+        let tx = SanitizedTransaction {
+            account_keys: vec![payer, program],
+            recent_blockhash: [0u8; 32],
+            instructions: (0..3)
+                .map(|_| CompiledInstruction {
+                    program_id_index: 1,
+                    account_indices: vec![0],
+                    data: vec![],
+                })
+                .collect(),
+            num_signatures: 1,
+            num_readonly_signed: 0,
+            num_readonly_unsigned: 1,
+            signatures: vec![],
+            message_bytes: vec![],
+        };
+
+        let result = bank.process_transaction(&tx, &PassthroughBackend, MAX_COMPUTE_UNITS);
+        assert!(
+            !matches!(
+                result.error,
+                Some(TransactionExecutionError::TooManyInstructions { .. })
+            ),
+            "should not reject transaction within instruction limit"
+        );
+    }
+
+    #[test]
+    fn transaction_exceeding_instruction_limit_rejected() {
+        let bank = create_test_bank();
+        let payer = Pubkey::new_unique();
+        let program = Pubkey::new_unique();
+        store_test_account(
+            &bank,
+            &payer,
+            &Account::new(100_000_000, vec![], Pubkey::default()),
+        );
+
+        // 65 instructions — exceeds the 64 limit
+        let tx = SanitizedTransaction {
+            account_keys: vec![payer, program],
+            recent_blockhash: [0u8; 32],
+            instructions: (0..65)
+                .map(|_| CompiledInstruction {
+                    program_id_index: 1,
+                    account_indices: vec![0],
+                    data: vec![],
+                })
+                .collect(),
+            num_signatures: 1,
+            num_readonly_signed: 0,
+            num_readonly_unsigned: 1,
+            signatures: vec![],
+            message_bytes: vec![],
+        };
+
+        let result = bank.process_transaction(&tx, &PassthroughBackend, MAX_COMPUTE_UNITS);
+        assert!(!result.success);
+        assert!(matches!(
+            result.error,
+            Some(TransactionExecutionError::TooManyInstructions {
+                count: 65,
+                limit: 64
+            })
+        ));
+    }
+
+    #[test]
+    fn transaction_at_exact_instruction_limit_accepted() {
+        let bank = create_test_bank();
+        let payer = Pubkey::new_unique();
+        let program = Pubkey::new_unique();
+        store_test_account(
+            &bank,
+            &payer,
+            &Account::new(100_000_000, vec![], Pubkey::default()),
+        );
+
+        // Exactly 64 instructions — at the limit, should be accepted
+        let tx = SanitizedTransaction {
+            account_keys: vec![payer, program],
+            recent_blockhash: [0u8; 32],
+            instructions: (0..64)
+                .map(|_| CompiledInstruction {
+                    program_id_index: 1,
+                    account_indices: vec![0],
+                    data: vec![],
+                })
+                .collect(),
+            num_signatures: 1,
+            num_readonly_signed: 0,
+            num_readonly_unsigned: 1,
+            signatures: vec![],
+            message_bytes: vec![],
+        };
+
+        let result = bank.process_transaction(&tx, &PassthroughBackend, MAX_COMPUTE_UNITS);
+        assert!(
+            !matches!(
+                result.error,
+                Some(TransactionExecutionError::TooManyInstructions { .. })
+            ),
+            "should accept transaction at exact instruction limit"
+        );
     }
 }
