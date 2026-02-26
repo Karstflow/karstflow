@@ -3,6 +3,7 @@ use paradencer_consensus::{
     SlotFinalizationResult,
 };
 use std::sync::{Arc, Mutex, RwLock};
+use tracing::warn;
 
 /// Errors that can occur during bank transitions
 #[derive(Debug, Clone)]
@@ -105,10 +106,29 @@ impl BankTransition {
             });
         }
 
-        // Get leader schedule for new slot
-        // For now, reuse parent's leader schedule
-        // In production, this would query the proper leader schedule for the slot's epoch
-        let leader_schedule = parent_bank.leader_schedule().clone();
+        // Resolve the leader schedule for the child slot's epoch.
+        // When a slot crosses an epoch boundary, activate the pre-computed
+        // next leader schedule so validators are assigned correctly.
+        let epoch_schedule = parent_bank.epoch_schedule();
+        let parent_epoch = epoch_schedule.get_epoch(parent_slot);
+        let child_epoch = epoch_schedule.get_epoch(slot);
+
+        let leader_schedule = if child_epoch != parent_epoch {
+            match parent_bank.next_leader_schedule() {
+                Some(next_schedule) => next_schedule,
+                None => {
+                    warn!(
+                        parent_epoch,
+                        child_epoch,
+                        slot,
+                        "no next leader schedule at epoch boundary, reusing parent schedule",
+                    );
+                    parent_bank.leader_schedule().clone()
+                }
+            }
+        } else {
+            parent_bank.leader_schedule().clone()
+        };
 
         // Create child bank
         let child_bank = Bank::new_from_parent(&parent_bank, slot, leader_schedule);
