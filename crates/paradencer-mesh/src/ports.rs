@@ -101,3 +101,116 @@ pub fn bounded_link<MessageType>(capacity: usize) -> (OutPort<MessageType>, InPo
         },
     )
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn bounded_link_sends_and_receives() {
+        let (tx, rx) = bounded_link::<u64>(4);
+        tx.try_send(42).unwrap();
+        let msg = rx.try_recv().unwrap();
+        assert_eq!(msg, Some(42));
+    }
+
+    #[test]
+    fn bounded_link_empty_receive_returns_none() {
+        let (_tx, rx) = bounded_link::<u64>(4);
+        let msg = rx.try_recv().unwrap();
+        assert_eq!(msg, None);
+    }
+
+    #[test]
+    fn bounded_link_full_returns_error() {
+        let (tx, _rx) = bounded_link::<u64>(2);
+        tx.try_send(1).unwrap();
+        tx.try_send(2).unwrap();
+        let result = tx.try_send(3);
+        assert!(matches!(result, Err(SendError::QueueFull(3))));
+    }
+
+    #[test]
+    fn bounded_link_dropped_receiver_returns_closed() {
+        let (tx, rx) = bounded_link::<u64>(4);
+        drop(rx);
+        let result = tx.try_send(1);
+        assert!(matches!(result, Err(SendError::QueueClosed(1))));
+    }
+
+    #[test]
+    fn bounded_link_dropped_sender_returns_closed() {
+        let (tx, rx) = bounded_link::<u64>(4);
+        tx.try_send(1).unwrap();
+        drop(tx);
+        // First read succeeds (buffered message)
+        assert_eq!(rx.try_recv().unwrap(), Some(1));
+        // Next read sees closed
+        let result = rx.try_recv();
+        assert!(matches!(result, Err(ReceiveError::QueueClosed)));
+    }
+
+    #[test]
+    fn bounded_link_stats_track_enqueue_dequeue() {
+        let (tx, rx) = bounded_link::<u64>(4);
+        tx.try_send(10).unwrap();
+        tx.try_send(20).unwrap();
+        rx.try_recv().unwrap();
+
+        let snap = tx.snapshot();
+        assert_eq!(snap.enqueued_messages, 2);
+        // Dequeue tracked on receiver side
+        let snap_rx = rx.snapshot();
+        assert_eq!(snap_rx.dequeued_messages, 1);
+    }
+
+    #[test]
+    fn bounded_link_stats_track_blocked_sends() {
+        let (tx, _rx) = bounded_link::<u64>(1);
+        tx.try_send(1).unwrap();
+        let _ = tx.try_send(2); // blocked
+
+        let snap = tx.snapshot();
+        assert_eq!(snap.blocked_sends, 1);
+    }
+
+    #[test]
+    fn bounded_link_stats_track_empty_receives() {
+        let (_tx, rx) = bounded_link::<u64>(4);
+        rx.try_recv().unwrap(); // empty
+        rx.try_recv().unwrap(); // empty again
+
+        let snap = rx.snapshot();
+        assert_eq!(snap.empty_receives, 2);
+    }
+
+    #[test]
+    fn bounded_link_zero_capacity_becomes_one() {
+        let (tx, rx) = bounded_link::<u64>(0);
+        tx.try_send(99).unwrap();
+        assert_eq!(rx.try_recv().unwrap(), Some(99));
+    }
+
+    #[test]
+    fn bounded_link_fifo_order() {
+        let (tx, rx) = bounded_link::<u64>(8);
+        for i in 0..5 {
+            tx.try_send(i).unwrap();
+        }
+        for i in 0..5 {
+            assert_eq!(rx.try_recv().unwrap(), Some(i));
+        }
+    }
+
+    #[test]
+    fn bounded_link_snapshot_reports_depth() {
+        let (tx, _rx) = bounded_link::<u64>(8);
+        tx.try_send(1).unwrap();
+        tx.try_send(2).unwrap();
+        tx.try_send(3).unwrap();
+
+        let snap = tx.snapshot();
+        assert_eq!(snap.queue_depth, 3);
+        assert_eq!(snap.queue_capacity, Some(8));
+    }
+}

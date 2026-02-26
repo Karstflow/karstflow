@@ -277,3 +277,235 @@ fn checked_usize_to_u64(value: usize, field: &'static str) -> Result<u64, Storag
         delta: u64::MAX,
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn sample_request(fragment_id: u64) -> RuntimeStateApplyRequest {
+        RuntimeStateApplyRequest {
+            fragment_id,
+            account_writes: 10,
+            account_data_bytes: 2048,
+            rent_epoch_updates: 3,
+            program_loads: 2,
+            program_evictions: 1,
+            program_invalidations: 0,
+        }
+    }
+
+    #[test]
+    fn new_store_has_zeroed_snapshot() {
+        let store = RuntimeStateStore::new();
+        let snap = store.snapshot();
+        assert_eq!(snap.last_fragment_id, 0);
+        assert_eq!(snap.total_account_writes, 0);
+        assert_eq!(snap.total_account_data_bytes, 0);
+        assert_eq!(snap.total_program_loads, 0);
+    }
+
+    #[test]
+    fn default_equals_new() {
+        assert_eq!(RuntimeStateStore::default(), RuntimeStateStore::new());
+    }
+
+    #[test]
+    fn apply_effects_advances_fragment_id() {
+        let mut store = RuntimeStateStore::new();
+        let receipt = store.apply_effects(sample_request(1)).unwrap();
+        assert_eq!(receipt.fragment_id, 1);
+        assert_eq!(receipt.previous_last_fragment_id, 0);
+        assert_eq!(store.snapshot().last_fragment_id, 1);
+    }
+
+    #[test]
+    fn apply_effects_accumulates_counters() {
+        let mut store = RuntimeStateStore::new();
+        store.apply_effects(sample_request(1)).unwrap();
+        store.apply_effects(sample_request(2)).unwrap();
+
+        let snap = store.snapshot();
+        assert_eq!(snap.total_account_writes, 20);
+        assert_eq!(snap.total_account_data_bytes, 4096);
+        assert_eq!(snap.total_rent_epoch_updates, 6);
+        assert_eq!(snap.total_program_loads, 4);
+        assert_eq!(snap.total_program_evictions, 2);
+    }
+
+    #[test]
+    fn apply_effects_rejects_regression() {
+        let mut store = RuntimeStateStore::new();
+        store.apply_effects(sample_request(5)).unwrap();
+        let result = store.apply_effects(sample_request(3));
+        assert!(matches!(
+            result,
+            Err(StorageError::FragmentRegression { .. })
+        ));
+    }
+
+    #[test]
+    fn apply_effects_rejects_same_fragment_id() {
+        let mut store = RuntimeStateStore::new();
+        store.apply_effects(sample_request(1)).unwrap();
+        let result = store.apply_effects(sample_request(1));
+        assert!(matches!(
+            result,
+            Err(StorageError::FragmentRegression { .. })
+        ));
+    }
+
+    #[test]
+    fn rollback_effects_restores_previous_state() {
+        let mut store = RuntimeStateStore::new();
+        store.apply_effects(sample_request(1)).unwrap();
+        let receipt = store.apply_effects(sample_request(2)).unwrap();
+
+        store.rollback_effects(receipt).unwrap();
+
+        let snap = store.snapshot();
+        assert_eq!(snap.last_fragment_id, 1);
+        assert_eq!(snap.total_account_writes, 10);
+        assert_eq!(snap.total_account_data_bytes, 2048);
+    }
+
+    #[test]
+    fn rollback_effects_rejects_wrong_fragment_id() {
+        let mut store = RuntimeStateStore::new();
+        let receipt = store.apply_effects(sample_request(1)).unwrap();
+        store.apply_effects(sample_request(2)).unwrap();
+
+        // Try to rollback fragment 1 when last is fragment 2
+        let result = store.rollback_effects(receipt);
+        assert!(matches!(
+            result,
+            Err(StorageError::RuntimeStateRollbackOrderViolation { .. })
+        ));
+    }
+
+    #[test]
+    fn rollback_effects_rejects_tampered_receipt() {
+        let mut store = RuntimeStateStore::new();
+        let mut receipt = store.apply_effects(sample_request(1)).unwrap();
+        // Tamper with the receipt
+        receipt.account_writes = 999;
+
+        let result = store.rollback_effects(receipt);
+        assert!(matches!(
+            result,
+            Err(StorageError::RuntimeStateReceiptMismatch { .. })
+        ));
+    }
+
+    #[test]
+    fn rewind_to_fragment_rolls_back_multiple() {
+        let mut store = RuntimeStateStore::new();
+        store.apply_effects(sample_request(1)).unwrap();
+        store.apply_effects(sample_request(2)).unwrap();
+        store.apply_effects(sample_request(3)).unwrap();
+
+        let rolled_back = store.rewind_to_fragment(1).unwrap();
+        assert_eq!(rolled_back, 2);
+        assert_eq!(store.snapshot().last_fragment_id, 1);
+        assert_eq!(store.snapshot().total_account_writes, 10);
+    }
+
+    #[test]
+    fn rewind_to_current_fragment_is_noop() {
+        let mut store = RuntimeStateStore::new();
+        store.apply_effects(sample_request(1)).unwrap();
+
+        let rolled_back = store.rewind_to_fragment(1).unwrap();
+        assert_eq!(rolled_back, 0);
+        assert_eq!(store.snapshot().last_fragment_id, 1);
+    }
+
+    #[test]
+    fn rewind_to_fragment_rejects_forward_target() {
+        let mut store = RuntimeStateStore::new();
+        store.apply_effects(sample_request(1)).unwrap();
+
+        let result = store.rewind_to_fragment(5);
+        assert!(matches!(
+            result,
+            Err(StorageError::RuntimeStateRewindTargetAhead { .. })
+        ));
+    }
+
+    #[test]
+    fn seed_checkpoint_resets_state() {
+        let mut store = RuntimeStateStore::new();
+        store.apply_effects(sample_request(1)).unwrap();
+        store.apply_effects(sample_request(2)).unwrap();
+
+        store.seed_checkpoint(10);
+
+        let snap = store.snapshot();
+        assert_eq!(snap.last_fragment_id, 10);
+        assert_eq!(snap.total_account_writes, 0);
+        assert_eq!(snap.total_account_data_bytes, 0);
+    }
+
+    #[test]
+    fn seed_checkpoint_sets_rewind_floor() {
+        let mut store = RuntimeStateStore::new();
+        store.seed_checkpoint(10);
+        store.apply_effects(sample_request(11)).unwrap();
+        store.apply_effects(sample_request(12)).unwrap();
+
+        // Can rewind to checkpoint
+        let result = store.rewind_to_fragment(10);
+        assert!(result.is_ok());
+
+        // Cannot rewind below checkpoint
+        let result = store.rewind_to_fragment(5);
+        assert!(matches!(
+            result,
+            Err(StorageError::RuntimeStateRewindTargetBelowFloor { .. })
+        ));
+    }
+
+    #[test]
+    fn apply_then_full_rewind_restores_zero() {
+        let mut store = RuntimeStateStore::new();
+        store.apply_effects(sample_request(1)).unwrap();
+        store.apply_effects(sample_request(2)).unwrap();
+        store.apply_effects(sample_request(3)).unwrap();
+
+        store.rewind_to_fragment(0).unwrap();
+
+        let snap = store.snapshot();
+        assert_eq!(snap.last_fragment_id, 0);
+        assert_eq!(snap.total_account_writes, 0);
+        assert_eq!(snap.total_account_data_bytes, 0);
+        assert_eq!(snap.total_program_loads, 0);
+    }
+
+    #[test]
+    fn receipt_tracks_previous_fragment_id_chain() {
+        let mut store = RuntimeStateStore::new();
+        let r1 = store.apply_effects(sample_request(5)).unwrap();
+        let r2 = store.apply_effects(sample_request(10)).unwrap();
+        let r3 = store.apply_effects(sample_request(15)).unwrap();
+
+        assert_eq!(r1.previous_last_fragment_id, 0);
+        assert_eq!(r2.previous_last_fragment_id, 5);
+        assert_eq!(r3.previous_last_fragment_id, 10);
+    }
+
+    #[test]
+    fn rollback_empty_store_fails() {
+        let mut store = RuntimeStateStore::new();
+        let fake_receipt = RuntimeStateApplyReceipt {
+            fragment_id: 0,
+            previous_last_fragment_id: 0,
+            account_writes: 0,
+            account_data_bytes: 0,
+            rent_epoch_updates: 0,
+            program_loads: 0,
+            program_evictions: 0,
+            program_invalidations: 0,
+        };
+        let result = store.rollback_effects(fake_receipt);
+        assert!(result.is_err());
+    }
+}
