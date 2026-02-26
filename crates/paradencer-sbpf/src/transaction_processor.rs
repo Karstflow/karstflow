@@ -270,9 +270,16 @@ impl TransactionProcessor {
                 .execute(context)
                 .unwrap_or_else(|err| ExecutionOutcome::failure(100, err))
         } else if context.program_id == BPF_LOADER_PROGRAM_ID {
-            self.bpf_loader
+            let outcome = self
+                .bpf_loader
                 .execute(context)
-                .unwrap_or_else(|err| ExecutionOutcome::failure(400, err))
+                .unwrap_or_else(|err| ExecutionOutcome::failure(400, err));
+            // Invalidate the program cache when a program is deployed or upgraded.
+            // This ensures the next invocation loads the new bytecode.
+            if outcome.success {
+                self.invalidate_after_loader_instruction(context);
+            }
+            outcome
         } else if context.program_id == COMPUTE_BUDGET_PROGRAM_ID {
             self.compute_budget_program
                 .execute(context)
@@ -326,6 +333,29 @@ impl TransactionProcessor {
         match self.bytecode_vm.execute(context.clone()) {
             Ok(outcome) => outcome,
             Err(e) => ExecutionOutcome::failure(0, format!("BPF execution failed: {}", e)),
+        }
+    }
+
+    /// Invalidate the program cache after a BPF loader deploy or upgrade.
+    ///
+    /// Deploy (discriminant 2): program account is at index 2.
+    /// Upgrade (discriminant 3): program account is at index 1.
+    fn invalidate_after_loader_instruction(&self, context: &ExecutionContext) {
+        if context.instruction_data.len() < 4 {
+            return;
+        }
+        let disc = u32::from_le_bytes(
+            context.instruction_data[0..4]
+                .try_into()
+                .unwrap_or_default(),
+        );
+        let program_id = match disc {
+            2 if context.accounts.len() > 2 => Some(context.accounts[2].0),
+            3 if context.accounts.len() > 1 => Some(context.accounts[1].0),
+            _ => None,
+        };
+        if let Some(id) = program_id {
+            self.bytecode_vm.invalidate_program(&id);
         }
     }
 

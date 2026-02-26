@@ -12,7 +12,10 @@ use crate::syscall_dispatch::{InstructionExecutor, RuntimeSyscallDispatch};
 use crate::sysvar_snapshot::SysvarSnapshot;
 use crate::validation;
 use paradencer_constants::vm::DEFAULT_HEAP_SIZE;
-use paradencer_ids::{SYSTEM_PROGRAM_ID, VOTE_PROGRAM_ID};
+use paradencer_ids::{
+    BPF_LOADER_DEPRECATED_PROGRAM_ID, BPF_LOADER_PROGRAM_ID, BPF_LOADER_V2_PROGRAM_ID,
+    LOADER_V4_PROGRAM_ID, SYSTEM_PROGRAM_ID, VOTE_PROGRAM_ID,
+};
 use paradencer_types::{Account, AccountData, AccountMeta, Pubkey};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -166,6 +169,15 @@ impl BytecodeVm {
     /// Set the sysvar snapshot for this VM.
     pub fn set_sysvar_snapshot(&mut self, snapshot: SysvarSnapshot) {
         self.sysvar_snapshot = snapshot;
+    }
+
+    /// Remove a program from the cache.
+    ///
+    /// Called when a program is deployed or upgraded so that subsequent
+    /// invocations load the new bytecode from the updated account data.
+    pub fn invalidate_program(&self, program_id: &Pubkey) {
+        let mut cache = self.cache.lock().unwrap();
+        cache.invalidate(program_id);
     }
 
     /// Load and validate a program from raw ELF bytes.
@@ -353,10 +365,20 @@ impl SbpfVm for BytecodeVm {
             .find(|(pubkey, account, _)| *pubkey == context.program_id && account.meta.executable)
             .map(|(_, account, _)| account);
 
-        let elf_bytes = match program_account {
-            Some(account) => account.data.as_slice(),
+        let program = match program_account {
+            Some(account) => account,
             None => return Err(SbpfExecutionError::InvalidProgram),
         };
+
+        // Verify the program's owner is a recognized loader. Only accounts
+        // owned by one of the BPF loaders or the Loader-v4 are valid
+        // executable programs. Rejecting other owners prevents arbitrary
+        // executable-flagged accounts from being dispatched as programs.
+        if !is_valid_loader_owner(&program.meta.owner) {
+            return Err(SbpfExecutionError::InvalidProgram);
+        }
+
+        let elf_bytes = program.data.as_slice();
 
         if elf_bytes.is_empty() {
             return Err(SbpfExecutionError::InvalidAccountData);
@@ -384,10 +406,24 @@ impl SbpfVm for BytecodeVm {
     }
 }
 
+/// Check whether an account owner is a recognized program loader.
+///
+/// Only accounts owned by these loaders are valid executable programs:
+/// - BPF Loader (upgradeable loader, the standard for deployed programs)
+/// - BPF Loader v2 (non-upgradeable loader, used for early programs)
+/// - BPF Loader Deprecated (original loader, still recognized)
+/// - Loader v4 (next-generation loader)
+fn is_valid_loader_owner(owner: &Pubkey) -> bool {
+    *owner == BPF_LOADER_PROGRAM_ID
+        || *owner == BPF_LOADER_V2_PROGRAM_ID
+        || *owner == BPF_LOADER_DEPRECATED_PROGRAM_ID
+        || *owner == LOADER_V4_PROGRAM_ID
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use paradencer_ids::SYSTEM_PROGRAM_ID;
+    use paradencer_ids::{BPF_LOADER_PROGRAM_ID, SYSTEM_PROGRAM_ID};
     use paradencer_types::{Account, AccountData, AccountMeta, Pubkey};
 
     #[test]
@@ -529,7 +565,7 @@ mod tests {
         Account {
             meta: AccountMeta {
                 lamports: 1,
-                owner: Pubkey::default(),
+                owner: BPF_LOADER_PROGRAM_ID,
                 executable: true,
                 rent_epoch: 0,
             },
@@ -612,7 +648,7 @@ mod tests {
         let empty_account = Account {
             meta: AccountMeta {
                 lamports: 1,
-                owner: Pubkey::default(),
+                owner: BPF_LOADER_PROGRAM_ID,
                 executable: true,
                 rent_epoch: 0,
             },
@@ -822,5 +858,112 @@ mod tests {
             result.is_empty(),
             "Read-only account changes should be ignored"
         );
+    }
+
+    #[test]
+    fn rejects_executable_with_invalid_owner() {
+        use crate::instruction::{Instruction, Opcode};
+
+        let vm = BytecodeVm::new();
+        let program_id = Pubkey::new_unique();
+
+        let elf = make_elf_program(&[
+            Instruction::new(Opcode::Mov64Imm as u8, 0, 0, 0, 0),
+            Instruction::new(Opcode::Exit as u8, 0, 0, 0, 0),
+        ]);
+
+        // Account is executable but has an invalid owner (random pubkey)
+        let bad_owner_account = Account {
+            meta: AccountMeta {
+                lamports: 1,
+                owner: Pubkey::new_unique(),
+                executable: true,
+                rent_epoch: 0,
+            },
+            data: AccountData::new(elf),
+        };
+
+        let context = ExecutionContext::new(
+            program_id,
+            vec![(program_id, bad_owner_account, false)],
+            vec![],
+        );
+
+        let result = vm.execute(context);
+        assert!(result.is_err(), "executable with invalid owner should fail");
+    }
+
+    #[test]
+    fn accepts_all_valid_loader_owners() {
+        use paradencer_ids::{
+            BPF_LOADER_DEPRECATED_PROGRAM_ID, BPF_LOADER_V2_PROGRAM_ID, LOADER_V4_PROGRAM_ID,
+        };
+
+        let valid_owners = [
+            BPF_LOADER_PROGRAM_ID,
+            BPF_LOADER_V2_PROGRAM_ID,
+            BPF_LOADER_DEPRECATED_PROGRAM_ID,
+            LOADER_V4_PROGRAM_ID,
+        ];
+
+        for owner in &valid_owners {
+            assert!(
+                is_valid_loader_owner(owner),
+                "owner {:?} should be valid",
+                owner
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_invalid_loader_owners() {
+        let invalid_owners = [Pubkey::default(), Pubkey::new_unique(), SYSTEM_PROGRAM_ID];
+
+        for owner in &invalid_owners {
+            assert!(
+                !is_valid_loader_owner(owner),
+                "owner {:?} should be invalid",
+                owner
+            );
+        }
+    }
+
+    #[test]
+    fn invalidate_program_clears_cache() {
+        use crate::instruction::{Instruction, Opcode};
+
+        let vm = BytecodeVm::new();
+        let program_id = Pubkey::new_unique();
+
+        let elf = make_elf_program(&[
+            Instruction::new(Opcode::Mov64Imm as u8, 0, 0, 0, 0),
+            Instruction::new(Opcode::Exit as u8, 0, 0, 0, 0),
+        ]);
+
+        let account = program_account(elf);
+
+        // First execution should cache the program
+        let context = ExecutionContext::new(
+            program_id,
+            vec![(program_id, account.clone(), false)],
+            vec![],
+        );
+        let result = vm.execute(context);
+        assert!(result.is_ok());
+
+        // Verify program is cached
+        {
+            let mut cache = vm.cache.lock().unwrap();
+            assert!(cache.get(&program_id, 0).is_some());
+        }
+
+        // Invalidate
+        vm.invalidate_program(&program_id);
+
+        // Verify cache is empty for this program
+        {
+            let mut cache = vm.cache.lock().unwrap();
+            assert!(cache.get(&program_id, 0).is_none());
+        }
     }
 }

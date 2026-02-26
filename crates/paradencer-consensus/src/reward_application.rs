@@ -8,7 +8,8 @@
 /// rewards are distributed over multiple slots via the partitioned
 /// rewards distributor.
 use crate::rewards_distribution::{PendingReward, RewardsDistributor};
-use paradencer_storage::AccountDatabase;
+use paradencer_storage::{Account, AccountDatabase};
+use paradencer_types::Pubkey;
 
 /// Result of applying a batch of rewards.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -28,12 +29,20 @@ impl RewardApplicator {
     /// Apply a batch of pending rewards to accounts.
     ///
     /// For each reward entry, loads the account, adds the reward lamports,
-    /// and stores the updated account. Accounts not found in the database
-    /// are skipped. Zero-amount rewards are also skipped.
-    pub fn apply_rewards(
+    /// and stores the updated account. The `on_modify` callback is invoked
+    /// with the pubkey, old account, and new account so the caller can
+    /// update incremental hashes (e.g. lattice hash).
+    ///
+    /// Accounts not found in the database are skipped. Zero-amount rewards
+    /// are also skipped.
+    pub fn apply_rewards<F>(
         db: &AccountDatabase,
         rewards: &[PendingReward],
-    ) -> RewardApplicationResult {
+        mut on_modify: F,
+    ) -> RewardApplicationResult
+    where
+        F: FnMut(&Pubkey, &Account, &Account),
+    {
         let mut total_distributed: u64 = 0;
         let mut accounts_credited: u64 = 0;
         let mut accounts_skipped: u64 = 0;
@@ -44,9 +53,11 @@ impl RewardApplicator {
                 continue;
             }
 
-            if let Some(mut account) = db.get_published_account(&reward.account) {
-                account.meta.lamports = account.meta.lamports.saturating_add(reward.amount);
-                db.store_published_account(reward.account, account);
+            if let Some(old_account) = db.get_published_account(&reward.account) {
+                let mut new_account = old_account.clone();
+                new_account.meta.lamports = new_account.meta.lamports.saturating_add(reward.amount);
+                on_modify(&reward.account, &old_account, &new_account);
+                db.store_published_account(reward.account, new_account);
                 total_distributed += reward.amount;
                 accounts_credited += 1;
             } else {
@@ -65,12 +76,17 @@ impl RewardApplicator {
     ///
     /// Retrieves the rewards assigned to the given slot from the distributor,
     /// credits them to accounts, and marks the slot as distributed.
-    /// Returns the application result for this slot's partition.
-    pub fn apply_partition(
+    /// The `on_modify` callback is forwarded to `apply_rewards` for
+    /// incremental hash updates.
+    pub fn apply_partition<F>(
         db: &AccountDatabase,
         distributor: &mut RewardsDistributor,
         current_slot: u64,
-    ) -> RewardApplicationResult {
+        on_modify: F,
+    ) -> RewardApplicationResult
+    where
+        F: FnMut(&Pubkey, &Account, &Account),
+    {
         let rewards = distributor.rewards_for_slot(current_slot);
         if rewards.is_empty() {
             return RewardApplicationResult {
@@ -82,7 +98,7 @@ impl RewardApplicator {
 
         // Collect rewards before mutable borrow of distributor
         let rewards_snapshot: Vec<PendingReward> = rewards.to_vec();
-        let result = Self::apply_rewards(db, &rewards_snapshot);
+        let result = Self::apply_rewards(db, &rewards_snapshot, on_modify);
         distributor.mark_slot_distributed(current_slot);
         result
     }
@@ -126,7 +142,7 @@ mod tests {
             },
         ];
 
-        let result = RewardApplicator::apply_rewards(&db, &rewards);
+        let result = RewardApplicator::apply_rewards(&db, &rewards, |_, _, _| {});
 
         assert_eq!(result.total_distributed, 1500);
         assert_eq!(result.accounts_credited, 2);
@@ -150,7 +166,7 @@ mod tests {
             reward_type: RewardType::Voting,
         }];
 
-        let result = RewardApplicator::apply_rewards(&db, &rewards);
+        let result = RewardApplicator::apply_rewards(&db, &rewards, |_, _, _| {});
 
         assert_eq!(result.total_distributed, 0);
         assert_eq!(result.accounts_credited, 0);
@@ -167,7 +183,7 @@ mod tests {
             reward_type: RewardType::Voting,
         }];
 
-        let result = RewardApplicator::apply_rewards(&db, &rewards);
+        let result = RewardApplicator::apply_rewards(&db, &rewards, |_, _, _| {});
 
         assert_eq!(result.total_distributed, 0);
         assert_eq!(result.accounts_credited, 0);
@@ -182,7 +198,7 @@ mod tests {
     fn apply_rewards_empty_batch() {
         let (db, _) = make_db_with_accounts(0);
 
-        let result = RewardApplicator::apply_rewards(&db, &[]);
+        let result = RewardApplicator::apply_rewards(&db, &[], |_, _, _| {});
 
         assert_eq!(result.total_distributed, 0);
         assert_eq!(result.accounts_credited, 0);
@@ -206,7 +222,7 @@ mod tests {
 
         assert!(!distributor.is_complete());
 
-        let result = RewardApplicator::apply_partition(&db, &mut distributor, 50);
+        let result = RewardApplicator::apply_partition(&db, &mut distributor, 50, |_, _, _| {});
 
         assert_eq!(result.total_distributed, 300);
         assert_eq!(result.accounts_credited, 3);
@@ -225,7 +241,7 @@ mod tests {
 
         let mut distributor = RewardsDistributor::new(pending, 1, 50);
 
-        let result = RewardApplicator::apply_partition(&db, &mut distributor, 99);
+        let result = RewardApplicator::apply_partition(&db, &mut distributor, 99, |_, _, _| {});
 
         assert_eq!(result.total_distributed, 0);
         assert!(!distributor.is_complete());
@@ -249,7 +265,8 @@ mod tests {
         let mut total = 0u64;
         let partition_count = distributor.partition_count();
         for i in 0..partition_count {
-            let result = RewardApplicator::apply_partition(&db, &mut distributor, 100 + i);
+            let result =
+                RewardApplicator::apply_partition(&db, &mut distributor, 100 + i, |_, _, _| {});
             total += result.total_distributed;
         }
 
@@ -286,10 +303,35 @@ mod tests {
             },
         ];
 
-        let result = RewardApplicator::apply_rewards(&db, &rewards);
+        let result = RewardApplicator::apply_rewards(&db, &rewards, |_, _, _| {});
 
         assert_eq!(result.total_distributed, 400);
         assert_eq!(result.accounts_credited, 2);
         assert_eq!(result.accounts_skipped, 1);
+    }
+
+    #[test]
+    fn on_modify_callback_receives_old_and_new_accounts() {
+        use std::sync::atomic::{AtomicU64, Ordering};
+
+        let (db, pubkeys) = make_db_with_accounts(1);
+        let initial_lamports = db.get_published_account(&pubkeys[0]).unwrap().meta.lamports;
+
+        let rewards = vec![PendingReward {
+            account: pubkeys[0],
+            amount: 7_500,
+            reward_type: RewardType::Voting,
+        }];
+
+        let callback_count = AtomicU64::new(0);
+        let result = RewardApplicator::apply_rewards(&db, &rewards, |pk, old_acc, new_acc| {
+            assert_eq!(*pk, pubkeys[0]);
+            assert_eq!(old_acc.meta.lamports, initial_lamports);
+            assert_eq!(new_acc.meta.lamports, initial_lamports + 7_500);
+            callback_count.fetch_add(1, Ordering::Relaxed);
+        });
+
+        assert_eq!(result.accounts_credited, 1);
+        assert_eq!(callback_count.load(Ordering::Relaxed), 1);
     }
 }

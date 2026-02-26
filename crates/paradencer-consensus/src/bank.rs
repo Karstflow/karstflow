@@ -708,7 +708,14 @@ impl Bank {
     pub fn distribute_slot_rewards(&self) -> u64 {
         let mut guard = self.rewards_distributor.write().unwrap();
         if let Some(ref mut distributor) = *guard {
-            let result = RewardApplicator::apply_partition(&self.accounts, distributor, self.slot);
+            let result = RewardApplicator::apply_partition(
+                &self.accounts,
+                distributor,
+                self.slot,
+                |pubkey, old_acc, new_acc| {
+                    self.update_account_hash(pubkey, Some(old_acc), new_acc);
+                },
+            );
             self.capitalization
                 .fetch_add(result.total_distributed, Ordering::Relaxed);
             result.total_distributed
@@ -1047,7 +1054,13 @@ impl Bank {
                     })
                     .collect();
 
-                let result = RewardApplicator::apply_rewards(&self.accounts, &vote_rewards);
+                let result = RewardApplicator::apply_rewards(
+                    &self.accounts,
+                    &vote_rewards,
+                    |pubkey, old_acc, new_acc| {
+                        self.update_account_hash(pubkey, Some(old_acc), new_acc);
+                    },
+                );
                 self.capitalization
                     .fetch_add(result.total_distributed, Ordering::Relaxed);
             }
