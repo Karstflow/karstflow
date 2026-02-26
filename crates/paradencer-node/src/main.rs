@@ -1,5 +1,5 @@
 use paradencer_plugin::PluginService;
-use tracing::warn;
+use tracing::{info, warn};
 
 use paradencer_control::{
     build_diagnostics_summary_from_probe, build_pipeline_service, build_repair_service,
@@ -169,7 +169,51 @@ fn run_with_node_config(
         paradencer_stages::PipelineServiceConfig::default(),
         runtime_topology.pipeline_inputs,
     );
-    let _pipeline_handle = pipeline_bundle.handle;
+    // Wire leader slot orchestration: subscribe to replay signals and
+    // drive the pipeline handle when this validator becomes leader.
+    {
+        let leader_signal_rx = replay_bundle
+            .signal_bus
+            .lock()
+            .unwrap()
+            .subscribe()
+            .expect("signal bus subscriber limit not reached");
+        let handle = pipeline_bundle.handle.clone();
+
+        std::thread::Builder::new()
+            .name("leader-orchestrator".into())
+            .spawn(move || {
+                while let Ok(signal) = leader_signal_rx.recv() {
+                    match signal {
+                        paradencer_stages::ReplaySignal::BecameLeader(info) => {
+                            info!(
+                                start_slot = info.start_slot,
+                                end_slot = info.end_slot,
+                                epoch = info.epoch,
+                                "activating block production for leader range",
+                            );
+                            handle.begin_slot(info.start_slot);
+                        }
+                        paradencer_stages::ReplaySignal::SlotCompleted(info) => {
+                            if handle.is_leading() && info.slot == handle.current_slot() {
+                                handle.end_slot();
+                                // Register the new blockhash so the resolv
+                                // stage can validate transactions referencing it.
+                                handle.register_blockhash(info.bank_hash, info.slot);
+                            }
+                        }
+                        paradencer_stages::ReplaySignal::RootAdvanced(info) => {
+                            // Advance the resolv slot so stale transactions
+                            // referencing blockhashes older than the root are
+                            // expired.
+                            handle.advance_slot(info.new_root);
+                        }
+                        _ => {}
+                    }
+                }
+            })
+            .expect("failed to spawn leader orchestrator thread");
+    }
 
     // Build the turbine retransmit service for shred propagation.
     // Uses the gossip-derived identity and cluster state to route shreds
