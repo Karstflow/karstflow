@@ -5,6 +5,8 @@
 /// account loading, fee validation, instruction execution, account writeback,
 /// and fee collection.
 use crate::cost_tracker::TransactionCost;
+use crate::nonce::{derive_durable_nonce, deserialize_nonce_state, serialize_nonce_state};
+use crate::transaction_cache::{extract_nonce_key_index, is_nonce_instruction};
 use crate::{Bank, BankStatus, FeeCalculator};
 use paradencer_constants::compute_budget_program::INSTRUCTION_SET_LOADED_ACCOUNTS_DATA_SIZE_LIMIT;
 use paradencer_constants::execution::{
@@ -468,6 +470,97 @@ fn account_loaded_size(account: &Account) -> u64 {
 }
 
 // ---------------------------------------------------------------------------
+// Durable nonce transaction handling
+// ---------------------------------------------------------------------------
+
+/// Pre-execution nonce advancement data for durable transactions.
+///
+/// Captures the advanced nonce account so it can be persisted even if the
+/// transaction fails. The nonce mechanism itself prevents replay, so
+/// durable transactions skip the blockhash-based transaction cache.
+struct DurableNonceInfo {
+    /// The nonce account public key.
+    nonce_key: Pubkey,
+    /// The nonce account with advanced state (rollback copy).
+    /// Persisted on both success and failure paths.
+    rollback_account: Account,
+}
+
+/// Detect and pre-advance a durable nonce transaction.
+///
+/// A transaction is a durable nonce transaction when:
+/// 1. Its recent_blockhash is NOT in the blockhash queue
+/// 2. Its first instruction targets the System Program
+/// 3. Its first instruction is AdvanceNonceAccount (discriminant 4)
+/// 4. The nonce account contains an initialized nonce whose durable_nonce
+///    matches the transaction's recent_blockhash
+///
+/// Returns `Some(DurableNonceInfo)` with the advanced rollback account
+/// if the transaction is a valid durable nonce transaction, or `None`
+/// if validation fails.
+fn try_detect_durable_nonce(
+    tx: &SanitizedTransaction,
+    accounts: &paradencer_storage::AccountDatabase,
+    last_blockhash: &[u8; 32],
+    lamports_per_signature: u64,
+) -> Option<DurableNonceInfo> {
+    // First instruction must exist and target the System Program
+    let first_ix = tx.instructions.first()?;
+    let program_id = tx.account_keys.get(first_ix.program_id_index as usize)?;
+    if *program_id != SYSTEM_PROGRAM_ID {
+        return None;
+    }
+
+    // First instruction must be AdvanceNonceAccount
+    if !is_nonce_instruction(&first_ix.data) {
+        return None;
+    }
+
+    // Extract nonce account key
+    let nonce_key_index = extract_nonce_key_index(&first_ix.account_indices)?;
+    let nonce_key = *tx.account_keys.get(nonce_key_index)?;
+
+    // Load nonce account
+    let nonce_account = accounts.get_published_account(&nonce_key)?;
+
+    // Deserialize and verify nonce state
+    let nonce_state = deserialize_nonce_state(nonce_account.data.as_slice())?;
+    let nonce_data = nonce_state.data()?;
+
+    // Transaction's recent_blockhash must match the nonce's durable_nonce
+    let expected_nonce = Pubkey::new(tx.recent_blockhash);
+    if nonce_data.durable_nonce != expected_nonce {
+        return None;
+    }
+
+    // Derive next durable nonce from the last blockhash in the queue
+    let next_nonce_bytes = derive_durable_nonce(last_blockhash);
+    let next_nonce = Pubkey::new(next_nonce_bytes);
+
+    // Nonce must not already be advanced to next value
+    if nonce_data.durable_nonce == next_nonce {
+        return None;
+    }
+
+    // Create advanced nonce state
+    let advanced_state = crate::nonce::Nonce::Initialized(crate::nonce::NonceData {
+        authority: nonce_data.authority,
+        durable_nonce: next_nonce,
+        fee_calculator: FeeCalculator::new(lamports_per_signature),
+    });
+
+    // Build the rollback account with advanced nonce data
+    let mut rollback_account = nonce_account.clone();
+    let serialized = serialize_nonce_state(&advanced_state);
+    rollback_account.data = paradencer_storage::AccountData::from(serialized);
+
+    Some(DurableNonceInfo {
+        nonce_key,
+        rollback_account,
+    })
+}
+
+// ---------------------------------------------------------------------------
 // Bank execution methods
 // ---------------------------------------------------------------------------
 
@@ -501,18 +594,37 @@ impl Bank {
             };
         }
 
-        // Step 1b: Validate blockhash is recent
-        if !self.is_blockhash_valid(&transaction.recent_blockhash) {
-            return TransactionExecutionResult {
-                success: false,
-                compute_units_consumed: 0,
-                fee: 0,
-                modified_accounts: HashMap::new(),
-                logs: vec![],
-                error: Some(TransactionExecutionError::BlockhashNotRecent),
-                vote_updates: vec![],
-            };
-        }
+        // Step 1b: Validate blockhash or detect durable nonce transaction.
+        //
+        // If the blockhash is in the recent queue, this is a regular transaction.
+        // Otherwise, check if it's a durable nonce transaction (first instruction
+        // is AdvanceNonceAccount and the nonce matches the transaction's blockhash).
+        // Nonce is pre-advanced here and persisted on both success and failure.
+        let durable_nonce = if self.is_blockhash_valid(&transaction.recent_blockhash) {
+            None
+        } else {
+            let last_bh = self.last_blockhash();
+            let fee_calc = FeeCalculator::default();
+            match try_detect_durable_nonce(
+                transaction,
+                self.accounts(),
+                &last_bh,
+                fee_calc.lamports_per_signature,
+            ) {
+                Some(nonce_info) => Some(nonce_info),
+                None => {
+                    return TransactionExecutionResult {
+                        success: false,
+                        compute_units_consumed: 0,
+                        fee: 0,
+                        modified_accounts: HashMap::new(),
+                        logs: vec![],
+                        error: Some(TransactionExecutionError::BlockhashNotRecent),
+                        vote_updates: vec![],
+                    };
+                }
+            }
+        };
 
         // Step 1c: Verify Ed25519 signatures (skipped when signatures are empty)
         if !transaction.signatures.is_empty() {
@@ -690,8 +802,9 @@ impl Bank {
         let mut total_compute = 0u64;
         let mut all_logs = Vec::new();
         let mut modified = HashMap::new();
+        let mut exec_error: Option<TransactionExecutionError> = None;
 
-        for (idx, instruction) in transaction.instructions.iter().enumerate() {
+        'execution: for (idx, instruction) in transaction.instructions.iter().enumerate() {
             // Resolve program id
             let program_id = match transaction
                 .account_keys
@@ -699,42 +812,30 @@ impl Bank {
             {
                 Some(id) => *id,
                 None => {
-                    return TransactionExecutionResult {
-                        success: false,
-                        compute_units_consumed: total_compute,
-                        fee,
-                        modified_accounts: modified,
-                        logs: all_logs,
-                        error: Some(TransactionExecutionError::InstructionFailed {
-                            index: idx,
-                            message: format!(
-                                "invalid program_id_index {}",
-                                instruction.program_id_index
-                            ),
-                        }),
-                        vote_updates: vec![],
-                    };
+                    exec_error = Some(TransactionExecutionError::InstructionFailed {
+                        index: idx,
+                        message: format!(
+                            "invalid program_id_index {}",
+                            instruction.program_id_index
+                        ),
+                    });
+                    break 'execution;
                 }
             };
 
             // Build instruction accounts
             let mut instr_accounts = Vec::with_capacity(instruction.account_indices.len());
+            let mut invalid_index = false;
             for &ai in &instruction.account_indices {
                 let pubkey = match transaction.account_keys.get(ai as usize) {
                     Some(k) => *k,
                     None => {
-                        return TransactionExecutionResult {
-                            success: false,
-                            compute_units_consumed: total_compute,
-                            fee,
-                            modified_accounts: modified,
-                            logs: all_logs,
-                            error: Some(TransactionExecutionError::InstructionFailed {
-                                index: idx,
-                                message: format!("invalid account index {ai}"),
-                            }),
-                            vote_updates: vec![],
-                        };
+                        exec_error = Some(TransactionExecutionError::InstructionFailed {
+                            index: idx,
+                            message: format!("invalid account index {ai}"),
+                        });
+                        invalid_index = true;
+                        break;
                     }
                 };
 
@@ -745,6 +846,9 @@ impl Bank {
                     .unwrap_or_default();
 
                 instr_accounts.push((pubkey, account, true));
+            }
+            if invalid_index {
+                break 'execution;
             }
 
             let info = InstructionInfo {
@@ -764,22 +868,14 @@ impl Bank {
             }
 
             if !result.success {
-                // Merge any partial modifications
                 for (k, v) in result.modified_accounts {
                     modified.insert(k, v);
                 }
-                return TransactionExecutionResult {
-                    success: false,
-                    compute_units_consumed: total_compute,
-                    fee,
-                    modified_accounts: modified,
-                    logs: all_logs,
-                    error: Some(TransactionExecutionError::InstructionFailed {
-                        index: idx,
-                        message: result.error.unwrap_or_else(|| "unknown error".to_string()),
-                    }),
-                    vote_updates: vec![],
-                };
+                exec_error = Some(TransactionExecutionError::InstructionFailed {
+                    index: idx,
+                    message: result.error.unwrap_or_else(|| "unknown error".to_string()),
+                });
+                break 'execution;
             }
 
             // Merge modified accounts
@@ -789,59 +885,86 @@ impl Bank {
 
             // Check compute budget
             if total_compute > compute_limit {
-                return TransactionExecutionResult {
-                    success: false,
-                    compute_units_consumed: total_compute,
-                    fee,
-                    modified_accounts: modified,
-                    logs: all_logs,
-                    error: Some(TransactionExecutionError::ComputeBudgetExceeded {
-                        consumed: total_compute,
-                        limit: compute_limit,
-                    }),
-                    vote_updates: vec![],
-                };
+                exec_error = Some(TransactionExecutionError::ComputeBudgetExceeded {
+                    consumed: total_compute,
+                    limit: compute_limit,
+                });
+                break 'execution;
             }
         }
 
-        // Step 4b: Validate rent state transitions for writable accounts.
-        // The incinerator account is exempt from rent state checks — it
-        // accumulates burned lamports and is zeroed at slot freeze.
-        let rent_violation = modified.iter().find_map(|(pubkey, post_account)| {
-            if *pubkey == INCINERATOR_ID {
-                return None; // Incinerator is exempt
+        // Step 4b: Validate rent state transitions (only on success so far)
+        if exec_error.is_none() {
+            let rent_violation = modified.iter().find_map(|(pubkey, post_account)| {
+                if *pubkey == INCINERATOR_ID {
+                    return None;
+                }
+                let pre_account = account_state.get(pubkey).cloned().unwrap_or_default();
+                let pre_state = RentState::from_account(&pre_account, &rent);
+                let post_state = RentState::from_account(post_account, &rent);
+                if !is_rent_transition_allowed(&pre_state, &post_state) {
+                    Some(*pubkey)
+                } else {
+                    None
+                }
+            });
+            if let Some(violating_account) = rent_violation {
+                exec_error = Some(TransactionExecutionError::InsufficientFundsForRent {
+                    account: violating_account,
+                });
             }
-            let pre_account = account_state.get(pubkey).cloned().unwrap_or_default();
-            let pre_state = RentState::from_account(&pre_account, &rent);
-            let post_state = RentState::from_account(post_account, &rent);
-            if !is_rent_transition_allowed(&pre_state, &post_state) {
-                Some(*pubkey)
-            } else {
-                None
+        }
+
+        // Step 5: Handle success/failure with proper nonce rollback
+        if let Some(error) = exec_error {
+            // Transaction failed AFTER fee deduction.
+            // Write fee-debited payer and advanced nonce (if durable).
+            let mut failure_writes = HashMap::new();
+
+            // Always persist the fee-debited payer
+            if let Some(payer) = account_state.get(fee_payer) {
+                failure_writes.insert(*fee_payer, payer.clone());
             }
-        });
-        if let Some(violating_account) = rent_violation {
+
+            // Persist the advanced nonce account on failure
+            if let Some(ref nonce_info) = durable_nonce {
+                failure_writes.insert(nonce_info.nonce_key, nonce_info.rollback_account.clone());
+            }
+
+            if !failure_writes.is_empty() {
+                self.write_accounts(&failure_writes);
+            }
+
+            // Record fee even on failure
+            self.add_execution_fee(fee);
+            self.add_signatures(transaction.num_signatures);
+
             return TransactionExecutionResult {
                 success: false,
                 compute_units_consumed: total_compute,
                 fee,
                 modified_accounts: modified,
                 logs: all_logs,
-                error: Some(TransactionExecutionError::InsufficientFundsForRent {
-                    account: violating_account,
-                }),
+                error: Some(error),
                 vote_updates: vec![],
             };
         }
 
-        // Step 5: Write modified accounts back to the database
-        // Also include the fee-debited payer from account_state
+        // Step 5b: Success path — write all modified accounts
         let final_payer = account_state.get(fee_payer).cloned();
         if let Some(payer) = final_payer {
             if !modified.contains_key(fee_payer) {
                 modified.insert(*fee_payer, payer);
             }
         }
+
+        // Include nonce rollback if instructions didn't modify the nonce
+        if let Some(ref nonce_info) = durable_nonce {
+            modified
+                .entry(nonce_info.nonce_key)
+                .or_insert_with(|| nonce_info.rollback_account.clone());
+        }
+
         self.write_accounts(&modified);
 
         // Step 6: Record fees and signatures
@@ -854,8 +977,10 @@ impl Bank {
         // Step 8: Extract vote updates from successful vote transactions
         let vote_updates = self.extract_vote_updates(transaction);
 
-        // Step 9: Record transaction in dedup cache
-        if !transaction.signatures.is_empty() {
+        // Step 9: Record transaction in dedup cache.
+        // Durable nonce transactions skip the cache — the nonce mechanism
+        // itself prevents replay, matching the protocol's optimization.
+        if durable_nonce.is_none() && !transaction.signatures.is_empty() {
             let message_hash = compute_message_hash(transaction);
             self.transaction_cache().insert(
                 &transaction.recent_blockhash,
@@ -2468,5 +2593,223 @@ mod tests {
 
         // Should succeed — small accounts well within 64 MiB default limit
         assert!(result.success);
+    }
+
+    // -- Durable nonce transaction tests --
+
+    /// Create a nonce account with initialized state.
+    fn create_nonce_account(
+        authority: Pubkey,
+        durable_nonce: [u8; 32],
+        lamports_per_sig: u64,
+        lamports: u64,
+    ) -> Account {
+        use crate::nonce::{serialize_nonce_state, Nonce, NonceData};
+        use crate::FeeCalculator;
+
+        let state = Nonce::Initialized(NonceData {
+            authority,
+            durable_nonce: Pubkey::new(durable_nonce),
+            fee_calculator: FeeCalculator::new(lamports_per_sig),
+        });
+        let data = serialize_nonce_state(&state);
+        Account::new(lamports, data, SYSTEM_PROGRAM_ID)
+    }
+
+    #[test]
+    fn nonce_deserialization_roundtrip() {
+        use crate::nonce::{deserialize_nonce_state, serialize_nonce_state, Nonce, NonceData};
+
+        let authority = Pubkey::new_unique();
+        let nonce_hash = Pubkey::new_unique();
+        let fee_calc = FeeCalculator::new(5000);
+
+        let state = Nonce::Initialized(NonceData {
+            authority,
+            durable_nonce: nonce_hash,
+            fee_calculator: fee_calc,
+        });
+
+        let serialized = serialize_nonce_state(&state);
+        assert_eq!(serialized.len(), NONCE_ACCOUNT_SIZE);
+
+        let deserialized = deserialize_nonce_state(&serialized).unwrap();
+        let data = deserialized.data().unwrap();
+        assert_eq!(data.authority, authority);
+        assert_eq!(data.durable_nonce, nonce_hash);
+        assert_eq!(data.fee_calculator.lamports_per_signature, 5000);
+    }
+
+    #[test]
+    fn derive_durable_nonce_is_deterministic() {
+        use crate::nonce::derive_durable_nonce;
+
+        let blockhash = [0xAAu8; 32];
+        let nonce1 = derive_durable_nonce(&blockhash);
+        let nonce2 = derive_durable_nonce(&blockhash);
+        assert_eq!(nonce1, nonce2);
+
+        // Different blockhash produces different nonce
+        let nonce3 = derive_durable_nonce(&[0xBBu8; 32]);
+        assert_ne!(nonce1, nonce3);
+    }
+
+    #[test]
+    fn durable_nonce_transaction_succeeds() {
+        let bank = create_test_bank();
+        let backend = PassthroughBackend;
+
+        let payer = Pubkey::new_unique();
+        let nonce_key = Pubkey::new_unique();
+        let authority = payer; // payer is also nonce authority
+
+        // The nonce's durable_nonce must match the tx's recent_blockhash
+        let nonce_value = [0xCC; 32];
+        let nonce_account = create_nonce_account(authority, nonce_value, 5000, 10_000_000);
+        store_test_account(&bank, &nonce_key, &nonce_account);
+
+        let payer_account = Account::new(1_000_000_000, vec![], SYSTEM_PROGRAM_ID);
+        store_test_account(&bank, &payer, &payer_account);
+
+        let sys_id = SYSTEM_PROGRAM_ID;
+
+        // AdvanceNonceAccount instruction (discriminant 4)
+        let advance_data = 4u32.to_le_bytes().to_vec();
+
+        let tx = SanitizedTransaction {
+            account_keys: vec![payer, sys_id, nonce_key],
+            recent_blockhash: nonce_value, // matches nonce's durable_nonce
+            instructions: vec![
+                CompiledInstruction {
+                    program_id_index: 1,      // System Program
+                    account_indices: vec![2], // nonce account
+                    data: advance_data,
+                },
+                CompiledInstruction {
+                    program_id_index: 1,
+                    account_indices: vec![0],
+                    data: vec![0; 4],
+                },
+            ],
+            num_signatures: 1,
+            signatures: vec![],
+            message_bytes: vec![],
+        };
+
+        let result = bank.process_transaction(&tx, &backend, MAX_COMPUTE_UNITS);
+        assert!(result.success, "durable nonce transaction should succeed");
+        assert!(result.fee > 0, "fee should be non-zero for 1 signature");
+    }
+
+    #[test]
+    fn durable_nonce_invalid_blockhash_rejected() {
+        let bank = create_test_bank();
+        let backend = PassthroughBackend;
+
+        let payer = Pubkey::new_unique();
+        let nonce_key = Pubkey::new_unique();
+
+        let nonce_value = [0xCC; 32];
+        let nonce_account = create_nonce_account(payer, nonce_value, 5000, 10_000_000);
+        store_test_account(&bank, &nonce_key, &nonce_account);
+
+        let payer_account = Account::new(1_000_000_000, vec![], SYSTEM_PROGRAM_ID);
+        store_test_account(&bank, &payer, &payer_account);
+
+        let sys_id = SYSTEM_PROGRAM_ID;
+        let advance_data = 4u32.to_le_bytes().to_vec();
+
+        // recent_blockhash does NOT match nonce's durable_nonce
+        let tx = SanitizedTransaction {
+            account_keys: vec![payer, sys_id, nonce_key],
+            recent_blockhash: [0xDD; 32], // WRONG — doesn't match nonce
+            instructions: vec![CompiledInstruction {
+                program_id_index: 1,
+                account_indices: vec![2],
+                data: advance_data,
+            }],
+            num_signatures: 0,
+            signatures: vec![],
+            message_bytes: vec![],
+        };
+
+        let result = bank.process_transaction(&tx, &backend, MAX_COMPUTE_UNITS);
+        assert!(!result.success);
+        assert!(matches!(
+            result.error,
+            Some(TransactionExecutionError::BlockhashNotRecent)
+        ));
+    }
+
+    #[test]
+    fn durable_nonce_failure_still_advances_nonce_and_charges_fee() {
+        let bank = create_test_bank();
+        let backend = FailingBackend;
+
+        let payer = Pubkey::new_unique();
+        let nonce_key = Pubkey::new_unique();
+
+        let nonce_value = [0xCC; 32];
+        let nonce_account = create_nonce_account(payer, nonce_value, 5000, 10_000_000);
+        store_test_account(&bank, &nonce_key, &nonce_account);
+
+        let payer_account = Account::new(1_000_000_000, vec![], SYSTEM_PROGRAM_ID);
+        store_test_account(&bank, &payer, &payer_account);
+
+        let sys_id = SYSTEM_PROGRAM_ID;
+        let advance_data = 4u32.to_le_bytes().to_vec();
+
+        let tx = SanitizedTransaction {
+            account_keys: vec![payer, sys_id, nonce_key],
+            recent_blockhash: nonce_value,
+            instructions: vec![
+                CompiledInstruction {
+                    program_id_index: 1,
+                    account_indices: vec![2],
+                    data: advance_data,
+                },
+                CompiledInstruction {
+                    program_id_index: 1,
+                    account_indices: vec![0],
+                    data: vec![0xFF; 4], // will fail via FailingBackend
+                },
+            ],
+            num_signatures: 1,
+            signatures: vec![],
+            message_bytes: vec![],
+        };
+
+        let result = bank.process_transaction(&tx, &backend, MAX_COMPUTE_UNITS);
+        assert!(!result.success, "execution should fail");
+
+        // Fee should still be charged
+        assert!(result.fee > 0, "fee should be non-zero for 1 signature");
+
+        // Nonce account should be advanced (written via rollback)
+        let updated_nonce = bank
+            .accounts()
+            .get_published_account(&nonce_key)
+            .expect("nonce should still exist");
+
+        let nonce_state =
+            deserialize_nonce_state(updated_nonce.data.as_slice()).expect("should deserialize");
+        let nonce_data = nonce_state.data().expect("should be initialized");
+
+        // Nonce should have advanced — no longer equal to original value
+        assert_ne!(
+            nonce_data.durable_nonce,
+            Pubkey::new(nonce_value),
+            "nonce should be advanced even on failure"
+        );
+
+        // Fee payer should have fee deducted
+        let updated_payer = bank
+            .accounts()
+            .get_published_account(&payer)
+            .expect("payer should exist");
+        assert!(
+            updated_payer.meta.lamports < 1_000_000_000,
+            "fee should be deducted"
+        );
     }
 }

@@ -109,6 +109,91 @@ impl Nonce {
     }
 }
 
+/// Derive a durable nonce from a blockhash: SHA256("DURABLE_NONCE" || blockhash).
+///
+/// This is the deterministic derivation used both for initialization and
+/// advancement. The next durable nonce is always computed from the most
+/// recent blockhash in the blockhash queue.
+pub fn derive_durable_nonce(blockhash: &[u8; 32]) -> [u8; 32] {
+    use paradencer_constants::ledger::DURABLE_NONCE_PREFIX;
+    use sha2::{Digest, Sha256};
+
+    let mut hasher = Sha256::new();
+    hasher.update(DURABLE_NONCE_PREFIX);
+    hasher.update(blockhash);
+    hasher.finalize().into()
+}
+
+/// Deserialize nonce state from raw account data.
+///
+/// Layout: u32 version (LE) | u32 state (LE) | 32 bytes authority |
+/// 32 bytes durable_nonce | u64 lamports_per_signature (LE)
+/// Total: 80 bytes (NONCE_ACCOUNT_SIZE)
+pub fn deserialize_nonce_state(data: &[u8]) -> Option<Nonce> {
+    if data.len() != NONCE_ACCOUNT_SIZE {
+        return None;
+    }
+
+    let _version = u32::from_le_bytes(data[0..4].try_into().ok()?);
+    let state = u32::from_le_bytes(data[4..8].try_into().ok()?);
+
+    if state == paradencer_constants::ledger::NONCE_STATE_UNINITIALIZED {
+        return Some(Nonce::Uninitialized);
+    }
+
+    if state != paradencer_constants::ledger::NONCE_STATE_INITIALIZED {
+        return None;
+    }
+
+    let mut authority_bytes = [0u8; 32];
+    authority_bytes.copy_from_slice(&data[8..40]);
+    let authority = Pubkey::new(authority_bytes);
+
+    let mut nonce_bytes = [0u8; 32];
+    nonce_bytes.copy_from_slice(&data[40..72]);
+    let durable_nonce = Pubkey::new(nonce_bytes);
+
+    let lamports_per_sig = u64::from_le_bytes(data[72..80].try_into().ok()?);
+
+    Some(Nonce::Initialized(NonceData {
+        authority,
+        durable_nonce,
+        fee_calculator: FeeCalculator::new(lamports_per_sig),
+    }))
+}
+
+/// Serialize nonce state into raw account data.
+///
+/// Always writes current version (1).
+pub fn serialize_nonce_state(nonce: &Nonce) -> Vec<u8> {
+    use paradencer_constants::ledger::{
+        NONCE_STATE_INITIALIZED, NONCE_STATE_UNINITIALIZED, NONCE_VERSION_CURRENT,
+    };
+
+    let mut data = vec![0u8; NONCE_ACCOUNT_SIZE];
+
+    match nonce {
+        Nonce::Uninitialized => {
+            data[0..4].copy_from_slice(&NONCE_VERSION_CURRENT.to_le_bytes());
+            data[4..8].copy_from_slice(&NONCE_STATE_UNINITIALIZED.to_le_bytes());
+        }
+        Nonce::Initialized(nonce_data) => {
+            data[0..4].copy_from_slice(&NONCE_VERSION_CURRENT.to_le_bytes());
+            data[4..8].copy_from_slice(&NONCE_STATE_INITIALIZED.to_le_bytes());
+            data[8..40].copy_from_slice(nonce_data.authority.as_bytes());
+            data[40..72].copy_from_slice(nonce_data.durable_nonce.as_bytes());
+            data[72..80].copy_from_slice(
+                &nonce_data
+                    .fee_calculator
+                    .lamports_per_signature
+                    .to_le_bytes(),
+            );
+        }
+    }
+
+    data
+}
+
 /// Operations on nonce accounts.
 pub struct NonceAccount;
 
