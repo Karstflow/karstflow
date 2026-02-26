@@ -626,3 +626,356 @@ impl Default for SnapshotCatalog {
         Self::new()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_hot_state(fragments: u64, transactions: u64) -> HotStateStore {
+        let mut store = HotStateStore::new();
+        store.committed_fragments = fragments;
+        store.committed_transactions = transactions;
+        store
+    }
+
+    // --- Basic operations ---
+
+    #[test]
+    fn new_catalog_is_empty() {
+        let catalog = SnapshotCatalog::new();
+        assert_eq!(catalog.last_snapshot_fragment_id, 0);
+        assert_eq!(catalog.snapshots_written, 0);
+        assert!(catalog.restore_latest_snapshot().is_none());
+    }
+
+    #[test]
+    fn write_snapshot_creates_image() {
+        let mut catalog = SnapshotCatalog::new();
+        let hot_state = make_hot_state(10, 500);
+
+        let image = catalog.write_snapshot(100, &hot_state).unwrap();
+        assert_eq!(image.fragment_id, 100);
+        assert_eq!(image.committed_fragments, 10);
+        assert_eq!(image.committed_transactions, 500);
+        assert!(image.has_valid_checksum());
+
+        assert_eq!(catalog.last_snapshot_fragment_id, 100);
+        assert_eq!(catalog.snapshots_written, 1);
+    }
+
+    #[test]
+    fn write_snapshot_rejects_regression() {
+        let mut catalog = SnapshotCatalog::new();
+        let hot_state = make_hot_state(10, 500);
+
+        catalog.write_snapshot(100, &hot_state).unwrap();
+        let result = catalog.write_snapshot(50, &hot_state);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn restore_latest_snapshot() {
+        let mut catalog = SnapshotCatalog::new();
+        let hot_state = make_hot_state(10, 500);
+
+        catalog.write_snapshot(100, &hot_state).unwrap();
+        catalog
+            .write_snapshot(200, &make_hot_state(20, 1000))
+            .unwrap();
+
+        let latest = catalog.restore_latest_snapshot().unwrap();
+        assert_eq!(latest.fragment_id, 200);
+    }
+
+    #[test]
+    fn restore_specific_snapshot() {
+        let mut catalog = SnapshotCatalog::new();
+        catalog
+            .write_snapshot(100, &make_hot_state(10, 500))
+            .unwrap();
+        catalog
+            .write_snapshot(200, &make_hot_state(20, 1000))
+            .unwrap();
+
+        let snap = catalog.restore_snapshot(100).unwrap();
+        assert_eq!(snap.fragment_id, 100);
+
+        let missing = catalog.restore_snapshot(999);
+        assert!(missing.is_err());
+    }
+
+    // --- Retention ---
+
+    #[test]
+    fn enforce_retention_removes_oldest() {
+        let mut catalog = SnapshotCatalog::new();
+        for i in 1..=5 {
+            catalog
+                .write_snapshot(i * 100, &make_hot_state(i, i * 50))
+                .unwrap();
+        }
+
+        catalog.enforce_retention(3);
+
+        // Should keep only last 3 (300, 400, 500)
+        assert!(catalog.restore_snapshot(100).is_err());
+        assert!(catalog.restore_snapshot(200).is_err());
+        assert!(catalog.restore_snapshot(300).is_ok());
+        assert!(catalog.restore_snapshot(500).is_ok());
+        assert_eq!(catalog.last_snapshot_fragment_id, 500);
+    }
+
+    #[test]
+    fn enforce_retention_keeps_at_least_one() {
+        let mut catalog = SnapshotCatalog::new();
+        catalog
+            .write_snapshot(100, &make_hot_state(10, 500))
+            .unwrap();
+        catalog
+            .write_snapshot(200, &make_hot_state(20, 1000))
+            .unwrap();
+
+        // Even with max_snapshots=0, should keep 1
+        catalog.enforce_retention(0);
+        assert!(catalog.restore_latest_snapshot().is_some());
+    }
+
+    // --- Rewind ---
+
+    #[test]
+    fn rewind_removes_newer_snapshots() {
+        let mut catalog = SnapshotCatalog::new();
+        for i in 1..=5 {
+            catalog
+                .write_snapshot(i * 100, &make_hot_state(i, i * 50))
+                .unwrap();
+        }
+
+        let removed = catalog.rewind_to_fragment(300);
+        assert_eq!(removed, 2); // 400 and 500 removed
+
+        assert!(catalog.restore_snapshot(300).is_ok());
+        assert!(catalog.restore_snapshot(400).is_err());
+        assert_eq!(catalog.last_snapshot_fragment_id, 300);
+    }
+
+    #[test]
+    fn rewind_to_zero_removes_everything() {
+        let mut catalog = SnapshotCatalog::new();
+        catalog
+            .write_snapshot(100, &make_hot_state(10, 500))
+            .unwrap();
+        catalog
+            .write_snapshot(200, &make_hot_state(20, 1000))
+            .unwrap();
+
+        let removed = catalog.rewind_to_fragment(0);
+        assert_eq!(removed, 2);
+        assert!(catalog.restore_latest_snapshot().is_none());
+        assert_eq!(catalog.last_snapshot_fragment_id, 0);
+    }
+
+    // --- Persistence ---
+
+    #[test]
+    fn persist_and_load_roundtrip() {
+        let dir = std::env::temp_dir().join(format!("catalog_test_{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let catalog_path = dir.join("catalog.json");
+
+        let mut catalog = SnapshotCatalog::new();
+        catalog
+            .write_snapshot(100, &make_hot_state(10, 500))
+            .unwrap();
+        catalog
+            .write_snapshot(200, &make_hot_state(20, 1000))
+            .unwrap();
+
+        catalog.persist_to_file(&catalog_path).unwrap();
+
+        let loaded = SnapshotCatalog::load_from_file(&catalog_path).unwrap();
+        assert_eq!(loaded.last_snapshot_fragment_id, 200);
+        assert_eq!(loaded.snapshots_written, 2);
+
+        let snap = loaded.restore_snapshot(100).unwrap();
+        assert_eq!(snap.committed_fragments, 10);
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn load_from_missing_file_returns_error() {
+        let path = Path::new("/tmp/nonexistent_catalog_test.json");
+        let result = SnapshotCatalog::load_from_file(path);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn load_if_exists_returns_none_for_missing() {
+        let path = Path::new("/tmp/nonexistent_catalog_test2.json");
+        let result = SnapshotCatalog::load_from_file_if_exists(path).unwrap();
+        assert!(result.is_none());
+    }
+
+    // --- Validation ---
+
+    #[test]
+    fn validate_snapshot_sequence_detects_non_increasing_ids() {
+        let path = Path::new("test.json");
+        let snapshots = vec![
+            SnapshotImage::new(200, 20, 1000),
+            SnapshotImage::new(100, 10, 500), // out of order
+        ];
+        let result = validate_snapshot_sequence(path, &snapshots);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn validate_snapshot_sequence_detects_non_monotonic_fragments() {
+        let path = Path::new("test.json");
+        let snapshots = vec![
+            SnapshotImage::new(100, 20, 1000),
+            SnapshotImage::new(200, 10, 2000), // fragments decreased
+        ];
+        let result = validate_snapshot_sequence(path, &snapshots);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn validate_snapshot_sequence_detects_non_monotonic_transactions() {
+        let path = Path::new("test.json");
+        let snapshots = vec![
+            SnapshotImage::new(100, 10, 1000),
+            SnapshotImage::new(200, 20, 500), // transactions decreased
+        ];
+        let result = validate_snapshot_sequence(path, &snapshots);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn validate_snapshot_sequence_detects_bad_checksum() {
+        let path = Path::new("test.json");
+        let mut bad_image = SnapshotImage::new(100, 10, 500);
+        bad_image.state_checksum = 0xDEADBEEF; // tampered
+        let snapshots = vec![bad_image];
+        let result = validate_snapshot_sequence(path, &snapshots);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn validate_catalog_header_detects_snapshot_count_mismatch() {
+        let path = Path::new("test.json");
+        let snapshots = vec![
+            SnapshotImage::new(100, 10, 500),
+            SnapshotImage::new(200, 20, 1000),
+        ];
+        // snapshots_written=1 but 2 snapshots present
+        let result = validate_catalog_header(path, 1, 200, &snapshots);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn validate_catalog_header_detects_wrong_last_fragment_id() {
+        let path = Path::new("test.json");
+        let snapshots = vec![
+            SnapshotImage::new(100, 10, 500),
+            SnapshotImage::new(200, 20, 1000),
+        ];
+        // last_snapshot_fragment_id=100 but latest is 200
+        let result = validate_catalog_header(path, 5, 100, &snapshots);
+        assert!(result.is_err());
+    }
+
+    // --- Snapshot scheduling ---
+
+    #[test]
+    fn should_create_full_snapshot_respects_config() {
+        let mut catalog = SnapshotCatalog::new();
+        // No config — always false
+        assert!(!catalog.should_create_full_snapshot(1000));
+
+        let mut config = SnapshotConfig::new();
+        config.full_snapshot_interval = 1000;
+        catalog.set_config(config);
+
+        assert!(catalog.should_create_full_snapshot(1000));
+        assert!(catalog.should_create_full_snapshot(2000));
+        assert!(!catalog.should_create_full_snapshot(1500));
+    }
+
+    #[test]
+    fn should_create_incremental_skips_full_snapshot_slots() {
+        let mut config = SnapshotConfig::new();
+        config.full_snapshot_interval = 1000;
+        config.incremental_snapshot_interval = 100;
+        let catalog = SnapshotCatalog::new().with_config(config);
+
+        // Slot 100 is incremental
+        assert!(catalog.should_create_incremental_snapshot(100));
+        // Slot 1000 is full, not incremental
+        assert!(!catalog.should_create_incremental_snapshot(1000));
+    }
+
+    // --- Full/incremental snapshot registration ---
+
+    #[test]
+    fn register_and_list_snapshots() {
+        let mut catalog = SnapshotCatalog::new();
+
+        catalog.register_full_snapshot(100, PathBuf::from("/snap/full-100"));
+        catalog.register_full_snapshot(200, PathBuf::from("/snap/full-200"));
+        catalog.register_incremental_snapshot(150, PathBuf::from("/snap/inc-150"));
+
+        assert_eq!(catalog.list_full_snapshots(), vec![100, 200]);
+        assert_eq!(catalog.list_incremental_snapshots(), vec![150]);
+        assert_eq!(catalog.get_latest_full_snapshot_slot(), Some(200));
+        assert_eq!(catalog.get_incremental_snapshots_after(100), vec![150]);
+    }
+
+    // --- maybe_write_snapshot ---
+
+    #[test]
+    fn maybe_write_snapshot_skips_when_interval_zero() {
+        let mut catalog = SnapshotCatalog::new();
+        let hot_state = make_hot_state(10, 500);
+        let record = CommittedFragmentRecord {
+            fragment_id: 100,
+            transaction_count: 50,
+            total_cost_units: 500_000,
+        };
+
+        let written = catalog
+            .maybe_write_snapshot(&record, &hot_state, 0)
+            .unwrap();
+        assert!(!written);
+    }
+
+    #[test]
+    fn maybe_write_snapshot_writes_at_interval() {
+        let mut catalog = SnapshotCatalog::new();
+        let hot_state = make_hot_state(10, 500);
+        let record = CommittedFragmentRecord {
+            fragment_id: 100,
+            transaction_count: 50,
+            total_cost_units: 500_000,
+        };
+
+        let written = catalog
+            .maybe_write_snapshot(&record, &hot_state, 50)
+            .unwrap();
+        assert!(written); // 100 is multiple of 50
+
+        let not_written = catalog
+            .maybe_write_snapshot(
+                &CommittedFragmentRecord {
+                    fragment_id: 125,
+                    transaction_count: 60,
+                    total_cost_units: 600_000,
+                },
+                &make_hot_state(12, 600),
+                50,
+            )
+            .unwrap();
+        assert!(!not_written); // 125 is not multiple of 50
+    }
+}

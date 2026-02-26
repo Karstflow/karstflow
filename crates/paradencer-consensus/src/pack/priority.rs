@@ -239,3 +239,198 @@ impl PriorityQueue {
         self.pending = entries.into_iter().collect();
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_tx(price: u64, is_vote: bool) -> PendingTransaction {
+        PendingTransaction {
+            id: 0, // Will be assigned by queue
+            compute_unit_price: price,
+            compute_units: 1_000,
+            data_bytes: 100,
+            signature_count: 1,
+            is_vote,
+            expires_at_slot: 1000,
+            read_accounts: vec![],
+            write_accounts: vec![],
+            fee_payer: Pubkey::new_unique(),
+            payload_index: 0,
+        }
+    }
+
+    #[test]
+    fn empty_queue() {
+        let queue = PriorityQueue::new(100);
+        assert!(queue.is_empty());
+        assert_eq!(queue.len(), 0);
+        assert_eq!(queue.pending_count(), 0);
+        assert_eq!(queue.vote_count(), 0);
+    }
+
+    #[test]
+    fn insert_and_pop_pending() {
+        let mut queue = PriorityQueue::new(100);
+        queue.insert(make_tx(500, false));
+        queue.insert(make_tx(1000, false));
+        queue.insert(make_tx(200, false));
+
+        assert_eq!(queue.len(), 3);
+        assert_eq!(queue.pending_count(), 3);
+
+        // Should pop highest priority first
+        let top = queue.pop_pending().unwrap();
+        assert_eq!(top.compute_unit_price, 1000);
+        let next = queue.pop_pending().unwrap();
+        assert_eq!(next.compute_unit_price, 500);
+        let last = queue.pop_pending().unwrap();
+        assert_eq!(last.compute_unit_price, 200);
+        assert!(queue.pop_pending().is_none());
+    }
+
+    #[test]
+    fn insert_and_pop_votes() {
+        let mut queue = PriorityQueue::new(100);
+        queue.insert(make_tx(300, true));
+        queue.insert(make_tx(800, true));
+
+        assert_eq!(queue.vote_count(), 2);
+        assert_eq!(queue.pending_count(), 0);
+
+        let top = queue.pop_vote().unwrap();
+        assert_eq!(top.compute_unit_price, 800);
+    }
+
+    #[test]
+    fn votes_and_pending_separate() {
+        let mut queue = PriorityQueue::new(100);
+        queue.insert(make_tx(100, false));
+        queue.insert(make_tx(200, true));
+
+        assert_eq!(queue.pending_count(), 1);
+        assert_eq!(queue.vote_count(), 1);
+        assert_eq!(queue.len(), 2);
+
+        // Pop vote doesn't affect pending
+        let vote = queue.pop_vote().unwrap();
+        assert!(vote.is_vote);
+        assert_eq!(queue.pending_count(), 1);
+    }
+
+    #[test]
+    fn capacity_evicts_lowest_pending() {
+        let mut queue = PriorityQueue::new(3);
+        queue.insert(make_tx(100, false));
+        queue.insert(make_tx(200, false));
+        queue.insert(make_tx(300, false));
+
+        assert_eq!(queue.len(), 3);
+
+        // Insert higher priority — should evict price=100
+        let id = queue.insert(make_tx(400, false));
+        assert!(id.is_some());
+        assert_eq!(queue.len(), 3);
+
+        // Drain and verify lowest (100) was evicted
+        let all = queue.drain_pending();
+        let prices: Vec<u64> = all.iter().map(|t| t.compute_unit_price).collect();
+        assert!(!prices.contains(&100));
+        assert!(prices.contains(&200));
+        assert!(prices.contains(&300));
+        assert!(prices.contains(&400));
+    }
+
+    #[test]
+    fn capacity_rejects_low_priority() {
+        let mut queue = PriorityQueue::new(2);
+        queue.insert(make_tx(500, false));
+        queue.insert(make_tx(600, false));
+
+        // Insert lower priority — should be rejected
+        let id = queue.insert(make_tx(400, false));
+        assert!(id.is_none());
+        assert_eq!(queue.len(), 2);
+    }
+
+    #[test]
+    fn expire_before_removes_old_transactions() {
+        let mut queue = PriorityQueue::new(100);
+
+        let mut tx1 = make_tx(100, false);
+        tx1.expires_at_slot = 50;
+        queue.insert(tx1);
+
+        let mut tx2 = make_tx(200, false);
+        tx2.expires_at_slot = 100;
+        queue.insert(tx2);
+
+        let mut tx3 = make_tx(300, true);
+        tx3.expires_at_slot = 50;
+        queue.insert(tx3);
+
+        let expired = queue.expire_before(100);
+        assert_eq!(expired, 2); // tx1 (slot 50) and tx3 (slot 50)
+        assert_eq!(queue.len(), 1);
+        assert_eq!(queue.pending_count(), 1);
+    }
+
+    #[test]
+    fn clear_empties_everything() {
+        let mut queue = PriorityQueue::new(100);
+        queue.insert(make_tx(100, false));
+        queue.insert(make_tx(200, true));
+        assert_eq!(queue.len(), 2);
+
+        queue.clear();
+        assert!(queue.is_empty());
+    }
+
+    #[test]
+    fn peek_does_not_remove() {
+        let mut queue = PriorityQueue::new(100);
+        queue.insert(make_tx(500, false));
+        queue.insert(make_tx(300, true));
+
+        assert_eq!(queue.peek_pending().unwrap().compute_unit_price, 500);
+        assert_eq!(queue.peek_vote().unwrap().compute_unit_price, 300);
+        assert_eq!(queue.len(), 2); // Still there
+    }
+
+    #[test]
+    fn ids_are_monotonically_assigned() {
+        let mut queue = PriorityQueue::new(100);
+        let id1 = queue.insert(make_tx(100, false)).unwrap();
+        let id2 = queue.insert(make_tx(200, false)).unwrap();
+        let id3 = queue.insert(make_tx(300, true)).unwrap();
+        assert!(id1 < id2);
+        assert!(id2 < id3);
+    }
+
+    #[test]
+    fn priority_breaks_ties_by_insertion_order() {
+        let mut queue = PriorityQueue::new(100);
+        // Same price, different insertion order
+        queue.insert(make_tx(500, false)); // id=0
+        queue.insert(make_tx(500, false)); // id=1
+
+        let first = queue.pop_pending().unwrap();
+        let second = queue.pop_pending().unwrap();
+        // Earlier insertion (lower id) wins ties
+        assert!(first.id < second.id);
+    }
+
+    #[test]
+    fn drain_returns_in_priority_order() {
+        let mut queue = PriorityQueue::new(100);
+        queue.insert(make_tx(300, false));
+        queue.insert(make_tx(100, false));
+        queue.insert(make_tx(500, false));
+
+        let drained = queue.drain_pending();
+        assert_eq!(drained.len(), 3);
+        assert_eq!(drained[0].compute_unit_price, 500);
+        assert_eq!(drained[1].compute_unit_price, 300);
+        assert_eq!(drained[2].compute_unit_price, 100);
+    }
+}

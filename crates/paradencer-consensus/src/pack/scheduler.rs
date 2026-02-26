@@ -401,3 +401,305 @@ impl BlockScheduler {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_tx(id: u64, price: u64, cu: u64, is_vote: bool) -> PendingTransaction {
+        PendingTransaction {
+            id,
+            compute_unit_price: price,
+            compute_units: cu,
+            data_bytes: 200,
+            signature_count: 1,
+            is_vote,
+            expires_at_slot: 1000,
+            read_accounts: vec![],
+            write_accounts: vec![],
+            fee_payer: Pubkey::new_unique(),
+            payload_index: 0,
+        }
+    }
+
+    fn small_limits() -> BlockLimits {
+        BlockLimits {
+            max_block_compute_units: 100_000,
+            max_vote_compute_units: 30_000,
+            max_write_cost_per_account: 50_000,
+            max_data_bytes: 1_000_000,
+            max_transactions_per_microblock: 4,
+        }
+    }
+
+    // --- BlockUsage tests ---
+
+    #[test]
+    fn block_usage_default_is_empty() {
+        let usage = BlockUsage::default();
+        assert_eq!(usage.total_compute_units, 0);
+        assert_eq!(usage.transaction_count, 0);
+    }
+
+    #[test]
+    fn block_usage_tracks_transactions() {
+        let mut usage = BlockUsage::default();
+        let acct = Pubkey::new_unique();
+        let mut tx = make_tx(1, 100, 5_000, false);
+        tx.write_accounts = vec![acct];
+
+        usage.add_transaction(&tx);
+
+        assert_eq!(usage.total_compute_units, 5_000);
+        assert_eq!(usage.data_bytes, 200);
+        assert_eq!(usage.transaction_count, 1);
+        assert_eq!(*usage.account_write_costs.get(&acct).unwrap(), 5_000);
+    }
+
+    #[test]
+    fn block_usage_tracks_votes() {
+        let mut usage = BlockUsage::default();
+        let tx = make_tx(1, 100, 3_000, true);
+        usage.add_transaction(&tx);
+
+        assert_eq!(usage.vote_compute_units, 3_000);
+        assert_eq!(usage.total_compute_units, 3_000);
+    }
+
+    #[test]
+    fn block_usage_would_exceed_block_cu_limit() {
+        let mut usage = BlockUsage::default();
+        let limits = small_limits();
+        usage.total_compute_units = 99_000;
+
+        let tx = make_tx(1, 100, 2_000, false);
+        assert!(usage.would_exceed(&tx, &limits));
+    }
+
+    #[test]
+    fn block_usage_would_exceed_vote_cu_limit() {
+        let mut usage = BlockUsage::default();
+        let limits = small_limits();
+        usage.vote_compute_units = 29_000;
+
+        let tx = make_tx(1, 100, 2_000, true);
+        assert!(usage.would_exceed(&tx, &limits));
+    }
+
+    #[test]
+    fn block_usage_would_exceed_per_account_write_cost() {
+        let mut usage = BlockUsage::default();
+        let limits = small_limits();
+        let acct = Pubkey::new_unique();
+        usage.account_write_costs.insert(acct, 49_000);
+
+        let mut tx = make_tx(1, 100, 2_000, false);
+        tx.write_accounts = vec![acct];
+        assert!(usage.would_exceed(&tx, &limits));
+    }
+
+    #[test]
+    fn block_usage_would_exceed_data_bytes() {
+        let mut usage = BlockUsage::default();
+        let limits = small_limits();
+        usage.data_bytes = 999_900;
+
+        let tx = make_tx(1, 100, 1_000, false);
+        assert!(usage.would_exceed(&tx, &limits));
+    }
+
+    #[test]
+    fn block_usage_remaining_compute() {
+        let mut usage = BlockUsage::default();
+        let limits = small_limits();
+        usage.total_compute_units = 60_000;
+
+        assert_eq!(usage.remaining_compute_units(&limits), 40_000);
+    }
+
+    #[test]
+    fn block_usage_reset_clears_state() {
+        let mut usage = BlockUsage::default();
+        let acct = Pubkey::new_unique();
+        usage.total_compute_units = 50_000;
+        usage.vote_compute_units = 10_000;
+        usage.data_bytes = 5_000;
+        usage.transaction_count = 3;
+        usage.microblock_count = 1;
+        usage.account_write_costs.insert(acct, 20_000);
+
+        usage.reset();
+
+        assert_eq!(usage.total_compute_units, 0);
+        assert_eq!(usage.vote_compute_units, 0);
+        assert_eq!(usage.data_bytes, 0);
+        assert_eq!(usage.transaction_count, 0);
+        assert_eq!(usage.microblock_count, 0);
+        assert!(usage.account_write_costs.is_empty());
+    }
+
+    // --- BlockScheduler tests ---
+
+    #[test]
+    fn schedule_empty_queue_returns_empty_microblock() {
+        let mut scheduler = BlockScheduler::new(small_limits());
+        let mut queue = PriorityQueue::new(100);
+
+        let mb = scheduler.schedule_microblock(&mut queue, 0.25);
+        assert!(mb.transactions.is_empty());
+        assert_eq!(mb.total_compute_units, 0);
+    }
+
+    #[test]
+    fn schedule_single_pending_transaction() {
+        let mut scheduler = BlockScheduler::new(small_limits());
+        let mut queue = PriorityQueue::new(100);
+        queue.insert(make_tx(0, 500, 5_000, false));
+
+        let mb = scheduler.schedule_microblock(&mut queue, 0.25);
+        assert_eq!(mb.transactions.len(), 1);
+        assert_eq!(mb.total_compute_units, 5_000);
+        assert!(mb.transactions[0].estimated_fee > 0);
+    }
+
+    #[test]
+    fn schedule_respects_max_transactions_per_microblock() {
+        let mut scheduler = BlockScheduler::new(small_limits()); // max 4 per microblock
+        let mut queue = PriorityQueue::new(100);
+
+        for i in 0..10 {
+            queue.insert(make_tx(i, 500, 1_000, false));
+        }
+
+        let mb = scheduler.schedule_microblock(&mut queue, 0.0);
+        assert!(mb.transactions.len() <= 4);
+    }
+
+    #[test]
+    fn schedule_votes_first_then_pending() {
+        let mut scheduler = BlockScheduler::new(small_limits());
+        let mut queue = PriorityQueue::new(100);
+
+        queue.insert(make_tx(0, 100, 2_000, false));
+        queue.insert(make_tx(0, 200, 2_000, true));
+
+        let mb = scheduler.schedule_microblock(&mut queue, 0.5);
+        assert!(!mb.transactions.is_empty());
+        // First should be the vote
+        assert!(mb.transactions[0].transaction.is_vote);
+    }
+
+    #[test]
+    fn write_conflict_defers_transaction() {
+        let mut scheduler = BlockScheduler::new(small_limits());
+        let mut queue = PriorityQueue::new(100);
+
+        let shared_account = Pubkey::new_unique();
+
+        let mut tx1 = make_tx(0, 500, 2_000, false);
+        tx1.write_accounts = vec![shared_account];
+        let mut tx2 = make_tx(0, 400, 2_000, false);
+        tx2.write_accounts = vec![shared_account];
+
+        queue.insert(tx1);
+        queue.insert(tx2);
+
+        let mb = scheduler.schedule_microblock(&mut queue, 0.0);
+        // Only one should be scheduled (the other deferred due to conflict)
+        assert_eq!(mb.transactions.len(), 1);
+        // The deferred one should still be in the queue
+        assert_eq!(queue.pending_count(), 1);
+    }
+
+    #[test]
+    fn read_write_conflict_defers_transaction() {
+        let mut scheduler = BlockScheduler::new(small_limits());
+        let mut queue = PriorityQueue::new(100);
+
+        let shared_account = Pubkey::new_unique();
+
+        let mut tx1 = make_tx(0, 500, 2_000, false);
+        tx1.write_accounts = vec![shared_account];
+        let mut tx2 = make_tx(0, 400, 2_000, false);
+        tx2.read_accounts = vec![shared_account]; // Reads what tx1 writes
+
+        queue.insert(tx1);
+        queue.insert(tx2);
+
+        let mb = scheduler.schedule_microblock(&mut queue, 0.0);
+        assert_eq!(mb.transactions.len(), 1);
+    }
+
+    #[test]
+    fn release_locks_allows_previously_conflicting() {
+        let mut scheduler = BlockScheduler::new(small_limits());
+        let mut queue = PriorityQueue::new(100);
+
+        let shared_account = Pubkey::new_unique();
+
+        let mut tx1 = make_tx(0, 500, 2_000, false);
+        tx1.write_accounts = vec![shared_account];
+        let mut tx2 = make_tx(0, 400, 2_000, false);
+        tx2.write_accounts = vec![shared_account];
+
+        queue.insert(tx1);
+        queue.insert(tx2);
+
+        let mb1 = scheduler.schedule_microblock(&mut queue, 0.0);
+        assert_eq!(mb1.transactions.len(), 1);
+        let scheduled_id = mb1.transactions[0].transaction.id;
+
+        // Release the lock from the first transaction
+        scheduler.release_locks(scheduled_id);
+
+        // Now the second should be schedulable
+        let mb2 = scheduler.schedule_microblock(&mut queue, 0.0);
+        assert_eq!(mb2.transactions.len(), 1);
+    }
+
+    #[test]
+    fn end_block_resets_scheduler() {
+        let mut scheduler = BlockScheduler::new(small_limits());
+        let mut queue = PriorityQueue::new(100);
+
+        queue.insert(make_tx(0, 500, 50_000, false));
+        scheduler.schedule_microblock(&mut queue, 0.0);
+
+        assert!(scheduler.usage().total_compute_units > 0);
+
+        scheduler.end_block();
+        assert_eq!(scheduler.usage().total_compute_units, 0);
+        assert_eq!(scheduler.usage().transaction_count, 0);
+    }
+
+    #[test]
+    fn no_transactions_when_block_cu_exhausted() {
+        let limits = BlockLimits {
+            max_block_compute_units: 5_000,
+            ..small_limits()
+        };
+        let mut scheduler = BlockScheduler::new(limits);
+        let mut queue = PriorityQueue::new(100);
+
+        // First microblock uses all CU
+        queue.insert(make_tx(0, 500, 5_000, false));
+        let mb1 = scheduler.schedule_microblock(&mut queue, 0.0);
+        assert_eq!(mb1.transactions.len(), 1);
+
+        // Second microblock should produce nothing
+        queue.insert(make_tx(0, 500, 1_000, false));
+        let mb2 = scheduler.schedule_microblock(&mut queue, 0.0);
+        assert!(mb2.transactions.is_empty());
+    }
+
+    #[test]
+    fn microblock_count_incremented() {
+        let mut scheduler = BlockScheduler::new(small_limits());
+        let mut queue = PriorityQueue::new(100);
+        queue.insert(make_tx(0, 500, 1_000, false));
+
+        assert_eq!(scheduler.usage().microblock_count, 0);
+        scheduler.schedule_microblock(&mut queue, 0.0);
+        assert_eq!(scheduler.usage().microblock_count, 1);
+    }
+}
