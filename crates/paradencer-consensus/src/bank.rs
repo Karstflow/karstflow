@@ -564,7 +564,8 @@ impl Bank {
     /// Populates slot, epoch, timestamps and schedule info from the sysvar
     /// cache if present, falling back to constants for epoch schedule and rent.
     pub fn slot_context(&self) -> crate::bank_executor::SlotContext {
-        use paradencer_constants::{consensus, economics, ledger};
+        // Epoch schedule and rent configuration from the bank's state,
+        // not global constants — supports non-default configurations.
 
         let (slot, epoch, timestamp, epoch_start_ts, leader_sched_epoch) =
             if let Some(sysvars) = &self.sysvars {
@@ -579,6 +580,8 @@ impl Bank {
             } else {
                 (self.slot, self.epoch, 0, 0, self.epoch.saturating_add(1))
             };
+
+        let es = self.epoch_schedule.config();
 
         // Snapshot active feature gate IDs for the execution layer.
         let active_features = if let Some(ref fs_lock) = self.feature_set {
@@ -616,14 +619,14 @@ impl Bank {
             unix_timestamp: timestamp,
             epoch_start_timestamp: epoch_start_ts,
             leader_schedule_epoch: leader_sched_epoch,
-            slots_per_epoch: ledger::SLOTS_PER_EPOCH,
-            leader_schedule_slot_offset: consensus::LEADER_SCHEDULE_SLOT_OFFSET,
-            warmup: false,
-            first_normal_epoch: 0,
-            first_normal_slot: 0,
-            lamports_per_byte_year: economics::RENT_EXEMPTION_LAMPORTS_PER_BYTE,
-            exemption_threshold: 2.0,
-            burn_percent: economics::DEFAULT_FEE_BURN_PERCENT,
+            slots_per_epoch: es.slots_per_epoch,
+            leader_schedule_slot_offset: es.leader_schedule_slot_offset,
+            warmup: es.warmup,
+            first_normal_epoch: es.first_normal_epoch,
+            first_normal_slot: es.first_normal_slot,
+            lamports_per_byte_year: self.rent.lamports_per_byte_year,
+            exemption_threshold: self.rent.exemption_threshold,
+            burn_percent: self.rent.burn_percent,
             last_restart_slot: 0,
             recent_blockhash: *self.last_blockhash.read().unwrap(),
             lamports_per_signature: self.lamports_per_signature(),
