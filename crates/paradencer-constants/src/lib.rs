@@ -464,6 +464,7 @@ pub mod ipc;
 pub mod loader_v4;
 pub mod network;
 pub mod repair;
+pub mod replay;
 pub mod shred;
 pub mod syscalls;
 pub mod sysvars;

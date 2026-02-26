@@ -108,3 +108,9 @@ pub const TRANSACTION_FEE_BURN_PERCENT: u64 = 50;
 /// Maximum microblock compute units (CU). Each microblock is bounded
 /// by this limit to allow fine-grained pacing.
 pub const MAX_CUS_PER_MICROBLOCK: u64 = 1_600_000;
+
+/// Minimum interval between microblock emissions in nanoseconds.
+///
+/// Prevents bursty microblock production that could overwhelm
+/// execution tiles. At 50us, this allows up to ~20K microblocks/sec.
+pub const DEFAULT_MICROBLOCK_PACE_NS: u64 = 50_000;

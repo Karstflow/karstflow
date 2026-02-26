@@ -14,5 +14,6 @@ mod scheduler;
 pub use conflict_detector::{AccountLock, ConflictDetector, LockKind};
 pub use priority_queue::{PackedTransaction, TransactionQueue};
 pub use scheduler::{
-    Microblock, PackConfig, PackLimits, PackOutcome, PackScheduler, PackStats, PackStatsSnapshot,
+    Microblock, MicroblockRebate, PackConfig, PackLimits, PackOutcome, PackPacer, PackScheduler,
+    PackStats, PackStatsSnapshot,
 };

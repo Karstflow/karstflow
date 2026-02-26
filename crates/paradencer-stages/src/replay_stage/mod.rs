@@ -2,9 +2,11 @@ mod ancestry_verifier;
 mod bank_transition;
 mod block_processor;
 mod replay_pipeline;
+pub mod signals;
 mod slot_metrics;
 #[cfg(test)]
 mod tests;
+mod transaction_dispatcher;
 mod vote_integration;
 
 pub use ancestry_verifier::{
@@ -17,9 +19,16 @@ pub use replay_pipeline::{
     ForkReplayCoordinator, OptimisticConfirmationTracker, ReplayBatchProcessor, ReplayOptimizer,
     SlotReplayInfo,
 };
+pub use signals::{
+    BecameLeaderInfo, OptimisticConfirmationInfo, PohResetInfo, ReplaySignal, RootAdvancedInfo,
+    SignalBus, SlotCompletedInfo, SlotDeadInfo, SlotDeadReason,
+};
 pub use slot_metrics::{
     AggregateMetrics, AlertSeverity, AlertType, AnomalyType, MetricsTracker, PerformanceAlert,
     PerformanceAnomaly, PerformanceMonitor, PerformanceThresholds, SlotMetrics,
+};
+pub use transaction_dispatcher::{
+    DependencyGraph, DispatchProgress, DispatchState, DispatcherStats, TransactionDispatcher,
 };
 pub use vote_integration::{VoteIntegration, VoteIntegrationError};
 
@@ -142,6 +151,8 @@ pub struct ReplayStage {
     vote_integration: VoteIntegration,
     /// Statistics
     stats: Arc<Mutex<ReplayStats>>,
+    /// Signal bus for structured replay event broadcast.
+    signal_bus: Arc<Mutex<SignalBus>>,
 }
 
 impl ReplayStage {
@@ -184,6 +195,7 @@ impl ReplayStage {
             block_processor,
             vote_integration,
             stats: Arc::new(Mutex::new(ReplayStats::new())),
+            signal_bus: Arc::new(Mutex::new(SignalBus::new())),
         }
     }
 
@@ -211,7 +223,16 @@ impl ReplayStage {
             block_processor,
             vote_integration,
             stats: Arc::new(Mutex::new(ReplayStats::new())),
+            signal_bus: Arc::new(Mutex::new(SignalBus::new())),
         }
+    }
+
+    /// Get a shared reference to the signal bus.
+    ///
+    /// Use `signal_bus().lock().unwrap().subscribe()` to register a
+    /// new consumer of replay signals.
+    pub fn signal_bus(&self) -> Arc<Mutex<SignalBus>> {
+        Arc::clone(&self.signal_bus)
     }
 
     /// Process a single assembled block through replay
@@ -248,10 +269,27 @@ impl ReplayStage {
         }
 
         // Step 4: Apply transactions and process block
-        let outcome = self
+        let outcome = match self
             .block_processor
             .process_block(block.clone(), bank.clone())
-            .map_err(|e| StageError::ReplayError(format!("Block processing failed: {:?}", e)))?;
+        {
+            Ok(outcome) => outcome,
+            Err(e) => {
+                // Emit SlotDead signal on block processing failure.
+                self.signal_bus
+                    .lock()
+                    .unwrap()
+                    .emit(ReplaySignal::SlotDead(SlotDeadInfo {
+                        slot: block.slot,
+                        parent_slot: block.parent_slot,
+                        reason: SlotDeadReason::ExecutionFailed(format!("{:?}", e)),
+                    }));
+                return Err(StageError::ReplayError(format!(
+                    "Block processing failed: {:?}",
+                    e
+                )));
+            }
+        };
 
         // Step 4b: Feed vote updates from executed transactions into ForkChoice
         if self.config.process_votes && !outcome.vote_updates.is_empty() {
@@ -268,10 +306,23 @@ impl ReplayStage {
 
         // Step 5: Finalize slot if complete (distribute fees, update sysvars, freeze)
         if self.config.auto_freeze_banks && bank.is_complete() {
-            let finalization = self
-                .bank_transition
-                .freeze_bank(block.slot)
-                .map_err(|e| StageError::ReplayError(format!("Bank freeze failed: {:?}", e)))?;
+            let finalization = match self.bank_transition.freeze_bank(block.slot) {
+                Ok(f) => f,
+                Err(e) => {
+                    self.signal_bus
+                        .lock()
+                        .unwrap()
+                        .emit(ReplaySignal::SlotDead(SlotDeadInfo {
+                            slot: block.slot,
+                            parent_slot: block.parent_slot,
+                            reason: SlotDeadReason::BankFreezeError,
+                        }));
+                    return Err(StageError::ReplayError(format!(
+                        "Bank freeze failed: {:?}",
+                        e
+                    )));
+                }
+            };
 
             self.stats.lock().unwrap().record_bank_transition();
 
@@ -281,6 +332,28 @@ impl ReplayStage {
                     finalization.slot, finalization.epoch
                 );
             }
+
+            // Emit SlotCompleted signal after successful freeze.
+            let timestamp = bank
+                .sysvar_cache()
+                .map(|c| c.clock().unix_timestamp)
+                .unwrap_or(0);
+            self.signal_bus
+                .lock()
+                .unwrap()
+                .emit(ReplaySignal::SlotCompleted(SlotCompletedInfo {
+                    slot: block.slot,
+                    parent_slot: block.parent_slot,
+                    bank_hash: bank.hash(),
+                    block_hash: bank.last_blockhash(),
+                    epoch: finalization.epoch,
+                    is_epoch_boundary: finalization.epoch_boundary,
+                    transaction_count: outcome.transactions.len() as u64,
+                    executed_count: outcome.executed_count as u64,
+                    fee_lamports_collected: bank.execution_fees() + bank.priority_fees(),
+                    capitalization: bank.capitalization(),
+                    timestamp,
+                }));
         }
 
         // Step 6: Run consensus decision (vote + root progression)
@@ -337,6 +410,16 @@ impl ReplayStage {
                                     drop(bank_forks_r);
 
                                     self.stats.lock().unwrap().record_root_progression();
+
+                                    // Emit RootAdvanced signal.
+                                    self.signal_bus.lock().unwrap().emit(
+                                        ReplaySignal::RootAdvanced(RootAdvancedInfo {
+                                            new_root,
+                                            previous_root: block.parent_slot, // approximate
+                                            pruned_slot_count: 0, // TODO: track actual pruned count from set_root
+                                        }),
+                                    );
+
                                     println!("Root progressed to slot {}", new_root);
                                 }
                             }

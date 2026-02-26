@@ -1637,6 +1637,7 @@ version = "0.1.0"
 dependencies = [
  "bincode",
  "blake3",
+ "crossbeam-channel",
  "ed25519-dalek",
  "paradencer-consensus",
  "paradencer-constants",

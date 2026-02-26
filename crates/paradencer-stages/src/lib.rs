@@ -54,12 +54,15 @@ pub use execution_adapter::SbpfExecutionAdapter;
 pub use metrics_reporter::{LinkTelemetryStats, MetricsReporter, StageTelemetryStats};
 pub use replay_stage::{
     AggregateMetrics, AlertSeverity, AlertType, AncestryError, AncestryStats, AncestryVerifier,
-    AnomalyType, BankTransition, BankTransitionError, BatchReplayResult, BlockOutcome,
-    BlockProcessor, BlockProcessorError, ConfirmationInfo, ConfirmationStats, CoordinatorStats,
-    ForkDetector, ForkPoint, ForkReplayCoordinator, MetricsTracker, OptimisticConfirmationTracker,
-    PerformanceAlert, PerformanceAnomaly, PerformanceMonitor, PerformanceThresholds,
-    ReplayBatchProcessor, ReplayConfig, ReplayOptimizer, ReplayStage, ReplayStats, SlotMetrics,
-    SlotReplayInfo, TransactionResult, VoteIntegration, VoteIntegrationError,
+    AnomalyType, BankTransition, BankTransitionError, BatchReplayResult, BecameLeaderInfo,
+    BlockOutcome, BlockProcessor, BlockProcessorError, ConfirmationInfo, ConfirmationStats,
+    CoordinatorStats, DependencyGraph, DispatchProgress, DispatchState, DispatcherStats,
+    ForkDetector, ForkPoint, ForkReplayCoordinator, MetricsTracker, OptimisticConfirmationInfo,
+    OptimisticConfirmationTracker, PerformanceAlert, PerformanceAnomaly, PerformanceMonitor,
+    PerformanceThresholds, PohResetInfo, ReplayBatchProcessor, ReplayConfig, ReplayOptimizer,
+    ReplaySignal, ReplayStage, ReplayStats, RootAdvancedInfo, SignalBus, SlotCompletedInfo,
+    SlotDeadInfo, SlotDeadReason, SlotMetrics, SlotReplayInfo, TransactionDispatcher,
+    TransactionResult, VoteIntegration, VoteIntegrationError,
 };
 pub use shred_assembler::{
     detect_block_boundary, group_shreds_by_slot, AssembledBlock, Entry, ShredAssembler,
@@ -84,8 +87,9 @@ pub use exec_stage::{
 };
 pub use leader_pipeline::{LeaderPipeline, PipelineStepResult, SbpfExecutionEngine};
 pub use pack_stage::{
-    AccountLock, ConflictDetector, LockKind, Microblock, PackConfig, PackLimits, PackOutcome,
-    PackScheduler, PackStats, PackStatsSnapshot, PackedTransaction, TransactionQueue,
+    AccountLock, ConflictDetector, LockKind, Microblock, MicroblockRebate, PackConfig, PackLimits,
+    PackOutcome, PackPacer, PackScheduler, PackStats, PackStatsSnapshot, PackedTransaction,
+    TransactionQueue,
 };
 pub use pipeline_service::{
     PipelineHandle, PipelineService, PipelineServiceBuilder, PipelineServiceConfig,

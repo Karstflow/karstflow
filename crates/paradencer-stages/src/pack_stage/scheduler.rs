@@ -4,11 +4,16 @@
 /// microblocks that can be executed in parallel. Each microblock is a
 /// group of non-conflicting transactions bounded by compute unit and
 /// data size limits.
+///
+/// Supports CU rebate tracking (crediting back unused compute budget
+/// after execution), microblock pacing (rate-limiting production to
+/// avoid overwhelming execution tiles), and per-block microblock limits.
 use super::conflict_detector::{AccountLock, ConflictDetector, LockKind};
 use super::priority_queue::{PackedTransaction, TransactionQueue};
 use paradencer_constants::block_limits;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::time::Instant;
 
 /// Per-block cost limits (consensus-critical).
 #[derive(Debug, Clone)]
@@ -47,6 +52,8 @@ pub struct PackConfig {
     pub limits: PackLimits,
     /// Number of parallel execution tiles.
     pub execution_tile_count: usize,
+    /// Maximum microblocks per block (slot). Production stops after this limit.
+    pub max_microblocks_per_block: u64,
 }
 
 impl Default for PackConfig {
@@ -57,6 +64,7 @@ impl Default for PackConfig {
             vote_fraction: 0.75,
             limits: PackLimits::default(),
             execution_tile_count: 1,
+            max_microblocks_per_block: paradencer_constants::ledger::MAX_MICROBLOCKS_PER_SLOT,
         }
     }
 }
@@ -74,6 +82,85 @@ pub struct Microblock {
     pub total_data_bytes: u64,
     /// Whether this microblock contains only votes.
     pub is_vote_only: bool,
+}
+
+/// Execution result summary for CU rebate tracking.
+///
+/// After an execution tile processes a microblock, it reports the actual
+/// CU consumption. The difference between requested and consumed CUs
+/// is credited back to the block budget, allowing more transactions.
+#[derive(Debug, Clone, Copy)]
+pub struct MicroblockRebate {
+    /// Total CUs that were requested (budgeted) for the microblock.
+    pub requested_cus: u64,
+    /// Total CUs actually consumed during execution.
+    pub consumed_cus: u64,
+    /// Whether this microblock contained only vote transactions.
+    pub is_vote_only: bool,
+}
+
+/// Microblock production rate limiter.
+///
+/// Prevents bursty microblock emission that could overwhelm execution
+/// tiles. Enforces both a minimum time interval between emissions and
+/// a per-slot microblock count limit.
+#[derive(Debug)]
+pub struct PackPacer {
+    /// Minimum interval between microblock emissions (nanoseconds).
+    min_interval_ns: u64,
+    /// Last emission timestamp.
+    last_emit: Instant,
+    /// Microblocks produced this slot.
+    microblocks_this_slot: u64,
+    /// Maximum microblocks per slot.
+    max_microblocks_per_slot: u64,
+}
+
+impl PackPacer {
+    /// Create a new pacer with the given configuration.
+    ///
+    /// The first emission is always allowed (last_emit is set far in the past).
+    pub fn new(min_interval_ns: u64, max_microblocks_per_slot: u64) -> Self {
+        // Set last_emit far enough in the past that the first can_emit() returns true.
+        let past = Instant::now()
+            .checked_sub(std::time::Duration::from_secs(10))
+            .unwrap_or_else(Instant::now);
+        Self {
+            min_interval_ns,
+            last_emit: past,
+            microblocks_this_slot: 0,
+            max_microblocks_per_slot,
+        }
+    }
+
+    /// Whether a microblock can be emitted now.
+    ///
+    /// Returns `false` if either:
+    /// - The minimum interval since the last emission hasn't elapsed
+    /// - The per-slot microblock limit has been reached
+    pub fn can_emit(&self) -> bool {
+        if self.microblocks_this_slot >= self.max_microblocks_per_slot {
+            return false;
+        }
+        self.last_emit.elapsed().as_nanos() >= self.min_interval_ns as u128
+    }
+
+    /// Record that a microblock was emitted.
+    pub fn record_emit(&mut self) {
+        self.last_emit = Instant::now();
+        self.microblocks_this_slot += 1;
+    }
+
+    /// Reset for a new slot.
+    pub fn new_slot(&mut self) {
+        self.microblocks_this_slot = 0;
+        self.last_emit = Instant::now();
+    }
+
+    /// Number of microblocks produced in the current slot.
+    pub fn microblocks_this_slot(&self) -> u64 {
+        self.microblocks_this_slot
+    }
 }
 
 /// Outcome of a schedule attempt.
@@ -101,6 +188,10 @@ pub struct PackStats {
     pub blocks_completed: AtomicU64,
     pub block_cost_units_used: AtomicU64,
     pub block_vote_cost_units_used: AtomicU64,
+    /// Total CUs credited back via rebates.
+    pub rebated_cus: AtomicU64,
+    /// Number of times pacing delayed microblock production.
+    pub microblocks_paced: AtomicU64,
 }
 
 impl PackStats {
@@ -113,6 +204,8 @@ impl PackStats {
             blocks_completed: self.blocks_completed.load(Ordering::Relaxed),
             block_cost_units_used: self.block_cost_units_used.load(Ordering::Relaxed),
             block_vote_cost_units_used: self.block_vote_cost_units_used.load(Ordering::Relaxed),
+            rebated_cus: self.rebated_cus.load(Ordering::Relaxed),
+            microblocks_paced: self.microblocks_paced.load(Ordering::Relaxed),
         }
     }
 }
@@ -127,6 +220,10 @@ pub struct PackStatsSnapshot {
     pub blocks_completed: u64,
     pub block_cost_units_used: u64,
     pub block_vote_cost_units_used: u64,
+    /// Total CUs credited back via rebates.
+    pub rebated_cus: u64,
+    /// Number of times pacing delayed microblock production.
+    pub microblocks_paced: u64,
 }
 
 /// The transaction scheduler.
@@ -144,6 +241,8 @@ pub struct PackScheduler {
     block_vote_cost_units: u64,
     /// Current block's accumulated data bytes.
     block_data_bytes: u64,
+    /// Number of microblocks produced in the current block.
+    microblocks_this_block: u64,
     /// Current slot.
     current_slot: u64,
     /// Statistics.
@@ -167,6 +266,7 @@ impl PackScheduler {
             block_cost_units: 0,
             block_vote_cost_units: 0,
             block_data_bytes: 0,
+            microblocks_this_block: 0,
             current_slot: 0,
             stats: Arc::new(PackStats::default()),
         }
@@ -195,6 +295,9 @@ impl PackScheduler {
             return None;
         }
         if self.block_data_bytes >= self.config.limits.max_data_bytes_per_block {
+            return None;
+        }
+        if self.microblocks_this_block >= self.config.max_microblocks_per_block {
             return None;
         }
 
@@ -303,6 +406,7 @@ impl PackScheduler {
         self.block_data_bytes += total_data;
 
         self.next_microblock_id += 1;
+        self.microblocks_this_block += 1;
 
         self.stats
             .transactions_scheduled
@@ -329,12 +433,37 @@ impl PackScheduler {
         self.conflict_detector.release(microblock_id);
     }
 
+    /// Complete a microblock with execution results, applying CU rebates.
+    ///
+    /// The difference between requested and consumed CUs is credited back
+    /// to the block budget, allowing additional transactions to be packed.
+    /// This is consensus-critical: it determines how many transactions
+    /// fit in a block when execution consumes less than the budget.
+    pub fn complete_microblock_with_rebate(
+        &mut self,
+        microblock_id: u64,
+        rebate: MicroblockRebate,
+    ) {
+        let rebated_cus = rebate.requested_cus.saturating_sub(rebate.consumed_cus);
+        if rebated_cus > 0 {
+            self.block_cost_units = self.block_cost_units.saturating_sub(rebated_cus);
+            if rebate.is_vote_only {
+                self.block_vote_cost_units = self.block_vote_cost_units.saturating_sub(rebated_cus);
+            }
+            self.stats
+                .rebated_cus
+                .fetch_add(rebated_cus, Ordering::Relaxed);
+        }
+        self.conflict_detector.release(microblock_id);
+    }
+
     /// Start a new block. Resets per-block limits and conflict state.
     pub fn new_block(&mut self, slot: u64) {
         self.current_slot = slot;
         self.block_cost_units = 0;
         self.block_vote_cost_units = 0;
         self.block_data_bytes = 0;
+        self.microblocks_this_block = 0;
         self.next_microblock_id = 0;
         self.conflict_detector.reset();
 
@@ -364,6 +493,11 @@ impl PackScheduler {
     /// Number of active (in-flight) microblocks.
     pub fn active_microblocks(&self) -> usize {
         self.conflict_detector.active_microblock_count()
+    }
+
+    /// Number of microblocks produced in the current block.
+    pub fn microblocks_this_block(&self) -> u64 {
+        self.microblocks_this_block
     }
 }
 
@@ -579,5 +713,203 @@ mod tests {
         let mb = scheduler.produce_microblock().unwrap();
         assert_eq!(mb.transactions.len(), 1); // second doesn't fit
         assert_eq!(mb.total_compute_units, 200_000);
+    }
+
+    // -----------------------------------------------------------------------
+    // Rebate tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn rebate_credits_back_cus() {
+        let config = PackConfig {
+            limits: PackLimits {
+                max_cost_per_block: 500_000,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let mut scheduler = PackScheduler::with_config(config);
+
+        let tx = make_tx_with_accounts(5_000, 200_000, vec![account(1)], vec![], false);
+        scheduler.submit(tx);
+
+        let mb = scheduler.produce_microblock().unwrap();
+        assert_eq!(scheduler.block_cost_units(), 200_000);
+
+        // Execution only consumed 150K of the 200K budgeted.
+        scheduler.complete_microblock_with_rebate(
+            mb.id,
+            MicroblockRebate {
+                requested_cus: 200_000,
+                consumed_cus: 150_000,
+                is_vote_only: false,
+            },
+        );
+
+        // 50K should be credited back.
+        assert_eq!(scheduler.block_cost_units(), 150_000);
+        assert_eq!(scheduler.stats().snapshot().rebated_cus, 50_000);
+    }
+
+    #[test]
+    fn rebate_allows_more_transactions() {
+        let config = PackConfig {
+            limits: PackLimits {
+                max_cost_per_block: 300_000,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let mut scheduler = PackScheduler::with_config(config);
+
+        // First tx takes 200K of 300K budget.
+        let tx1 = make_tx_with_accounts(5_000, 200_000, vec![account(1)], vec![], false);
+        scheduler.submit(tx1);
+        let mb1 = scheduler.produce_microblock().unwrap();
+
+        // Second tx needs 200K — would exceed 300K limit.
+        let tx2 = make_tx_with_accounts(5_000, 200_000, vec![account(2)], vec![], false);
+        scheduler.submit(tx2);
+        assert!(scheduler.produce_microblock().is_none());
+
+        // Rebate 150K from first microblock (only 50K consumed).
+        scheduler.complete_microblock_with_rebate(
+            mb1.id,
+            MicroblockRebate {
+                requested_cus: 200_000,
+                consumed_cus: 50_000,
+                is_vote_only: false,
+            },
+        );
+
+        // Now budget is 50K used, 250K remaining — tx2 (200K) fits.
+        let mb2 = scheduler.produce_microblock();
+        assert!(mb2.is_some());
+    }
+
+    #[test]
+    fn rebate_vote_cost() {
+        let config = PackConfig {
+            limits: PackLimits {
+                max_vote_cost_per_block: 100_000,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let mut scheduler = PackScheduler::with_config(config);
+
+        let tx = make_tx_with_accounts(5_000, 80_000, vec![account(1)], vec![], true);
+        scheduler.submit(tx);
+        let mb = scheduler.produce_microblock().unwrap();
+
+        // Rebate as vote-only.
+        scheduler.complete_microblock_with_rebate(
+            mb.id,
+            MicroblockRebate {
+                requested_cus: 80_000,
+                consumed_cus: 30_000,
+                is_vote_only: true,
+            },
+        );
+
+        // Vote cost should be reduced from 80K to 30K.
+        assert_eq!(scheduler.block_cost_units(), 30_000);
+    }
+
+    // -----------------------------------------------------------------------
+    // Pacing tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn pacer_limits_rate() {
+        let pacer = PackPacer::new(1_000_000_000, 100); // 1 second interval
+                                                        // Just created, so can_emit should be true (elapsed > 0).
+        assert!(pacer.can_emit());
+    }
+
+    #[test]
+    fn pacer_slot_limit() {
+        let mut pacer = PackPacer::new(0, 3); // no time limit, 3 per slot
+        assert!(pacer.can_emit());
+        pacer.record_emit();
+        assert!(pacer.can_emit());
+        pacer.record_emit();
+        assert!(pacer.can_emit());
+        pacer.record_emit();
+        // 3rd emitted — now at limit.
+        assert!(!pacer.can_emit());
+    }
+
+    #[test]
+    fn pacer_new_slot_resets() {
+        let mut pacer = PackPacer::new(0, 2);
+        pacer.record_emit();
+        pacer.record_emit();
+        assert!(!pacer.can_emit());
+
+        pacer.new_slot();
+        assert!(pacer.can_emit());
+        assert_eq!(pacer.microblocks_this_slot(), 0);
+    }
+
+    // -----------------------------------------------------------------------
+    // Max microblocks per block test
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn max_microblocks_per_block_enforced() {
+        let config = PackConfig {
+            max_microblocks_per_block: 2,
+            max_txns_per_microblock: 1,
+            ..Default::default()
+        };
+        let mut scheduler = PackScheduler::with_config(config);
+
+        // Submit 3 transactions.
+        for i in 0..3 {
+            let tx = make_tx_with_accounts(5_000, 100_000, vec![account(i)], vec![], false);
+            scheduler.submit(tx);
+        }
+
+        // First two microblocks succeed.
+        let mb1 = scheduler.produce_microblock();
+        assert!(mb1.is_some());
+        scheduler.complete_microblock(mb1.unwrap().id);
+
+        let mb2 = scheduler.produce_microblock();
+        assert!(mb2.is_some());
+        scheduler.complete_microblock(mb2.unwrap().id);
+
+        // Third is blocked by max_microblocks_per_block.
+        let mb3 = scheduler.produce_microblock();
+        assert!(mb3.is_none());
+
+        // New block resets.
+        scheduler.new_block(1);
+        let mb4 = scheduler.produce_microblock();
+        assert!(mb4.is_some());
+    }
+
+    #[test]
+    fn microblocks_this_block_counter() {
+        let config = PackConfig {
+            max_txns_per_microblock: 1,
+            ..Default::default()
+        };
+        let mut scheduler = PackScheduler::with_config(config);
+
+        for i in 0..3 {
+            let tx = make_tx_with_accounts(5_000, 100_000, vec![account(i)], vec![], false);
+            scheduler.submit(tx);
+        }
+
+        assert_eq!(scheduler.microblocks_this_block(), 0);
+        scheduler.produce_microblock();
+        assert_eq!(scheduler.microblocks_this_block(), 1);
+        scheduler.produce_microblock();
+        assert_eq!(scheduler.microblocks_this_block(), 2);
+
+        scheduler.new_block(1);
+        assert_eq!(scheduler.microblocks_this_block(), 0);
     }
 }

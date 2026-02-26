@@ -1,9 +1,11 @@
+use super::transaction_dispatcher::TransactionDispatcher;
 use crate::{AssembledBlock, Entry};
 use paradencer_consensus::{
     resolve_address_lookups, Bank, CommitmentLevel, CommitmentTracker, CompiledInstruction,
     ExecutionBackend, SanitizedTransaction, TransactionExecutionResult, VoteUpdate,
 };
 use paradencer_constants::execution::MAX_COMPUTE_UNITS;
+use paradencer_constants::replay::DEFAULT_EXECUTION_LANES;
 use paradencer_constants::transaction as tx_const;
 use paradencer_execution::ExecutionBridge;
 use paradencer_storage::Pubkey;
@@ -172,6 +174,11 @@ pub enum BlockProcessorError {
 /// - Transaction execution via Bank + ExecutionBackend
 /// - Tick registration with verified PoH hashes
 /// - Commitment tracking updates
+///
+/// When `lane_count > 1`, transaction entries are processed using
+/// a dependency-aware dispatcher that tracks account lock conflicts
+/// (WAW, RAW, WAR) and executes transactions in an optimal order
+/// for parallel dispatch.
 pub struct BlockProcessor {
     /// Execution bridge for batch-level execution policies
     pub execution_bridge: Arc<ExecutionBridge>,
@@ -183,6 +190,10 @@ pub struct BlockProcessor {
     /// Should be true in production; can be disabled during
     /// initial snapshot replay or testing.
     pub verify_poh: bool,
+    /// Number of parallel execution lanes for transaction dispatch.
+    /// When > 1, uses the dependency-aware dispatcher to identify
+    /// independent transactions that can execute concurrently.
+    pub lane_count: usize,
 }
 
 impl BlockProcessor {
@@ -203,6 +214,7 @@ impl BlockProcessor {
             backend,
             commitment_tracker,
             verify_poh: true,
+            lane_count: 1,
         }
     }
 
@@ -286,8 +298,27 @@ impl BlockProcessor {
         Ok(())
     }
 
-    /// Apply transactions from an entry
+    /// Apply transactions from an entry.
+    ///
+    /// When `lane_count > 1`, uses the dependency-aware dispatcher to
+    /// execute transactions in an order that respects account lock
+    /// dependencies, enabling parallel dispatch to execution lanes.
     pub fn apply_transactions(
+        &mut self,
+        transactions: &[Vec<u8>],
+        bank: &Arc<Bank>,
+        starting_index: usize,
+        vote_updates: &mut Vec<VoteUpdate>,
+    ) -> Result<Vec<TransactionResult>, BlockProcessorError> {
+        if self.lane_count > 1 {
+            self.apply_transactions_dispatched(transactions, bank, starting_index, vote_updates)
+        } else {
+            self.apply_transactions_serial(transactions, bank, starting_index, vote_updates)
+        }
+    }
+
+    /// Serial transaction execution (original path).
+    fn apply_transactions_serial(
         &mut self,
         transactions: &[Vec<u8>],
         bank: &Arc<Bank>,
@@ -303,6 +334,124 @@ impl BlockProcessor {
         }
 
         Ok(results)
+    }
+
+    /// Dependency-aware transaction execution using the dispatch graph.
+    ///
+    /// 1. Deserializes all transactions and resolves address lookups
+    /// 2. Extracts write/read account sets for dependency analysis
+    /// 3. Builds a DAG of WAW, RAW, WAR dependencies
+    /// 4. Dispatches ready transactions to execution lanes
+    ///
+    /// Currently executes on the calling thread in dispatch order.
+    // TODO: dispatch to parallel execution lanes when Bank supports
+    // concurrent transaction processing across tiles.
+    fn apply_transactions_dispatched(
+        &mut self,
+        transactions: &[Vec<u8>],
+        bank: &Arc<Bank>,
+        starting_index: usize,
+        vote_updates: &mut Vec<VoteUpdate>,
+    ) -> Result<Vec<TransactionResult>, BlockProcessorError> {
+        if transactions.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        // Phase 1: Deserialize all transactions and resolve address lookups.
+        let mut deserialized: Vec<(usize, SanitizedTransaction)> =
+            Vec::with_capacity(transactions.len());
+        let mut results: Vec<Option<TransactionResult>> = vec![None; transactions.len()];
+
+        for (i, tx_data) in transactions.iter().enumerate() {
+            let tx_index = starting_index + i;
+            match deserialize_transaction(tx_data) {
+                Ok(mut d) => {
+                    if !d.address_table_lookups.is_empty() {
+                        let db = bank.accounts();
+                        match resolve_address_lookups(&d.address_table_lookups, |pubkey| {
+                            db.get_published_account(pubkey)
+                        }) {
+                            Ok(resolved) => {
+                                d.tx.num_writable_lookup_keys = resolved.writable.len();
+                                d.tx.account_keys.extend(resolved.writable);
+                                d.tx.account_keys.extend(resolved.readonly);
+                            }
+                            Err(e) => {
+                                results[i] =
+                                    Some(TransactionResult::failure(tx_index, e.to_string()));
+                                continue;
+                            }
+                        }
+                    }
+                    deserialized.push((i, d.tx));
+                }
+                Err(msg) => {
+                    results[i] = Some(TransactionResult::failure(tx_index, msg));
+                }
+            }
+        }
+
+        // Phase 2: Extract account locks and build dependency graph.
+        let tx_locks: Vec<(Vec<Pubkey>, Vec<Pubkey>)> = deserialized
+            .iter()
+            .map(|(_, tx)| {
+                let mut writes = Vec::new();
+                let mut reads = Vec::new();
+                for (idx, key) in tx.account_keys.iter().enumerate() {
+                    if tx.is_writable_index(idx) {
+                        writes.push(*key);
+                    } else {
+                        reads.push(*key);
+                    }
+                }
+                (writes, reads)
+            })
+            .collect();
+
+        let mut dispatcher = TransactionDispatcher::new(self.lane_count);
+        dispatcher.load_transactions(tx_locks);
+
+        // Map from dispatcher index → original transaction index.
+        let dispatch_to_original: Vec<usize> = deserialized.iter().map(|(i, _)| *i).collect();
+
+        // Phase 3: Execute in dispatch order.
+        loop {
+            let (progress, dispatched) = dispatcher.dispatch_step();
+            if progress.all_done && dispatched.is_empty() {
+                break;
+            }
+
+            for (dispatch_idx, _lane) in dispatched {
+                let original_idx = dispatch_to_original[dispatch_idx as usize];
+                let tx_index = starting_index + original_idx;
+                let sanitized = &deserialized[dispatch_idx as usize].1;
+
+                let exec_result =
+                    bank.process_transaction(sanitized, self.backend.as_ref(), MAX_COMPUTE_UNITS);
+
+                if exec_result.success {
+                    vote_updates.extend(exec_result.vote_updates.iter().cloned());
+                }
+
+                results[original_idx] =
+                    Some(TransactionResult::from_execution(tx_index, &exec_result));
+                dispatcher.complete_transaction(dispatch_idx);
+            }
+        }
+
+        // Phase 4: Collect results in original order.
+        Ok(results
+            .into_iter()
+            .enumerate()
+            .map(|(i, r)| {
+                r.unwrap_or_else(|| {
+                    TransactionResult::failure(
+                        starting_index + i,
+                        "transaction was not dispatched".to_string(),
+                    )
+                })
+            })
+            .collect())
     }
 
     /// Execute a single transaction through the Bank execution pipeline.
