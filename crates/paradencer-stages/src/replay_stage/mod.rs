@@ -306,7 +306,12 @@ impl ReplayStage {
                 .vote_integration
                 .process_vote_updates(&outcome.vote_updates)
             {
-                warn!(slot = block.slot, error = ?e, "vote update processing warning");
+                warn!(
+                    slot = block.slot,
+                    vote_count = outcome.vote_updates.len(),
+                    error = ?e,
+                    "failed to incorporate vote updates into fork choice"
+                );
             }
         }
 

@@ -1177,10 +1177,9 @@ impl Service for VoteBroadcastAdapter {
         };
 
         // Sign the CRDS value with the validator's Ed25519 key.
-        // The signature covers (origin || wallclock || data) serialized bytes.
-        if let Ok(sig) = paradencer_crypto::sign_message(&self.secret_key, &crds_value.origin) {
-            crds_value.signature = sig;
-        }
+        // The signature covers the full signable payload (type, origin,
+        // wallclock, sub_index, and data-specific fields).
+        crds_value.sign(&self.secret_key);
 
         // Insert into CRDS table — the gossip push loop handles broadcast.
         self.cluster_info.insert_crds_value(crds_value, 1);
