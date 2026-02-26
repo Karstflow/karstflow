@@ -122,3 +122,132 @@ impl Default for SlotHashesSysvar {
         Self::new()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn hash_for(slot: u64) -> [u8; 32] {
+        let mut h = [0u8; 32];
+        h[0..8].copy_from_slice(&slot.to_le_bytes());
+        h
+    }
+
+    #[test]
+    fn new_is_empty() {
+        let sh = SlotHashesSysvar::new();
+        assert!(sh.is_empty());
+        assert_eq!(sh.len(), 0);
+        assert!(sh.most_recent().is_none());
+        assert!(sh.oldest().is_none());
+    }
+
+    #[test]
+    fn add_and_get() {
+        let mut sh = SlotHashesSysvar::new();
+        sh.add(100, hash_for(100));
+        assert_eq!(sh.len(), 1);
+        assert_eq!(sh.get(100), Some(&hash_for(100)));
+        assert!(sh.get(99).is_none());
+    }
+
+    #[test]
+    fn most_recent_and_oldest() {
+        let mut sh = SlotHashesSysvar::new();
+        sh.add(10, hash_for(10));
+        sh.add(20, hash_for(20));
+        sh.add(30, hash_for(30));
+
+        let most = sh.most_recent().unwrap();
+        assert_eq!(most.slot, 30);
+        assert_eq!(most.hash, hash_for(30));
+
+        let old = sh.oldest().unwrap();
+        assert_eq!(old.slot, 10);
+        assert_eq!(old.hash, hash_for(10));
+    }
+
+    #[test]
+    fn descending_order() {
+        let mut sh = SlotHashesSysvar::new();
+        sh.add(10, hash_for(10));
+        sh.add(20, hash_for(20));
+        sh.add(30, hash_for(30));
+
+        let slots: Vec<u64> = sh.iter().map(|e| e.slot).collect();
+        assert_eq!(slots, vec![30, 20, 10]);
+    }
+
+    #[test]
+    fn contains() {
+        let mut sh = SlotHashesSysvar::new();
+        sh.add(50, hash_for(50));
+        assert!(sh.contains(50));
+        assert!(!sh.contains(51));
+    }
+
+    #[test]
+    fn eviction_at_capacity() {
+        let mut sh = SlotHashesSysvar::new();
+        for i in 0..MAX_SLOT_HASHES as u64 {
+            sh.add(i, hash_for(i));
+        }
+        assert_eq!(sh.len(), MAX_SLOT_HASHES);
+
+        // Oldest is slot 0
+        assert!(sh.contains(0));
+
+        // Add one more — slot 0 should be evicted
+        sh.add(MAX_SLOT_HASHES as u64, hash_for(MAX_SLOT_HASHES as u64));
+        assert_eq!(sh.len(), MAX_SLOT_HASHES);
+        assert!(!sh.contains(0));
+        assert!(sh.contains(1));
+        assert!(sh.contains(MAX_SLOT_HASHES as u64));
+    }
+
+    #[test]
+    fn serialization_roundtrip_empty() {
+        let sh = SlotHashesSysvar::new();
+        let bytes = sh.to_bytes();
+        let restored = SlotHashesSysvar::from_bytes(&bytes).unwrap();
+        assert_eq!(restored.len(), 0);
+    }
+
+    #[test]
+    fn serialization_roundtrip_with_entries() {
+        let mut sh = SlotHashesSysvar::new();
+        sh.add(10, hash_for(10));
+        sh.add(20, hash_for(20));
+        sh.add(30, hash_for(30));
+
+        let bytes = sh.to_bytes();
+        let restored = SlotHashesSysvar::from_bytes(&bytes).unwrap();
+        assert_eq!(restored.len(), 3);
+        assert_eq!(restored.get(10), Some(&hash_for(10)));
+        assert_eq!(restored.get(20), Some(&hash_for(20)));
+        assert_eq!(restored.get(30), Some(&hash_for(30)));
+
+        let slots: Vec<u64> = restored.iter().map(|e| e.slot).collect();
+        assert_eq!(slots, vec![30, 20, 10]);
+    }
+
+    #[test]
+    fn from_bytes_rejects_too_short() {
+        assert!(SlotHashesSysvar::from_bytes(&[0; 4]).is_none());
+    }
+
+    #[test]
+    fn from_bytes_rejects_truncated_entries() {
+        let mut data = vec![0u8; 8];
+        data[0..8].copy_from_slice(&2u64.to_le_bytes()); // says 2 entries
+                                                         // but no entry data follows
+        assert!(SlotHashesSysvar::from_bytes(&data).is_none());
+    }
+
+    #[test]
+    fn default_equals_new() {
+        let d = SlotHashesSysvar::default();
+        let n = SlotHashesSysvar::new();
+        assert_eq!(d.len(), n.len());
+    }
+}

@@ -175,3 +175,187 @@ impl Default for SlotHistorySysvar {
         Self::new()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn new_has_empty_state() {
+        let sh = SlotHistorySysvar::new();
+        assert_eq!(sh.base_slot(), 0);
+        assert_eq!(sh.next_slot(), 0);
+        assert!(!sh.check(0));
+    }
+
+    #[test]
+    fn set_and_check_single_slot() {
+        let mut sh = SlotHistorySysvar::new();
+        sh.set(42);
+        assert!(sh.check(42));
+        assert!(!sh.check(41));
+        assert!(!sh.check(43));
+        assert_eq!(sh.next_slot(), 43);
+    }
+
+    #[test]
+    fn set_multiple_slots() {
+        let mut sh = SlotHistorySysvar::new();
+        sh.set(10);
+        sh.set(20);
+        sh.set(30);
+        assert!(sh.check(10));
+        assert!(sh.check(20));
+        assert!(sh.check(30));
+        assert!(!sh.check(15));
+        assert_eq!(sh.next_slot(), 31);
+    }
+
+    #[test]
+    fn set_slot_zero() {
+        let mut sh = SlotHistorySysvar::new();
+        sh.set(0);
+        assert!(sh.check(0));
+        assert_eq!(sh.next_slot(), 1);
+    }
+
+    #[test]
+    fn check_returns_false_for_unset_slot() {
+        let mut sh = SlotHistorySysvar::new();
+        sh.set(100);
+        assert!(!sh.check(99));
+        assert!(!sh.check(101));
+    }
+
+    #[test]
+    fn set_beyond_window_advances_base() {
+        let mut sh = SlotHistorySysvar::new();
+        sh.set(5);
+        assert!(sh.check(5));
+
+        // Set a slot far beyond the window
+        let far_slot = SLOT_HISTORY_BITS as u64 + 100;
+        sh.set(far_slot);
+
+        // The old slot should be evicted
+        assert!(!sh.check(5));
+        // The new slot should be present
+        assert!(sh.check(far_slot));
+        // Base should have advanced
+        assert!(sh.base_slot() > 0);
+    }
+
+    #[test]
+    fn evicted_slot_returns_false() {
+        let mut sh = SlotHistorySysvar::new();
+        sh.set(0);
+        sh.set(1);
+
+        // Force base to advance past slot 0 and 1
+        let new_slot = SLOT_HISTORY_BITS as u64 + 10;
+        sh.set(new_slot);
+
+        assert!(!sh.check(0));
+        assert!(!sh.check(1));
+    }
+
+    #[test]
+    fn set_slot_below_base_is_ignored() {
+        let mut sh = SlotHistorySysvar::new();
+        // Advance the base
+        let far = SLOT_HISTORY_BITS as u64 + 50;
+        sh.set(far);
+        let base = sh.base_slot();
+
+        // Try setting a slot below the base
+        sh.set(0);
+        // Should not crash and base shouldn't change
+        assert_eq!(sh.base_slot(), base);
+        assert!(!sh.check(0));
+    }
+
+    #[test]
+    fn next_slot_tracks_highest_set() {
+        let mut sh = SlotHistorySysvar::new();
+        sh.set(100);
+        assert_eq!(sh.next_slot(), 101);
+
+        // Setting a lower slot doesn't decrease next_slot
+        sh.set(50);
+        assert_eq!(sh.next_slot(), 101);
+
+        // Setting higher slot updates next_slot
+        sh.set(200);
+        assert_eq!(sh.next_slot(), 201);
+    }
+
+    #[test]
+    fn check_beyond_window_returns_false() {
+        let mut sh = SlotHistorySysvar::new();
+        sh.set(0);
+        // Check slot way beyond the window
+        assert!(!sh.check(SLOT_HISTORY_BITS as u64 + 100));
+    }
+
+    #[test]
+    fn serialization_roundtrip_empty() {
+        let sh = SlotHistorySysvar::new();
+        let bytes = sh.to_bytes();
+        let restored = SlotHistorySysvar::from_bytes(&bytes).unwrap();
+        assert_eq!(restored.base_slot(), 0);
+        assert_eq!(restored.next_slot(), 0);
+    }
+
+    #[test]
+    fn serialization_roundtrip_with_data() {
+        let mut sh = SlotHistorySysvar::new();
+        sh.set(10);
+        sh.set(100);
+        sh.set(1000);
+
+        let bytes = sh.to_bytes();
+        let restored = SlotHistorySysvar::from_bytes(&bytes).unwrap();
+        assert_eq!(restored.base_slot(), sh.base_slot());
+        assert_eq!(restored.next_slot(), sh.next_slot());
+        assert!(restored.check(10));
+        assert!(restored.check(100));
+        assert!(restored.check(1000));
+        assert!(!restored.check(50));
+    }
+
+    #[test]
+    fn from_bytes_rejects_too_short() {
+        assert!(SlotHistorySysvar::from_bytes(&[0; 10]).is_none());
+    }
+
+    #[test]
+    fn from_bytes_rejects_truncated_words() {
+        // Header says 2 words but data only has 1
+        let mut data = vec![0u8; 24 + 8]; // header + 1 word
+        data[16..24].copy_from_slice(&2u64.to_le_bytes()); // word_count = 2
+        assert!(SlotHistorySysvar::from_bytes(&data).is_none());
+    }
+
+    #[test]
+    fn advance_base_partial_bits() {
+        let mut sh = SlotHistorySysvar::new();
+        // Set several consecutive slots
+        for i in 0..128 {
+            sh.set(i);
+        }
+        // Now advance by setting a slot that's exactly at the window boundary + some bits
+        let new_slot = SLOT_HISTORY_BITS as u64 + 33; // 33 forces partial bit shift
+        sh.set(new_slot);
+        assert!(sh.check(new_slot));
+        // Earlier slots should be evicted
+        assert!(!sh.check(0));
+    }
+
+    #[test]
+    fn default_equals_new() {
+        let d = SlotHistorySysvar::default();
+        let n = SlotHistorySysvar::new();
+        assert_eq!(d.base_slot(), n.base_slot());
+        assert_eq!(d.next_slot(), n.next_slot());
+    }
+}

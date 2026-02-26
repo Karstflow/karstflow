@@ -224,3 +224,215 @@ fn deserialize_delegated(data: &[u8]) -> Result<StakeState, StakeError> {
 
     Ok(StakeState::Delegated(meta, stake, flags))
 }
+
+#[cfg(test)]
+#[allow(deprecated)]
+mod tests {
+    use super::*;
+
+    fn test_meta() -> Meta {
+        Meta::new(
+            2_282_880,
+            Authorized::new(Pubkey::new([1u8; 32]), Pubkey::new([2u8; 32])),
+            Lockup::new(1_000_000, 50, Pubkey::new([3u8; 32])),
+        )
+    }
+
+    fn test_delegation() -> Delegation {
+        Delegation::new(Pubkey::new([4u8; 32]), 500_000, 10)
+    }
+
+    fn test_stake_account() -> StakeAccount {
+        StakeAccount::new(test_delegation(), 12345)
+    }
+
+    // --- Uninitialized ---
+
+    #[test]
+    fn roundtrip_uninitialized() {
+        let state = StakeState::Uninitialized;
+        let bytes = serialize_stake_state(&state);
+        assert_eq!(bytes.len(), constants::STAKE_STATE_V2_SIZE);
+
+        let restored = deserialize_stake_state(&bytes).unwrap();
+        assert!(matches!(restored, StakeState::Uninitialized));
+    }
+
+    // --- RewardsPool ---
+
+    #[test]
+    fn roundtrip_rewards_pool() {
+        let state = StakeState::RewardsPool;
+        let bytes = serialize_stake_state(&state);
+        assert_eq!(bytes.len(), constants::STAKE_STATE_V2_SIZE);
+
+        let restored = deserialize_stake_state(&bytes).unwrap();
+        assert!(matches!(restored, StakeState::RewardsPool));
+    }
+
+    // --- Initialized ---
+
+    #[test]
+    fn roundtrip_initialized() {
+        let meta = test_meta();
+        let state = StakeState::Initialized(meta.clone());
+        let bytes = serialize_stake_state(&state);
+        assert_eq!(bytes.len(), constants::STAKE_STATE_V2_SIZE);
+
+        let restored = deserialize_stake_state(&bytes).unwrap();
+        if let StakeState::Initialized(m) = restored {
+            assert_eq!(m.rent_exempt_reserve, meta.rent_exempt_reserve);
+            assert_eq!(m.authorized.staker, meta.authorized.staker);
+            assert_eq!(m.authorized.withdrawer, meta.authorized.withdrawer);
+            assert_eq!(m.lockup.unix_timestamp, meta.lockup.unix_timestamp);
+            assert_eq!(m.lockup.epoch, meta.lockup.epoch);
+            assert_eq!(m.lockup.custodian, meta.lockup.custodian);
+        } else {
+            panic!("expected Initialized variant");
+        }
+    }
+
+    // --- Delegated ---
+
+    #[test]
+    fn roundtrip_delegated() {
+        let meta = test_meta();
+        let stake = test_stake_account();
+        let flags = StakeFlags::MUST_FULLY_ACTIVATE_BEFORE_DEACTIVATION;
+        let state = StakeState::Delegated(meta.clone(), stake.clone(), flags);
+        let bytes = serialize_stake_state(&state);
+        assert_eq!(bytes.len(), constants::STAKE_STATE_V2_SIZE);
+
+        let restored = deserialize_stake_state(&bytes).unwrap();
+        if let StakeState::Delegated(m, s, f) = restored {
+            assert_eq!(m.rent_exempt_reserve, meta.rent_exempt_reserve);
+            assert_eq!(s.delegation.voter_pubkey, stake.delegation.voter_pubkey);
+            assert_eq!(s.delegation.stake_amount, stake.delegation.stake_amount);
+            assert_eq!(
+                s.delegation.activation_epoch,
+                stake.delegation.activation_epoch
+            );
+            assert_eq!(s.delegation.deactivation_epoch, u64::MAX);
+            assert_eq!(s.credits_observed, 12345);
+            assert_eq!(f.bits, flags.bits);
+        } else {
+            panic!("expected Delegated variant");
+        }
+    }
+
+    #[test]
+    fn roundtrip_delegated_empty_flags() {
+        let state = StakeState::Delegated(test_meta(), test_stake_account(), StakeFlags::EMPTY);
+        let bytes = serialize_stake_state(&state);
+        let restored = deserialize_stake_state(&bytes).unwrap();
+        if let StakeState::Delegated(_, _, f) = restored {
+            assert_eq!(f.bits, 0);
+        } else {
+            panic!("expected Delegated variant");
+        }
+    }
+
+    // --- Discriminant checks ---
+
+    #[test]
+    fn discriminants_are_correct() {
+        assert_eq!(
+            StakeState::Uninitialized.discriminant(),
+            constants::STATE_UNINITIALIZED
+        );
+        assert_eq!(
+            StakeState::Initialized(test_meta()).discriminant(),
+            constants::STATE_INITIALIZED
+        );
+        assert_eq!(
+            StakeState::Delegated(test_meta(), test_stake_account(), StakeFlags::EMPTY)
+                .discriminant(),
+            constants::STATE_DELEGATED
+        );
+        assert_eq!(
+            StakeState::RewardsPool.discriminant(),
+            constants::STATE_REWARDS_POOL
+        );
+    }
+
+    #[test]
+    fn first_four_bytes_are_discriminant() {
+        let bytes = serialize_stake_state(&StakeState::Uninitialized);
+        assert_eq!(&bytes[0..4], &0u32.to_le_bytes());
+
+        let bytes = serialize_stake_state(&StakeState::Initialized(test_meta()));
+        assert_eq!(&bytes[0..4], &1u32.to_le_bytes());
+
+        let bytes = serialize_stake_state(&StakeState::Delegated(
+            test_meta(),
+            test_stake_account(),
+            StakeFlags::EMPTY,
+        ));
+        assert_eq!(&bytes[0..4], &2u32.to_le_bytes());
+
+        let bytes = serialize_stake_state(&StakeState::RewardsPool);
+        assert_eq!(&bytes[0..4], &3u32.to_le_bytes());
+    }
+
+    // --- Error cases ---
+
+    #[test]
+    fn deserialize_too_short() {
+        let result = deserialize_stake_state(&[0; 3]);
+        assert!(matches!(result, Err(StakeError::AccountDataTooSmall)));
+    }
+
+    #[test]
+    fn deserialize_invalid_discriminant() {
+        let mut data = vec![0u8; constants::STAKE_STATE_V2_SIZE];
+        data[0..4].copy_from_slice(&99u32.to_le_bytes());
+        let result = deserialize_stake_state(&data);
+        assert!(matches!(result, Err(StakeError::InvalidAccountData)));
+    }
+
+    #[test]
+    fn deserialize_initialized_truncated_meta() {
+        // Valid discriminant but not enough data for meta fields
+        let mut data = vec![0u8; 8]; // 4 discriminant + 4 extra (not enough for meta)
+        data[0..4].copy_from_slice(&constants::STATE_INITIALIZED.to_le_bytes());
+        let result = deserialize_stake_state(&data);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn output_size_is_always_v2() {
+        let states = [
+            StakeState::Uninitialized,
+            StakeState::Initialized(test_meta()),
+            StakeState::Delegated(test_meta(), test_stake_account(), StakeFlags::EMPTY),
+            StakeState::RewardsPool,
+        ];
+        for state in &states {
+            let bytes = serialize_stake_state(state);
+            assert_eq!(bytes.len(), constants::STAKE_STATE_V2_SIZE);
+        }
+    }
+
+    // --- Warmup/cooldown rate preservation ---
+
+    #[test]
+    fn warmup_cooldown_rate_survives_roundtrip() {
+        let d = Delegation {
+            voter_pubkey: Pubkey::new([5u8; 32]),
+            stake_amount: 1_000_000,
+            activation_epoch: 42,
+            deactivation_epoch: u64::MAX,
+            warmup_cooldown_rate: 0.25,
+        };
+        let stake = StakeAccount::new(d, 999);
+        let state = StakeState::Delegated(test_meta(), stake, StakeFlags::EMPTY);
+
+        let bytes = serialize_stake_state(&state);
+        let restored = deserialize_stake_state(&bytes).unwrap();
+        if let StakeState::Delegated(_, s, _) = restored {
+            assert!((s.delegation.warmup_cooldown_rate - 0.25).abs() < f64::EPSILON);
+        } else {
+            panic!("expected Delegated variant");
+        }
+    }
+}
