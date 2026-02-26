@@ -33,6 +33,7 @@ impl CacheShard {
         message_hash: &[u8; MESSAGE_HASH_PREFIX_BYTES],
         slot: u64,
         fork: u64,
+        status: super::entry::TransactionStatus,
     ) -> bool {
         let message_map = self.entries.entry(*blockhash).or_default();
 
@@ -45,7 +46,7 @@ impl CacheShard {
             existing.add_fork(fork);
             true
         } else {
-            message_map.insert(*message_hash, CacheEntry::new(slot, fork));
+            message_map.insert(*message_hash, CacheEntry::new(slot, fork, status));
             self.entry_count += 1;
             true
         }
@@ -62,6 +63,19 @@ impl CacheShard {
             .get(blockhash)
             .and_then(|m| m.get(message_hash))
             .is_some_and(|entry| entry.seen_on_fork(fork))
+    }
+
+    /// Look up the cache entry for a transaction on a given fork.
+    pub fn get(
+        &self,
+        blockhash: &[u8; 32],
+        message_hash: &[u8; MESSAGE_HASH_PREFIX_BYTES],
+        fork: u64,
+    ) -> Option<&CacheEntry> {
+        self.entries
+            .get(blockhash)
+            .and_then(|m| m.get(message_hash))
+            .filter(|entry| entry.seen_on_fork(fork))
     }
 
     /// Remove all entries for a specific slot.

@@ -362,3 +362,53 @@ fn seed_multiple_blockhashes_same_slot() {
     assert!(cache.contains(&make_blockhash(1), &make_message_hash(10), 100));
     assert!(cache.contains(&make_blockhash(2), &make_message_hash(10), 100));
 }
+
+// ── transaction status recording ──────────────────────────────────
+
+#[test]
+fn insert_records_success_status_by_default() {
+    let cache = TransactionCache::new();
+    let bh = make_blockhash(1);
+    let mh = make_message_hash(2);
+
+    cache.insert(&bh, &mh, 100, 0);
+
+    let (slot, status) = cache.get_status(&bh, &mh, 0).unwrap();
+    assert_eq!(slot, 100);
+    assert_eq!(status, TransactionStatus::Success);
+}
+
+#[test]
+fn insert_with_failed_status() {
+    let cache = TransactionCache::new();
+    let bh = make_blockhash(1);
+    let mh = make_message_hash(2);
+
+    cache.insert_with_status(&bh, &mh, 100, 0, TransactionStatus::Failed);
+
+    let (slot, status) = cache.get_status(&bh, &mh, 0).unwrap();
+    assert_eq!(slot, 100);
+    assert_eq!(status, TransactionStatus::Failed);
+}
+
+#[test]
+fn get_status_returns_none_for_missing() {
+    let cache = TransactionCache::new();
+    let bh = make_blockhash(1);
+    let mh = make_message_hash(2);
+
+    assert!(cache.get_status(&bh, &mh, 0).is_none());
+}
+
+#[test]
+fn get_status_returns_none_for_wrong_fork() {
+    let cache = TransactionCache::new();
+    let bh = make_blockhash(1);
+    let mh = make_message_hash(2);
+
+    cache.insert(&bh, &mh, 100, 0);
+
+    // Exists on fork 0, not on fork 1
+    assert!(cache.get_status(&bh, &mh, 0).is_some());
+    assert!(cache.get_status(&bh, &mh, 1).is_none());
+}

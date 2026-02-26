@@ -10,7 +10,7 @@ mod shard;
 #[cfg(test)]
 mod tests;
 
-pub use entry::CacheEntry;
+pub use entry::{CacheEntry, TransactionStatus};
 pub use nonce::{extract_nonce_key_index, is_nonce_instruction};
 
 use paradencer_constants::block_limits::{
@@ -71,6 +71,24 @@ impl TransactionCache {
         slot: u64,
         fork: u64,
     ) -> bool {
+        self.insert_with_status(
+            blockhash,
+            message_hash,
+            slot,
+            fork,
+            entry::TransactionStatus::Success,
+        )
+    }
+
+    /// Insert a transaction with explicit execution status.
+    pub fn insert_with_status(
+        &self,
+        blockhash: &[u8; 32],
+        message_hash: &[u8; MESSAGE_HASH_PREFIX_BYTES],
+        slot: u64,
+        fork: u64,
+        status: entry::TransactionStatus,
+    ) -> bool {
         // Capacity check: if we are already at the limit, reject.
         if self.entry_count() >= self.max_entries {
             return false;
@@ -80,7 +98,7 @@ impl TransactionCache {
         let mut shard = self.shards[idx]
             .write()
             .expect("transaction cache shard lock poisoned");
-        shard.insert(blockhash, message_hash, slot, fork)
+        shard.insert(blockhash, message_hash, slot, fork, status)
     }
 
     /// Check whether a transaction already exists on a particular fork.
@@ -95,6 +113,25 @@ impl TransactionCache {
             .read()
             .expect("transaction cache shard lock poisoned");
         shard.contains(blockhash, message_hash, fork)
+    }
+
+    /// Look up the execution status of a transaction on a given fork.
+    ///
+    /// Returns `Some((slot, status))` if the transaction was found, or `None`
+    /// if it hasn't been recorded yet.
+    pub fn get_status(
+        &self,
+        blockhash: &[u8; 32],
+        message_hash: &[u8; MESSAGE_HASH_PREFIX_BYTES],
+        fork: u64,
+    ) -> Option<(u64, entry::TransactionStatus)> {
+        let idx = self.shard_for_hash(blockhash);
+        let shard = self.shards[idx]
+            .read()
+            .expect("transaction cache shard lock poisoned");
+        shard
+            .get(blockhash, message_hash, fork)
+            .map(|e| (e.slot, e.status))
     }
 
     /// Seed the cache with entries from a parsed status cache.

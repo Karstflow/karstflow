@@ -1,3 +1,12 @@
+/// Execution status recorded alongside a transaction in the cache.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TransactionStatus {
+    /// Transaction executed successfully.
+    Success,
+    /// Transaction failed with an execution error.
+    Failed,
+}
+
 /// Tracks where a transaction has been seen across forks.
 #[derive(Debug, Clone)]
 pub struct CacheEntry {
@@ -5,14 +14,17 @@ pub struct CacheEntry {
     pub slot: u64,
     /// Fork identifiers on which this transaction has appeared.
     pub forks: Vec<u64>,
+    /// Execution result of the transaction.
+    pub status: TransactionStatus,
 }
 
 impl CacheEntry {
     /// Create a new cache entry for a transaction first seen on the given slot and fork.
-    pub fn new(slot: u64, fork: u64) -> Self {
+    pub fn new(slot: u64, fork: u64, status: TransactionStatus) -> Self {
         Self {
             slot,
             forks: vec![fork],
+            status,
         }
     }
 

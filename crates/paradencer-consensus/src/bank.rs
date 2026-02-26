@@ -14,7 +14,7 @@ use paradencer_constants::ledger::{GENESIS_EPOCH, GENESIS_SLOT, TICKS_PER_SLOT};
 use paradencer_crypto::lthash::{self, LatticeHashValue};
 use paradencer_ids::SYSTEM_PROGRAM_ID;
 use paradencer_storage::{Account, AccountDatabase, Pubkey, SnapshotBankState};
-use std::sync::atomic::{AtomicU64, AtomicU8, Ordering};
+use std::sync::atomic::{AtomicI64, AtomicU64, AtomicU8, Ordering};
 use std::sync::{Arc, RwLock};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -98,6 +98,10 @@ pub struct Bank {
     // Per-block cost tracking for compute/data limits
     cost_tracker: Arc<crate::cost_tracker::CostTracker>,
 
+    /// Running total of all accounts' data sizes across the database.
+    /// Updated by process_transaction after successful execution.
+    accounts_data_size: AtomicI64,
+
     // Leader schedule computed at epoch boundary for the next epoch
     next_leader_schedule: RwLock<Option<Arc<LeaderSchedule>>>,
 
@@ -178,6 +182,7 @@ impl Bank {
             blockhash_queue: RwLock::new(BlockhashQueue::default()),
             transaction_cache: Arc::new(TransactionCache::new()),
             cost_tracker: Arc::new(crate::cost_tracker::CostTracker::new()),
+            accounts_data_size: AtomicI64::new(0),
             next_leader_schedule: RwLock::new(None),
             stake_tracker: None,
             stake_history: None,
@@ -256,6 +261,7 @@ impl Bank {
             blockhash_queue: RwLock::new(blockhash_queue),
             transaction_cache: Arc::new(TransactionCache::new()),
             cost_tracker: Arc::new(crate::cost_tracker::CostTracker::new()),
+            accounts_data_size: AtomicI64::new(bank_state.accounts_data_len as i64),
             next_leader_schedule: RwLock::new(None),
             stake_tracker: None,
             stake_history: None,
@@ -332,6 +338,7 @@ impl Bank {
             blockhash_queue: RwLock::new(parent.blockhash_queue.read().unwrap().clone()),
             transaction_cache: parent.transaction_cache.clone(),
             cost_tracker: Arc::new(crate::cost_tracker::CostTracker::new()),
+            accounts_data_size: AtomicI64::new(parent.accounts_data_size.load(Ordering::Acquire)),
             next_leader_schedule: RwLock::new(None),
             stake_tracker: parent.stake_tracker.clone(),
             stake_history: parent.stake_history.clone(),
@@ -601,6 +608,21 @@ impl Bank {
     /// Get the per-block cost tracker.
     pub fn cost_tracker(&self) -> &crate::cost_tracker::CostTracker {
         &self.cost_tracker
+    }
+
+    /// Total bytes of account data across the database.
+    pub fn accounts_data_size(&self) -> i64 {
+        self.accounts_data_size.load(Ordering::Acquire)
+    }
+
+    /// Adjust the running total of accounts data bytes.
+    ///
+    /// Called after successful transaction execution with the net change
+    /// in account data bytes (positive for growth, negative for shrink).
+    pub fn update_accounts_data_size_delta(&self, delta: i64) {
+        if delta != 0 {
+            self.accounts_data_size.fetch_add(delta, Ordering::Release);
+        }
     }
 
     /// Get a clone of the current lattice hash accumulator.
