@@ -46,6 +46,11 @@ pub struct SysvarSnapshot {
     pub epoch_stake: std::collections::HashMap<[u8; 32], u64>,
     // Processed sibling instructions for the current transaction.
     pub sibling_instructions: Vec<SiblingInstruction>,
+    /// Active feature gate IDs for the current slot.
+    /// Used by the execution layer to check feature-gated behavior
+    /// (e.g., enabling/disabling syscalls, instruction variants, or
+    /// VM execution modes based on network-wide feature activation).
+    pub active_features: std::collections::HashSet<[u8; 32]>,
 }
 
 /// A previously processed instruction within the same transaction.
@@ -85,6 +90,7 @@ impl Default for SysvarSnapshot {
             sysvar_data: std::collections::HashMap::new(),
             epoch_stake: std::collections::HashMap::new(),
             sibling_instructions: Vec::new(),
+            active_features: std::collections::HashSet::new(),
         }
     }
 }
@@ -147,6 +153,7 @@ mod tests {
             sysvar_data: std::collections::HashMap::new(),
             epoch_stake: std::collections::HashMap::new(),
             sibling_instructions: Vec::new(),
+            active_features: std::collections::HashSet::new(),
         };
         assert_eq!(snap.slot, 12345);
         assert_eq!(snap.epoch, 7);

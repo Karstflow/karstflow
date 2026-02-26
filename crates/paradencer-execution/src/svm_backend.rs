@@ -74,6 +74,7 @@ fn to_sysvar_snapshot(ctx: &SlotContext) -> SysvarSnapshot {
         last_restart_slot: ctx.last_restart_slot,
         recent_blockhash: ctx.recent_blockhash,
         lamports_per_signature: ctx.lamports_per_signature,
+        active_features: ctx.active_features.clone(),
         ..SysvarSnapshot::default()
     }
 }
@@ -149,6 +150,7 @@ mod tests {
             last_restart_slot: 10,
             recent_blockhash: [0xAB; 32],
             lamports_per_signature: 5_000,
+            active_features: std::collections::HashSet::new(),
         }
     }
 

@@ -527,6 +527,14 @@ impl Bank {
                 (self.slot, self.epoch, 0, 0, self.epoch.saturating_add(1))
             };
 
+        // Snapshot active feature gate IDs for the execution layer.
+        let active_features = if let Some(ref fs_lock) = self.feature_set {
+            let fs = fs_lock.read().unwrap();
+            fs.active_features().map(|(id, _)| *id.as_bytes()).collect()
+        } else {
+            std::collections::HashSet::new()
+        };
+
         crate::bank_executor::SlotContext {
             slot,
             epoch,
@@ -544,6 +552,7 @@ impl Bank {
             last_restart_slot: 0,
             recent_blockhash: *self.last_blockhash.read().unwrap(),
             lamports_per_signature: self.lamports_per_signature(),
+            active_features,
         }
     }
 

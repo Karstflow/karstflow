@@ -22,10 +22,11 @@ use paradencer_constants::system_program::MAX_ACCOUNT_DATA_SIZE;
 use paradencer_constants::sysvars::MAX_INSTRUCTIONS_PER_TRANSACTION;
 use paradencer_ids::{
     COMPUTE_BUDGET_PROGRAM_ID, ED25519_PROGRAM_ID, INCINERATOR_ID, INSTRUCTIONS_SYSVAR_ID,
-    SECP256K1_PROGRAM_ID, SECP256R1_PROGRAM_ID, SYSTEM_PROGRAM_ID, VOTE_PROGRAM_ID,
+    SECP256K1_PROGRAM_ID, SECP256R1_PROGRAM_ID, STAKE_PROGRAM_ID, SYSTEM_PROGRAM_ID,
+    VOTE_PROGRAM_ID,
 };
 use paradencer_storage::{Account, AccountData, Pubkey, TransactionId};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 // ---------------------------------------------------------------------------
 // Execution backend trait
@@ -51,6 +52,9 @@ pub struct SlotContext {
     pub last_restart_slot: u64,
     pub recent_blockhash: [u8; 32],
     pub lamports_per_signature: u64,
+    /// Active feature gate IDs (as raw 32-byte keys) at this slot.
+    /// Execution layer uses this to check feature-gated behavior.
+    pub active_features: HashSet<[u8; 32]>,
 }
 
 /// Compiled instruction passed to the execution backend.
@@ -1726,6 +1730,7 @@ impl Bank {
     ///
     /// Also updates the bank's lattice hash accumulator for each modified
     /// account by subtracting the old hash and adding the new hash.
+    /// Stake delegation caches are refreshed for any modified stake accounts.
     fn write_accounts(&self, accounts: &HashMap<Pubkey, Account>) {
         let db = self.accounts();
 
@@ -1734,6 +1739,10 @@ impl Bank {
             let old_account = db.get_published_account(pubkey);
             self.update_account_hash(pubkey, old_account.as_ref(), new_account);
         }
+
+        // Update stake delegation cache for modified stake accounts so that
+        // leader schedule, rewards, and epoch processing see current state.
+        self.update_stake_cache(accounts);
 
         // Write to database
         let mut xid_bytes = [0u8; 16];
@@ -1745,6 +1754,61 @@ impl Bank {
             let _ = db.write_account(xid, *pubkey, account.clone());
         }
         let _ = db.publish_transaction(xid);
+    }
+
+    /// Refresh the stake delegation cache for any modified stake accounts.
+    ///
+    /// After transaction execution, stake accounts may have new delegations,
+    /// changed delegation amounts, or been deactivated/closed. This method
+    /// inspects each modified account owned by the stake program and updates
+    /// the in-memory StakeTracker accordingly:
+    ///
+    /// - Zero-lamport accounts: delegation is removed (account reclaimed).
+    /// - Delegated state: delegation is upserted with current parameters.
+    /// - Non-delegated state or parse error: delegation is removed.
+    fn update_stake_cache(&self, accounts: &HashMap<Pubkey, Account>) {
+        use crate::stake::deserialize_stake_state;
+        use crate::stake::StakeState;
+
+        let tracker_lock = match self.stake_tracker() {
+            Some(tracker) => tracker,
+            None => return,
+        };
+
+        let mut has_stake_changes = false;
+        for account in accounts.values() {
+            if account.meta.owner == STAKE_PROGRAM_ID {
+                has_stake_changes = true;
+                break;
+            }
+        }
+        if !has_stake_changes {
+            return;
+        }
+
+        let mut tracker = tracker_lock.write().unwrap();
+
+        for (pubkey, account) in accounts {
+            if account.meta.owner != STAKE_PROGRAM_ID {
+                continue;
+            }
+
+            if account.meta.lamports == 0 {
+                tracker.remove_delegation(pubkey);
+                continue;
+            }
+
+            match deserialize_stake_state(account.data.as_ref()) {
+                Ok(StakeState::Delegated(_, stake_account, _)) => {
+                    tracker.add_delegation(*pubkey, stake_account.delegation.clone());
+                }
+                _ => {
+                    // Not delegated (Uninitialized, Initialized, RewardsPool,
+                    // or corrupt data) — remove any stale delegation entry.
+                    tracker.remove_delegation(pubkey);
+                }
+            }
+        }
     }
 }
 
@@ -4549,5 +4613,166 @@ mod tests {
             "Instructions sysvar should be injected: {:?}",
             result.error
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // Stake delegation cache update tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn write_accounts_updates_stake_tracker_on_delegation() {
+        use crate::stake::serialize_stake_state;
+        use crate::stake::{Authorized, Delegation, Lockup, Meta, StakeAccount, StakeState};
+        use crate::StakeTracker;
+        use std::sync::RwLock;
+
+        let mut bank = create_test_bank();
+
+        // Attach a stake tracker
+        let tracker = Arc::new(RwLock::new(StakeTracker::new(0)));
+        bank.set_stake_tracker(tracker.clone());
+
+        // Create a stake account with a delegation
+        let stake_key = Pubkey::new_unique();
+        let voter = Pubkey::new_unique();
+        let delegation = Delegation::new(voter, 5_000_000, 0);
+        let stake_account = StakeAccount::new(delegation, 0);
+        let meta = Meta::new(2_282_880, Authorized::auto(stake_key), Lockup::default());
+        let state = StakeState::Delegated(meta, stake_account, Default::default());
+        let data = serialize_stake_state(&state);
+
+        let account = Account::new(7_282_880, data, STAKE_PROGRAM_ID);
+
+        // Store and then write via bank
+        store_test_account(&bank, &stake_key, &account);
+        let mut modified = HashMap::new();
+        modified.insert(stake_key, account.clone());
+        bank.write_accounts(&modified);
+
+        // Verify tracker was updated
+        let tracker_read = tracker.read().unwrap();
+        let del = tracker_read.get_delegation(&stake_key);
+        assert!(del.is_some(), "Delegation should be in tracker");
+        assert_eq!(del.unwrap().voter_pubkey, voter);
+        assert_eq!(del.unwrap().stake_amount, 5_000_000);
+    }
+
+    #[test]
+    fn write_accounts_removes_delegation_on_zero_lamports() {
+        use crate::stake::serialize_stake_state;
+        use crate::stake::{Delegation, StakeState};
+        use crate::StakeTracker;
+        use std::sync::RwLock;
+
+        let mut bank = create_test_bank();
+        let tracker = Arc::new(RwLock::new(StakeTracker::new(0)));
+        bank.set_stake_tracker(tracker.clone());
+
+        let stake_key = Pubkey::new_unique();
+        let voter = Pubkey::new_unique();
+
+        // Pre-populate tracker with a delegation
+        {
+            let mut t = tracker.write().unwrap();
+            t.add_delegation(stake_key, Delegation::new(voter, 1_000_000, 0));
+        }
+        assert!(tracker.read().unwrap().get_delegation(&stake_key).is_some());
+
+        // Write a zero-lamport stake account (reclaimed)
+        let state = StakeState::Uninitialized;
+        let data = serialize_stake_state(&state);
+        let account = Account {
+            data: paradencer_storage::AccountData::new(data),
+            meta: paradencer_storage::AccountMeta {
+                lamports: 0,
+                owner: STAKE_PROGRAM_ID,
+                ..Default::default()
+            },
+        };
+
+        let mut modified = HashMap::new();
+        modified.insert(stake_key, account);
+        bank.write_accounts(&modified);
+
+        assert!(
+            tracker.read().unwrap().get_delegation(&stake_key).is_none(),
+            "Zero-lamport stake account should remove delegation from tracker"
+        );
+    }
+
+    #[test]
+    fn write_accounts_removes_delegation_on_non_delegated_state() {
+        use crate::stake::serialize_stake_state;
+        use crate::stake::{Authorized, Delegation, Lockup, Meta, StakeState};
+        use crate::StakeTracker;
+        use std::sync::RwLock;
+
+        let mut bank = create_test_bank();
+        let tracker = Arc::new(RwLock::new(StakeTracker::new(0)));
+        bank.set_stake_tracker(tracker.clone());
+
+        let stake_key = Pubkey::new_unique();
+        let voter = Pubkey::new_unique();
+
+        // Pre-populate tracker
+        {
+            let mut t = tracker.write().unwrap();
+            t.add_delegation(stake_key, Delegation::new(voter, 1_000_000, 0));
+        }
+
+        // Write an Initialized (but not Delegated) stake account
+        let meta = Meta::new(2_282_880, Authorized::auto(stake_key), Lockup::default());
+        let state = StakeState::Initialized(meta);
+        let data = serialize_stake_state(&state);
+        let account = Account::new(2_282_880, data, STAKE_PROGRAM_ID);
+
+        let mut modified = HashMap::new();
+        modified.insert(stake_key, account);
+        bank.write_accounts(&modified);
+
+        assert!(
+            tracker.read().unwrap().get_delegation(&stake_key).is_none(),
+            "Initialized (non-delegated) state should remove delegation"
+        );
+    }
+
+    #[test]
+    fn write_accounts_ignores_non_stake_accounts() {
+        use crate::StakeTracker;
+        use std::sync::RwLock;
+
+        let mut bank = create_test_bank();
+        let tracker = Arc::new(RwLock::new(StakeTracker::new(0)));
+        bank.set_stake_tracker(tracker.clone());
+
+        // Write a system-owned account
+        let key = Pubkey::new_unique();
+        let account = Account::new(1_000_000, vec![], SYSTEM_PROGRAM_ID);
+        store_test_account(&bank, &key, &account);
+
+        let mut modified = HashMap::new();
+        modified.insert(key, account);
+        bank.write_accounts(&modified);
+
+        assert_eq!(
+            tracker.read().unwrap().delegation_count(),
+            0,
+            "Non-stake accounts should not affect tracker"
+        );
+    }
+
+    #[test]
+    fn write_accounts_no_tracker_is_noop() {
+        // Bank without a stake tracker should not panic
+        let bank = create_test_bank();
+
+        let key = Pubkey::new_unique();
+        let account = Account::new(1_000_000, vec![], STAKE_PROGRAM_ID);
+        store_test_account(&bank, &key, &account);
+
+        let mut modified = HashMap::new();
+        modified.insert(key, account);
+        // Should not panic even though the account is stake-owned
+        bank.write_accounts(&modified);
     }
 }
