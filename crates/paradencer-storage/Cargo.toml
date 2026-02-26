@@ -11,6 +11,7 @@ paradencer-types = { path = "../paradencer-types" }
 paradencer-sbpf = { path = "../paradencer-sbpf" }
 paradencer-ids = { path = "../paradencer-ids" }
 paradencer-crypto = { path = "../paradencer-crypto" }
+tracing.workspace = true
 thiserror.workspace = true
 serde.workspace = true
 serde_json.workspace = true

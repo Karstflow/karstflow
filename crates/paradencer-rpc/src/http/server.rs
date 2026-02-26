@@ -6,6 +6,7 @@ use serde_json::json;
 use std::net::{SocketAddr, TcpListener};
 use std::sync::Arc;
 use std::thread;
+use tracing::{error, info};
 
 use super::registry::REGISTERED_RPC_METHODS;
 use super::renderer::render_json_rpc_response;
@@ -21,12 +22,12 @@ pub fn spawn_rpc_http_server(
         .map_err(|source| RpcError::RpcHttpBind { bind_addr, source })?;
     drop(bind_probe);
 
-    println!(
-        "[rpc-http] serving JSON-RPC on http://{} full_api={} private={} runtime_provider={}",
-        bind_addr,
+    info!(
+        %bind_addr,
         full_api,
         private,
-        runtime_snapshot_provider.is_some()
+        runtime_provider = runtime_snapshot_provider.is_some(),
+        "serving JSON-RPC"
     );
 
     thread::Builder::new()
@@ -38,7 +39,7 @@ pub fn spawn_rpc_http_server(
             {
                 Ok(runtime) => runtime,
                 Err(error) => {
-                    eprintln!("[rpc-http] failed to build tokio runtime: {error}");
+                    error!(%error, "failed to build tokio runtime for RPC");
                     return;
                 }
             };
@@ -47,7 +48,7 @@ pub fn spawn_rpc_http_server(
                 let server = match ServerBuilder::default().build(bind_addr).await {
                     Ok(server) => server,
                     Err(error) => {
-                        eprintln!("[rpc-http] failed to start jsonrpsee server: {error}");
+                        error!(%error, "failed to start jsonrpsee server");
                         return;
                     }
                 };
@@ -66,7 +67,7 @@ pub fn spawn_rpc_http_server(
                             )
                         });
                     if let Err(error) = registration {
-                        eprintln!("[rpc-http] failed to register method {method_name}: {error}");
+                        error!(method = method_name, %error, "failed to register RPC method");
                         return;
                     }
                 }
@@ -76,7 +77,7 @@ pub fn spawn_rpc_http_server(
                     full_api,
                     runtime_snapshot_provider.clone(),
                 ) {
-                    eprintln!("[rpc-http] failed to register subscriptions: {error}");
+                    error!(%error, "failed to register RPC subscriptions");
                     return;
                 }
 

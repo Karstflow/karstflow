@@ -18,6 +18,7 @@ use std::sync::{
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 use thiserror::Error;
+use tracing::{error, info};
 
 /// Errors that can occur in the block producer
 #[derive(Debug, Error)]
@@ -301,7 +302,7 @@ impl BlockProducer {
 
             // We're the leader, produce the block!
             if config.verbose {
-                println!("Block producer: Leading slot {}", slot);
+                info!(slot, "block producer: leading slot");
             }
 
             let result = Self::produce_slot(
@@ -320,7 +321,7 @@ impl BlockProducer {
             );
 
             if let Err(e) = result {
-                eprintln!("Block producer error in slot {}: {}", slot, e);
+                error!(slot, error = %e, "block producer error");
             }
 
             // Advance to next slot
@@ -459,11 +460,11 @@ impl BlockProducer {
         drop(stats);
 
         if config.verbose {
-            println!(
-                "Block producer: Completed slot {} with {} transactions in {}ms",
+            info!(
                 slot,
-                transactions_in_slot,
-                slot_duration.as_millis()
+                transactions = transactions_in_slot,
+                duration_ms = slot_duration.as_millis() as u64,
+                "block producer: slot completed",
             );
         }
 

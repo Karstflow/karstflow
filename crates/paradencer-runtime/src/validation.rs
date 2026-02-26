@@ -1,6 +1,7 @@
 use crate::{RuntimeError, RuntimeResult};
 use paradencer_core::PinnedCorePolicy;
 use std::collections::HashSet;
+use tracing::warn;
 
 pub(crate) fn validate_pinned_assignment(
     service_count: usize,
@@ -17,19 +18,23 @@ pub(crate) fn validate_pinned_assignment(
             core_count,
         }),
         PinnedCorePolicy::Shared => {
-            eprintln!(
-                "[runtime] warning: {} services will share {} cores in pinned mode (policy=shared)",
-                service_count, core_count
+            warn!(
+                service_count,
+                core_count,
+                policy = "shared",
+                "services will share cores in pinned mode"
             );
             Ok(())
         }
         PinnedCorePolicy::Adaptive => {
             let oversubscription_ratio = service_count as f64 / core_count as f64;
             if oversubscription_ratio <= 2.0 {
-                eprintln!(
-                    "[runtime] warning: {} services will share {} cores in pinned mode (policy=adaptive, ratio={oversubscription_ratio:.2})",
+                warn!(
                     service_count,
-                    core_count
+                    core_count,
+                    oversubscription_ratio = format_args!("{oversubscription_ratio:.2}"),
+                    policy = "adaptive",
+                    "services will share cores in pinned mode"
                 );
                 Ok(())
             } else {

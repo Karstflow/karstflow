@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
+use tracing::info;
 
 const SNAPSHOT_CATALOG_SCHEMA_VERSION: u32 = 2;
 
@@ -317,9 +318,10 @@ impl SnapshotCatalog {
                             path: catalog_path.to_path_buf(),
                             message: error.to_string(),
                         })?;
-                    eprintln!(
-                        "[storage] migrating snapshot catalog schema_version 1 -> {}",
-                        SNAPSHOT_CATALOG_SCHEMA_VERSION
+                    info!(
+                        from = 1u32,
+                        to = SNAPSHOT_CATALOG_SCHEMA_VERSION,
+                        "migrating snapshot catalog schema"
                     );
                     SnapshotCatalogDisk {
                         schema_version: SNAPSHOT_CATALOG_SCHEMA_VERSION,
@@ -344,9 +346,10 @@ impl SnapshotCatalog {
                             path: catalog_path.to_path_buf(),
                             message: error.to_string(),
                         })?;
-                    eprintln!(
-                        "[storage] migrating snapshot catalog schema_version 0 -> {}",
-                        SNAPSHOT_CATALOG_SCHEMA_VERSION
+                    info!(
+                        from = 0u32,
+                        to = SNAPSHOT_CATALOG_SCHEMA_VERSION,
+                        "migrating snapshot catalog schema"
                     );
                     SnapshotCatalogDisk {
                         schema_version: SNAPSHOT_CATALOG_SCHEMA_VERSION,

@@ -16,6 +16,7 @@ use crate::StorageError;
 use std::io::Read;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use tracing::warn;
 
 /// Result of restoring a Solana snapshot.
 #[derive(Debug, Clone)]
@@ -192,18 +193,11 @@ impl SnapshotRestorer {
                             bank_state = Some(state);
                         }
                         Err(e) => {
-                            eprintln!(
-                                "warning: snapshot manifest parse failed \
-                                 (version={}, data_len={}): {}. \
-                                 Account restoration will continue without \
-                                 bank state metadata.",
-                                if version.is_empty() {
-                                    "<unknown>"
-                                } else {
-                                    &version
-                                },
-                                data.len(),
-                                e,
+                            warn!(
+                                version = if version.is_empty() { "<unknown>" } else { &version },
+                                data_len = data.len(),
+                                error = %e,
+                                "snapshot manifest parse failed, continuing without bank state metadata"
                             );
                         }
                     }
@@ -214,10 +208,9 @@ impl SnapshotRestorer {
                             status_cache = Some(result);
                         }
                         Err(e) => {
-                            eprintln!(
-                                "warning: status cache parse failed: {}. \
-                                 Transaction dedup will start empty.",
-                                e,
+                            warn!(
+                                error = %e,
+                                "status cache parse failed, transaction dedup will start empty"
                             );
                         }
                     }

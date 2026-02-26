@@ -4,6 +4,7 @@ use paradencer_consensus::{
     VoteUpdate,
 };
 use std::sync::{Arc, Mutex, RwLock};
+use tracing::warn;
 
 /// Errors that can occur during vote integration
 #[derive(Debug, Clone)]
@@ -96,10 +97,7 @@ impl VoteIntegration {
                 }
                 Err(e) => {
                     // Log but don't fail - individual vote failures are acceptable
-                    eprintln!(
-                        "Vote processing failed for account {:?} on slot {}: {:?}",
-                        vote_account, slot, e
-                    );
+                    warn!(vote_account = ?vote_account, slot, error = ?e, "vote processing failed");
                 }
             }
         }
@@ -142,9 +140,11 @@ impl VoteIntegration {
                 ) {
                     Ok(_) => processed += 1,
                     Err(e) => {
-                        eprintln!(
-                            "Vote update failed for {:?} slot {}: {:?}",
-                            update.vote_account, voted_slot, e
+                        warn!(
+                            vote_account = ?update.vote_account,
+                            slot = voted_slot,
+                            error = ?e,
+                            "vote update failed",
                         );
                     }
                 }

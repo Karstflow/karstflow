@@ -19,6 +19,7 @@ use paradencer_runtime::{RuntimeError, RuntimeResult, Service, ServiceContext};
 use paradencer_types::shred::Shred;
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::Duration;
+use tracing::warn;
 
 /// Configuration for the replay service.
 #[derive(Debug, Clone)]
@@ -234,7 +235,7 @@ impl Service for ReplayService {
             match self.replay_stage.replay_block(block) {
                 Ok(_outcome) => {}
                 Err(StageError::ReplayError(msg)) => {
-                    eprintln!("Replay failed for slot {}: {}", slot, msg);
+                    warn!(slot, error = %msg, "replay failed");
                 }
                 Err(e) => {
                     return Err(RuntimeError::service_failure(

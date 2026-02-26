@@ -13,6 +13,7 @@
 /// - `iter_all()`: stream all accounts from disk (or cache if no disk)
 use std::collections::HashMap;
 use std::sync::Arc;
+use tracing::error;
 
 use paradencer_constants::durable_store::{
     CF_ACCOUNTS, CF_ACCOUNT_META, DEFAULT_PUBLISHED_CACHE_MAX_ENTRIES,
@@ -145,7 +146,7 @@ impl PublishedStore {
             }
             if !batch.is_empty() {
                 if let Err(e) = store.write_batch(&batch) {
-                    eprintln!("durable store batch write error: {e}");
+                    error!(error = %e, "durable store batch write failed");
                 }
             }
         }
@@ -270,7 +271,7 @@ impl PublishedStore {
         let entries = match store.prefix_scan(CF_ACCOUNTS, &[]) {
             Ok(entries) => entries,
             Err(e) => {
-                eprintln!("iter_from_disk prefix_scan error: {e}");
+                error!(error = %e, "durable store prefix scan failed");
                 return Vec::new();
             }
         };
@@ -393,11 +394,11 @@ impl PublishedStore {
         if let Some(ref store) = self.store {
             let encoded = encode_account(account);
             if let Err(e) = store.put(CF_ACCOUNTS, pubkey.as_bytes(), &encoded) {
-                eprintln!("durable store put error: {e}");
+                error!(error = %e, "durable store put failed");
             }
             let meta = encode_account_meta(&account.meta.owner, account.meta.lamports, slot);
             if let Err(e) = store.put(CF_ACCOUNT_META, pubkey.as_bytes(), &meta) {
-                eprintln!("durable store meta put error: {e}");
+                error!(error = %e, "durable store meta put failed");
             }
         }
     }

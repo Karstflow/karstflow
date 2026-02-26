@@ -5,6 +5,7 @@ use paradencer_core::{ExecutionMode, RuntimeSpec};
 use std::collections::HashMap;
 use std::thread;
 use std::time::Duration;
+use tracing::info;
 
 pub fn run_services(spec: &RuntimeSpec, services: Vec<Box<dyn Service>>) -> RuntimeResult<()> {
     let stop_flag = ShutdownSwitch::new();
@@ -92,9 +93,11 @@ fn run_pinned(
             PinnedAssignmentSource::Explicit => "explicit",
         };
 
-        println!(
-            "[runtime] pinned assignment: service='{}' core_id={} source={}",
-            service_name, assigned_core.id, assignment_mode
+        info!(
+            service = %service_name,
+            core_id = assigned_core.id,
+            source = assignment_mode,
+            "pinned core assignment"
         );
 
         let builder = thread::Builder::new().name(service_name.clone());
