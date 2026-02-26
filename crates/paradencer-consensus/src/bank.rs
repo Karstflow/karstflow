@@ -598,6 +598,18 @@ impl Bank {
             (false, std::collections::HashMap::new())
         };
 
+        // Snapshot epoch stake per vote account for sol_get_epoch_stake syscall.
+        let epoch_stake = if let Some(ref tracker_lock) = self.stake_tracker {
+            let tracker = tracker_lock.read().unwrap();
+            tracker
+                .stake_by_vote_account()
+                .into_iter()
+                .map(|(pubkey, stake)| (*pubkey.as_bytes(), stake))
+                .collect()
+        } else {
+            std::collections::HashMap::new()
+        };
+
         crate::bank_executor::SlotContext {
             slot,
             epoch,
@@ -617,6 +629,7 @@ impl Bank {
             lamports_per_signature: self.lamports_per_signature(),
             epoch_rewards_active,
             sysvar_data,
+            epoch_stake,
             active_features,
         }
     }

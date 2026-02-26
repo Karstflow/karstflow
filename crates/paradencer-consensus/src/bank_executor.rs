@@ -58,6 +58,10 @@ pub struct SlotContext {
     /// Populated from the sysvar cache so `sol_get_sysvar` can serve
     /// programs without a dependency on the consensus layer at runtime.
     pub sysvar_data: HashMap<[u8; 32], Vec<u8>>,
+    /// Delegated stake per vote account at the current epoch boundary.
+    /// Used by `sol_get_epoch_stake` syscall. Keyed by vote account
+    /// address (32 bytes), value is delegated stake in lamports.
+    pub epoch_stake: HashMap<[u8; 32], u64>,
     /// Active feature gate IDs (as raw 32-byte keys) at this slot.
     /// Execution layer uses this to check feature-gated behavior.
     pub active_features: HashSet<[u8; 32]>,

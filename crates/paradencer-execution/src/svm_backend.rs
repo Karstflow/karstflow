@@ -76,6 +76,7 @@ fn to_sysvar_snapshot(ctx: &SlotContext) -> SysvarSnapshot {
         lamports_per_signature: ctx.lamports_per_signature,
         epoch_rewards_active: ctx.epoch_rewards_active,
         sysvar_data: ctx.sysvar_data.clone(),
+        epoch_stake: ctx.epoch_stake.clone(),
         active_features: ctx.active_features.clone(),
         ..SysvarSnapshot::default()
     }
@@ -154,6 +155,7 @@ mod tests {
             lamports_per_signature: 5_000,
             epoch_rewards_active: false,
             sysvar_data: HashMap::new(),
+            epoch_stake: HashMap::new(),
             active_features: std::collections::HashSet::new(),
         }
     }
