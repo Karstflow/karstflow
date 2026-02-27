@@ -27,3 +27,4 @@ pub mod tag_cache;
 pub mod tempo;
 pub mod tile;
 pub mod tile_link;
+pub mod tile_metrics;
