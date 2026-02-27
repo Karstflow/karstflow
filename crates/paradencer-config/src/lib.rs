@@ -58,6 +58,9 @@ pub struct NodeConfig {
     pub expected_shred_version: Option<u16>,
     pub live_entrypoints: Vec<SocketAddr>,
     pub gossip_bind_addr: SocketAddr,
+    /// Allow gossip from private RFC1918 addresses. Defaults to `false`.
+    /// Set to `true` for local development and testnet deployments.
+    pub gossip_allow_private_addresses: bool,
     pub runtime_spec: RuntimeSpec,
     pub topology_spec: TopologySpec,
     pub ingress_policy: IngressPolicy,
@@ -190,6 +193,11 @@ impl NodeConfig {
             expected_shred_version,
             live_entrypoints,
             gossip_bind_addr,
+            gossip_allow_private_addresses: std::env::var(
+                "PARADENCER_GOSSIP_ALLOW_PRIVATE_ADDRESSES",
+            )
+            .map(|v| v == "true" || v == "1")
+            .unwrap_or(false),
             runtime_spec: build_runtime_spec(profile)?,
             topology_spec: build_topology_spec(profile)?,
             ingress_policy: build_ingress_policy(profile)?,

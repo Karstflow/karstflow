@@ -24,6 +24,12 @@ pub struct GossipConfig {
     pub prune_interval: Duration,
     pub prune_timeout: Duration,
     pub max_cluster_size: usize,
+    /// Allow gossip from private (RFC1918) addresses.
+    ///
+    /// When `false` (default), packets from 10.0.0.0/8, 172.16.0.0/12,
+    /// 192.168.0.0/16, and 127.0.0.0/8 are rejected. Set to `true` for
+    /// local development and testnet deployments.
+    pub allow_private_addresses: bool,
 }
 
 impl Default for GossipConfig {
@@ -37,6 +43,7 @@ impl Default for GossipConfig {
             prune_interval: Duration::from_millis(gossip_const::PRUNE_INTERVAL_MS),
             prune_timeout: Duration::from_secs(30),
             max_cluster_size: 5000,
+            allow_private_addresses: false,
         }
     }
 }
@@ -60,6 +67,7 @@ pub struct GossipServiceStats {
     pub send_errors: Arc<AtomicU64>,
     pub receive_errors: Arc<AtomicU64>,
     pub pull_responses_budget_exhausted: Arc<AtomicU64>,
+    pub packets_rejected_source_addr: Arc<AtomicU64>,
 }
 
 impl GossipServiceStats {
@@ -81,6 +89,7 @@ impl GossipServiceStats {
             send_errors: Arc::new(AtomicU64::new(0)),
             receive_errors: Arc::new(AtomicU64::new(0)),
             pull_responses_budget_exhausted: Arc::new(AtomicU64::new(0)),
+            packets_rejected_source_addr: Arc::new(AtomicU64::new(0)),
         }
     }
 }
@@ -93,6 +102,48 @@ impl Default for GossipServiceStats {
 
 /// Maximum packet size for gossip messages.
 const GOSSIP_MAX_PACKET_SIZE: usize = gossip_const::GOSSIP_MTU;
+
+// ---------------------------------------------------------------------------
+// Source address validation
+// ---------------------------------------------------------------------------
+
+/// Check whether a source IP address is valid for gossip.
+///
+/// Rejects:
+/// - 0.0.0.0 (unspecified)
+/// - 255.255.255.255 (broadcast)
+/// - 224.0.0.0/4 (multicast)
+/// - Port 0
+///
+/// When `allow_private` is false, also rejects:
+/// - 10.0.0.0/8
+/// - 172.16.0.0/12
+/// - 192.168.0.0/16
+/// - 127.0.0.0/8 (loopback)
+fn is_valid_gossip_source(addr: &SocketAddr, allow_private: bool) -> bool {
+    match addr {
+        SocketAddr::V4(v4) => {
+            let ip = v4.ip();
+            let port = v4.port();
+
+            // Always reject: zero port, unspecified, broadcast, multicast
+            if port == 0 || ip.is_unspecified() || ip.is_broadcast() || ip.is_multicast() {
+                return false;
+            }
+
+            // Optionally reject private/loopback addresses
+            if !allow_private && (ip.is_private() || ip.is_loopback()) {
+                return false;
+            }
+
+            true
+        }
+        SocketAddr::V6(_) => {
+            // IPv6 not supported for gossip
+            false
+        }
+    }
+}
 
 /// Token-bucket rate limiter for outbound pull response data.
 ///
@@ -223,8 +274,16 @@ impl GossipService {
         let recv_stats = self.stats.clone();
         let recv_socket = Arc::clone(&self.socket);
         let recv_budget = Arc::clone(&self.pull_budget);
+        let allow_private = self.config.allow_private_addresses;
         tokio::spawn(async move {
-            Self::receive_loop(recv_socket, recv_cluster_info, recv_stats, recv_budget).await;
+            Self::receive_loop(
+                recv_socket,
+                recv_cluster_info,
+                recv_stats,
+                recv_budget,
+                allow_private,
+            )
+            .await;
         });
 
         // Spawn push gossip task
@@ -292,12 +351,21 @@ impl GossipService {
         cluster_info: Arc<ClusterInfo>,
         stats: GossipServiceStats,
         pull_budget: SharedBudget,
+        allow_private_addresses: bool,
     ) {
         let mut buf = vec![0u8; GOSSIP_MAX_PACKET_SIZE];
 
         loop {
             match socket.recv_from(&mut buf).await {
                 Ok((len, src_addr)) => {
+                    // Reject invalid source addresses (multicast, broadcast, etc.)
+                    if !is_valid_gossip_source(&src_addr, allow_private_addresses) {
+                        stats
+                            .packets_rejected_source_addr
+                            .fetch_add(1, Ordering::Relaxed);
+                        continue;
+                    }
+
                     stats
                         .bytes_received
                         .fetch_add(len as u64, Ordering::Relaxed);
@@ -764,6 +832,7 @@ mod tests {
 
         let config = GossipConfig {
             bind_addr: "127.0.0.1:0".parse().unwrap(),
+            allow_private_addresses: true,
             ..GossipConfig::default()
         };
 
@@ -851,5 +920,66 @@ mod tests {
         // last_replenish is now, so no time has passed
         let remaining = budget.replenish(100);
         assert_eq!(remaining, 0);
+    }
+
+    // --- Source address validation tests ---
+
+    fn addr(ip: &str, port: u16) -> SocketAddr {
+        format!("{}:{}", ip, port).parse().unwrap()
+    }
+
+    #[test]
+    fn rejects_multicast_source() {
+        assert!(!is_valid_gossip_source(&addr("224.0.0.1", 8000), true));
+        assert!(!is_valid_gossip_source(
+            &addr("239.255.255.250", 8000),
+            true
+        ));
+    }
+
+    #[test]
+    fn rejects_broadcast_source() {
+        assert!(!is_valid_gossip_source(
+            &addr("255.255.255.255", 8000),
+            true
+        ));
+    }
+
+    #[test]
+    fn rejects_unspecified_source() {
+        assert!(!is_valid_gossip_source(&addr("0.0.0.0", 8000), true));
+    }
+
+    #[test]
+    fn rejects_zero_port() {
+        assert!(!is_valid_gossip_source(&addr("1.2.3.4", 0), true));
+    }
+
+    #[test]
+    fn accepts_public_address() {
+        assert!(is_valid_gossip_source(&addr("8.8.8.8", 8000), false));
+        assert!(is_valid_gossip_source(&addr("1.1.1.1", 8000), false));
+    }
+
+    #[test]
+    fn rejects_private_when_not_allowed() {
+        assert!(!is_valid_gossip_source(&addr("10.0.0.1", 8000), false));
+        assert!(!is_valid_gossip_source(&addr("172.16.0.1", 8000), false));
+        assert!(!is_valid_gossip_source(&addr("192.168.1.1", 8000), false));
+        assert!(!is_valid_gossip_source(&addr("127.0.0.1", 8000), false));
+    }
+
+    #[test]
+    fn accepts_private_when_allowed() {
+        assert!(is_valid_gossip_source(&addr("10.0.0.1", 8000), true));
+        assert!(is_valid_gossip_source(&addr("172.16.0.1", 8000), true));
+        assert!(is_valid_gossip_source(&addr("192.168.1.1", 8000), true));
+        assert!(is_valid_gossip_source(&addr("127.0.0.1", 8000), true));
+    }
+
+    #[test]
+    fn rejects_ipv6() {
+        let v6: SocketAddr = "[::1]:8000".parse().unwrap();
+        assert!(!is_valid_gossip_source(&v6, true));
     }
 }

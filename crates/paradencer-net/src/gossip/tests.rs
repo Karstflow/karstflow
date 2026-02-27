@@ -16,6 +16,7 @@ async fn test_gossip_service_push() {
 
     let config1 = GossipConfig {
         bind_addr: "127.0.0.1:0".parse().unwrap(),
+        allow_private_addresses: true,
         ..GossipConfig::default()
     };
 
@@ -30,6 +31,7 @@ async fn test_gossip_service_push() {
 
     let config2 = GossipConfig {
         bind_addr: "127.0.0.1:0".parse().unwrap(),
+        allow_private_addresses: true,
         ..GossipConfig::default()
     };
 

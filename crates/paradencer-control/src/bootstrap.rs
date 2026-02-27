@@ -671,6 +671,7 @@ pub fn start_gossip_service(
 
     let gossip_config = GossipConfig {
         bind_addr: gossip_bind_addr,
+        allow_private_addresses: node_config.gossip_allow_private_addresses,
         ..GossipConfig::default()
     };
 
