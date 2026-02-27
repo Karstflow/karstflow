@@ -2549,77 +2549,139 @@ impl SyscallHandler for SolPanicHandler {
 }
 
 // ---------------------------------------------------------------------------
-// BLS12-381 syscalls (feature-gated, stub until crypto support is added)
+// BLS12-381 syscalls
 // ---------------------------------------------------------------------------
 
 /// sol_curve_decompress: Decompress BLS12-381 curve points (G1/G2).
 ///
-/// Feature-gated by `enable_bls12_381_syscall`. Currently returns 1
-/// (unsupported) since the BLS12-381 crypto primitives are not yet
-/// implemented. The handler deducts compute units correctly.
+/// Feature-gated by `enable_bls12_381_syscall`. Supports both big-endian
+/// and little-endian encodings via the 0x80 flag on the curve_id.
 struct SolCurveDecompressHandler;
 
 impl SyscallHandler for SolCurveDecompressHandler {
     fn call(
         &self,
         vm: &mut VmState,
-        r1: u64,  // curve_id
-        _r2: u64, // point_addr
-        _r3: u64, // result_addr
+        r1: u64, // curve_id (with optional LE flag in bit 7)
+        r2: u64, // point_addr
+        r3: u64, // result_addr
         _r4: u64,
         _r5: u64,
     ) -> Result<u64, VmError> {
         let base_id = r1 & !syscalls::BLS12_381_LITTLE_ENDIAN_FLAG;
+        let big_endian = (r1 & syscalls::BLS12_381_LITTLE_ENDIAN_FLAG) == 0;
 
-        let cost = match base_id {
-            syscalls::CURVE_ID_BLS12_381_G1 => syscalls::BLS12_381_G1_DECOMPRESS_COST,
-            syscalls::CURVE_ID_BLS12_381_G2 => syscalls::BLS12_381_G2_DECOMPRESS_COST,
-            _ => return Ok(1), // Invalid curve_id
+        let (input_sz, output_sz, cost) = match base_id {
+            syscalls::CURVE_ID_BLS12_381_G1 => (
+                syscalls::BLS12_381_G1_COMPRESSED_SIZE,
+                syscalls::BLS12_381_G1_POINT_SIZE,
+                syscalls::BLS12_381_G1_DECOMPRESS_COST,
+            ),
+            syscalls::CURVE_ID_BLS12_381_G2 => (
+                syscalls::BLS12_381_G2_COMPRESSED_SIZE,
+                syscalls::BLS12_381_G2_POINT_SIZE,
+                syscalls::BLS12_381_G2_DECOMPRESS_COST,
+            ),
+            _ => return Ok(1),
         };
         deduct_compute(vm, cost)?;
 
-        // BLS12-381 crypto not yet implemented — return soft error.
-        // TODO: Implement when paradencer-crypto adds BLS12-381 support.
-        Ok(1)
+        let input = vm
+            .memory
+            .read_slice(r2, input_sz)
+            .map_err(|e| VmError::MemoryError(e.to_string()))?;
+
+        let mut output = vec![0u8; output_sz];
+        let mut ctx = create_syscall_context(vm);
+
+        let ret = match base_id {
+            syscalls::CURVE_ID_BLS12_381_G1 => {
+                crate::syscalls::g1_decompress(&mut ctx, &input, &mut output, big_endian)
+                    .unwrap_or(1)
+            }
+            syscalls::CURVE_ID_BLS12_381_G2 => {
+                crate::syscalls::g2_decompress(&mut ctx, &input, &mut output, big_endian)
+                    .unwrap_or(1)
+            }
+            _ => 1,
+        };
+
+        vm.compute_meter = ctx.compute_meter;
+        if ret == 0 {
+            vm.memory
+                .write_slice(r3, &output)
+                .map_err(|e| VmError::MemoryError(e.to_string()))?;
+        }
+
+        Ok(ret)
     }
 }
 
 /// sol_curve_pairing_map: Compute BLS12-381 multi-pairing.
 ///
-/// Feature-gated by `enable_bls12_381_syscall`. Currently returns 1
-/// (unsupported) since the BLS12-381 crypto primitives are not yet
-/// implemented. The handler deducts compute units correctly.
+/// Takes N pairs of (G1, G2) affine points and computes the product of
+/// pairings. Supports big-endian and little-endian via the 0x80 flag.
 struct SolCurvePairingMapHandler;
 
 impl SyscallHandler for SolCurvePairingMapHandler {
     fn call(
         &self,
         vm: &mut VmState,
-        r1: u64,  // curve_id
-        r2: u64,  // num_pairs
-        _r3: u64, // g1_points_addr
-        _r4: u64, // g2_points_addr
-        _r5: u64, // result_addr
+        r1: u64, // curve_id (with optional LE flag in bit 7)
+        r2: u64, // num_pairs
+        r3: u64, // g1_points_addr
+        r4: u64, // g2_points_addr
+        r5: u64, // result_addr
     ) -> Result<u64, VmError> {
         let base_id = r1 & !syscalls::BLS12_381_LITTLE_ENDIAN_FLAG;
+        let big_endian = (r1 & syscalls::BLS12_381_LITTLE_ENDIAN_FLAG) == 0;
 
         if base_id != syscalls::CURVE_ID_BLS12_381_G1 {
-            return Ok(1); // Invalid curve_id
-        }
-
-        let num_pairs = r2;
-        if num_pairs == 0 {
             return Ok(1);
         }
 
-        // Cost: base + incremental per additional pair.
+        let num_pairs = r2 as usize;
+        if num_pairs == 0 || num_pairs > syscalls::BLS12_381_MAX_PAIRING_PAIRS {
+            return Ok(1);
+        }
+
         let cost = syscalls::BLS12_381_PAIRING_BASE_COST
-            + num_pairs.saturating_sub(1) * syscalls::BLS12_381_PAIRING_PER_PAIR_COST;
+            + (num_pairs as u64).saturating_sub(1) * syscalls::BLS12_381_PAIRING_PER_PAIR_COST;
         deduct_compute(vm, cost)?;
 
-        // BLS12-381 crypto not yet implemented — return soft error.
-        // TODO: Implement when paradencer-crypto adds BLS12-381 support.
-        Ok(1)
+        let g1_sz = num_pairs * syscalls::BLS12_381_G1_POINT_SIZE;
+        let g2_sz = num_pairs * syscalls::BLS12_381_G2_POINT_SIZE;
+
+        let g1_data = vm
+            .memory
+            .read_slice(r3, g1_sz)
+            .map_err(|e| VmError::MemoryError(e.to_string()))?;
+        let g2_data = vm
+            .memory
+            .read_slice(r4, g2_sz)
+            .map_err(|e| VmError::MemoryError(e.to_string()))?;
+
+        let mut output = vec![0u8; syscalls::BLS12_381_GT_ELEMENT_SIZE];
+        let mut ctx = create_syscall_context(vm);
+
+        let ret = crate::syscalls::pairing_map(
+            &mut ctx,
+            &g1_data,
+            &g2_data,
+            num_pairs,
+            &mut output,
+            big_endian,
+        )
+        .unwrap_or(1);
+
+        vm.compute_meter = ctx.compute_meter;
+        if ret == 0 {
+            vm.memory
+                .write_slice(r5, &output)
+                .map_err(|e| VmError::MemoryError(e.to_string()))?;
+        }
+
+        Ok(ret)
     }
 }
 
@@ -3740,42 +3802,60 @@ mod tests {
     }
 
     #[test]
-    fn sol_curve_decompress_deducts_compute() {
+    fn sol_curve_decompress_g1_identity() {
         let handler = SolCurveDecompressHandler;
         let mut vm = make_test_vm(10_000);
 
-        // G1 decompress — should deduct BLS12_381_G1_DECOMPRESS_COST
-        let result = handler.call(&mut vm, syscalls::CURVE_ID_BLS12_381_G1, 0, 0, 0, 0);
-        assert_eq!(result.unwrap(), 1); // stub returns 1
+        // G1 compressed identity: 0xC0 followed by 47 zero bytes.
+        let mut compressed = [0u8; 48];
+        compressed[0] = 0xC0;
+        let input_addr = REGION_HEAP_BASE;
+        let output_addr = REGION_HEAP_BASE + 64;
+        vm.memory.write_slice(input_addr, &compressed).unwrap();
+
+        let result = handler.call(
+            &mut vm,
+            syscalls::CURVE_ID_BLS12_381_G1,
+            input_addr,
+            output_addr,
+            0,
+            0,
+        );
+        assert_eq!(result.unwrap(), 0);
         assert_eq!(
             vm.compute_meter,
             10_000 - syscalls::BLS12_381_G1_DECOMPRESS_COST
         );
-
-        // Invalid curve_id — should not deduct compute
-        let before = vm.compute_meter;
-        let result = handler.call(&mut vm, 99, 0, 0, 0, 0);
-        assert_eq!(result.unwrap(), 1);
-        assert_eq!(vm.compute_meter, before); // no change
     }
 
     #[test]
-    fn sol_curve_pairing_map_deducts_compute() {
+    fn sol_curve_decompress_invalid_curve_id() {
+        let handler = SolCurveDecompressHandler;
+        let mut vm = make_test_vm(10_000);
+
+        let result = handler.call(&mut vm, 99, 0, 0, 0, 0);
+        assert_eq!(result.unwrap(), 1);
+        assert_eq!(vm.compute_meter, 10_000); // no compute deducted
+    }
+
+    #[test]
+    fn sol_curve_pairing_map_zero_pairs_rejected() {
         let handler = SolCurvePairingMapHandler;
         let mut vm = make_test_vm(200_000);
 
-        // 2 pairs — base + 1 * per_pair
-        let result = handler.call(&mut vm, syscalls::CURVE_ID_BLS12_381_G1, 2, 0, 0, 0);
-        assert_eq!(result.unwrap(), 1);
-        let expected_cost =
-            syscalls::BLS12_381_PAIRING_BASE_COST + syscalls::BLS12_381_PAIRING_PER_PAIR_COST;
-        assert_eq!(vm.compute_meter, 200_000 - expected_cost);
-
-        // 0 pairs — early return, no compute deduction
-        let before = vm.compute_meter;
         let result = handler.call(&mut vm, syscalls::CURVE_ID_BLS12_381_G1, 0, 0, 0, 0);
         assert_eq!(result.unwrap(), 1);
-        assert_eq!(vm.compute_meter, before);
+        assert_eq!(vm.compute_meter, 200_000); // no compute deducted
+    }
+
+    #[test]
+    fn sol_curve_pairing_map_too_many_pairs_rejected() {
+        let handler = SolCurvePairingMapHandler;
+        let mut vm = make_test_vm(1_000_000);
+
+        let result = handler.call(&mut vm, syscalls::CURVE_ID_BLS12_381_G1, 9, 0, 0, 0);
+        assert_eq!(result.unwrap(), 1);
+        assert_eq!(vm.compute_meter, 1_000_000); // no compute deducted
     }
 
     // -----------------------------------------------------------------------

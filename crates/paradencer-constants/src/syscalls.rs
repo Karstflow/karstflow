@@ -165,10 +165,15 @@ pub const CURVE_ID_BLS12_381_G2: u64 = 6;
 /// Bit flag for little-endian byte order on BLS12-381 operations.
 pub const BLS12_381_LITTLE_ENDIAN_FLAG: u64 = 0x80;
 
-// BLS12-381 point sizes
+// BLS12-381 point sizes (uncompressed)
 pub const BLS12_381_G1_POINT_SIZE: usize = 96;
 pub const BLS12_381_G2_POINT_SIZE: usize = 192;
 pub const BLS12_381_GT_ELEMENT_SIZE: usize = 576;
+// BLS12-381 point sizes (compressed)
+pub const BLS12_381_G1_COMPRESSED_SIZE: usize = 48;
+pub const BLS12_381_G2_COMPRESSED_SIZE: usize = 96;
+/// Maximum number of pairs in a single pairing batch operation.
+pub const BLS12_381_MAX_PAIRING_PAIRS: usize = 8;
 
 // BLS12-381 compute costs
 pub const BLS12_381_G1_DECOMPRESS_COST: u64 = 1_000;

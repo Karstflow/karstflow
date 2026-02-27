@@ -4,6 +4,7 @@
 //! to interact with the runtime. This module provides the registry
 //! of all available syscalls and their dispatch logic.
 
+mod bls12_381;
 mod cpi;
 mod cpi_account;
 mod crypto;
@@ -19,6 +20,7 @@ mod runtime;
 #[cfg(test)]
 mod tests;
 
+pub use bls12_381::{g1_decompress, g2_decompress, pairing_map};
 pub use cpi::{
     deduplicate_accounts, derive_pda_signers, invoke, invoke_signed, CpiAccountInfo,
     CpiAccountMeta, CpiContext, CpiInstruction, InstructionAccount,

@@ -19,4 +19,5 @@ substrate-bn = { workspace = true }
 curve25519-dalek = { workspace = true }
 light-poseidon = { workspace = true }
 ark-bn254 = { workspace = true }
+blst = { workspace = true }
 bs58 = { workspace = true }

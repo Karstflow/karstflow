@@ -57,6 +57,7 @@ substrate-bn = "0.6"
 curve25519-dalek = { version = "4.1", default-features = false }
 light-poseidon = "0.2"
 ark-bn254 = "0.4"
+blst = "0.3"
 
 # Encoding
 bs58 = "0.5"
