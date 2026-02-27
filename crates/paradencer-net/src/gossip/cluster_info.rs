@@ -704,6 +704,72 @@ impl ClusterInfo {
         table.insert(value, 0, now_nanos, EntryOrigin::Push);
     }
 
+    /// Publish epoch slots to the gossip network.
+    ///
+    /// Advertises which slots this node has available in the current epoch.
+    /// `epoch_index` selects which epoch slots entry (0..255) to use,
+    /// allowing multiple entries per node for large slot ranges.
+    /// `compressed_slots` is the bincode-serialized compressed slot bitmap.
+    pub fn publish_epoch_slots(&self, epoch_index: u8, compressed_slots: Vec<u8>) {
+        let now_nanos = current_timestamp_nanos();
+        let mut value = CrdsValue {
+            origin: self.node_id.0,
+            wallclock_nanos: now_nanos,
+            signature: [0u8; 64],
+            data: CrdsValueData::EpochSlots(super::crds::EpochSlots {
+                index: epoch_index,
+                slots: compressed_slots,
+            }),
+        };
+        self.sign_value(&mut value);
+        let mut table = self.table.write();
+        table.insert(value, 0, now_nanos, EntryOrigin::Push);
+    }
+
+    /// Publish this node's version information to the gossip network.
+    ///
+    /// Creates a signed Version CRDS value so peers know our software
+    /// version and feature set. Broadcast is handled by the push loop.
+    pub fn publish_version(&self, version: VersionInfo) {
+        let now_nanos = current_timestamp_nanos();
+        let mut value = CrdsValue {
+            origin: self.node_id.0,
+            wallclock_nanos: now_nanos,
+            signature: [0u8; 64],
+            data: CrdsValueData::Version(version),
+        };
+        self.sign_value(&mut value);
+        let mut table = self.table.write();
+        table.insert(value, 0, now_nanos, EntryOrigin::Push);
+    }
+
+    /// Publish snapshot hashes to the gossip network.
+    ///
+    /// Advertises the base full snapshot and any incremental snapshots
+    /// available from this node. Used by other validators discovering
+    /// snapshot sources for bootstrap.
+    pub fn publish_snapshot_hashes(
+        &self,
+        base: (u64, [u8; 32]),
+        incremental: Vec<(u64, [u8; 32])>,
+    ) {
+        let now_nanos = current_timestamp_nanos();
+        let mut value = CrdsValue {
+            origin: self.node_id.0,
+            wallclock_nanos: now_nanos,
+            signature: [0u8; 64],
+            data: CrdsValueData::IncrementalSnapshotHashes(
+                super::crds::IncrementalSnapshotHashes {
+                    base,
+                    hashes: incremental,
+                },
+            ),
+        };
+        self.sign_value(&mut value);
+        let mut table = self.table.write();
+        table.insert(value, 0, now_nanos, EntryOrigin::Push);
+    }
+
     /// Refresh the self ContactInfo entry with an updated wallclock.
     ///
     /// Called periodically (every ~7.5s) to maintain freshness. Updates
@@ -1183,6 +1249,86 @@ mod tests {
         // Unknown address returns None.
         let unknown = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(192, 168, 0, 1)), 5555);
         assert_eq!(cluster.lookup_by_repair_addr(&unknown), None);
+    }
+
+    #[test]
+    fn publish_epoch_slots_inserts_into_table() {
+        let (secret, pubkey) = paradencer_crypto::generate_keypair();
+        let node_id = NodeId(pubkey);
+        let info = create_test_contact_info(node_id, 8000);
+        let cluster = ClusterInfo::with_signing_key(
+            node_id,
+            info,
+            Duration::from_secs(30),
+            MAX_CLUSTER_SIZE,
+            secret,
+        );
+
+        let compressed = vec![0xFF; 16]; // mock compressed slot bitmap
+        cluster.publish_epoch_slots(0, compressed);
+
+        let (values, _cursor) = cluster.values_since_cursor(0);
+        let epoch_count = values
+            .iter()
+            .filter(|v| matches!(v.data, CrdsValueData::EpochSlots(_)))
+            .count();
+        assert_eq!(epoch_count, 1);
+    }
+
+    #[test]
+    fn publish_version_inserts_into_table() {
+        let (secret, pubkey) = paradencer_crypto::generate_keypair();
+        let node_id = NodeId(pubkey);
+        let info = create_test_contact_info(node_id, 8000);
+        let cluster = ClusterInfo::with_signing_key(
+            node_id,
+            info,
+            Duration::from_secs(30),
+            MAX_CLUSTER_SIZE,
+            secret,
+        );
+
+        let version = VersionInfo {
+            client: 0,
+            major: 2,
+            minor: 1,
+            patch: 0,
+            commit: 0xDEAD,
+            feature_set: 0xBEEF,
+        };
+        cluster.publish_version(version);
+
+        let (values, _cursor) = cluster.values_since_cursor(0);
+        let version_count = values
+            .iter()
+            .filter(|v| matches!(v.data, CrdsValueData::Version(_)))
+            .count();
+        assert_eq!(version_count, 1);
+    }
+
+    #[test]
+    fn publish_snapshot_hashes_inserts_into_table() {
+        let (secret, pubkey) = paradencer_crypto::generate_keypair();
+        let node_id = NodeId(pubkey);
+        let info = create_test_contact_info(node_id, 8000);
+        let cluster = ClusterInfo::with_signing_key(
+            node_id,
+            info,
+            Duration::from_secs(30),
+            MAX_CLUSTER_SIZE,
+            secret,
+        );
+
+        let base = (1000u64, [0xAA; 32]);
+        let incremental = vec![(1100u64, [0xBB; 32])];
+        cluster.publish_snapshot_hashes(base, incremental);
+
+        let (values, _cursor) = cluster.values_since_cursor(0);
+        let snap_count = values
+            .iter()
+            .filter(|v| matches!(v.data, CrdsValueData::IncrementalSnapshotHashes(_)))
+            .count();
+        assert_eq!(snap_count, 1);
     }
 
     #[test]
