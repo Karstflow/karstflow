@@ -843,6 +843,22 @@ impl ClusterInfo {
             .map(|info| info.node_id)
     }
 
+    /// Look up a specific socket address for a node by pubkey and socket type index.
+    ///
+    /// Scans CRDS contact info entries for a matching pubkey and returns
+    /// the socket at the given index (see `gossip::SOCKET_*` constants).
+    pub fn lookup_socket(&self, pubkey: &[u8; 32], socket_index: usize) -> Option<SocketAddr> {
+        let table = self.table.read();
+        table.contact_info_entries().into_iter().find_map(|entry| {
+            let ci = entry.value.data.as_contact_info()?;
+            if ci.pubkey == *pubkey {
+                ci.sockets.get(socket_index).copied().flatten()
+            } else {
+                None
+            }
+        })
+    }
+
     /// Access the underlying CRDS table (for advanced operations).
     pub fn crds_table(&self) -> &Arc<RwLock<CrdsTable>> {
         &self.table

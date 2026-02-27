@@ -1425,7 +1425,7 @@ impl Service for VoteBroadcastAdapter {
 /// Wire format: `[sig_count(1)] [signature(64)] [message]`
 /// Message: `[num_required_sigs(1)] [num_readonly_signed(0)] [num_readonly_unsigned(1)]`
 ///          `[account_keys] [recent_blockhash(32)] [instructions]`
-fn build_vote_transaction(
+pub fn build_vote_transaction(
     secret_key: &[u8; 32],
     node_pubkey: &[u8; 32],
     vote_account: &[u8; 32],

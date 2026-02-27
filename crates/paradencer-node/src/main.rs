@@ -5,18 +5,18 @@ use tracing::{info, warn};
 use paradencer_control::{
     build_diagnostics_summary_from_probe, build_pipeline_service, build_repair_service,
     build_replay_service_with_block_input, build_replay_service_with_consensus,
-    build_turbine_service, build_vote_broadcast_service, dispatch_command,
-    ensure_mainnet_readiness, evaluate_mainnet_readiness, materialize_service_pair_from_config,
-    materialize_services_from_config, parse_command, render_diagnostics_cluster_mode_line,
-    render_diagnostics_lane_capacity_line, render_diagnostics_ok_line,
-    render_diagnostics_probe_line, render_diagnostics_readiness_issue_line,
-    render_diagnostics_readiness_line, render_diagnostics_services_line,
-    render_diagnostics_stage_mix_line, render_diagnostics_topology_line,
-    render_preflight_readiness_issue_line, render_preflight_readiness_line,
-    render_readiness_policy_line, resolve_validator_identity, restore_from_snapshot_archive,
-    run_diagnostics_phase, run_preflight_phase, run_preflight_phase_with_probe_report,
-    run_runtime_phase_with_consensus, save_tower_to_disk, spawn_snapshot_thread,
-    start_gossip_service, BlockstoreShredProvider, ServiceBundle,
+    build_turbine_service, build_vote_broadcast_service, build_vote_sender_service,
+    dispatch_command, ensure_mainnet_readiness, evaluate_mainnet_readiness,
+    materialize_service_pair_from_config, materialize_services_from_config, parse_command,
+    render_diagnostics_cluster_mode_line, render_diagnostics_lane_capacity_line,
+    render_diagnostics_ok_line, render_diagnostics_probe_line,
+    render_diagnostics_readiness_issue_line, render_diagnostics_readiness_line,
+    render_diagnostics_services_line, render_diagnostics_stage_mix_line,
+    render_diagnostics_topology_line, render_preflight_readiness_issue_line,
+    render_preflight_readiness_line, render_readiness_policy_line, resolve_validator_identity,
+    restore_from_snapshot_archive, run_diagnostics_phase, run_preflight_phase,
+    run_preflight_phase_with_probe_report, run_runtime_phase_with_consensus, save_tower_to_disk,
+    spawn_snapshot_thread, start_gossip_service, BlockstoreShredProvider, ServiceBundle,
 };
 
 fn main() -> paradencer_control::Result<()> {
@@ -330,11 +330,24 @@ fn run_with_node_config(
     // Build the vote broadcast service. Monitors the shared Tower for
     // new consensus decisions and pushes them to gossip as CrdsValue
     // entries.
+    let vote_sender_tower = consensus.tower.clone();
+    let vote_sender_forks = consensus.bank_forks.clone();
+    let vote_sender_cluster = cluster_info.clone();
     let vote_broadcast_bundle = build_vote_broadcast_service(
         &identity,
         consensus.tower,
         consensus.bank_forks,
         cluster_info,
+    );
+
+    // Build the direct vote sender service. Sends vote transactions
+    // via UDP to the next N leaders' TPU_VOTE sockets for low-latency
+    // consensus participation.
+    let vote_sender_bundle = build_vote_sender_service(
+        &identity,
+        vote_sender_tower,
+        vote_sender_forks,
+        vote_sender_cluster,
     );
 
     let mut services = runtime_topology.services;
@@ -343,6 +356,9 @@ fn run_with_node_config(
     services.push(turbine_bundle.service);
     services.push(repair_bundle.service);
     services.push(vote_broadcast_bundle.service);
+    if let Ok(bundle) = vote_sender_bundle {
+        services.push(bundle.service);
+    }
 
     // Keep gossip and plugins alive until run_runtime_phase returns.
     let _gossip = gossip_handle;

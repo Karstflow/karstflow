@@ -6,6 +6,7 @@ mod preflight;
 mod runner;
 pub mod snapshot_download;
 mod surface;
+mod vote_sender;
 pub mod wait_for_supermajority;
 
 pub use bootstrap::{
@@ -43,3 +44,4 @@ pub use preflight::{
 };
 pub use runner::dispatch_command;
 pub use surface::{render_config_summary, validate_identity_keypair_from_env};
+pub use vote_sender::{build_vote_sender_service, VoteSenderBundle};
