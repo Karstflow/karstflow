@@ -331,8 +331,7 @@ impl<'a> LinkConsumer<'a> {
         for _ in 0..max_count {
             match self.meta_ring.poll(self.next_seq, max_polls_per_frag) {
                 PollResult::Ready(meta) => {
-                    let payload =
-                        unsafe { self.data_region.read_payload(meta.chunk, meta.sz) };
+                    let payload = unsafe { self.data_region.read_payload(meta.chunk, meta.sz) };
                     self.next_seq = seq_inc(self.next_seq, 1);
                     results.push((meta, payload));
                 }
@@ -645,7 +644,12 @@ mod tests {
 
         // Second timestamp should be >= first (compressed 32-bit wrapping
         // means we compare as unsigned within a short window).
-        assert!(second >= first, "timestamps should be monotonic: {} >= {}", second, first);
+        assert!(
+            second >= first,
+            "timestamps should be monotonic: {} >= {}",
+            second,
+            first
+        );
     }
 
     #[test]

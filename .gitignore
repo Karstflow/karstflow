@@ -4,6 +4,8 @@
 # Documentation (temporary)
 /docs/
 /docs/*
+.bgv
+.bgv/*
 
 # Rust analyzer / IDE
 **/*.rs.bk

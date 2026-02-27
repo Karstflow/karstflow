@@ -1,6 +1,7 @@
 use serde_json::json;
+use std::sync::Arc;
 
-use crate::state::{RpcCommitment, RpcRuntimeSnapshot};
+use crate::state::{BankAccessProvider, RpcCommitment, RpcRuntimeSnapshot};
 use paradencer_constants::economics::{BASE_NETWORK_SUPPLY_LAMPORTS, TOKEN_UI_DECIMALS_DIVISOR};
 use paradencer_constants::rpc::{DEFAULT_TOKEN_ACCOUNT_SPACE, MAX_SIGNATURE_CONFIRMATIONS};
 
@@ -13,10 +14,11 @@ pub(super) fn handle(
     request: &serde_json::Value,
     snapshot: RpcRuntimeSnapshot,
     commitment: RpcCommitment,
+    bank_access: Option<&Arc<dyn BankAccessProvider>>,
 ) -> Result<serde_json::Value, RpcMethodError> {
     match method {
-        RpcMethod::GetBalance => build_balance_response(request, snapshot, commitment),
-        RpcMethod::GetSupply => build_supply_response(request, snapshot, commitment),
+        RpcMethod::GetBalance => build_balance_response(request, snapshot, commitment, bank_access),
+        RpcMethod::GetSupply => build_supply_response(request, snapshot, commitment, bank_access),
         RpcMethod::GetTokenSupply => build_token_supply_response(request, snapshot, commitment),
         RpcMethod::GetTokenAccountBalance => {
             build_token_account_balance_response(request, snapshot, commitment)
@@ -36,9 +38,11 @@ pub(super) fn handle(
         RpcMethod::GetTokenAccountsByDelegate => {
             build_token_accounts_by_delegate_response(request, snapshot, commitment)
         }
-        RpcMethod::GetAccountInfo => build_account_info_response(request, snapshot, commitment),
+        RpcMethod::GetAccountInfo => {
+            build_account_info_response(request, snapshot, commitment, bank_access)
+        }
         RpcMethod::GetMultipleAccounts => {
-            build_multiple_accounts_response(request, snapshot, commitment)
+            build_multiple_accounts_response(request, snapshot, commitment, bank_access)
         }
         RpcMethod::GetSignatureStatuses => {
             build_signature_statuses_response(request, snapshot, commitment)
@@ -51,20 +55,25 @@ fn build_supply_response(
     request: &serde_json::Value,
     snapshot: RpcRuntimeSnapshot,
     commitment: RpcCommitment,
+    bank_access: Option<&Arc<dyn BankAccessProvider>>,
 ) -> Result<serde_json::Value, RpcMethodError> {
     ensure_min_context_slot_satisfied(request, snapshot, commitment)?;
     let exclude_non_circulating = parse_supply_exclude_non_circulating_flag(request)?;
-    let slot = snapshot.slot_for_commitment(commitment);
-    let total = snapshot
-        .transaction_count
-        .saturating_mul(10)
-        .saturating_add(BASE_NETWORK_SUPPLY_LAMPORTS);
-    let non_circulating = total / 20;
-    let non_circulating_accounts = if exclude_non_circulating {
-        Vec::new()
+    let slot = resolve_slot(snapshot, commitment, bank_access);
+
+    let total = if let Some(bank) = bank_access {
+        bank.get_capitalization(commitment)
     } else {
-        vec!["ParaDancerReserve11111111111111111111111111111"]
+        snapshot
+            .transaction_count
+            .saturating_mul(10)
+            .saturating_add(BASE_NETWORK_SUPPLY_LAMPORTS)
     };
+
+    // TODO: Implement real non-circulating account tracking
+    let non_circulating = total / 20;
+    let non_circulating_accounts: Vec<&str> = Vec::new();
+    let _ = exclude_non_circulating;
     Ok(json!({
         "context": {"slot": slot},
         "value": {
@@ -256,48 +265,81 @@ fn build_account_info_response(
     request: &serde_json::Value,
     snapshot: RpcRuntimeSnapshot,
     commitment: RpcCommitment,
+    bank_access: Option<&Arc<dyn BankAccessProvider>>,
 ) -> Result<serde_json::Value, RpcMethodError> {
     ensure_min_context_slot_satisfied(request, snapshot, commitment)?;
-    let pubkey = params::first_param_non_empty_string(request)?;
+    let pubkey_str = params::first_param_non_empty_string(request)?;
+    let encoding = parse_encoding(request);
+    let slot = resolve_slot(snapshot, commitment, bank_access);
 
-    let synthetic_lamports = synthetic_lamports_from_pubkey(&pubkey, snapshot.transaction_count);
-    Ok(json!({
-        "context": {"slot": snapshot.slot_for_commitment(commitment)},
-        "value": {
-            "lamports": synthetic_lamports,
-            "owner": "11111111111111111111111111111111",
-            "executable": false,
-            "rentEpoch": 0,
-            "data": ["", "base64"],
-            "space": 0
-        }
-    }))
+    if let Some(bank) = bank_access {
+        let pubkey = parse_pubkey(&pubkey_str)?;
+        let value = match bank.get_account(&pubkey, commitment) {
+            Some(account) => format_account_value(&account, &encoding),
+            None => serde_json::Value::Null,
+        };
+        Ok(json!({
+            "context": {"slot": slot},
+            "value": value
+        }))
+    } else {
+        let synthetic_lamports =
+            synthetic_lamports_from_pubkey(&pubkey_str, snapshot.transaction_count);
+        Ok(json!({
+            "context": {"slot": slot},
+            "value": {
+                "lamports": synthetic_lamports,
+                "owner": "11111111111111111111111111111111",
+                "executable": false,
+                "rentEpoch": 0,
+                "data": ["", "base64"],
+                "space": 0
+            }
+        }))
+    }
 }
 
 fn build_multiple_accounts_response(
     request: &serde_json::Value,
     snapshot: RpcRuntimeSnapshot,
     commitment: RpcCommitment,
+    bank_access: Option<&Arc<dyn BankAccessProvider>>,
 ) -> Result<serde_json::Value, RpcMethodError> {
     ensure_min_context_slot_satisfied(request, snapshot, commitment)?;
     let pubkeys = params::first_param_non_empty_string_array(request)?;
-    let accounts = pubkeys
-        .iter()
-        .map(|pubkey| {
-            let lamports = synthetic_lamports_from_pubkey(pubkey, snapshot.transaction_count);
-            json!({
-                "lamports": lamports,
-                "owner": "11111111111111111111111111111111",
-                "executable": false,
-                "rentEpoch": 0,
-                "data": ["", "base64"],
-                "space": 0
+    let encoding = parse_encoding(request);
+    let slot = resolve_slot(snapshot, commitment, bank_access);
+
+    let accounts = if let Some(bank) = bank_access {
+        pubkeys
+            .iter()
+            .map(|pubkey_str| {
+                let pubkey = parse_pubkey(pubkey_str)?;
+                Ok(match bank.get_account(&pubkey, commitment) {
+                    Some(account) => format_account_value(&account, &encoding),
+                    None => serde_json::Value::Null,
+                })
             })
-        })
-        .collect::<Vec<_>>();
+            .collect::<Result<Vec<_>, RpcMethodError>>()?
+    } else {
+        pubkeys
+            .iter()
+            .map(|pubkey| {
+                let lamports = synthetic_lamports_from_pubkey(pubkey, snapshot.transaction_count);
+                json!({
+                    "lamports": lamports,
+                    "owner": "11111111111111111111111111111111",
+                    "executable": false,
+                    "rentEpoch": 0,
+                    "data": ["", "base64"],
+                    "space": 0
+                })
+            })
+            .collect::<Vec<_>>()
+    };
 
     Ok(json!({
-        "context": {"slot": snapshot.slot_for_commitment(commitment)},
+        "context": {"slot": slot},
         "value": accounts
     }))
 }
@@ -306,13 +348,21 @@ fn build_balance_response(
     request: &serde_json::Value,
     snapshot: RpcRuntimeSnapshot,
     commitment: RpcCommitment,
+    bank_access: Option<&Arc<dyn BankAccessProvider>>,
 ) -> Result<serde_json::Value, RpcMethodError> {
     ensure_min_context_slot_satisfied(request, snapshot, commitment)?;
-    let pubkey = params::first_param_non_empty_string(request)?;
+    let pubkey_str = params::first_param_non_empty_string(request)?;
+    let slot = resolve_slot(snapshot, commitment, bank_access);
 
-    let lamports = synthetic_lamports_from_pubkey(&pubkey, snapshot.transaction_count);
+    let lamports = if let Some(bank) = bank_access {
+        let pubkey = parse_pubkey(&pubkey_str)?;
+        bank.get_balance(&pubkey, commitment)
+    } else {
+        synthetic_lamports_from_pubkey(&pubkey_str, snapshot.transaction_count)
+    };
+
     Ok(json!({
-        "context": {"slot": snapshot.slot_for_commitment(commitment)},
+        "context": {"slot": slot},
         "value": lamports
     }))
 }
@@ -530,6 +580,61 @@ fn parse_supply_exclude_non_circulating_flag(
         .transpose()?
         .unwrap_or(false);
     Ok(exclude_non_circulating_accounts)
+}
+
+fn parse_pubkey(encoded: &str) -> Result<paradencer_types::Pubkey, RpcMethodError> {
+    let bytes = bs58::decode(encoded)
+        .into_vec()
+        .map_err(|_| RpcMethodError::InvalidParams)?;
+    let array: [u8; 32] = bytes
+        .try_into()
+        .map_err(|_| RpcMethodError::InvalidParams)?;
+    Ok(paradencer_types::Pubkey::new(array))
+}
+
+fn parse_encoding(request: &serde_json::Value) -> String {
+    let params = params::params_array_or_empty(request);
+    params::first_config_object(params)
+        .and_then(|cfg| cfg.get("encoding"))
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("base64")
+        .to_string()
+}
+
+fn resolve_slot(
+    snapshot: RpcRuntimeSnapshot,
+    commitment: RpcCommitment,
+    bank_access: Option<&Arc<dyn BankAccessProvider>>,
+) -> u64 {
+    bank_access
+        .map(|bank| bank.get_slot(commitment))
+        .unwrap_or_else(|| snapshot.slot_for_commitment(commitment))
+}
+
+fn format_account_value(account: &paradencer_types::Account, encoding: &str) -> serde_json::Value {
+    let data_value = encode_account_data(account.data.as_slice(), encoding);
+    json!({
+        "lamports": account.meta.lamports,
+        "owner": account.meta.owner.to_string(),
+        "executable": account.meta.executable,
+        "rentEpoch": account.meta.rent_epoch,
+        "data": data_value,
+        "space": account.data.len()
+    })
+}
+
+fn encode_account_data(data: &[u8], encoding: &str) -> serde_json::Value {
+    use base64::Engine;
+    match encoding {
+        "base58" => {
+            let encoded = bs58::encode(data).into_string();
+            json!([encoded, "base58"])
+        }
+        _ => {
+            let encoded = base64::engine::general_purpose::STANDARD.encode(data);
+            json!([encoded, "base64"])
+        }
+    }
 }
 
 fn parse_signature_statuses_config(

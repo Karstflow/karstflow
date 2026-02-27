@@ -1,5 +1,6 @@
-use crate::state::{RpcCommitment, RpcRuntimeSnapshot};
+use crate::state::{BankAccessProvider, RpcCommitment, RpcRuntimeSnapshot};
 use serde_json::json;
+use std::sync::Arc;
 
 use super::method_error::RpcMethodError;
 use super::methods::dispatch_method;
@@ -9,6 +10,7 @@ pub(super) fn render_json_rpc_response(
     body: &str,
     full_api: bool,
     runtime_snapshot: Option<RpcRuntimeSnapshot>,
+    bank_access: Option<&Arc<dyn BankAccessProvider>>,
 ) -> String {
     let parsed: serde_json::Value = match serde_json::from_str(body) {
         Ok(value) => value,
@@ -37,7 +39,9 @@ pub(super) fn render_json_rpc_response(
             }
             let mut responses = Vec::new();
             for request in requests {
-                if let Some(response) = render_single_request(request, full_api, snapshot) {
+                if let Some(response) =
+                    render_single_request(request, full_api, snapshot, bank_access)
+                {
                     responses.push(response);
                 }
             }
@@ -47,7 +51,7 @@ pub(super) fn render_json_rpc_response(
                 serde_json::Value::Array(responses).to_string()
             }
         }
-        _ => match render_single_request(&parsed, full_api, snapshot) {
+        _ => match render_single_request(&parsed, full_api, snapshot, bank_access) {
             Some(response) => response.to_string(),
             None => String::new(),
         },
@@ -58,6 +62,7 @@ fn render_single_request(
     parsed: &serde_json::Value,
     full_api: bool,
     snapshot: RpcRuntimeSnapshot,
+    bank_access: Option<&Arc<dyn BankAccessProvider>>,
 ) -> Option<serde_json::Value> {
     let parsed_object = match parsed.as_object() {
         Some(object) => object,
@@ -131,7 +136,14 @@ fn render_single_request(
             };
         }
     };
-    let result = dispatch_method(rpc_method, parsed, snapshot, commitment, full_api);
+    let result = dispatch_method(
+        rpc_method,
+        parsed,
+        snapshot,
+        commitment,
+        full_api,
+        bank_access,
+    );
 
     if is_notification {
         None
@@ -220,6 +232,7 @@ mod tests {
             r#"{"jsonrpc":"2.0","id":1,"method":"getHealth","params":[]}"#,
             false,
             None,
+            None,
         );
         assert!(payload.contains(r#""result":"ok""#));
         assert!(payload.contains(r#""id":1"#));
@@ -230,6 +243,7 @@ mod tests {
         let payload = render_json_rpc_response(
             r#"{"jsonrpc":"2.0","id":"a","method":"getVersion","params":[]}"#,
             true,
+            None,
             None,
         );
         assert!(payload.contains(r#""paradencer-core":"0.1.0""#));
@@ -242,6 +256,7 @@ mod tests {
             r#"{"jsonrpc":"2.0","id":3,"method":"unknownMethod","params":[]}"#,
             false,
             None,
+            None,
         );
         assert!(payload.contains(r#""code":-32601"#));
         assert!(payload.contains("Method not found"));
@@ -249,7 +264,7 @@ mod tests {
 
     #[test]
     fn rpc_response_returns_parse_error() {
-        let payload = render_json_rpc_response("{bad json", false, None);
+        let payload = render_json_rpc_response("{bad json", false, None, None);
         assert!(payload.contains(r#""code":-32700"#));
         assert!(payload.contains("Parse error"));
     }
@@ -260,13 +275,15 @@ mod tests {
             r#"{"jsonrpc":"2.0","method":"getHealth","params":[]}"#,
             false,
             None,
+            None,
         );
         assert!(payload.is_empty());
     }
 
     #[test]
     fn rpc_response_invalid_request_without_id_still_returns_error() {
-        let payload = render_json_rpc_response(r#"{"jsonrpc":"2.0","params":[]}"#, false, None);
+        let payload =
+            render_json_rpc_response(r#"{"jsonrpc":"2.0","params":[]}"#, false, None, None);
         assert!(payload.contains(r#""code":-32600"#));
         assert!(payload.contains(r#""id":null"#));
     }
@@ -276,6 +293,7 @@ mod tests {
         let payload = render_json_rpc_response(
             r#"{"jsonrpc":"1.0","method":"getHealth","params":[]}"#,
             false,
+            None,
             None,
         );
         assert!(payload.contains(r#""code":-32600"#));
@@ -288,6 +306,7 @@ mod tests {
             r#"[{"jsonrpc":"2.0","id":1,"method":"getHealth","params":[]},{"jsonrpc":"2.0","method":"getHealth","params":[]},{"jsonrpc":"2.0","id":2,"method":"getVersion","params":[]}]"#,
             false,
             None,
+            None,
         );
         let parsed: serde_json::Value = serde_json::from_str(&payload).unwrap();
         let responses = parsed.as_array().expect("batch response array");
@@ -296,7 +315,7 @@ mod tests {
 
     #[test]
     fn rpc_response_empty_batch_returns_invalid_request() {
-        let payload = render_json_rpc_response("[]", false, None);
+        let payload = render_json_rpc_response("[]", false, None, None);
         assert!(payload.contains(r#""code":-32600"#));
     }
 
@@ -305,6 +324,7 @@ mod tests {
         let payload = render_json_rpc_response(
             r#"[{"jsonrpc":"2.0","method":"getHealth","params":[]},{"jsonrpc":"2.0","method":"getVersion","params":[]}]"#,
             false,
+            None,
             None,
         );
         assert!(payload.is_empty());
@@ -316,6 +336,7 @@ mod tests {
             r#"{"jsonrpc":"2.0","id":{"bad":"id"},"method":"getHealth","params":[]}"#,
             false,
             None,
+            None,
         );
         assert!(payload.contains(r#""code":-32600"#));
     }
@@ -325,6 +346,7 @@ mod tests {
         let payload = render_json_rpc_response(
             r#"[{"jsonrpc":"2.0","id":1,"method":"getHealth","params":[]},{"jsonrpc":"2.0","id":{"bad":"id"},"method":"getHealth","params":[]}]"#,
             false,
+            None,
             None,
         );
         let parsed: serde_json::Value = serde_json::from_str(&payload).unwrap();
@@ -342,6 +364,7 @@ mod tests {
             r#"{"jsonrpc":"2.0","id":1.5,"method":"getHealth","params":[]}"#,
             false,
             None,
+            None,
         );
         assert!(payload.contains(r#""code":-32600"#));
         assert!(payload.contains(r#""id":null"#));
@@ -352,6 +375,7 @@ mod tests {
         let payload = render_json_rpc_response(
             r#"[{"jsonrpc":"2.0","id":1,"method":"getHealth","params":[]},{"jsonrpc":"2.0","id":2.25,"method":"getHealth","params":[]}]"#,
             false,
+            None,
             None,
         );
         let parsed: serde_json::Value = serde_json::from_str(&payload).unwrap();
@@ -365,7 +389,7 @@ mod tests {
 
     #[test]
     fn rpc_response_rejects_non_object_request_as_invalid_request() {
-        let payload = render_json_rpc_response(r#"[1,2,3]"#, false, None);
+        let payload = render_json_rpc_response(r#"[1,2,3]"#, false, None, None);
         assert!(payload.contains(r#""code":-32600"#));
         assert!(payload.contains("Invalid request"));
     }
@@ -375,6 +399,7 @@ mod tests {
         let payload = render_json_rpc_response(
             r#"{"jsonrpc":"1.0","id":1,"method":"getHealth","params":[]}"#,
             false,
+            None,
             None,
         );
         assert!(payload.contains(r#""code":-32600"#));
@@ -387,6 +412,7 @@ mod tests {
             r#"{"jsonrpc":"2.0","id":1,"method":123,"params":[]}"#,
             false,
             None,
+            None,
         );
         assert!(payload.contains(r#""code":-32600"#));
         assert!(payload.contains("Invalid request"));
@@ -398,6 +424,7 @@ mod tests {
             r#"{"jsonrpc":"2.0","id":1,"method":"","params":[]}"#,
             false,
             None,
+            None,
         );
         assert!(payload.contains(r#""code":-32600"#));
     }
@@ -407,6 +434,7 @@ mod tests {
         let payload = render_json_rpc_response(
             r#"{"jsonrpc":"2.0","id":1,"method":"rpc.discover","params":[]}"#,
             false,
+            None,
             None,
         );
         assert!(payload.contains(r#""code":-32600"#));
@@ -424,6 +452,7 @@ mod tests {
                 uptime_millis: 2_000,
                 latest_blockhash_seed: 42,
             }),
+            None,
         );
         assert!(payload.contains(r#""result":10"#));
 
@@ -437,6 +466,7 @@ mod tests {
                 uptime_millis: 2_000,
                 latest_blockhash_seed: 42,
             }),
+            None,
         );
         assert!(payload.contains(r#""result":10"#));
     }
@@ -453,6 +483,7 @@ mod tests {
                 uptime_millis: 1_000,
                 latest_blockhash_seed: 7,
             }),
+            None,
         );
         assert!(payload.contains(r#""result":42"#));
     }
@@ -469,6 +500,7 @@ mod tests {
                 uptime_millis: 1_000,
                 latest_blockhash_seed: 7,
             }),
+            None,
         );
         assert!(payload.contains(r#""code":-32602"#));
     }
@@ -485,6 +517,7 @@ mod tests {
                 uptime_millis: 1_000,
                 latest_blockhash_seed: 7,
             }),
+            None,
         );
         assert!(payload.contains(r#""code":-32602"#));
     }
@@ -494,6 +527,7 @@ mod tests {
         let payload = render_json_rpc_response(
             r#"{"jsonrpc":"2.0","id":102,"method":"getHealth","params":{"bad":"shape"}}"#,
             false,
+            None,
             None,
         );
         assert!(payload.contains(r#""code":-32602"#));
@@ -511,6 +545,7 @@ mod tests {
                 uptime_millis: 5_000,
                 latest_blockhash_seed: 0xABCD,
             }),
+            None,
         );
         assert!(payload.contains(r#""result":0"#));
 
@@ -524,6 +559,7 @@ mod tests {
                 uptime_millis: 5_000,
                 latest_blockhash_seed: 0xABCD,
             }),
+            None,
         );
         assert!(payload.contains(r#""result":333"#));
     }
@@ -533,6 +569,7 @@ mod tests {
         let payload = render_json_rpc_response(
             r#"{"jsonrpc":"2.0","id":23,"method":"getGenesisHash","params":[]}"#,
             false,
+            None,
             None,
         );
         assert!(payload.contains(r#""result":"5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp6H6r6Q4QvJf4""#));
@@ -550,6 +587,7 @@ mod tests {
                 uptime_millis: 10_000,
                 latest_blockhash_seed: 1,
             }),
+            None,
         );
         assert!(payload.contains(r#""code":-32016"#));
         assert!(payload.contains("Minimum context slot not reached"));
@@ -567,6 +605,7 @@ mod tests {
                 uptime_millis: 10_000,
                 latest_blockhash_seed: 1,
             }),
+            None,
         );
         assert!(payload.contains(r#""code":-32016"#));
     }
@@ -583,6 +622,7 @@ mod tests {
                 uptime_millis: 10_000,
                 latest_blockhash_seed: 1,
             }),
+            None,
         );
         assert!(payload.contains(r#""code":-32016"#));
     }
@@ -599,6 +639,7 @@ mod tests {
                 uptime_millis: 10_000,
                 latest_blockhash_seed: 1,
             }),
+            None,
         );
         assert!(payload.contains(r#""code":-32016"#));
     }
@@ -615,6 +656,7 @@ mod tests {
                 uptime_millis: 10_000,
                 latest_blockhash_seed: 7,
             }),
+            None,
         );
         assert!(payload.contains(r#""lamportsPerSignature":5000"#));
         assert!(payload.contains(r#""slot":15"#));
@@ -635,6 +677,7 @@ mod tests {
                 uptime_millis: 5_000,
                 latest_blockhash_seed: 0xABCD,
             }),
+            None,
         );
         assert!(payload.contains(r#""value":true"#));
     }
@@ -644,6 +687,7 @@ mod tests {
         let payload = render_json_rpc_response(
             r#"{"jsonrpc":"2.0","id":27,"method":"isBlockhashValid","params":[]}"#,
             false,
+            None,
             None,
         );
         assert!(payload.contains(r#""code":-32602"#));
@@ -661,6 +705,7 @@ mod tests {
                 uptime_millis: 5_000,
                 latest_blockhash_seed: 0xABCD,
             }),
+            None,
         );
         assert!(payload.contains(r#""value":5040"#));
         assert!(payload.contains(r#""slot":0"#));
@@ -678,6 +723,7 @@ mod tests {
                 uptime_millis: 5_000,
                 latest_blockhash_seed: 0xABCD,
             }),
+            None,
         );
         assert!(payload.contains(r#""lamportsPerSignature":5000"#));
         assert!(payload.contains(r#""lastValidSlot":161"#));
@@ -699,6 +745,7 @@ mod tests {
                 uptime_millis: 5_000,
                 latest_blockhash_seed: 0xABCD,
             }),
+            None,
         );
         assert!(payload.contains(r#""lamportsPerSignature":5000"#));
     }
@@ -715,6 +762,7 @@ mod tests {
                 uptime_millis: 5_000,
                 latest_blockhash_seed: 0xABCD,
             }),
+            None,
         );
         assert!(payload.contains(r#""result":{"context":{"slot":0},"value":null}"#));
     }
@@ -724,6 +772,7 @@ mod tests {
         let payload = render_json_rpc_response(
             r#"{"jsonrpc":"2.0","id":284,"method":"getFeeCalculatorForBlockhash","params":[]}"#,
             false,
+            None,
             None,
         );
         assert!(payload.contains(r#""code":-32602"#));
@@ -741,6 +790,7 @@ mod tests {
                 uptime_millis: 5_000,
                 latest_blockhash_seed: 0xABCD,
             }),
+            None,
         );
         assert!(payload.contains(r#""code":-32016"#));
     }
@@ -757,6 +807,7 @@ mod tests {
                 uptime_millis: 5_000,
                 latest_blockhash_seed: 0xABCD,
             }),
+            None,
         );
         assert!(payload.contains(r#""code":-32016"#));
     }
@@ -766,6 +817,7 @@ mod tests {
         let payload = render_json_rpc_response(
             r#"{"jsonrpc":"2.0","id":29,"method":"getFeeForMessage","params":[]}"#,
             false,
+            None,
             None,
         );
         assert!(payload.contains(r#""code":-32602"#));
@@ -783,6 +835,7 @@ mod tests {
                 uptime_millis: 5_000,
                 latest_blockhash_seed: 0xABCD,
             }),
+            None,
         );
         assert!(payload.contains(r#""result":{"context":{"slot":15},"value":"#));
     }
@@ -793,6 +846,7 @@ mod tests {
             r#"{"jsonrpc":"2.0","id":26,"method":"getIdentity","params":[]}"#,
             false,
             None,
+            None,
         );
         assert!(payload.contains(r#""identity":"ParaDancer11111111111111111111111111111111""#));
     }
@@ -802,6 +856,7 @@ mod tests {
         let payload = render_json_rpc_response(
             r#"{"jsonrpc":"2.0","id":265,"method":"getEpochSchedule","params":[]}"#,
             false,
+            None,
             None,
         );
         assert!(payload.contains(r#""slotsPerEpoch":432000"#));
@@ -815,6 +870,7 @@ mod tests {
             r#"{"jsonrpc":"2.0","id":266,"method":"getMinimumBalanceForRentExemption","params":[165]}"#,
             false,
             None,
+            None,
         );
         assert!(payload.contains(r#""result":2039280"#));
     }
@@ -824,6 +880,7 @@ mod tests {
         let payload = render_json_rpc_response(
             r#"{"jsonrpc":"2.0","id":267,"method":"getMinimumBalanceForRentExemption","params":[]}"#,
             false,
+            None,
             None,
         );
         assert!(payload.contains(r#""code":-32602"#));
@@ -841,6 +898,7 @@ mod tests {
                 uptime_millis: 1_000,
                 latest_blockhash_seed: 1,
             }),
+            None,
         );
         assert!(payload.contains(r#""slot":77"#));
         assert!(payload.contains(r#""value":1000000000"#));
@@ -858,6 +916,7 @@ mod tests {
                 uptime_millis: 5_000,
                 latest_blockhash_seed: 0xABCD,
             }),
+            None,
         );
         assert!(payload.contains(r#""code":-32016"#));
     }
@@ -874,6 +933,7 @@ mod tests {
                 uptime_millis: 1_000,
                 latest_blockhash_seed: 1,
             }),
+            None,
         );
         assert!(payload.contains("ParaLeader"));
     }
@@ -890,6 +950,7 @@ mod tests {
                 uptime_millis: 1_000,
                 latest_blockhash_seed: 1,
             }),
+            None,
         );
         assert!(payload.contains(r#""result":["ParaLeader"#));
     }
@@ -899,6 +960,7 @@ mod tests {
         let payload = render_json_rpc_response(
             r#"{"jsonrpc":"2.0","id":262,"method":"getSlotLeaders","params":[]}"#,
             false,
+            None,
             None,
         );
         assert!(payload.contains(r#""code":-32602"#));
@@ -916,6 +978,7 @@ mod tests {
                 uptime_millis: 1_000,
                 latest_blockhash_seed: 1,
             }),
+            None,
         );
         assert!(payload.contains(r#""code":-32602"#));
     }
@@ -932,6 +995,7 @@ mod tests {
                 uptime_millis: 1_000,
                 latest_blockhash_seed: 1,
             }),
+            None,
         );
         assert!(payload.contains(r#""result":[]"#));
     }
@@ -948,6 +1012,7 @@ mod tests {
                 uptime_millis: 10_000,
                 latest_blockhash_seed: 9,
             }),
+            None,
         );
         assert!(payload.contains(r#""epoch":1"#));
         assert!(payload.contains(r#""slotIndex":67968"#));
@@ -966,6 +1031,7 @@ mod tests {
                 uptime_millis: 10_000,
                 latest_blockhash_seed: 9,
             }),
+            None,
         );
         assert!(payload.contains(r#""full":500000"#));
         assert!(payload.contains(r#""incremental":499999"#));
@@ -983,6 +1049,7 @@ mod tests {
                 uptime_millis: 10_000,
                 latest_blockhash_seed: 9,
             }),
+            None,
         );
         assert!(payload.contains(r#""result":500000"#));
     }
@@ -999,6 +1066,7 @@ mod tests {
                 uptime_millis: 5_000,
                 latest_blockhash_seed: 0xABCD,
             }),
+            None,
         );
         assert!(payload.contains(r#""lastValidBlockHeight":150"#));
         assert!(payload.contains(r#""slot":0"#));
@@ -1019,6 +1087,7 @@ mod tests {
                 uptime_millis: 5_000,
                 latest_blockhash_seed: 0xABCD,
             }),
+            None,
         );
         assert!(payload.contains(r#""code":-32016"#));
     }
@@ -1035,6 +1104,7 @@ mod tests {
                 uptime_millis: 5_000,
                 latest_blockhash_seed: 0xABCD,
             }),
+            None,
         );
         assert!(payload.contains(r#""code":-32016"#));
     }
@@ -1051,6 +1121,7 @@ mod tests {
                 uptime_millis: 5_000,
                 latest_blockhash_seed: 0xABCD,
             }),
+            None,
         );
         assert!(payload.contains(r#""code":-32016"#));
     }
@@ -1067,6 +1138,7 @@ mod tests {
                 uptime_millis: 5_000,
                 latest_blockhash_seed: 0xABCD,
             }),
+            None,
         );
         assert!(payload.contains(r#""code":-32016"#));
     }
@@ -1083,6 +1155,7 @@ mod tests {
                 uptime_millis: 10_000,
                 latest_blockhash_seed: 1,
             }),
+            None,
         );
         assert!(payload.contains("numTransactions"));
         assert!(payload.contains("numSlots"));
@@ -1095,6 +1168,7 @@ mod tests {
             r#"{"jsonrpc":"2.0","id":331,"method":"getRecentPerformanceSamples","params":["2"]}"#,
             true,
             None,
+            None,
         );
         assert!(payload.contains(r#""code":-32602"#));
     }
@@ -1104,6 +1178,7 @@ mod tests {
         let payload = render_json_rpc_response(
             r#"{"jsonrpc":"2.0","id":332,"method":"getRecentPerformanceSamples","params":[0]}"#,
             true,
+            None,
             None,
         );
         assert!(payload.contains(r#""code":-32602"#));
@@ -1115,6 +1190,7 @@ mod tests {
             r#"{"jsonrpc":"2.0","id":99,"method":"getInflationGovernor","params":[]}"#,
             true,
             None,
+            None,
         );
         assert!(payload.contains(r#""initial":0.08"#));
         assert!(payload.contains(r#""terminal":0.015"#));
@@ -1125,6 +1201,7 @@ mod tests {
         let payload = render_json_rpc_response(
             r#"{"jsonrpc":"2.0","id":100,"method":"getInflationGovernor","params":[]}"#,
             false,
+            None,
             None,
         );
         assert!(payload.contains(r#""code":-32601"#));
@@ -1142,6 +1219,7 @@ mod tests {
                 uptime_millis: 10_000,
                 latest_blockhash_seed: 9,
             }),
+            None,
         );
         assert!(payload.contains(r#""epoch":1"#));
         assert!(payload.contains(r#""validator":"#));
@@ -1152,6 +1230,7 @@ mod tests {
         let payload = render_json_rpc_response(
             r#"{"jsonrpc":"2.0","id":102,"method":"getInflationRate","params":[]}"#,
             false,
+            None,
             None,
         );
         assert!(payload.contains(r#""code":-32601"#));
@@ -1169,6 +1248,7 @@ mod tests {
                 uptime_millis: 9_000,
                 latest_blockhash_seed: 1,
             }),
+            None,
         );
         assert!(payload.contains(r#""effectiveSlot":23"#));
         assert!(payload.contains(r#""commission":5"#));
@@ -1180,6 +1260,7 @@ mod tests {
             r#"{"jsonrpc":"2.0","id":104,"method":"getInflationReward","params":[]}"#,
             true,
             None,
+            None,
         );
         assert!(payload.contains(r#""code":-32602"#));
     }
@@ -1189,6 +1270,7 @@ mod tests {
         let payload = render_json_rpc_response(
             r#"{"jsonrpc":"2.0","id":105,"method":"getInflationReward","params":[["Vote111111111111111111111111111111111111111"]]}"#,
             false,
+            None,
             None,
         );
         assert!(payload.contains(r#""code":-32601"#));
@@ -1206,6 +1288,7 @@ mod tests {
                 uptime_millis: 9_000,
                 latest_blockhash_seed: 1,
             }),
+            None,
         );
         assert!(
             payload.contains(r#""sourceAddress":"Vote111111111111111111111111111111111111111""#)
@@ -1225,6 +1308,7 @@ mod tests {
                 uptime_millis: 9_000,
                 latest_blockhash_seed: 1,
             }),
+            None,
         );
         assert!(payload.contains(r#""code":-32016"#));
     }
@@ -1241,6 +1325,7 @@ mod tests {
                 uptime_millis: 9_000,
                 latest_blockhash_seed: 1,
             }),
+            None,
         );
         assert!(payload.contains(r#""before":"before-sig""#));
         assert!(payload.contains(r#""until":"until-sig""#));
@@ -1258,6 +1343,7 @@ mod tests {
                 uptime_millis: 9_000,
                 latest_blockhash_seed: 1,
             }),
+            None,
         );
         assert!(
             payload.contains(r#""sourceAddress":"Vote111111111111111111111111111111111111111""#)
@@ -1271,6 +1357,7 @@ mod tests {
             r#"{"jsonrpc":"2.0","id":873,"method":"getConfirmedSignaturesForAddress2","params":["Vote111111111111111111111111111111111111111"]}"#,
             false,
             None,
+            None,
         );
         assert!(payload.contains(r#""code":-32601"#));
     }
@@ -1281,6 +1368,7 @@ mod tests {
             r#"{"jsonrpc":"2.0","id":88,"method":"getSignaturesForAddress","params":[]}"#,
             true,
             None,
+            None,
         );
         assert!(payload.contains(r#""code":-32602"#));
     }
@@ -1290,6 +1378,7 @@ mod tests {
         let payload = render_json_rpc_response(
             r#"{"jsonrpc":"2.0","id":89,"method":"getSignaturesForAddress","params":["Vote111111111111111111111111111111111111111"]}"#,
             false,
+            None,
             None,
         );
         assert!(payload.contains(r#""code":-32601"#));
@@ -1307,6 +1396,7 @@ mod tests {
                 uptime_millis: 10_000,
                 latest_blockhash_seed: 1,
             }),
+            None,
         );
         assert!(payload.contains(r#""code":-32601"#));
     }
@@ -1323,6 +1413,7 @@ mod tests {
                 uptime_millis: 10_000,
                 latest_blockhash_seed: 1,
             }),
+            None,
         );
         assert!(payload.contains(r#""pubkey":"ParaDancer11111111111111111111111111111111""#));
         assert!(payload.contains(r#""version":"0.1.0""#));
@@ -1333,6 +1424,7 @@ mod tests {
         let payload = render_json_rpc_response(
             r#"{"jsonrpc":"2.0","id":84,"method":"getClusterNodes","params":[]}"#,
             false,
+            None,
             None,
         );
         assert!(payload.contains(r#""code":-32601"#));
@@ -1350,6 +1442,7 @@ mod tests {
                 uptime_millis: 9_000,
                 latest_blockhash_seed: 1,
             }),
+            None,
         );
         assert!(payload.contains(r#""votePubkey":"Vote111111111111111111111111111111111111111""#));
         assert!(payload.contains(r#""delinquent":[]"#));
@@ -1367,6 +1460,7 @@ mod tests {
                 uptime_millis: 9_000,
                 latest_blockhash_seed: 1,
             }),
+            None,
         );
         assert!(payload.contains(r#""current":[{"#));
         assert!(payload.contains(r#""votePubkey":"Vote111111111111111111111111111111111111111""#));
@@ -1384,6 +1478,7 @@ mod tests {
                 uptime_millis: 9_000,
                 latest_blockhash_seed: 1,
             }),
+            None,
         );
         assert!(payload.contains(r#""current":[]"#));
     }
@@ -1400,6 +1495,7 @@ mod tests {
                 uptime_millis: 9_000,
                 latest_blockhash_seed: 1,
             }),
+            None,
         );
         assert!(payload.contains(r#""delinquent":[{"#));
         assert!(payload.contains(r#""votePubkey":"VoteDelinq11111111111111111111111111111111111""#));
@@ -1410,6 +1506,7 @@ mod tests {
         let payload = render_json_rpc_response(
             r#"{"jsonrpc":"2.0","id":854,"method":"getVoteAccounts","params":[{"keepUnstakedDelinquents":"yes"}]}"#,
             true,
+            None,
             None,
         );
         assert!(payload.contains(r#""code":-32602"#));
@@ -1427,6 +1524,7 @@ mod tests {
                 uptime_millis: 9_000,
                 latest_blockhash_seed: 1,
             }),
+            None,
         );
         assert!(payload.contains(r#""code":-32016"#));
     }
@@ -1436,6 +1534,7 @@ mod tests {
         let payload = render_json_rpc_response(
             r#"{"jsonrpc":"2.0","id":86,"method":"getVoteAccounts","params":[]}"#,
             false,
+            None,
             None,
         );
         assert!(payload.contains(r#""code":-32601"#));
@@ -1453,6 +1552,7 @@ mod tests {
                 uptime_millis: 9_000,
                 latest_blockhash_seed: 1,
             }),
+            None,
         );
         assert!(payload.contains(r#""context":{"slot":23}"#));
         assert!(payload.contains(
@@ -1472,6 +1572,7 @@ mod tests {
                 uptime_millis: 9_000,
                 latest_blockhash_seed: 1,
             }),
+            None,
         );
         assert!(payload.contains(r#""nonCirculatingAccounts":[]"#));
     }
@@ -1488,6 +1589,7 @@ mod tests {
                 uptime_millis: 9_000,
                 latest_blockhash_seed: 1,
             }),
+            None,
         );
         assert!(payload.contains(r#""code":-32016"#));
     }
@@ -1498,6 +1600,7 @@ mod tests {
             r#"{"jsonrpc":"2.0","id":753,"method":"getSupply","params":[{"excludeNonCirculatingAccountsList":"true"}]}"#,
             true,
             None,
+            None,
         );
         assert!(payload.contains(r#""code":-32602"#));
     }
@@ -1507,6 +1610,7 @@ mod tests {
         let payload = render_json_rpc_response(
             r#"{"jsonrpc":"2.0","id":76,"method":"getSupply","params":[]}"#,
             false,
+            None,
             None,
         );
         assert!(payload.contains(r#""code":-32601"#));
@@ -1524,6 +1628,7 @@ mod tests {
                 uptime_millis: 9_000,
                 latest_blockhash_seed: 1,
             }),
+            None,
         );
         assert!(payload.contains(r#""context":{"slot":23}"#));
         assert!(payload.contains(r#""amount":"#));
@@ -1535,6 +1640,7 @@ mod tests {
         let payload = render_json_rpc_response(
             r#"{"jsonrpc":"2.0","id":771,"method":"getTokenSupply","params":["So11111111111111111111111111111111111111112"]}"#,
             false,
+            None,
             None,
         );
         assert!(payload.contains(r#""code":-32601"#));
@@ -1552,6 +1658,7 @@ mod tests {
                 uptime_millis: 9_000,
                 latest_blockhash_seed: 1,
             }),
+            None,
         );
         assert!(payload.contains(r#""context":{"slot":23}"#));
         assert!(payload.contains(r#""amount":"#));
@@ -1563,6 +1670,7 @@ mod tests {
         let payload = render_json_rpc_response(
             r#"{"jsonrpc":"2.0","id":773,"method":"getTokenAccountBalance","params":[]}"#,
             true,
+            None,
             None,
         );
         assert!(payload.contains(r#""code":-32602"#));
@@ -1580,6 +1688,7 @@ mod tests {
                 uptime_millis: 9_000,
                 latest_blockhash_seed: 1,
             }),
+            None,
         );
         assert!(payload.contains(r#""code":-32016"#));
     }
@@ -1589,6 +1698,7 @@ mod tests {
         let payload = render_json_rpc_response(
             r#"{"jsonrpc":"2.0","id":775,"method":"getTokenAccountBalance","params":["ParaOwnerAcct00111111111111111111111111111111"]}"#,
             false,
+            None,
             None,
         );
         assert!(payload.contains(r#""code":-32601"#));
@@ -1606,6 +1716,7 @@ mod tests {
                 uptime_millis: 9_000,
                 latest_blockhash_seed: 1,
             }),
+            None,
         );
         assert!(payload.contains(r#""context":{"slot":23}"#));
         assert!(payload.contains(r#"ParaLargest00"#));
@@ -1617,6 +1728,7 @@ mod tests {
             r#"{"jsonrpc":"2.0","id":78,"method":"getLargestAccounts","params":[{"filter":1}]}"#,
             true,
             None,
+            None,
         );
         assert!(payload.contains(r#""code":-32602"#));
     }
@@ -1626,6 +1738,7 @@ mod tests {
         let payload = render_json_rpc_response(
             r#"{"jsonrpc":"2.0","id":79,"method":"getLargestAccounts","params":[]}"#,
             false,
+            None,
             None,
         );
         assert!(payload.contains(r#""code":-32601"#));
@@ -1643,6 +1756,7 @@ mod tests {
                 uptime_millis: 9_000,
                 latest_blockhash_seed: 1,
             }),
+            None,
         );
         assert!(payload.contains(r#""mint":"So11111111111111111111111111111111111111112""#));
         assert!(payload.contains(r#"ParaToken00"#));
@@ -1660,6 +1774,7 @@ mod tests {
                 uptime_millis: 9_000,
                 latest_blockhash_seed: 1,
             }),
+            None,
         );
         assert!(payload.contains(r#""code":-32016"#));
     }
@@ -1676,6 +1791,7 @@ mod tests {
                 uptime_millis: 9_000,
                 latest_blockhash_seed: 1,
             }),
+            None,
         );
         assert!(payload.contains(r#""context":{"slot":23}"#));
         assert!(payload.contains(r#"ParaProgAcct00"#));
@@ -1687,6 +1803,7 @@ mod tests {
             r#"{"jsonrpc":"2.0","id":91,"method":"getProgramAccounts","params":[]}"#,
             true,
             None,
+            None,
         );
         assert!(payload.contains(r#""code":-32602"#));
     }
@@ -1696,6 +1813,7 @@ mod tests {
         let payload = render_json_rpc_response(
             r#"{"jsonrpc":"2.0","id":92,"method":"getProgramAccounts","params":["11111111111111111111111111111111"]}"#,
             false,
+            None,
             None,
         );
         assert!(payload.contains(r#""code":-32601"#));
@@ -1713,6 +1831,7 @@ mod tests {
                 uptime_millis: 9_000,
                 latest_blockhash_seed: 1,
             }),
+            None,
         );
         assert!(payload.contains(r#""tokenOwner":"Vote111111111111111111111111111111111111111""#));
         assert!(payload
@@ -1725,6 +1844,7 @@ mod tests {
             r#"{"jsonrpc":"2.0","id":94,"method":"getTokenAccountsByOwner","params":["Vote111111111111111111111111111111111111111"]}"#,
             true,
             None,
+            None,
         );
         assert!(payload.contains(r#""code":-32602"#));
     }
@@ -1734,6 +1854,7 @@ mod tests {
         let payload = render_json_rpc_response(
             r#"{"jsonrpc":"2.0","id":95,"method":"getTokenAccountsByOwner","params":["Vote111111111111111111111111111111111111111",{"mint":"So11111111111111111111111111111111111111112"}]}"#,
             false,
+            None,
             None,
         );
         assert!(payload.contains(r#""code":-32601"#));
@@ -1751,6 +1872,7 @@ mod tests {
                 uptime_millis: 9_000,
                 latest_blockhash_seed: 1,
             }),
+            None,
         );
         assert!(payload.contains(r#""delegate":"Vote111111111111111111111111111111111111111""#));
         assert!(
@@ -1764,6 +1886,7 @@ mod tests {
             r#"{"jsonrpc":"2.0","id":97,"method":"getTokenAccountsByDelegate","params":["Vote111111111111111111111111111111111111111"]}"#,
             true,
             None,
+            None,
         );
         assert!(payload.contains(r#""code":-32602"#));
     }
@@ -1773,6 +1896,7 @@ mod tests {
         let payload = render_json_rpc_response(
             r#"{"jsonrpc":"2.0","id":98,"method":"getTokenAccountsByDelegate","params":["Vote111111111111111111111111111111111111111",{"programId":"TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"}]}"#,
             false,
+            None,
             None,
         );
         assert!(payload.contains(r#""code":-32601"#));
@@ -1784,6 +1908,7 @@ mod tests {
             r#"{"jsonrpc":"2.0","id":81,"method":"getTokenLargestAccounts","params":[]}"#,
             true,
             None,
+            None,
         );
         assert!(payload.contains(r#""code":-32602"#));
     }
@@ -1793,6 +1918,7 @@ mod tests {
         let payload = render_json_rpc_response(
             r#"{"jsonrpc":"2.0","id":82,"method":"getTokenLargestAccounts","params":["So11111111111111111111111111111111111111112"]}"#,
             false,
+            None,
             None,
         );
         assert!(payload.contains(r#""code":-32601"#));
@@ -1810,6 +1936,7 @@ mod tests {
                 uptime_millis: 9_000,
                 latest_blockhash_seed: 1,
             }),
+            None,
         );
         assert!(payload.contains("lamports"));
         assert!(payload.contains(r#""slot":23"#));
@@ -1828,6 +1955,7 @@ mod tests {
                 uptime_millis: 9_000,
                 latest_blockhash_seed: 1,
             }),
+            None,
         );
         assert!(payload.contains(r#""code":-32016"#));
         assert!(payload.contains("Minimum context slot not reached"));
@@ -1845,6 +1973,7 @@ mod tests {
                 uptime_millis: 9_000,
                 latest_blockhash_seed: 1,
             }),
+            None,
         );
         assert!(payload.contains(r#""context":{"slot":55}"#));
         assert!(payload.contains(r#""value":["#));
@@ -1857,6 +1986,7 @@ mod tests {
             r#"{"jsonrpc":"2.0","id":44,"method":"getMultipleAccounts","params":[]}"#,
             true,
             None,
+            None,
         );
         assert!(payload.contains(r#""code":-32602"#));
     }
@@ -1866,6 +1996,7 @@ mod tests {
         let payload = render_json_rpc_response(
             r#"{"jsonrpc":"2.0","id":45,"method":"getMultipleAccounts","params":[["11111111111111111111111111111111"]]}"#,
             false,
+            None,
             None,
         );
         assert!(payload.contains(r#""code":-32601"#));
@@ -1883,6 +2014,7 @@ mod tests {
                 uptime_millis: 9_000,
                 latest_blockhash_seed: 1,
             }),
+            None,
         );
         assert!(payload.contains(r#""code":-32016"#));
         assert!(payload.contains("Minimum context slot not reached"));
@@ -1894,6 +2026,7 @@ mod tests {
             r#"{"jsonrpc":"2.0","id":46,"method":"getFirstAvailableBlock","params":[]}"#,
             false,
             None,
+            None,
         );
         assert!(payload.contains(r#""result":0"#));
     }
@@ -1903,6 +2036,7 @@ mod tests {
         let payload = render_json_rpc_response(
             r#"{"jsonrpc":"2.0","id":69,"method":"minimumLedgerSlot","params":[]}"#,
             false,
+            None,
             None,
         );
         assert!(payload.contains(r#""result":0"#));
@@ -1920,6 +2054,7 @@ mod tests {
                 uptime_millis: 10_000,
                 latest_blockhash_seed: 3,
             }),
+            None,
         );
         assert!(payload.contains(r#""result":21"#));
     }
@@ -1936,6 +2071,7 @@ mod tests {
                 uptime_millis: 10_000,
                 latest_blockhash_seed: 3,
             }),
+            None,
         );
         assert!(payload.contains(r#""result":[3,4,5,6]"#));
     }
@@ -1952,6 +2088,7 @@ mod tests {
                 uptime_millis: 10_000,
                 latest_blockhash_seed: 3,
             }),
+            None,
         );
         assert!(payload.contains(r#""context":{"slot":68}"#));
         assert!(payload.contains(r#""confirmationStatus":"finalized""#));
@@ -1969,6 +2106,7 @@ mod tests {
                 uptime_millis: 10_000,
                 latest_blockhash_seed: 3,
             }),
+            None,
         );
         assert!(payload.contains(r#""value":[null]"#));
     }
@@ -1985,6 +2123,7 @@ mod tests {
                 uptime_millis: 10_000,
                 latest_blockhash_seed: 3,
             }),
+            None,
         );
         assert!(payload.contains(r#""confirmationStatus":"finalized""#));
     }
@@ -2001,6 +2140,7 @@ mod tests {
                 uptime_millis: 10_000,
                 latest_blockhash_seed: 3,
             }),
+            None,
         );
         assert!(payload.contains(r#"ParaDancer11111111111111111111111111111111"#));
         assert!(payload.contains(r#"ParaDancer22222222222222222222222222222222"#));
@@ -2018,6 +2158,7 @@ mod tests {
                 uptime_millis: 10_000,
                 latest_blockhash_seed: 3,
             }),
+            None,
         );
         assert!(payload.contains(r#"Vote111111111111111111111111111111111111111"#));
         assert!(!payload.contains(r#"ParaDancer22222222222222222222222222222222"#));
@@ -2035,6 +2176,7 @@ mod tests {
                 uptime_millis: 10_000,
                 latest_blockhash_seed: 3,
             }),
+            None,
         );
         assert!(payload.contains(r#""code":-32016"#));
     }
@@ -2045,6 +2187,7 @@ mod tests {
             r#"{"jsonrpc":"2.0","id":73,"method":"getLeaderSchedule","params":[null,{"identity":1}]}"#,
             true,
             None,
+            None,
         );
         assert!(payload.contains(r#""code":-32602"#));
     }
@@ -2054,6 +2197,7 @@ mod tests {
         let payload = render_json_rpc_response(
             r#"{"jsonrpc":"2.0","id":74,"method":"getLeaderSchedule","params":[]}"#,
             false,
+            None,
             None,
         );
         assert!(payload.contains(r#""code":-32601"#));
@@ -2071,6 +2215,7 @@ mod tests {
                 uptime_millis: 10_000,
                 latest_blockhash_seed: 3,
             }),
+            None,
         );
         assert!(payload.contains(r#""range":{"firstSlot":12,"lastSlot":15}"#));
         assert!(payload.contains(r#"ParaDancer11111111111111111111111111111111"#));
@@ -2088,6 +2233,7 @@ mod tests {
                 uptime_millis: 10_000,
                 latest_blockhash_seed: 3,
             }),
+            None,
         );
         assert!(payload.contains(r#""code":-32016"#));
     }
@@ -2098,6 +2244,7 @@ mod tests {
             r#"{"jsonrpc":"2.0","id":64,"method":"getBlockProduction","params":[{"range":{"firstSlot":"x"}}]}"#,
             true,
             None,
+            None,
         );
         assert!(payload.contains(r#""code":-32602"#));
     }
@@ -2107,6 +2254,7 @@ mod tests {
         let payload = render_json_rpc_response(
             r#"{"jsonrpc":"2.0","id":65,"method":"getBlockProduction","params":[]}"#,
             false,
+            None,
             None,
         );
         assert!(payload.contains(r#""code":-32601"#));
@@ -2124,6 +2272,7 @@ mod tests {
                 uptime_millis: 10_000,
                 latest_blockhash_seed: 3,
             }),
+            None,
         );
         assert!(payload.contains(r#""slot":68"#));
         assert!(payload.contains(r#""prioritizationFee":110"#));
@@ -2141,6 +2290,7 @@ mod tests {
                 uptime_millis: 10_000,
                 latest_blockhash_seed: 3,
             }),
+            None,
         );
         assert!(payload.contains(r#""code":-32016"#));
     }
@@ -2150,6 +2300,7 @@ mod tests {
         let payload = render_json_rpc_response(
             r#"{"jsonrpc":"2.0","id":67,"method":"getRecentPrioritizationFees","params":[["",1]]}"#,
             true,
+            None,
             None,
         );
         assert!(payload.contains(r#""code":-32602"#));
@@ -2161,6 +2312,7 @@ mod tests {
             r#"{"jsonrpc":"2.0","id":68,"method":"getRecentPrioritizationFees","params":[]}"#,
             false,
             None,
+            None,
         );
         assert!(payload.contains(r#""code":-32601"#));
     }
@@ -2171,6 +2323,7 @@ mod tests {
             r#"{"jsonrpc":"2.0","id":58,"method":"getSignatureStatuses","params":[]}"#,
             true,
             None,
+            None,
         );
         assert!(payload.contains(r#""code":-32602"#));
     }
@@ -2180,6 +2333,7 @@ mod tests {
         let payload = render_json_rpc_response(
             r#"{"jsonrpc":"2.0","id":581,"method":"getSignatureStatuses","params":[["abc"],{"searchTransactionHistory":"yes"}]}"#,
             true,
+            None,
             None,
         );
         assert!(payload.contains(r#""code":-32602"#));
@@ -2197,6 +2351,7 @@ mod tests {
                 uptime_millis: 10_000,
                 latest_blockhash_seed: 3,
             }),
+            None,
         );
         assert!(payload.contains(r#""code":-32016"#));
     }
@@ -2206,6 +2361,7 @@ mod tests {
         let payload = render_json_rpc_response(
             r#"{"jsonrpc":"2.0","id":59,"method":"getSignatureStatuses","params":[["abc"]]}"#,
             false,
+            None,
             None,
         );
         assert!(payload.contains(r#""code":-32601"#));
@@ -2223,6 +2379,7 @@ mod tests {
                 uptime_millis: 10_000,
                 latest_blockhash_seed: 3,
             }),
+            None,
         );
         assert!(payload.contains(
             r#""transaction":{"message":{"accountKeys":[],"instructions":[],"recentBlockhash":"#
@@ -2236,6 +2393,7 @@ mod tests {
         let payload = render_json_rpc_response(
             r#"{"jsonrpc":"2.0","id":61,"method":"getTransaction","params":[]}"#,
             true,
+            None,
             None,
         );
         assert!(payload.contains(r#""code":-32602"#));
@@ -2253,6 +2411,7 @@ mod tests {
                 uptime_millis: 10_000,
                 latest_blockhash_seed: 3,
             }),
+            None,
         );
         assert!(payload.contains(r#""code":-32602"#));
     }
@@ -2269,6 +2428,7 @@ mod tests {
                 uptime_millis: 10_000,
                 latest_blockhash_seed: 3,
             }),
+            None,
         );
         assert!(payload.contains(r#""code":-32602"#));
     }
@@ -2285,6 +2445,7 @@ mod tests {
                 uptime_millis: 10_000,
                 latest_blockhash_seed: 3,
             }),
+            None,
         );
         assert!(payload.contains(r#""code":-32602"#));
     }
@@ -2301,6 +2462,7 @@ mod tests {
                 uptime_millis: 10_000,
                 latest_blockhash_seed: 3,
             }),
+            None,
         );
         assert!(payload.contains(r#""code":-32602"#));
     }
@@ -2317,6 +2479,7 @@ mod tests {
                 uptime_millis: 10_000,
                 latest_blockhash_seed: 3,
             }),
+            None,
         );
         assert!(payload.contains(r#""message":""#));
         assert!(!payload.contains(r#""accountKeys":"#));
@@ -2327,6 +2490,7 @@ mod tests {
         let payload = render_json_rpc_response(
             r#"{"jsonrpc":"2.0","id":62,"method":"getTransaction","params":["abc"]}"#,
             false,
+            None,
             None,
         );
         assert!(payload.contains(r#""code":-32601"#));
@@ -2344,6 +2508,7 @@ mod tests {
                 uptime_millis: 10_000,
                 latest_blockhash_seed: 3,
             }),
+            None,
         );
         assert!(payload.contains(r#""result":[]"#));
     }
@@ -2360,6 +2525,7 @@ mod tests {
                 uptime_millis: 10_000,
                 latest_blockhash_seed: 3,
             }),
+            None,
         );
         assert!(payload.contains(r#""code":-32602"#));
     }
@@ -2376,6 +2542,7 @@ mod tests {
                 uptime_millis: 10_000,
                 latest_blockhash_seed: 3,
             }),
+            None,
         );
         assert!(payload.contains(r#""code":-32602"#));
     }
@@ -2392,6 +2559,7 @@ mod tests {
                 uptime_millis: 10_000,
                 latest_blockhash_seed: 3,
             }),
+            None,
         );
         assert!(payload.contains(r#""code":-32602"#));
     }
@@ -2408,6 +2576,7 @@ mod tests {
                 uptime_millis: 10_000,
                 latest_blockhash_seed: 3,
             }),
+            None,
         );
         assert!(payload.contains(r#""result":[5,6,7]"#));
     }
@@ -2424,6 +2593,7 @@ mod tests {
                 uptime_millis: 10_000,
                 latest_blockhash_seed: 3,
             }),
+            None,
         );
         assert!(payload.contains(r#""totalStake":1000000000"#));
         assert!(payload.contains(r#""commitment":["#));
@@ -2441,6 +2611,7 @@ mod tests {
                 uptime_millis: 10_000,
                 latest_blockhash_seed: 3,
             }),
+            None,
         );
         assert!(payload.contains(r#""result":null"#));
     }
@@ -2450,6 +2621,7 @@ mod tests {
         let payload = render_json_rpc_response(
             r#"{"jsonrpc":"2.0","id":503,"method":"getBlockCommitment","params":[]}"#,
             true,
+            None,
             None,
         );
         assert!(payload.contains(r#""code":-32602"#));
@@ -2461,6 +2633,7 @@ mod tests {
             r#"{"jsonrpc":"2.0","id":504,"method":"getBlockCommitment","params":[1]}"#,
             false,
             None,
+            None,
         );
         assert!(payload.contains(r#""code":-32601"#));
     }
@@ -2470,6 +2643,7 @@ mod tests {
         let payload = render_json_rpc_response(
             r#"{"jsonrpc":"2.0","id":51,"method":"getBlocksWithLimit","params":[5]}"#,
             true,
+            None,
             None,
         );
         assert!(payload.contains(r#""code":-32602"#));
@@ -2487,6 +2661,7 @@ mod tests {
                 uptime_millis: 10_000,
                 latest_blockhash_seed: 3,
             }),
+            None,
         );
         assert!(payload.contains(r#""code":-32602"#));
     }
@@ -2503,6 +2678,7 @@ mod tests {
                 uptime_millis: 10_000,
                 latest_blockhash_seed: 3,
             }),
+            None,
         );
         assert!(payload.contains(r#""code":-32602"#));
     }
@@ -2519,6 +2695,7 @@ mod tests {
                 uptime_millis: 10_000,
                 latest_blockhash_seed: 3,
             }),
+            None,
         );
         assert!(payload.contains(r#""code":-32016"#));
     }
@@ -2535,6 +2712,7 @@ mod tests {
                 uptime_millis: 10_000,
                 latest_blockhash_seed: 3,
             }),
+            None,
         );
         assert!(payload.contains(r#""code":-32016"#));
     }
@@ -2544,6 +2722,7 @@ mod tests {
         let payload = render_json_rpc_response(
             r#"{"jsonrpc":"2.0","id":52,"method":"getBlocksWithLimit","params":[3,4]}"#,
             false,
+            None,
             None,
         );
         assert!(payload.contains(r#""code":-32601"#));
@@ -2555,6 +2734,7 @@ mod tests {
             r#"{"jsonrpc":"2.0","id":49,"method":"getBlocks","params":[3,6]}"#,
             false,
             None,
+            None,
         );
         assert!(payload.contains(r#""code":-32601"#));
     }
@@ -2564,6 +2744,7 @@ mod tests {
         let payload = render_json_rpc_response(
             r#"{"jsonrpc":"2.0","id":42,"method":"getAccountInfo","params":[]}"#,
             true,
+            None,
             None,
         );
         assert!(payload.contains(r#""code":-32602"#));
@@ -2581,6 +2762,7 @@ mod tests {
                 uptime_millis: 10_000,
                 latest_blockhash_seed: 3,
             }),
+            None,
         );
         assert!(payload.contains("blockHeight"));
         assert!(payload.contains("parentSlot"));
@@ -2599,6 +2781,7 @@ mod tests {
                 uptime_millis: 10_000,
                 latest_blockhash_seed: 3,
             }),
+            None,
         );
         assert!(payload.contains(r#""result":null"#));
     }
@@ -2608,6 +2791,7 @@ mod tests {
         let payload = render_json_rpc_response(
             r#"{"jsonrpc":"2.0","id":53,"method":"getBlock","params":[]}"#,
             true,
+            None,
             None,
         );
         assert!(payload.contains(r#""code":-32602"#));
@@ -2625,6 +2809,7 @@ mod tests {
                 uptime_millis: 10_000,
                 latest_blockhash_seed: 3,
             }),
+            None,
         );
         assert!(payload.contains(r#""code":-32602"#));
     }
@@ -2641,6 +2826,7 @@ mod tests {
                 uptime_millis: 10_000,
                 latest_blockhash_seed: 3,
             }),
+            None,
         );
         assert!(payload.contains(r#""code":-32602"#));
     }
@@ -2657,6 +2843,7 @@ mod tests {
                 uptime_millis: 10_000,
                 latest_blockhash_seed: 3,
             }),
+            None,
         );
         assert!(payload.contains(r#""code":-32602"#));
     }
@@ -2673,6 +2860,7 @@ mod tests {
                 uptime_millis: 10_000,
                 latest_blockhash_seed: 3,
             }),
+            None,
         );
         assert!(payload.contains(r#""code":-32602"#));
     }
@@ -2689,6 +2877,7 @@ mod tests {
                 uptime_millis: 10_000,
                 latest_blockhash_seed: 3,
             }),
+            None,
         );
         assert!(payload.contains(r#""code":-32602"#));
     }
@@ -2705,6 +2894,7 @@ mod tests {
                 uptime_millis: 10_000,
                 latest_blockhash_seed: 3,
             }),
+            None,
         );
         assert!(payload.contains(r#""transactions":[]"#));
         assert!(payload.contains(r#""rewards":null"#));
@@ -2722,6 +2912,7 @@ mod tests {
                 uptime_millis: 10_000,
                 latest_blockhash_seed: 3,
             }),
+            None,
         );
         assert!(payload.contains(r#""code":-32016"#));
         assert!(payload.contains("Minimum context slot not reached"));
@@ -2739,6 +2930,7 @@ mod tests {
                 uptime_millis: 10_000,
                 latest_blockhash_seed: 3,
             }),
+            None,
         );
         assert!(payload.contains(r#""result":1700000020"#));
     }
@@ -2755,6 +2947,7 @@ mod tests {
                 uptime_millis: 10_000,
                 latest_blockhash_seed: 3,
             }),
+            None,
         );
         assert!(payload.contains(r#""result":null"#));
     }
@@ -2771,6 +2964,7 @@ mod tests {
                 uptime_millis: 10_000,
                 latest_blockhash_seed: 3,
             }),
+            None,
         );
         assert!(payload.contains(r#""code":-32602"#));
     }
@@ -2787,6 +2981,7 @@ mod tests {
                 uptime_millis: 10_000,
                 latest_blockhash_seed: 3,
             }),
+            None,
         );
         assert!(payload.contains(r#""code":-32601"#));
     }
@@ -2803,6 +2998,7 @@ mod tests {
                 uptime_millis: 10_000,
                 latest_blockhash_seed: 3,
             }),
+            None,
         );
         assert!(payload.contains("blockHeight"));
         assert!(payload.contains("transactions"));
@@ -2820,6 +3016,7 @@ mod tests {
                 uptime_millis: 10_000,
                 latest_blockhash_seed: 3,
             }),
+            None,
         );
         assert!(payload.contains(r#""result":[3,4,5,6]"#));
     }
@@ -2836,6 +3033,7 @@ mod tests {
                 uptime_millis: 10_000,
                 latest_blockhash_seed: 3,
             }),
+            None,
         );
         assert!(payload.contains(r#""meta":"#));
         assert!(payload.contains(r#""transaction":"#));
@@ -2847,6 +3045,7 @@ mod tests {
             r#"{"jsonrpc":"2.0","id":904,"method":"getConfirmedBlock","params":[10]}"#,
             false,
             None,
+            None,
         );
         assert!(payload.contains(r#""code":-32601"#));
 
@@ -2854,12 +3053,14 @@ mod tests {
             r#"{"jsonrpc":"2.0","id":905,"method":"getConfirmedBlocks","params":[3,6]}"#,
             false,
             None,
+            None,
         );
         assert!(payload.contains(r#""code":-32601"#));
 
         let payload = render_json_rpc_response(
             r#"{"jsonrpc":"2.0","id":906,"method":"getConfirmedTransaction","params":["abc123"]}"#,
             false,
+            None,
             None,
         );
         assert!(payload.contains(r#""code":-32601"#));
@@ -2877,6 +3078,7 @@ mod tests {
                 uptime_millis: 2_000,
                 latest_blockhash_seed: 77,
             }),
+            None,
         );
         assert!(payload.contains(r#""result":"#));
     }
@@ -2886,6 +3088,7 @@ mod tests {
         let payload = render_json_rpc_response(
             r#"{"jsonrpc":"2.0","id":911,"method":"sendTransaction","params":["dGVzdF90eA==",{"encoding":"json"}]}"#,
             true,
+            None,
             None,
         );
         assert!(payload.contains(r#""code":-32602"#));
@@ -2897,6 +3100,7 @@ mod tests {
             r#"{"jsonrpc":"2.0","id":913,"method":"sendTransaction","params":["dGVzdF90eA==",{"encoding":"base64","foo":"bar"}]}"#,
             true,
             None,
+            None,
         );
         assert!(payload.contains(r#""code":-32602"#));
     }
@@ -2906,6 +3110,7 @@ mod tests {
         let payload = render_json_rpc_response(
             r#"{"jsonrpc":"2.0","id":914,"method":"sendTransaction","params":["dGVzdF90eA==",{"encoding":"base64"},1]}"#,
             true,
+            None,
             None,
         );
         assert!(payload.contains(r#""code":-32602"#));
@@ -2923,6 +3128,7 @@ mod tests {
                 uptime_millis: 1_000,
                 latest_blockhash_seed: 7,
             }),
+            None,
         );
         assert!(payload.contains(r#""code":-32016"#));
     }
@@ -2939,6 +3145,7 @@ mod tests {
                 uptime_millis: 2_000,
                 latest_blockhash_seed: 77,
             }),
+            None,
         );
         assert!(payload.contains(r#""unitsConsumed":"#));
         assert!(payload.contains(r#""replacementBlockhash":"#));
@@ -2950,6 +3157,7 @@ mod tests {
             r#"{"jsonrpc":"2.0","id":921,"method":"simulateTransaction","params":["dGVzdF90eA==",{"accounts":{"addresses":["",1]}}]}"#,
             true,
             None,
+            None,
         );
         assert!(payload.contains(r#""code":-32602"#));
     }
@@ -2959,6 +3167,7 @@ mod tests {
         let payload = render_json_rpc_response(
             r#"{"jsonrpc":"2.0","id":924,"method":"simulateTransaction","params":["dGVzdF90eA==",{"encoding":"base64","extra":true}]}"#,
             true,
+            None,
             None,
         );
         assert!(payload.contains(r#""code":-32602"#));
@@ -2970,6 +3179,7 @@ mod tests {
             r#"{"jsonrpc":"2.0","id":925,"method":"simulateTransaction","params":["dGVzdF90eA==",{"accounts":{"encoding":"base64","addresses":["11111111111111111111111111111111"],"extra":"x"}}]}"#,
             true,
             None,
+            None,
         );
         assert!(payload.contains(r#""code":-32602"#));
     }
@@ -2979,6 +3189,7 @@ mod tests {
         let payload = render_json_rpc_response(
             r#"{"jsonrpc":"2.0","id":926,"method":"simulateTransaction","params":["dGVzdF90eA==",{"encoding":"base64"},1]}"#,
             true,
+            None,
             None,
         );
         assert!(payload.contains(r#""code":-32602"#));
@@ -2990,12 +3201,14 @@ mod tests {
             r#"{"jsonrpc":"2.0","id":922,"method":"sendTransaction","params":["dGVzdF90eA=="]}"#,
             false,
             None,
+            None,
         );
         assert!(payload.contains(r#""code":-32601"#));
 
         let payload = render_json_rpc_response(
             r#"{"jsonrpc":"2.0","id":923,"method":"simulateTransaction","params":["dGVzdF90eA=="]}"#,
             false,
+            None,
             None,
         );
         assert!(payload.contains(r#""code":-32601"#));
@@ -3095,5 +3308,426 @@ mod tests {
         assert!(allowed("getProgramAccounts", true));
         assert!(allowed("getTokenAccountsByOwner", true));
         assert!(allowed("getTokenAccountsByDelegate", true));
+    }
+
+    // --- BankAccessProvider integration tests ---
+
+    use crate::state::BankAccessProvider;
+    use std::collections::HashMap;
+    use std::sync::{Arc, Mutex};
+
+    struct MockBankAccess {
+        accounts: Mutex<HashMap<paradencer_types::Pubkey, paradencer_types::Account>>,
+        slot: u64,
+        blockhash: [u8; 32],
+        lamports_per_sig: u64,
+        transaction_count: u64,
+        capitalization: u64,
+    }
+
+    impl MockBankAccess {
+        fn new() -> Self {
+            Self {
+                accounts: Mutex::new(HashMap::new()),
+                slot: 100,
+                blockhash: [0xAB; 32],
+                lamports_per_sig: 5000,
+                transaction_count: 999,
+                capitalization: 500_000_000_000,
+            }
+        }
+
+        fn with_account(
+            self,
+            pubkey: paradencer_types::Pubkey,
+            account: paradencer_types::Account,
+        ) -> Self {
+            self.accounts.lock().unwrap().insert(pubkey, account);
+            self
+        }
+    }
+
+    impl BankAccessProvider for MockBankAccess {
+        fn get_account(
+            &self,
+            pubkey: &paradencer_types::Pubkey,
+            _commitment: crate::state::RpcCommitment,
+        ) -> Option<paradencer_types::Account> {
+            self.accounts.lock().unwrap().get(pubkey).cloned()
+        }
+
+        fn get_balance(
+            &self,
+            pubkey: &paradencer_types::Pubkey,
+            _commitment: crate::state::RpcCommitment,
+        ) -> u64 {
+            self.accounts
+                .lock()
+                .unwrap()
+                .get(pubkey)
+                .map(|a| a.meta.lamports)
+                .unwrap_or(0)
+        }
+
+        fn get_slot(&self, _commitment: crate::state::RpcCommitment) -> u64 {
+            self.slot
+        }
+
+        fn get_block_height(&self, _commitment: crate::state::RpcCommitment) -> u64 {
+            self.slot
+        }
+
+        fn get_latest_blockhash(&self, _commitment: crate::state::RpcCommitment) -> [u8; 32] {
+            self.blockhash
+        }
+
+        fn is_blockhash_valid(
+            &self,
+            blockhash: &[u8; 32],
+            _commitment: crate::state::RpcCommitment,
+        ) -> bool {
+            *blockhash == self.blockhash
+        }
+
+        fn get_lamports_per_signature(&self, _commitment: crate::state::RpcCommitment) -> u64 {
+            self.lamports_per_sig
+        }
+
+        fn get_last_valid_block_height(&self, _commitment: crate::state::RpcCommitment) -> u64 {
+            self.slot + 150
+        }
+
+        fn get_transaction_count(&self, _commitment: crate::state::RpcCommitment) -> u64 {
+            self.transaction_count
+        }
+
+        fn get_capitalization(&self, _commitment: crate::state::RpcCommitment) -> u64 {
+            self.capitalization
+        }
+    }
+
+    fn test_pubkey_bytes() -> [u8; 32] {
+        let mut bytes = [0u8; 32];
+        bytes[0] = 1;
+        bytes[31] = 1;
+        bytes
+    }
+
+    fn test_pubkey() -> paradencer_types::Pubkey {
+        paradencer_types::Pubkey::new(test_pubkey_bytes())
+    }
+
+    fn test_pubkey_base58() -> String {
+        bs58::encode(test_pubkey_bytes()).into_string()
+    }
+
+    #[test]
+    fn bank_access_get_balance_returns_real_lamports() {
+        let pubkey = test_pubkey();
+        let account = paradencer_types::Account::new(42_000, vec![], pubkey);
+        let mock: Arc<dyn BankAccessProvider> =
+            Arc::new(MockBankAccess::new().with_account(pubkey, account));
+
+        let payload = render_json_rpc_response(
+            &format!(
+                r#"{{"jsonrpc":"2.0","id":1,"method":"getBalance","params":["{}"]}}"#,
+                test_pubkey_base58()
+            ),
+            false,
+            Some(RpcRuntimeSnapshot {
+                slot: 10,
+                block_height: 10,
+                transaction_count: 0,
+                uptime_millis: 1_000,
+                latest_blockhash_seed: 0,
+            }),
+            Some(&mock),
+        );
+        let parsed: serde_json::Value = serde_json::from_str(&payload).unwrap();
+        assert_eq!(parsed["result"]["value"], 42_000);
+        assert_eq!(parsed["result"]["context"]["slot"], 100);
+    }
+
+    #[test]
+    fn bank_access_get_balance_returns_zero_for_missing_account() {
+        let mock: Arc<dyn BankAccessProvider> = Arc::new(MockBankAccess::new());
+
+        let payload = render_json_rpc_response(
+            &format!(
+                r#"{{"jsonrpc":"2.0","id":1,"method":"getBalance","params":["{}"]}}"#,
+                test_pubkey_base58()
+            ),
+            false,
+            Some(RpcRuntimeSnapshot {
+                slot: 10,
+                block_height: 10,
+                transaction_count: 0,
+                uptime_millis: 1_000,
+                latest_blockhash_seed: 0,
+            }),
+            Some(&mock),
+        );
+        let parsed: serde_json::Value = serde_json::from_str(&payload).unwrap();
+        assert_eq!(parsed["result"]["value"], 0);
+    }
+
+    #[test]
+    fn bank_access_get_account_info_returns_real_account() {
+        let pubkey = test_pubkey();
+        let owner = paradencer_types::Pubkey::new([2u8; 32]);
+        let account = paradencer_types::Account::new(100_000, vec![1, 2, 3], owner);
+        let mock: Arc<dyn BankAccessProvider> =
+            Arc::new(MockBankAccess::new().with_account(pubkey, account));
+
+        let payload = render_json_rpc_response(
+            &format!(
+                r#"{{"jsonrpc":"2.0","id":1,"method":"getAccountInfo","params":["{}"]}}"#,
+                test_pubkey_base58()
+            ),
+            false,
+            Some(RpcRuntimeSnapshot {
+                slot: 10,
+                block_height: 10,
+                transaction_count: 0,
+                uptime_millis: 1_000,
+                latest_blockhash_seed: 0,
+            }),
+            Some(&mock),
+        );
+        let parsed: serde_json::Value = serde_json::from_str(&payload).unwrap();
+        let value = &parsed["result"]["value"];
+        assert_eq!(value["lamports"], 100_000);
+        assert_eq!(value["space"], 3);
+        assert!(!value["executable"].as_bool().unwrap());
+    }
+
+    #[test]
+    fn bank_access_get_account_info_returns_null_for_missing_account() {
+        let mock: Arc<dyn BankAccessProvider> = Arc::new(MockBankAccess::new());
+
+        let payload = render_json_rpc_response(
+            &format!(
+                r#"{{"jsonrpc":"2.0","id":1,"method":"getAccountInfo","params":["{}"]}}"#,
+                test_pubkey_base58()
+            ),
+            false,
+            Some(RpcRuntimeSnapshot {
+                slot: 10,
+                block_height: 10,
+                transaction_count: 0,
+                uptime_millis: 1_000,
+                latest_blockhash_seed: 0,
+            }),
+            Some(&mock),
+        );
+        let parsed: serde_json::Value = serde_json::from_str(&payload).unwrap();
+        assert!(parsed["result"]["value"].is_null());
+    }
+
+    #[test]
+    fn bank_access_get_multiple_accounts_returns_mixed_results() {
+        let pubkey1 = test_pubkey();
+        let account1 = paradencer_types::Account::new(50_000, vec![], pubkey1);
+        let mock: Arc<dyn BankAccessProvider> =
+            Arc::new(MockBankAccess::new().with_account(pubkey1, account1));
+
+        let pubkey2 = paradencer_types::Pubkey::new([3u8; 32]);
+        let pubkey2_bs58 = bs58::encode(pubkey2.as_bytes()).into_string();
+
+        let payload = render_json_rpc_response(
+            &format!(
+                r#"{{"jsonrpc":"2.0","id":1,"method":"getMultipleAccounts","params":[["{}", "{}"]]}}"#,
+                test_pubkey_base58(),
+                pubkey2_bs58
+            ),
+            false,
+            Some(RpcRuntimeSnapshot {
+                slot: 10,
+                block_height: 10,
+                transaction_count: 0,
+                uptime_millis: 1_000,
+                latest_blockhash_seed: 0,
+            }),
+            Some(&mock),
+        );
+        let parsed: serde_json::Value = serde_json::from_str(&payload).unwrap();
+        let values = parsed["result"]["value"].as_array().unwrap();
+        assert_eq!(values.len(), 2);
+        assert_eq!(values[0]["lamports"], 50_000);
+        assert!(values[1].is_null());
+    }
+
+    #[test]
+    fn bank_access_get_latest_blockhash_returns_real_hash() {
+        let mock: Arc<dyn BankAccessProvider> = Arc::new(MockBankAccess::new());
+        let expected_hash = bs58::encode([0xAB; 32]).into_string();
+
+        let payload = render_json_rpc_response(
+            r#"{"jsonrpc":"2.0","id":1,"method":"getLatestBlockhash","params":[]}"#,
+            false,
+            Some(RpcRuntimeSnapshot {
+                slot: 10,
+                block_height: 10,
+                transaction_count: 0,
+                uptime_millis: 1_000,
+                latest_blockhash_seed: 0,
+            }),
+            Some(&mock),
+        );
+        let parsed: serde_json::Value = serde_json::from_str(&payload).unwrap();
+        assert_eq!(parsed["result"]["value"]["blockhash"], expected_hash);
+        assert_eq!(parsed["result"]["value"]["lastValidBlockHeight"], 250);
+        assert_eq!(parsed["result"]["context"]["slot"], 100);
+    }
+
+    #[test]
+    fn bank_access_is_blockhash_valid_checks_real_hash() {
+        let mock: Arc<dyn BankAccessProvider> = Arc::new(MockBankAccess::new());
+        let valid_hash = bs58::encode([0xAB; 32]).into_string();
+        let invalid_hash = bs58::encode([0x00; 32]).into_string();
+
+        let payload = render_json_rpc_response(
+            &format!(
+                r#"{{"jsonrpc":"2.0","id":1,"method":"isBlockhashValid","params":["{valid_hash}"]}}"#
+            ),
+            false,
+            Some(RpcRuntimeSnapshot {
+                slot: 10,
+                block_height: 10,
+                transaction_count: 0,
+                uptime_millis: 1_000,
+                latest_blockhash_seed: 0,
+            }),
+            Some(&mock),
+        );
+        let parsed: serde_json::Value = serde_json::from_str(&payload).unwrap();
+        assert_eq!(parsed["result"]["value"], true);
+
+        let payload = render_json_rpc_response(
+            &format!(
+                r#"{{"jsonrpc":"2.0","id":2,"method":"isBlockhashValid","params":["{invalid_hash}"]}}"#
+            ),
+            false,
+            Some(RpcRuntimeSnapshot {
+                slot: 10,
+                block_height: 10,
+                transaction_count: 0,
+                uptime_millis: 1_000,
+                latest_blockhash_seed: 0,
+            }),
+            Some(&mock),
+        );
+        let parsed: serde_json::Value = serde_json::from_str(&payload).unwrap();
+        assert_eq!(parsed["result"]["value"], false);
+    }
+
+    #[test]
+    fn bank_access_get_slot_returns_real_slot() {
+        let mock: Arc<dyn BankAccessProvider> = Arc::new(MockBankAccess::new());
+
+        let payload = render_json_rpc_response(
+            r#"{"jsonrpc":"2.0","id":1,"method":"getSlot","params":[]}"#,
+            false,
+            Some(RpcRuntimeSnapshot {
+                slot: 10,
+                block_height: 10,
+                transaction_count: 0,
+                uptime_millis: 1_000,
+                latest_blockhash_seed: 0,
+            }),
+            Some(&mock),
+        );
+        let parsed: serde_json::Value = serde_json::from_str(&payload).unwrap();
+        assert_eq!(parsed["result"], 100);
+    }
+
+    #[test]
+    fn bank_access_get_transaction_count_returns_real_count() {
+        let mock: Arc<dyn BankAccessProvider> = Arc::new(MockBankAccess::new());
+
+        let payload = render_json_rpc_response(
+            r#"{"jsonrpc":"2.0","id":1,"method":"getTransactionCount","params":[]}"#,
+            false,
+            Some(RpcRuntimeSnapshot {
+                slot: 10,
+                block_height: 10,
+                transaction_count: 0,
+                uptime_millis: 1_000,
+                latest_blockhash_seed: 0,
+            }),
+            Some(&mock),
+        );
+        let parsed: serde_json::Value = serde_json::from_str(&payload).unwrap();
+        assert_eq!(parsed["result"], 999);
+    }
+
+    #[test]
+    fn bank_access_get_supply_returns_real_capitalization() {
+        let mock: Arc<dyn BankAccessProvider> = Arc::new(MockBankAccess::new());
+
+        let payload = render_json_rpc_response(
+            r#"{"jsonrpc":"2.0","id":1,"method":"getSupply","params":[]}"#,
+            false,
+            Some(RpcRuntimeSnapshot {
+                slot: 10,
+                block_height: 10,
+                transaction_count: 0,
+                uptime_millis: 1_000,
+                latest_blockhash_seed: 0,
+            }),
+            Some(&mock),
+        );
+        let parsed: serde_json::Value = serde_json::from_str(&payload).unwrap();
+        assert_eq!(parsed["result"]["value"]["total"], 500_000_000_000_u64);
+    }
+
+    #[test]
+    fn bank_access_get_recent_blockhash_returns_real_hash_and_fee() {
+        let mock: Arc<dyn BankAccessProvider> = Arc::new(MockBankAccess::new());
+        let expected_hash = bs58::encode([0xAB; 32]).into_string();
+
+        let payload = render_json_rpc_response(
+            r#"{"jsonrpc":"2.0","id":1,"method":"getRecentBlockhash","params":[]}"#,
+            false,
+            Some(RpcRuntimeSnapshot {
+                slot: 10,
+                block_height: 10,
+                transaction_count: 0,
+                uptime_millis: 1_000,
+                latest_blockhash_seed: 0,
+            }),
+            Some(&mock),
+        );
+        let parsed: serde_json::Value = serde_json::from_str(&payload).unwrap();
+        assert_eq!(parsed["result"]["value"]["blockhash"], expected_hash);
+        assert_eq!(
+            parsed["result"]["value"]["feeCalculator"]["lamportsPerSignature"],
+            5000
+        );
+    }
+
+    #[test]
+    fn bank_access_fallback_to_synthetic_when_none() {
+        let payload = render_json_rpc_response(
+            &format!(
+                r#"{{"jsonrpc":"2.0","id":1,"method":"getBalance","params":["{}"]}}"#,
+                test_pubkey_base58()
+            ),
+            false,
+            Some(RpcRuntimeSnapshot {
+                slot: 10,
+                block_height: 10,
+                transaction_count: 100,
+                uptime_millis: 1_000,
+                latest_blockhash_seed: 0,
+            }),
+            None,
+        );
+        let parsed: serde_json::Value = serde_json::from_str(&payload).unwrap();
+        let value = parsed["result"]["value"].as_u64().unwrap();
+        assert!(
+            value > 0,
+            "synthetic fallback should produce non-zero balance"
+        );
     }
 }

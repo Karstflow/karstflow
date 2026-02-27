@@ -41,6 +41,47 @@ pub trait RuntimeSnapshotProvider: Send + Sync {
     fn latest_snapshot(&self) -> Option<RpcRuntimeSnapshot>;
 }
 
+/// Provides access to bank state for RPC methods that need real account data.
+///
+/// Implementors resolve commitment levels internally (processed = working bank,
+/// confirmed = optimistically confirmed bank, finalized = root bank) and return
+/// account data from the appropriate fork.
+pub trait BankAccessProvider: Send + Sync {
+    /// Look up a single account by pubkey at the given commitment level.
+    fn get_account(
+        &self,
+        pubkey: &paradencer_types::Pubkey,
+        commitment: RpcCommitment,
+    ) -> Option<paradencer_types::Account>;
+
+    /// Get the lamport balance for a pubkey.
+    fn get_balance(&self, pubkey: &paradencer_types::Pubkey, commitment: RpcCommitment) -> u64;
+
+    /// Get the slot number for a commitment level.
+    fn get_slot(&self, commitment: RpcCommitment) -> u64;
+
+    /// Get the block height for a commitment level.
+    fn get_block_height(&self, commitment: RpcCommitment) -> u64;
+
+    /// Get the latest blockhash as a 32-byte array.
+    fn get_latest_blockhash(&self, commitment: RpcCommitment) -> [u8; 32];
+
+    /// Check whether a blockhash is still valid (in the recent blockhash queue).
+    fn is_blockhash_valid(&self, blockhash: &[u8; 32], commitment: RpcCommitment) -> bool;
+
+    /// Get the current lamports-per-signature fee.
+    fn get_lamports_per_signature(&self, commitment: RpcCommitment) -> u64;
+
+    /// Get the last valid block height for the latest blockhash.
+    fn get_last_valid_block_height(&self, commitment: RpcCommitment) -> u64;
+
+    /// Get the transaction count.
+    fn get_transaction_count(&self, commitment: RpcCommitment) -> u64;
+
+    /// Get the total capitalization (supply) in lamports.
+    fn get_capitalization(&self, commitment: RpcCommitment) -> u64;
+}
+
 pub struct MetricsFileRuntimeSnapshotProvider {
     metrics_file_path: PathBuf,
 }

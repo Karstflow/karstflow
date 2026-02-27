@@ -8,7 +8,8 @@ mod params;
 pub(super) mod shared;
 mod transactions;
 
-use crate::state::{RpcCommitment, RpcRuntimeSnapshot};
+use crate::state::{BankAccessProvider, RpcCommitment, RpcRuntimeSnapshot};
+use std::sync::Arc;
 
 use super::method_error::RpcMethodError;
 use super::registry::RpcMethod;
@@ -19,6 +20,7 @@ pub(super) fn dispatch_method(
     snapshot: RpcRuntimeSnapshot,
     commitment: RpcCommitment,
     full_api: bool,
+    bank_access: Option<&Arc<dyn BankAccessProvider>>,
 ) -> Result<serde_json::Value, RpcMethodError> {
     match method {
         RpcMethod::GetHealth
@@ -48,7 +50,7 @@ pub(super) fn dispatch_method(
         | RpcMethod::GetRecentBlockhash
         | RpcMethod::GetLatestBlockhash
         | RpcMethod::GetRecentPerformanceSamples => {
-            ledger::handle(method, request, snapshot, commitment)
+            ledger::handle(method, request, snapshot, commitment, bank_access)
         }
 
         RpcMethod::GetInflationGovernor
@@ -67,7 +69,7 @@ pub(super) fn dispatch_method(
         | RpcMethod::GetAccountInfo
         | RpcMethod::GetMultipleAccounts
         | RpcMethod::GetSignatureStatuses => {
-            accounts::handle(method, request, snapshot, commitment)
+            accounts::handle(method, request, snapshot, commitment, bank_access)
         }
 
         RpcMethod::GetSignaturesForAddress

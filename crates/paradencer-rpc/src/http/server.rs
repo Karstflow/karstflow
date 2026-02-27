@@ -1,5 +1,5 @@
 use crate::errors::{Result, RpcError};
-use crate::state::RuntimeSnapshotProvider;
+use crate::state::{BankAccessProvider, RuntimeSnapshotProvider};
 use jsonrpsee::server::{RpcModule, ServerBuilder};
 use jsonrpsee::types::{ErrorObjectOwned, Params};
 use serde_json::json;
@@ -17,6 +17,7 @@ pub fn spawn_rpc_http_server(
     full_api: bool,
     private: bool,
     runtime_snapshot_provider: Option<Arc<dyn RuntimeSnapshotProvider>>,
+    bank_access_provider: Option<Arc<dyn BankAccessProvider>>,
 ) -> Result<()> {
     let bind_probe = TcpListener::bind(bind_addr)
         .map_err(|source| RpcError::RpcHttpBind { bind_addr, source })?;
@@ -57,6 +58,7 @@ pub fn spawn_rpc_http_server(
                 for method in REGISTERED_RPC_METHODS {
                     let method_name = method.as_str();
                     let provider = runtime_snapshot_provider.clone();
+                    let bank_access = bank_access_provider.clone();
                     let registration =
                         module.register_method(method_name, move |params: Params<'_>, _, _| {
                             dispatch_via_legacy_renderer(
@@ -64,6 +66,7 @@ pub fn spawn_rpc_http_server(
                                 params,
                                 full_api,
                                 provider.as_ref(),
+                                bank_access.as_ref(),
                             )
                         });
                     if let Err(error) = registration {
@@ -95,6 +98,7 @@ fn dispatch_via_legacy_renderer(
     params: Params<'_>,
     full_api: bool,
     runtime_snapshot_provider: Option<&Arc<dyn RuntimeSnapshotProvider>>,
+    bank_access: Option<&Arc<dyn BankAccessProvider>>,
 ) -> std::result::Result<serde_json::Value, ErrorObjectOwned> {
     let request_params = match params.parse::<Option<serde_json::Value>>() {
         Ok(Some(value)) => value,
@@ -124,7 +128,12 @@ fn dispatch_via_legacy_renderer(
     let runtime_snapshot =
         runtime_snapshot_provider.and_then(|provider| provider.latest_snapshot());
 
-    let response = render_json_rpc_response(&request_body.to_string(), full_api, runtime_snapshot);
+    let response = render_json_rpc_response(
+        &request_body.to_string(),
+        full_api,
+        runtime_snapshot,
+        bank_access,
+    );
     let parsed_response: serde_json::Value = serde_json::from_str(&response).map_err(|error| {
         ErrorObjectOwned::owned(-32603, format!("Internal error: {error}"), None::<()>)
     })?;

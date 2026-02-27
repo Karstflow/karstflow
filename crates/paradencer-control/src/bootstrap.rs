@@ -23,7 +23,7 @@ use paradencer_net::{
     ValidatorInfo,
 };
 use paradencer_observability::spawn_metrics_http_bridge;
-use paradencer_rpc::{metrics_file_provider, spawn_rpc_http_server};
+use paradencer_rpc::{metrics_file_provider, spawn_rpc_http_server, BankAccessProvider};
 use paradencer_runtime::{build_pinned_affinity_plan, run_services, Service, ServiceProbeReport};
 use paradencer_stages::{
     ExecutionErrorHandlingPolicy, MetricsOutputTarget, PipelineHandle, PipelineServiceBuilder,
@@ -1945,22 +1945,27 @@ pub fn maybe_start_rpc_http_server_with_consensus(
         paradencer_config::ConfigError::RpcEnabledRequiresBindAddr,
     ))?;
 
-    let runtime_snapshot_provider: Option<Arc<dyn paradencer_rpc::RuntimeSnapshotProvider>> =
-        if let Some(forks) = bank_forks {
-            Some(Arc::new(ConsensusSnapshotProvider::new(forks)))
-        } else {
-            // Fall back to file-based provider if no consensus data.
+    let (runtime_snapshot_provider, bank_access_provider) = if let Some(ref forks) = bank_forks {
+        let snap: Option<Arc<dyn paradencer_rpc::RuntimeSnapshotProvider>> =
+            Some(Arc::new(ConsensusSnapshotProvider::new(forks.clone())));
+        let bank: Option<Arc<dyn BankAccessProvider>> =
+            Some(Arc::new(ConsensusBankAccessProvider::new(forks.clone())));
+        (snap, bank)
+    } else {
+        let snapshot_provider: Option<Arc<dyn paradencer_rpc::RuntimeSnapshotProvider>> =
             match &node_config.metrics_output_target {
                 MetricsOutputTarget::File(path) => Some(metrics_file_provider(path.clone())),
                 _ => None,
-            }
-        };
+            };
+        (snapshot_provider, None)
+    };
 
     spawn_rpc_http_server(
         bind_addr,
         node_config.rpc_full_api,
         node_config.rpc_private,
         runtime_snapshot_provider,
+        bank_access_provider,
     )?;
     Ok(())
 }
@@ -1990,6 +1995,103 @@ impl paradencer_rpc::RuntimeSnapshotProvider for ConsensusSnapshotProvider {
             uptime_millis: 0,
             latest_blockhash_seed: bank.slot().wrapping_mul(0x517c_c1b7_2722_0a95),
         })
+    }
+}
+
+/// Provides access to real account and blockhash data from the consensus layer.
+///
+/// Resolves commitment levels to the appropriate bank fork:
+/// - Processed/Confirmed → working bank (CommitmentTracker integration deferred)
+/// - Finalized → root bank
+struct ConsensusBankAccessProvider {
+    bank_forks: Arc<RwLock<BankForks>>,
+}
+
+impl ConsensusBankAccessProvider {
+    fn new(bank_forks: Arc<RwLock<BankForks>>) -> Self {
+        Self { bank_forks }
+    }
+
+    fn bank_for_commitment(&self, commitment: paradencer_rpc::RpcCommitment) -> Option<Arc<Bank>> {
+        let forks = self.bank_forks.read().ok()?;
+        match commitment {
+            paradencer_rpc::RpcCommitment::Finalized => forks.root_bank(),
+            // Processed and Confirmed both use working bank for now.
+            // TODO: Use CommitmentTracker for proper confirmed bank resolution.
+            _ => Some(forks.working_bank()),
+        }
+    }
+}
+
+impl BankAccessProvider for ConsensusBankAccessProvider {
+    fn get_account(
+        &self,
+        pubkey: &paradencer_types::Pubkey,
+        commitment: paradencer_rpc::RpcCommitment,
+    ) -> Option<paradencer_types::Account> {
+        let bank = self.bank_for_commitment(commitment)?;
+        bank.accounts().get_published_account(pubkey)
+    }
+
+    fn get_balance(
+        &self,
+        pubkey: &paradencer_types::Pubkey,
+        commitment: paradencer_rpc::RpcCommitment,
+    ) -> u64 {
+        self.bank_for_commitment(commitment)
+            .and_then(|bank| bank.accounts().get_published_account(pubkey))
+            .map(|account| account.meta.lamports)
+            .unwrap_or(0)
+    }
+
+    fn get_slot(&self, commitment: paradencer_rpc::RpcCommitment) -> u64 {
+        self.bank_for_commitment(commitment)
+            .map(|bank| bank.slot())
+            .unwrap_or(0)
+    }
+
+    fn get_block_height(&self, commitment: paradencer_rpc::RpcCommitment) -> u64 {
+        // Block height currently equals slot number.
+        self.get_slot(commitment)
+    }
+
+    fn get_latest_blockhash(&self, commitment: paradencer_rpc::RpcCommitment) -> [u8; 32] {
+        self.bank_for_commitment(commitment)
+            .map(|bank| bank.last_blockhash())
+            .unwrap_or([0u8; 32])
+    }
+
+    fn is_blockhash_valid(
+        &self,
+        blockhash: &[u8; 32],
+        commitment: paradencer_rpc::RpcCommitment,
+    ) -> bool {
+        self.bank_for_commitment(commitment)
+            .map(|bank| bank.is_blockhash_valid(blockhash))
+            .unwrap_or(false)
+    }
+
+    fn get_lamports_per_signature(&self, commitment: paradencer_rpc::RpcCommitment) -> u64 {
+        self.bank_for_commitment(commitment)
+            .map(|bank| bank.lamports_per_signature())
+            .unwrap_or(paradencer_constants::economics::LAMPORTS_PER_SIGNATURE)
+    }
+
+    fn get_last_valid_block_height(&self, commitment: paradencer_rpc::RpcCommitment) -> u64 {
+        self.get_block_height(commitment)
+            .saturating_add(paradencer_constants::ledger::RECENT_BLOCKHASH_VALIDITY_WINDOW)
+    }
+
+    fn get_transaction_count(&self, commitment: paradencer_rpc::RpcCommitment) -> u64 {
+        self.bank_for_commitment(commitment)
+            .map(|bank| bank.transaction_count())
+            .unwrap_or(0)
+    }
+
+    fn get_capitalization(&self, commitment: paradencer_rpc::RpcCommitment) -> u64 {
+        self.bank_for_commitment(commitment)
+            .map(|bank| bank.capitalization())
+            .unwrap_or(0)
     }
 }
 
