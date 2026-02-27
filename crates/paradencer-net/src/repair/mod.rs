@@ -1,5 +1,6 @@
 mod coordinator;
 mod forest;
+mod nonce;
 mod policy;
 mod protocol;
 mod request;
@@ -15,6 +16,7 @@ pub use coordinator::{
     ResponseOutcome,
 };
 pub use forest::{InsertOutcome, RepairForest, RepairTarget, ShredSource, SlotRepairState};
+pub use nonce::{current_time_ns, RepairNonceGenerator};
 pub use policy::{InflightEntry, InflightTracker, PeerId, PeerMetrics, PeerSelector, RequestDedup};
 pub use protocol::{RepairRequest, RepairRequestType, RepairResponse, ShredData};
 pub use request::{RepairRequester, RepairRequesterStats};

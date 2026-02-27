@@ -338,8 +338,8 @@ pub struct InflightTracker {
     pending: HashMap<u64, InflightEntry>,
     /// Maximum entries before evicting oldest.
     max_entries: usize,
-    /// Next nonce to assign.
-    next_nonce: u64,
+    /// Keyed nonce generator for time-bucketed nonce computation.
+    nonce_gen: super::nonce::RepairNonceGenerator,
     /// Request timeout duration.
     timeout: Duration,
 }
@@ -365,15 +365,21 @@ impl InflightTracker {
         Self {
             pending: HashMap::new(),
             max_entries: paradencer_constants::repair::MAX_INFLIGHT_REQUESTS,
-            next_nonce: 1,
+            nonce_gen: crate::repair::RepairNonceGenerator::new(),
             timeout: Duration::from_millis(paradencer_constants::repair::REQUEST_TIMEOUT_MS),
         }
     }
 
     /// Register a new in-flight request. Returns the assigned nonce.
+    ///
+    /// The nonce is computed from a keyed hash of (slot, shred_index, time)
+    /// using a per-session secret. This ties the nonce to the request
+    /// parameters and prevents peers from forging response nonces.
     pub fn register(&mut self, slot: Slot, shred_index: ShredIndex, peer: PeerId) -> u64 {
-        let nonce = self.next_nonce;
-        self.next_nonce = self.next_nonce.wrapping_add(1);
+        let time_ns = super::nonce::current_time_ns();
+        let nonce = self
+            .nonce_gen
+            .compute_shred_nonce(slot, shred_index, time_ns) as u64;
 
         // Evict oldest if at capacity.
         if self.pending.len() >= self.max_entries {
@@ -397,6 +403,23 @@ impl InflightTracker {
     /// Complete an in-flight request by nonce. Returns the entry if found.
     pub fn complete(&mut self, nonce: u64) -> Option<InflightEntry> {
         self.pending.remove(&nonce)
+    }
+
+    /// Complete an in-flight request, validating that the nonce matches
+    /// the expected (slot, shred_index). Returns the entry only if both
+    /// the nonce exists and the parameters match.
+    pub fn complete_validated(
+        &mut self,
+        nonce: u64,
+        slot: Slot,
+        shred_index: ShredIndex,
+    ) -> Option<InflightEntry> {
+        if let Some(entry) = self.pending.get(&nonce) {
+            if entry.slot == slot && entry.shred_index == shred_index {
+                return self.pending.remove(&nonce);
+            }
+        }
+        None
     }
 
     /// Remove and return all timed-out requests.
@@ -622,12 +645,45 @@ mod tests {
     }
 
     #[test]
-    fn inflight_nonce_increments() {
+    fn inflight_nonce_is_nonzero() {
         let mut tracker = InflightTracker::new();
+        let nonce = tracker.register(100, 0, peer_id(1));
+        assert!(nonce > 0, "keyed nonce should be nonzero");
+    }
 
+    #[test]
+    fn inflight_different_params_different_nonces() {
+        let mut tracker = InflightTracker::new();
         let n1 = tracker.register(100, 0, peer_id(1));
         let n2 = tracker.register(101, 0, peer_id(1));
-        assert_eq!(n2, n1 + 1);
+        // Different slots should produce different nonces (with high probability).
+        // They could collide in theory but this is extremely unlikely.
+        assert_ne!(
+            n1, n2,
+            "different request params should produce different nonces"
+        );
+    }
+
+    #[test]
+    fn inflight_complete_validated_matches() {
+        let mut tracker = InflightTracker::new();
+        let nonce = tracker.register(100, 5, peer_id(1));
+
+        // Correct slot/index should succeed.
+        let entry = tracker.complete_validated(nonce, 100, 5).unwrap();
+        assert_eq!(entry.slot, 100);
+        assert_eq!(entry.shred_index, 5);
+    }
+
+    #[test]
+    fn inflight_complete_validated_wrong_slot_fails() {
+        let mut tracker = InflightTracker::new();
+        let nonce = tracker.register(100, 5, peer_id(1));
+
+        // Wrong slot should fail.
+        assert!(tracker.complete_validated(nonce, 999, 5).is_none());
+        // Entry should still be pending.
+        assert_eq!(tracker.len(), 1);
     }
 
     #[test]
@@ -635,7 +691,7 @@ mod tests {
         let mut tracker = InflightTracker {
             pending: HashMap::new(),
             max_entries: 1000,
-            next_nonce: 1,
+            nonce_gen: crate::repair::RepairNonceGenerator::new(),
             timeout: Duration::from_millis(10),
         };
 
@@ -654,7 +710,7 @@ mod tests {
         let mut tracker = InflightTracker {
             pending: HashMap::new(),
             max_entries: 2,
-            next_nonce: 1,
+            nonce_gen: crate::repair::RepairNonceGenerator::new(),
             timeout: Duration::from_secs(60),
         };
 

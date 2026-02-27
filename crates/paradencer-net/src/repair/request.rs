@@ -1,5 +1,6 @@
 use super::*;
 use crate::gossip::{ClusterInfo, NodeId};
+use crate::repair::nonce::{current_time_ns, RepairNonceGenerator};
 use crate::repair::protocol::{RepairRequest, RepairRequestType, RepairResponse, ShredData};
 use crate::repair::wire::convert;
 use std::collections::HashMap;
@@ -63,12 +64,15 @@ struct PendingRequest {
 ///
 /// Sends wire-compatible repair requests signed with the node's Ed25519 key.
 /// Responses are raw shred payloads with a u32 nonce appended.
+///
+/// Nonces are computed from a keyed SHA-256 hash of (slot, shred_index, time),
+/// tying each nonce to its request parameters for response validation.
 pub struct RepairRequester {
     node_id: NodeId,
     cluster_info: Arc<ClusterInfo>,
     socket: Arc<UdpSocket>,
     stats: RepairRequesterStats,
-    nonce_counter: Arc<AtomicU64>,
+    nonce_gen: RepairNonceGenerator,
     pending_requests: Arc<parking_lot::RwLock<HashMap<u64, PendingRequest>>>,
     request_timeout: Duration,
     request_tx: mpsc::Sender<(RepairRequest, SocketAddr, oneshot::Sender<RepairResponse>)>,
@@ -85,7 +89,7 @@ impl RepairRequester {
             cluster_info,
             socket,
             stats: RepairRequesterStats::new(),
-            nonce_counter: Arc::new(AtomicU64::new(0)),
+            nonce_gen: RepairNonceGenerator::new(),
             pending_requests: Arc::new(parking_lot::RwLock::new(HashMap::new())),
             request_timeout: Duration::from_millis(DEFAULT_REPAIR_TIMEOUT_MS),
             request_tx,
@@ -154,7 +158,9 @@ impl RepairRequester {
         slot: Slot,
         index: ShredIndex,
     ) -> RepairResult<Option<ShredData>> {
-        let nonce = self.next_nonce();
+        let nonce = self
+            .nonce_gen
+            .compute_shred_nonce(slot, index, current_time_ns()) as u64;
         let request = RepairRequest::Shred {
             requester: self.node_id,
             slot,
@@ -181,7 +187,9 @@ impl RepairRequester {
         target: SocketAddr,
         slot: Slot,
     ) -> RepairResult<Option<ShredIndex>> {
-        let nonce = self.next_nonce();
+        let nonce = self
+            .nonce_gen
+            .compute_shred_nonce(slot, 0, current_time_ns()) as u64;
         let request = RepairRequest::HighestShred {
             requester: self.node_id,
             slot,
@@ -208,7 +216,9 @@ impl RepairRequester {
         start_slot: Slot,
         end_slot: Slot,
     ) -> RepairResult<Vec<ShredData>> {
-        let nonce = self.next_nonce();
+        let nonce = self
+            .nonce_gen
+            .compute_shred_nonce(start_slot, 0, current_time_ns()) as u64;
         let request = RepairRequest::SlotRange {
             requester: self.node_id,
             start_slot,
@@ -236,7 +246,7 @@ impl RepairRequester {
         slot: Slot,
         ancestors: u64,
     ) -> RepairResult<Vec<ShredData>> {
-        let nonce = self.next_nonce();
+        let nonce = self.nonce_gen.compute_orphan_nonce(slot, current_time_ns()) as u64;
         let request = RepairRequest::Ancestor {
             requester: self.node_id,
             slot,
@@ -403,8 +413,10 @@ impl RepairRequester {
         }
     }
 
-    fn next_nonce(&self) -> u64 {
-        self.nonce_counter.fetch_add(1, Ordering::Relaxed)
+    /// Access the nonce generator (for tests).
+    #[cfg(test)]
+    fn nonce_gen(&self) -> &RepairNonceGenerator {
+        &self.nonce_gen
     }
 }
 
@@ -528,7 +540,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_requester_nonce() {
+    async fn test_requester_nonce_keyed() {
         let node_id = NodeId::new([1u8; 32]);
         let cluster_info = Arc::new(ClusterInfo::new(
             node_id,
@@ -540,10 +552,12 @@ mod tests {
 
         let requester = RepairRequester::new(node_id, cluster_info, socket);
 
-        let nonce1 = requester.next_nonce();
-        let nonce2 = requester.next_nonce();
+        let t = super::super::nonce::current_time_ns();
+        let n1 = requester.nonce_gen().compute_shred_nonce(100, 0, t);
+        let n2 = requester.nonce_gen().compute_shred_nonce(101, 0, t);
 
-        assert_eq!(nonce2, nonce1 + 1);
+        assert!(n1 > 0, "nonce should be nonzero");
+        assert_ne!(n1, n2, "different params should produce different nonces");
     }
 
     #[test]
