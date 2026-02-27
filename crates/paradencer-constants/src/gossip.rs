@@ -236,3 +236,19 @@ pub const MAX_WALLCLOCK_MS: u64 = 1_000_000_000_000_000;
 
 /// Number of duplicate shred proof chunks per complete proof.
 pub const DUPLICATE_SHRED_MAX_CHUNKS: u16 = 16;
+
+// ---------------------------------------------------------------------------
+// Outbound data budget (pull response rate limiting)
+// ---------------------------------------------------------------------------
+
+/// Budget replenishment interval in nanoseconds (100ms).
+pub const BUDGET_REPLENISH_INTERVAL_NS: u64 = 100_000_000;
+
+/// Bytes replenished per staked validator per interval.
+pub const BUDGET_BYTES_PER_INTERVAL: u64 = 1_024;
+
+/// Maximum accumulation multiplier (burst capacity).
+pub const BUDGET_MAX_MULTIPLE: u64 = 5;
+
+/// Minimum assumed staked validators for budget calculation.
+pub const BUDGET_MIN_STAKED: u64 = 2;

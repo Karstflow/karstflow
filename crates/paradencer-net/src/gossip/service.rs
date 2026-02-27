@@ -6,7 +6,7 @@ use std::collections::HashSet;
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tokio::net::UdpSocket;
 use tokio::sync::broadcast;
 use tokio::time::{interval, sleep};
@@ -59,6 +59,7 @@ pub struct GossipServiceStats {
     pub bytes_received: Arc<AtomicU64>,
     pub send_errors: Arc<AtomicU64>,
     pub receive_errors: Arc<AtomicU64>,
+    pub pull_responses_budget_exhausted: Arc<AtomicU64>,
 }
 
 impl GossipServiceStats {
@@ -79,6 +80,7 @@ impl GossipServiceStats {
             bytes_received: Arc::new(AtomicU64::new(0)),
             send_errors: Arc::new(AtomicU64::new(0)),
             receive_errors: Arc::new(AtomicU64::new(0)),
+            pull_responses_budget_exhausted: Arc::new(AtomicU64::new(0)),
         }
     }
 }
@@ -92,6 +94,69 @@ impl Default for GossipServiceStats {
 /// Maximum packet size for gossip messages.
 const GOSSIP_MAX_PACKET_SIZE: usize = gossip_const::GOSSIP_MTU;
 
+/// Token-bucket rate limiter for outbound pull response data.
+///
+/// Replenished every 100ms with `num_staked * 1024` bytes, capped at
+/// 5x that amount. Only pull responses are rate-limited; push messages
+/// are not.
+#[derive(Debug)]
+pub struct DataBudget {
+    remaining: u64,
+    last_replenish: Instant,
+}
+
+impl Default for DataBudget {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl DataBudget {
+    pub fn new() -> Self {
+        Self {
+            remaining: 0,
+            last_replenish: Instant::now(),
+        }
+    }
+
+    /// Replenish the budget based on elapsed time and staked validator count.
+    /// Returns the current remaining budget after replenishment.
+    pub fn replenish(&mut self, num_staked: u64) -> u64 {
+        let now = Instant::now();
+        let elapsed = now.duration_since(self.last_replenish);
+
+        if elapsed.as_nanos() >= gossip_const::BUDGET_REPLENISH_INTERVAL_NS as u128 {
+            let staked = num_staked.max(gossip_const::BUDGET_MIN_STAKED);
+            let increment = staked.saturating_mul(gossip_const::BUDGET_BYTES_PER_INTERVAL);
+            let cap = gossip_const::BUDGET_MAX_MULTIPLE.saturating_mul(increment);
+            self.remaining = self.remaining.saturating_add(increment).min(cap);
+            self.last_replenish = now;
+        }
+
+        self.remaining
+    }
+
+    /// Debit bytes from the budget. Returns true if the full amount was
+    /// available, false if the budget was exhausted (partial debit).
+    pub fn debit(&mut self, bytes: u64) -> bool {
+        if self.remaining >= bytes {
+            self.remaining -= bytes;
+            true
+        } else {
+            self.remaining = 0;
+            false
+        }
+    }
+
+    /// Current remaining budget in bytes.
+    pub fn remaining(&self) -> u64 {
+        self.remaining
+    }
+}
+
+/// Thread-safe handle to the outbound pull response budget.
+type SharedBudget = Arc<parking_lot::Mutex<DataBudget>>;
+
 /// Gossip service for cluster communication.
 ///
 /// Uses wire-compatible protocol encoding that matches the standard
@@ -101,6 +166,7 @@ pub struct GossipService {
     config: GossipConfig,
     stats: GossipServiceStats,
     socket: Arc<UdpSocket>,
+    pull_budget: SharedBudget,
     shutdown_tx: Option<broadcast::Sender<()>>,
 }
 
@@ -128,6 +194,7 @@ impl GossipService {
             config,
             stats: GossipServiceStats::new(),
             socket: Arc::new(socket),
+            pull_budget: Arc::new(parking_lot::Mutex::new(DataBudget::new())),
             shutdown_tx: None,
         })
     }
@@ -155,8 +222,9 @@ impl GossipService {
         let recv_cluster_info = Arc::clone(&self.cluster_info);
         let recv_stats = self.stats.clone();
         let recv_socket = Arc::clone(&self.socket);
+        let recv_budget = Arc::clone(&self.pull_budget);
         tokio::spawn(async move {
-            Self::receive_loop(recv_socket, recv_cluster_info, recv_stats).await;
+            Self::receive_loop(recv_socket, recv_cluster_info, recv_stats, recv_budget).await;
         });
 
         // Spawn push gossip task
@@ -223,6 +291,7 @@ impl GossipService {
         socket: Arc<UdpSocket>,
         cluster_info: Arc<ClusterInfo>,
         stats: GossipServiceStats,
+        pull_budget: SharedBudget,
     ) {
         let mut buf = vec![0u8; GOSSIP_MAX_PACKET_SIZE];
 
@@ -235,8 +304,15 @@ impl GossipService {
 
                     match WireProtocol::decode(&buf[..len]) {
                         Ok(message) => {
-                            Self::handle_message(message, src_addr, &cluster_info, &stats, &socket)
-                                .await;
+                            Self::handle_message(
+                                message,
+                                src_addr,
+                                &cluster_info,
+                                &stats,
+                                &socket,
+                                &pull_budget,
+                            )
+                            .await;
                         }
                         Err(_) => {
                             stats.receive_errors.fetch_add(1, Ordering::Relaxed);
@@ -258,6 +334,7 @@ impl GossipService {
         cluster_info: &Arc<ClusterInfo>,
         stats: &GossipServiceStats,
         socket: &Arc<UdpSocket>,
+        pull_budget: &SharedBudget,
     ) {
         match message {
             WireProtocol::PushMessage(_sender, values) => {
@@ -270,6 +347,22 @@ impl GossipService {
 
             WireProtocol::PullRequest(wire_filter, caller_value) => {
                 stats.pull_requests_received.fetch_add(1, Ordering::Relaxed);
+
+                // Replenish and check pull response budget.
+                // Use cluster size as proxy for staked count until stake
+                // tracking is integrated.
+                let num_staked = cluster_info.size() as u64;
+                {
+                    let mut budget = pull_budget.lock();
+                    if budget.replenish(num_staked) == 0 {
+                        stats
+                            .pull_responses_budget_exhausted
+                            .fetch_add(1, Ordering::Relaxed);
+                        // Still insert the caller's contact info even when budget-limited.
+                        Self::insert_wire_values(cluster_info, &[caller_value]);
+                        return;
+                    }
+                }
 
                 // Also insert the caller's self-value (contains their contact info)
                 Self::insert_wire_values(cluster_info, &[caller_value]);
@@ -299,6 +392,11 @@ impl GossipService {
                 let response = WireProtocol::PullResponse(cluster_info.node_id().0, wire_values);
 
                 if let Ok(encoded) = response.encode() {
+                    // Debit the pull response budget.
+                    {
+                        let mut budget = pull_budget.lock();
+                        budget.debit(encoded.len() as u64);
+                    }
                     let _ = socket.send_to(&encoded, src_addr).await;
                     stats.pull_responses_sent.fetch_add(1, Ordering::Relaxed);
                     stats
@@ -658,5 +756,77 @@ mod tests {
 
         assert_eq!(stats.push_messages_sent.load(Ordering::Relaxed), 5);
         assert_eq!(stats.push_messages_received.load(Ordering::Relaxed), 3);
+    }
+
+    // --- DataBudget tests ---
+
+    #[test]
+    fn budget_starts_at_zero() {
+        let budget = DataBudget::new();
+        assert_eq!(budget.remaining(), 0);
+    }
+
+    #[test]
+    fn budget_replenish_adds_bytes() {
+        let mut budget = DataBudget::new();
+        // Force last_replenish far enough in the past to trigger replenishment.
+        budget.last_replenish = Instant::now() - Duration::from_millis(200);
+
+        let remaining = budget.replenish(10);
+        // 10 staked * 1024 = 10240
+        assert_eq!(remaining, 10_240);
+        assert_eq!(budget.remaining(), 10_240);
+    }
+
+    #[test]
+    fn budget_replenish_uses_minimum_staked() {
+        let mut budget = DataBudget::new();
+        budget.last_replenish = Instant::now() - Duration::from_millis(200);
+
+        // 0 staked should use BUDGET_MIN_STAKED (2)
+        let remaining = budget.replenish(0);
+        assert_eq!(remaining, 2 * 1024);
+    }
+
+    #[test]
+    fn budget_caps_at_max_multiple() {
+        let mut budget = DataBudget::new();
+
+        // Replenish many times to accumulate
+        for _ in 0..20 {
+            budget.last_replenish = Instant::now() - Duration::from_millis(200);
+            budget.replenish(10);
+        }
+
+        // Cap: 5 * 10 * 1024 = 51200
+        assert_eq!(budget.remaining(), 51_200);
+    }
+
+    #[test]
+    fn budget_debit_subtracts() {
+        let mut budget = DataBudget::new();
+        budget.last_replenish = Instant::now() - Duration::from_millis(200);
+        budget.replenish(10); // 10240
+
+        assert!(budget.debit(5000));
+        assert_eq!(budget.remaining(), 5240);
+    }
+
+    #[test]
+    fn budget_debit_exhaustion() {
+        let mut budget = DataBudget::new();
+        budget.last_replenish = Instant::now() - Duration::from_millis(200);
+        budget.replenish(2); // 2048
+
+        assert!(!budget.debit(5000));
+        assert_eq!(budget.remaining(), 0);
+    }
+
+    #[test]
+    fn budget_no_replenish_before_interval() {
+        let mut budget = DataBudget::new();
+        // last_replenish is now, so no time has passed
+        let remaining = budget.replenish(100);
+        assert_eq!(remaining, 0);
     }
 }

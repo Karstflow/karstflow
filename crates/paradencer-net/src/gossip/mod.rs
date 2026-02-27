@@ -19,7 +19,7 @@ pub use protocol::{
     GossipMessage, GossipMessageType, GossipPullRequest, GossipPullResponse, GossipPushMessage,
     GossipVersion, PullRequestFilter, GOSSIP_PROTOCOL_VERSION,
 };
-pub use service::{GossipConfig, GossipService, GossipServiceStats};
+pub use service::{DataBudget, GossipConfig, GossipService, GossipServiceStats};
 
 use crate::IngressError;
 
