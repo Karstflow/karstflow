@@ -34,5 +34,10 @@ pub(crate) fn emit_line(output_target: &MetricsOutputTarget, line: &str) -> Resu
                 })?;
             Ok(())
         }
+        MetricsOutputTarget::Http => {
+            // Http target is handled directly by MetricsReporter::tick()
+            // writing to the shared MetricsContent buffer.
+            Ok(())
+        }
     }
 }

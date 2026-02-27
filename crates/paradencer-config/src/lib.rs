@@ -565,6 +565,7 @@ pub fn validate_metrics_target_preflight(
             }
             Ok(())
         }
+        MetricsOutputTarget::Http => Ok(()),
     }
 }
 

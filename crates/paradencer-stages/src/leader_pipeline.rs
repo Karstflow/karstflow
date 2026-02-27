@@ -12,7 +12,7 @@
 /// the PoH service advances the hash chain to produce tick entries.
 use crate::block_producer::{Entry, MicroblockEntry, PohService, PohState};
 use crate::exec_stage::{ExecStage, ExecutionEngine, MicroblockExecResult, TransactionExecResult};
-use crate::pack_stage::{PackScheduler, PackedTransaction};
+use crate::pack_stage::{MicroblockRebate, PackPacer, PackScheduler, PackedTransaction};
 use paradencer_sbpf::TransactionProcessor;
 use paradencer_types::{Account, Pubkey};
 use sha2::{Digest, Sha256};
@@ -177,30 +177,83 @@ pub struct PipelineStepResult {
     pub microblock_id: u64,
 }
 
+/// Accumulated statistics for one leader slot.
+#[derive(Debug, Clone, Default)]
+pub struct LeaderPipelineStats {
+    /// Total microblocks produced and executed.
+    pub microblocks_produced: u64,
+    /// Total transactions executed (success + failure).
+    pub transactions_executed: u64,
+    /// Total successfully executed transactions.
+    pub transactions_succeeded: u64,
+    /// Total failed transactions.
+    pub transactions_failed: u64,
+    /// Total compute units consumed across all microblocks.
+    pub compute_units_consumed: u64,
+    /// Total compute units budgeted (before rebate).
+    pub compute_units_budgeted: u64,
+    /// Total CUs rebated back to block budget.
+    pub compute_units_rebated: u64,
+    /// Total fees collected.
+    pub fees_collected: u64,
+    /// Number of times the pacer delayed microblock emission.
+    pub pacing_delays: u64,
+}
+
 /// The leader block production pipeline.
 ///
 /// Call `step()` repeatedly during a leader slot to produce and execute
 /// microblocks. Between steps, call `advance_poh()` to produce tick entries.
 /// When the slot is complete, call `finish_slot()`.
+///
+/// Integrates `PackPacer` for rate-limiting microblock emission and
+/// CU rebate tracking for accurate block budget accounting.
 pub struct LeaderPipeline {
     pack: PackScheduler,
     exec: ExecStage,
     poh: PohService,
+    /// Optional microblock emission rate limiter.
+    pacer: Option<PackPacer>,
     /// Accumulated entries for the current slot.
     entries: Vec<Entry>,
     /// Count of microblocks executed in this slot.
     microblocks_executed: u64,
+    /// Per-slot statistics.
+    stats: LeaderPipelineStats,
 }
 
 impl LeaderPipeline {
-    /// Create a new pipeline with the given components.
+    /// Create a new pipeline with the given components (no pacing).
     pub fn new(pack: PackScheduler, exec: ExecStage, poh: PohService) -> Self {
         Self {
             pack,
             exec,
             poh,
+            pacer: None,
             entries: Vec::new(),
             microblocks_executed: 0,
+            stats: LeaderPipelineStats::default(),
+        }
+    }
+
+    /// Create a pipeline with microblock pacing enabled.
+    ///
+    /// The pacer enforces a minimum interval between microblock emissions
+    /// and a per-slot microblock count limit.
+    pub fn with_pacer(
+        pack: PackScheduler,
+        exec: ExecStage,
+        poh: PohService,
+        pacer: PackPacer,
+    ) -> Self {
+        Self {
+            pack,
+            exec,
+            poh,
+            pacer: Some(pacer),
+            entries: Vec::new(),
+            microblocks_executed: 0,
+            stats: LeaderPipelineStats::default(),
         }
     }
 
@@ -209,6 +262,10 @@ impl LeaderPipeline {
         self.pack.new_block(slot);
         self.entries.clear();
         self.microblocks_executed = 0;
+        self.stats = LeaderPipelineStats::default();
+        if let Some(ref mut pacer) = self.pacer {
+            pacer.new_slot();
+        }
     }
 
     /// Submit a transaction for scheduling.
@@ -218,13 +275,27 @@ impl LeaderPipeline {
 
     /// Try to produce and execute one microblock.
     ///
-    /// Returns `None` if no transactions are available or block is full.
-    /// On success, the microblock is executed, the mixin hash is fed to PoH,
-    /// and pack locks are released.
+    /// Returns `None` if:
+    /// - No transactions are available
+    /// - Block is full
+    /// - Pacer is throttling emission (minimum interval not elapsed)
+    ///
+    /// On success, the microblock is executed, CU rebates are computed,
+    /// the mixin hash is fed to PoH, and pack locks are released.
     pub fn step(&mut self) -> Option<PipelineStepResult> {
+        // 0. Check pacer: is emission allowed?
+        if let Some(ref pacer) = self.pacer {
+            if !pacer.can_emit() {
+                self.stats.pacing_delays += 1;
+                return None;
+            }
+        }
+
         // 1. Pack: produce next microblock
         let microblock = self.pack.produce_microblock()?;
         let microblock_id = microblock.id;
+        let is_vote_only = microblock.is_vote_only;
+        let budgeted_cus = microblock.total_compute_units;
 
         // 2. Exec: execute the microblock
         let exec_result = self.exec.execute_microblock(&microblock);
@@ -242,10 +313,35 @@ impl LeaderPipeline {
             self.entries.push(Entry::Microblock(entry.clone()));
         }
 
-        // 5. Release pack locks for this microblock
-        self.pack.complete_microblock(microblock_id);
+        // 5. Compute CU rebate and release pack locks
+        let consumed_cus = exec_result.total_compute_units;
+        let rebate = MicroblockRebate {
+            requested_cus: budgeted_cus,
+            consumed_cus,
+            is_vote_only,
+        };
+        self.pack
+            .complete_microblock_with_rebate(microblock_id, rebate);
 
+        // 6. Record pacer emission
+        if let Some(ref mut pacer) = self.pacer {
+            pacer.record_emit();
+        }
+
+        // 7. Update statistics
         self.microblocks_executed += 1;
+        self.stats.microblocks_produced += 1;
+        self.stats.compute_units_budgeted += budgeted_cus;
+        self.stats.compute_units_consumed += consumed_cus;
+        if budgeted_cus > consumed_cus {
+            self.stats.compute_units_rebated += budgeted_cus - consumed_cus;
+        }
+        self.stats.transactions_executed += exec_result.transaction_results.len() as u64;
+        self.stats.transactions_succeeded += exec_result.success_count as u64;
+        self.stats.transactions_failed += exec_result.failure_count as u64;
+        for tx_result in &exec_result.transaction_results {
+            self.stats.fees_collected += tx_result.fee_paid;
+        }
 
         Some(PipelineStepResult {
             exec_result,
@@ -281,6 +377,11 @@ impl LeaderPipeline {
     /// Whether PoH is in Leading state.
     pub fn is_leading(&self) -> bool {
         self.poh.state() == PohState::Leading
+    }
+
+    /// Per-slot accumulated statistics.
+    pub fn stats(&self) -> &LeaderPipelineStats {
+        &self.stats
     }
 
     /// Access the PoH service for reset/state transitions.
@@ -496,5 +597,179 @@ mod tests {
         let result = engine.execute(&tx);
         assert!(!result.success);
         assert!(result.error.is_some());
+    }
+
+    #[test]
+    fn stats_track_execution_results() {
+        let config = PackConfig {
+            max_txns_per_microblock: 1,
+            ..Default::default()
+        };
+        let pack = PackScheduler::with_config(config);
+        let engine = MockExecutionEngine::new(50_000);
+        let exec = ExecStage::new(Box::new(engine));
+        let poh = PohService::new(Hash::default());
+        let mut pipeline = LeaderPipeline::new(pack, exec, poh);
+
+        pipeline.begin_slot(1);
+
+        pipeline.submit_transaction(make_tx(1, 5_000, 200_000));
+        pipeline.submit_transaction(make_tx(2, 3_000, 100_000));
+
+        pipeline.step();
+        pipeline.step();
+
+        let stats = pipeline.stats();
+        assert_eq!(stats.microblocks_produced, 2);
+        assert_eq!(stats.transactions_executed, 2);
+        assert!(stats.compute_units_consumed > 0);
+    }
+
+    #[test]
+    fn stats_reset_on_begin_slot() {
+        let mut pipeline = make_pipeline();
+        pipeline.begin_slot(1);
+
+        pipeline.submit_transaction(make_tx(1, 5_000, 200_000));
+        pipeline.step();
+
+        assert_eq!(pipeline.stats().microblocks_produced, 1);
+
+        pipeline.begin_slot(2);
+        assert_eq!(pipeline.stats().microblocks_produced, 0);
+        assert_eq!(pipeline.stats().transactions_executed, 0);
+    }
+
+    #[test]
+    fn rebate_tracking_credits_unused_cus() {
+        let mut pipeline = make_pipeline();
+        pipeline.begin_slot(1);
+
+        // MockExecutionEngine consumes 50_000 CUs per transaction.
+        // Submit a transaction with 200_000 CU budget.
+        pipeline.submit_transaction(make_tx(1, 5_000, 200_000));
+        pipeline.step();
+
+        let stats = pipeline.stats();
+        // Budgeted 200K, consumed 50K, rebated 150K.
+        assert_eq!(stats.compute_units_budgeted, 200_000);
+        assert_eq!(stats.compute_units_consumed, 50_000);
+        assert_eq!(stats.compute_units_rebated, 150_000);
+    }
+
+    #[test]
+    fn pacer_throttles_emission() {
+        let config = PackConfig {
+            max_txns_per_microblock: 1,
+            ..Default::default()
+        };
+        let pack = PackScheduler::with_config(config);
+        let engine = MockExecutionEngine::new(50_000);
+        let exec = ExecStage::new(Box::new(engine));
+        let poh = PohService::new(Hash::default());
+        // Very long interval (10 seconds) to ensure throttling.
+        let pacer = PackPacer::new(10_000_000_000, u64::MAX);
+        let mut pipeline = LeaderPipeline::with_pacer(pack, exec, poh, pacer);
+
+        // Don't call begin_slot to avoid new_slot() resetting last_emit.
+        // Instead, submit directly. The PackPacer::new() sets last_emit
+        // far in the past, so the first call will succeed.
+        pipeline.pack.new_block(1);
+        pipeline.entries.clear();
+        pipeline.microblocks_executed = 0;
+        pipeline.stats = LeaderPipelineStats::default();
+
+        pipeline.submit_transaction(make_tx(1, 5_000, 100_000));
+        pipeline.submit_transaction(make_tx(2, 3_000, 100_000));
+
+        // First step should succeed (pacer initialized with past timestamp).
+        let r1 = pipeline.step();
+        assert!(r1.is_some());
+
+        // Second step should be throttled (10s interval not elapsed).
+        let r2 = pipeline.step();
+        assert!(r2.is_none());
+
+        assert_eq!(pipeline.stats().pacing_delays, 1);
+    }
+
+    #[test]
+    fn pacer_per_slot_limit() {
+        let config = PackConfig {
+            max_txns_per_microblock: 1,
+            ..Default::default()
+        };
+        let pack = PackScheduler::with_config(config);
+        let engine = MockExecutionEngine::new(50_000);
+        let exec = ExecStage::new(Box::new(engine));
+        let poh = PohService::new(Hash::default());
+        // Allow max 1 microblock per slot, with zero interval.
+        let pacer = PackPacer::new(0, 1);
+        let mut pipeline = LeaderPipeline::with_pacer(pack, exec, poh, pacer);
+
+        // Manually init to avoid new_slot() timestamp issues.
+        pipeline.pack.new_block(1);
+        pipeline.entries.clear();
+        pipeline.microblocks_executed = 0;
+        pipeline.stats = LeaderPipelineStats::default();
+
+        pipeline.submit_transaction(make_tx(1, 5_000, 100_000));
+        pipeline.submit_transaction(make_tx(2, 3_000, 100_000));
+
+        // First step succeeds.
+        assert!(pipeline.step().is_some());
+
+        // Second step blocked by per-slot limit.
+        assert!(pipeline.step().is_none());
+        assert!(pipeline.stats().pacing_delays >= 1);
+    }
+
+    #[test]
+    fn pipeline_without_pacer_produces_freely() {
+        let config = PackConfig {
+            max_txns_per_microblock: 1,
+            ..Default::default()
+        };
+        let pack = PackScheduler::with_config(config);
+        let engine = MockExecutionEngine::new(50_000);
+        let exec = ExecStage::new(Box::new(engine));
+        let poh = PohService::new(Hash::default());
+        let mut pipeline = LeaderPipeline::new(pack, exec, poh);
+        pipeline.begin_slot(1);
+
+        for i in 0..5u8 {
+            pipeline.submit_transaction(make_tx(i, 5_000, 100_000));
+        }
+
+        // All 5 should be produced without pacing delays (one per microblock).
+        let mut count = 0;
+        while pipeline.step().is_some() {
+            count += 1;
+        }
+        assert_eq!(count, 5);
+        assert_eq!(pipeline.stats().pacing_delays, 0);
+    }
+
+    #[test]
+    fn fees_collected_tracks_priority_fees() {
+        let config = PackConfig {
+            max_txns_per_microblock: 1,
+            ..Default::default()
+        };
+        let pack = PackScheduler::with_config(config);
+        let engine = MockExecutionEngine::new(50_000);
+        let exec = ExecStage::new(Box::new(engine));
+        let poh = PohService::new(Hash::default());
+        let mut pipeline = LeaderPipeline::new(pack, exec, poh);
+        pipeline.begin_slot(1);
+
+        pipeline.submit_transaction(make_tx(1, 5_000, 100_000));
+        pipeline.submit_transaction(make_tx(2, 3_000, 100_000));
+
+        pipeline.step();
+        pipeline.step();
+
+        // MockExecutionEngine succeeds, so fees = priority_fee per tx.
+        assert_eq!(pipeline.stats().fees_collected, 8_000);
     }
 }

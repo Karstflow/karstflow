@@ -14,6 +14,8 @@ pub enum MetricsOutputTarget {
     Stdout,
     File(PathBuf),
     Udp(SocketAddr),
+    /// Write Prometheus text to a shared buffer served by MetricsHttpServer.
+    Http,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

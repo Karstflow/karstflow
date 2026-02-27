@@ -2,6 +2,7 @@ mod format;
 mod sink;
 
 use crate::errors::StageError;
+use crate::metrics_http::MetricsContent;
 use crate::{
     BlockAssemblyStats, IngressFilterStats, MetricsOutputFormat, MetricsOutputTarget,
     ShredFilterStats,
@@ -20,6 +21,9 @@ pub struct MetricsReporter {
     ingress_filter_stats: Arc<IngressFilterStats>,
     shred_filter_stats: Arc<ShredFilterStats>,
     block_assembly_stats: Arc<BlockAssemblyStats>,
+    /// Shared buffer for HTTP metrics serving. Only used when
+    /// `output_target` is `MetricsOutputTarget::Http`.
+    http_content: Option<MetricsContent>,
 }
 
 pub struct LinkTelemetryStats {
@@ -93,7 +97,18 @@ impl MetricsReporter {
             ingress_filter_stats: stage_stats.ingress_filter_stats,
             shred_filter_stats: stage_stats.shred_filter_stats,
             block_assembly_stats: stage_stats.block_assembly_stats,
+            http_content: None,
         }
+    }
+
+    /// Set the shared HTTP content buffer for Prometheus scraping.
+    ///
+    /// When the output target is `Http`, each tick updates this buffer
+    /// with the latest Prometheus text. A `MetricsHttpServer` serves
+    /// this content on `GET /metrics`.
+    pub fn with_http_content(mut self, content: MetricsContent) -> Self {
+        self.http_content = Some(content);
+        self
     }
 
     fn to_runtime_error(&self, error: StageError) -> RuntimeError {
@@ -175,7 +190,7 @@ impl Service for MetricsReporter {
                     .map_err(|error| self.to_runtime_error(error))?;
             }
             MetricsOutputFormat::PrometheusText => {
-                for line in format::build_prometheus_lines(
+                let lines = format::build_prometheus_lines(
                     uptime_millis,
                     &packet_snapshot,
                     &shred_snapshot,
@@ -183,9 +198,21 @@ impl Service for MetricsReporter {
                     ingress_filter_snapshot,
                     shred_filter_snapshot,
                     block_assembly_snapshot,
-                ) {
-                    sink::emit_line(&self.output_target, &line)
-                        .map_err(|error| self.to_runtime_error(error))?;
+                );
+
+                // For Http target, join all lines and write to the shared buffer.
+                if matches!(self.output_target, MetricsOutputTarget::Http) {
+                    if let Some(ref content) = self.http_content {
+                        let full_text = lines.join("\n");
+                        if let Ok(mut guard) = content.lock() {
+                            *guard = full_text;
+                        }
+                    }
+                } else {
+                    for line in lines {
+                        sink::emit_line(&self.output_target, &line)
+                            .map_err(|error| self.to_runtime_error(error))?;
+                    }
                 }
             }
         }

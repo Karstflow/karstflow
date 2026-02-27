@@ -29,6 +29,7 @@ mod fec_resolver;
 #[cfg(test)]
 mod integration_tests;
 mod leader_pipeline;
+pub mod metrics_http;
 mod metrics_reporter;
 pub mod pack_stage;
 mod pipeline_service;
@@ -42,6 +43,7 @@ mod shred_filter;
 mod shred_network;
 mod shred_store_service;
 pub mod shred_verifier;
+mod sign_service;
 mod stats;
 #[cfg(test)]
 mod testsuite;
@@ -57,6 +59,9 @@ pub use dedup_stage::{DedupOutcome, DedupStage, DedupStats, TransactionCache};
 pub use edge_intake::EdgeIntake;
 pub use errors::StageError;
 pub use execution_adapter::SbpfExecutionAdapter;
+pub use metrics_http::{
+    shared_metrics_content, MetricsContent, MetricsHttpServer, MetricsHttpStats,
+};
 pub use metrics_reporter::{LinkTelemetryStats, MetricsReporter, StageTelemetryStats};
 pub use replay_stage::{
     AggregateMetrics, AlertSeverity, AlertType, AncestryError, AncestryStats, AncestryVerifier,
@@ -98,7 +103,9 @@ pub use fec_resolver::{
     FecBufferHandle, FecResolverPool, FecResolverStats, FecSetKey, FecSetView, FecSetViewMut,
     ResolverInsertResult, SpilledFecSet,
 };
-pub use leader_pipeline::{LeaderPipeline, PipelineStepResult, SbpfExecutionEngine};
+pub use leader_pipeline::{
+    LeaderPipeline, LeaderPipelineStats, PipelineStepResult, SbpfExecutionEngine,
+};
 pub use pack_stage::{
     AccountLock, ConflictDetector, LockKind, Microblock, MicroblockRebate, PackConfig, PackLimits,
     PackOutcome, PackPacer, PackScheduler, PackStats, PackStatsSnapshot, PackedTransaction,
@@ -121,6 +128,7 @@ pub use shred_network::{
 };
 pub use shred_store_service::{ShredStoreConfig, ShredStoreService, ShredStoreStats};
 pub use shred_verifier::{LeaderLookup, ShredVerifyResult};
+pub use sign_service::{SignError, SignResult, SignService, SignServiceStats, SignType};
 pub use tile_metrics::{SignalBusHealthTracker, TickTimer, TickTimerSnapshot};
 pub use tile_pipeline::{
     DedupTile, PipelineConfig, ResolvTile, TransactionPipeline, ValidatorPipeline,
