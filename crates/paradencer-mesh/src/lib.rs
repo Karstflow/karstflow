@@ -16,6 +16,7 @@ pub type Receiver<T> = InPort<T>;
 // Zero-copy inter-tile IPC (Tango-equivalent)
 // ---------------------------------------------------------------------------
 
+pub mod cnc;
 pub mod data_region;
 pub mod flow;
 pub mod fragment;

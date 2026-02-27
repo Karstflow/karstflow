@@ -1879,8 +1879,7 @@ pub fn build_shred_pipeline_with_link(
     let block_channel_depth = config.max_buffered_slots.max(64);
 
     // Crossbeam channel for ShredCollector input (to be replaced in W003).
-    let (_shred_tx, shred_rx) =
-        bounded_link::<paradencer_types::shred::Shred>(shred_channel_depth);
+    let (_shred_tx, shred_rx) = bounded_link::<paradencer_types::shred::Shred>(shred_channel_depth);
     let (block_tx, block_rx) =
         bounded_link::<paradencer_stages::AssembledBlock>(block_channel_depth);
 
