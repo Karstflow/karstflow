@@ -1622,6 +1622,7 @@ dependencies = [
  "paradencer-types",
  "parking_lot 0.12.5",
  "rand",
+ "rand_chacha",
  "serde",
  "serde-big-array",
  "sha2",

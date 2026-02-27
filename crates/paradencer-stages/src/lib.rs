@@ -24,6 +24,7 @@ mod edge_intake;
 mod errors;
 mod exec_stage;
 mod execution_adapter;
+mod fec_cache;
 mod fec_resolver;
 #[cfg(test)]
 mod integration_tests;
@@ -92,6 +93,7 @@ pub use exec_stage::{
     ExecConfig, ExecStage, ExecStats, ExecStatsSnapshot, ExecutionEngine, MicroblockExecResult,
     MockExecutionEngine, TransactionExecResult,
 };
+pub use fec_cache::{CachedFecSet, FecCacheConfig, FecCacheStats, FecSetCache};
 pub use fec_resolver::{
     FecBufferHandle, FecResolverPool, FecResolverStats, FecSetKey, FecSetView, FecSetViewMut,
     ResolverInsertResult, SpilledFecSet,

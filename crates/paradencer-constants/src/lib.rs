@@ -485,6 +485,7 @@ pub mod replay;
 pub mod shred;
 pub mod syscalls;
 pub mod sysvars;
+pub mod turbine;
 pub mod vm;
 
 pub mod transaction {
