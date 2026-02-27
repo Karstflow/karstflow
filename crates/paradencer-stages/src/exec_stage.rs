@@ -281,6 +281,7 @@ mod tests {
         let total_data: u64 = txns.iter().map(|t| t.data_size as u64).sum();
         Microblock {
             id: 0,
+            target_tile: 0,
             transactions: txns,
             total_compute_units: total_cu,
             total_data_bytes: total_data,

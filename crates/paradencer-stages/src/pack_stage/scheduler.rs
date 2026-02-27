@@ -11,6 +11,7 @@
 use super::conflict_detector::{AccountLock, ConflictDetector, LockKind};
 use super::priority_queue::{PackedTransaction, TransactionQueue};
 use paradencer_constants::block_limits;
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
@@ -74,6 +75,10 @@ impl Default for PackConfig {
 pub struct Microblock {
     /// Unique microblock identifier within this block.
     pub id: u64,
+    /// Target execution tile index (0-based).
+    /// Used for multi-tile scheduling: each microblock is dispatched to
+    /// a specific execution tile that holds its account locks.
+    pub target_tile: usize,
     /// Transactions in this microblock.
     pub transactions: Vec<PackedTransaction>,
     /// Total compute units in this microblock.
@@ -247,6 +252,10 @@ pub struct PackScheduler {
     current_slot: u64,
     /// Statistics.
     stats: Arc<PackStats>,
+    /// In-flight compute units per execution tile.
+    per_tile_inflight_cus: Vec<u64>,
+    /// Maps microblock ID to (target_tile, requested_cus) for tile CU tracking.
+    microblock_tile_map: HashMap<u64, (usize, u64)>,
 }
 
 impl PackScheduler {
@@ -258,7 +267,10 @@ impl PackScheduler {
     /// Create a new scheduler with the given configuration.
     pub fn with_config(config: PackConfig) -> Self {
         let max_write_cost = config.limits.max_write_cost_per_account;
+        let tile_count = config.execution_tile_count.max(1);
         Self {
+            per_tile_inflight_cus: vec![0u64; tile_count],
+            microblock_tile_map: HashMap::new(),
             config,
             queue: TransactionQueue::with_capacity(65_536),
             conflict_detector: ConflictDetector::new(max_write_cost),
@@ -280,6 +292,21 @@ impl PackScheduler {
     /// Submit a transaction for scheduling.
     pub fn submit(&mut self, tx: PackedTransaction) {
         self.queue.insert(tx);
+    }
+
+    /// Select the execution tile with the lowest in-flight compute units.
+    ///
+    /// When multiple tiles are tied, picks the lowest index (deterministic).
+    fn select_target_tile(&self) -> usize {
+        let mut best_tile = 0;
+        let mut best_cus = self.per_tile_inflight_cus[0];
+        for (i, &cus) in self.per_tile_inflight_cus.iter().enumerate().skip(1) {
+            if cus < best_cus {
+                best_tile = i;
+                best_cus = cus;
+            }
+        }
+        best_tile
     }
 
     /// Produce the next microblock from queued transactions.
@@ -405,6 +432,12 @@ impl PackScheduler {
         }
         self.block_data_bytes += total_data;
 
+        // Select the least-loaded execution tile.
+        let target_tile = self.select_target_tile();
+        self.per_tile_inflight_cus[target_tile] += total_cu;
+        self.microblock_tile_map
+            .insert(microblock_id, (target_tile, total_cu));
+
         self.next_microblock_id += 1;
         self.microblocks_this_block += 1;
 
@@ -420,6 +453,7 @@ impl PackScheduler {
 
         Some(Microblock {
             id: microblock_id,
+            target_tile,
             transactions,
             total_compute_units: total_cu,
             total_data_bytes: total_data,
@@ -428,8 +462,11 @@ impl PackScheduler {
     }
 
     /// Notify the scheduler that a microblock has been executed,
-    /// releasing its account locks.
+    /// releasing its account locks and per-tile CU tracking.
     pub fn complete_microblock(&mut self, microblock_id: u64) {
+        if let Some((tile, cus)) = self.microblock_tile_map.remove(&microblock_id) {
+            self.per_tile_inflight_cus[tile] = self.per_tile_inflight_cus[tile].saturating_sub(cus);
+        }
         self.conflict_detector.release(microblock_id);
     }
 
@@ -454,6 +491,9 @@ impl PackScheduler {
                 .rebated_cus
                 .fetch_add(rebated_cus, Ordering::Relaxed);
         }
+        if let Some((tile, cus)) = self.microblock_tile_map.remove(&microblock_id) {
+            self.per_tile_inflight_cus[tile] = self.per_tile_inflight_cus[tile].saturating_sub(cus);
+        }
         self.conflict_detector.release(microblock_id);
     }
 
@@ -466,6 +506,8 @@ impl PackScheduler {
         self.microblocks_this_block = 0;
         self.next_microblock_id = 0;
         self.conflict_detector.reset();
+        self.per_tile_inflight_cus.fill(0);
+        self.microblock_tile_map.clear();
 
         // Drain expired transactions.
         let expired = self.queue.drain_expired(slot);
@@ -498,6 +540,16 @@ impl PackScheduler {
     /// Number of microblocks produced in the current block.
     pub fn microblocks_this_block(&self) -> u64 {
         self.microblocks_this_block
+    }
+
+    /// In-flight compute units per execution tile.
+    pub fn per_tile_inflight_cus(&self) -> &[u64] {
+        &self.per_tile_inflight_cus
+    }
+
+    /// Number of configured execution tiles.
+    pub fn execution_tile_count(&self) -> usize {
+        self.per_tile_inflight_cus.len()
     }
 }
 
@@ -911,5 +963,155 @@ mod tests {
 
         scheduler.new_block(1);
         assert_eq!(scheduler.microblocks_this_block(), 0);
+    }
+
+    // -----------------------------------------------------------------------
+    // Multi-tile scheduling tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn multi_tile_assigns_target_tile() {
+        let config = PackConfig {
+            execution_tile_count: 4,
+            max_txns_per_microblock: 1,
+            ..Default::default()
+        };
+        let mut scheduler = PackScheduler::with_config(config);
+        assert_eq!(scheduler.execution_tile_count(), 4);
+
+        // Submit 4 non-conflicting transactions.
+        for i in 0..4 {
+            let tx = make_tx_with_accounts(5_000, 100_000, vec![account(i)], vec![], false);
+            scheduler.submit(tx);
+        }
+
+        // First microblock goes to tile 0 (all empty, lowest index wins).
+        let mb0 = scheduler.produce_microblock().unwrap();
+        assert_eq!(mb0.target_tile, 0);
+
+        // Second goes to tile 1 (tile 0 has 100K, rest have 0).
+        let mb1 = scheduler.produce_microblock().unwrap();
+        assert_eq!(mb1.target_tile, 1);
+
+        // Third to tile 2.
+        let mb2 = scheduler.produce_microblock().unwrap();
+        assert_eq!(mb2.target_tile, 2);
+
+        // Fourth to tile 3.
+        let mb3 = scheduler.produce_microblock().unwrap();
+        assert_eq!(mb3.target_tile, 3);
+
+        // All tiles now have 100K in-flight.
+        for cus in scheduler.per_tile_inflight_cus() {
+            assert_eq!(*cus, 100_000);
+        }
+
+        // Complete tile 2 — it becomes the least loaded.
+        scheduler.complete_microblock(mb2.id);
+        assert_eq!(scheduler.per_tile_inflight_cus()[2], 0);
+    }
+
+    #[test]
+    fn multi_tile_load_balances() {
+        let config = PackConfig {
+            execution_tile_count: 2,
+            max_txns_per_microblock: 1,
+            ..Default::default()
+        };
+        let mut scheduler = PackScheduler::with_config(config);
+
+        // Submit a heavy tx and a light tx.
+        let heavy = make_tx_with_accounts(5_000, 400_000, vec![account(1)], vec![], false);
+        let light = make_tx_with_accounts(4_000, 100_000, vec![account(2)], vec![], false);
+        scheduler.submit(heavy);
+        scheduler.submit(light);
+
+        // Heavy goes to tile 0 first (both empty).
+        let mb_heavy = scheduler.produce_microblock().unwrap();
+        assert_eq!(mb_heavy.target_tile, 0);
+        assert_eq!(scheduler.per_tile_inflight_cus()[0], 400_000);
+        assert_eq!(scheduler.per_tile_inflight_cus()[1], 0);
+
+        // Light goes to tile 1 (less loaded).
+        let mb_light = scheduler.produce_microblock().unwrap();
+        assert_eq!(mb_light.target_tile, 1);
+        assert_eq!(scheduler.per_tile_inflight_cus()[1], 100_000);
+
+        // Next microblock would go to tile 1 (100K < 400K).
+        let tx3 = make_tx_with_accounts(3_000, 50_000, vec![account(3)], vec![], false);
+        scheduler.submit(tx3);
+        let mb3 = scheduler.produce_microblock().unwrap();
+        assert_eq!(mb3.target_tile, 1);
+        assert_eq!(scheduler.per_tile_inflight_cus()[1], 150_000);
+    }
+
+    #[test]
+    fn multi_tile_resets_on_new_block() {
+        let config = PackConfig {
+            execution_tile_count: 3,
+            max_txns_per_microblock: 1,
+            ..Default::default()
+        };
+        let mut scheduler = PackScheduler::with_config(config);
+
+        let tx = make_tx_with_accounts(5_000, 200_000, vec![account(1)], vec![], false);
+        scheduler.submit(tx);
+        scheduler.produce_microblock();
+        assert_eq!(scheduler.per_tile_inflight_cus()[0], 200_000);
+
+        scheduler.new_block(1);
+        for cus in scheduler.per_tile_inflight_cus() {
+            assert_eq!(*cus, 0);
+        }
+    }
+
+    #[test]
+    fn single_tile_default_target_zero() {
+        // Default config: 1 execution tile.
+        let mut scheduler = PackScheduler::new();
+        assert_eq!(scheduler.execution_tile_count(), 1);
+
+        let tx = make_tx_with_accounts(5_000, 200_000, vec![account(1)], vec![], false);
+        scheduler.submit(tx);
+
+        let mb = scheduler.produce_microblock().unwrap();
+        assert_eq!(mb.target_tile, 0);
+    }
+
+    #[test]
+    fn multi_tile_complete_releases_tile_cus() {
+        let config = PackConfig {
+            execution_tile_count: 2,
+            max_txns_per_microblock: 1,
+            ..Default::default()
+        };
+        let mut scheduler = PackScheduler::with_config(config);
+
+        // Two transactions → tile 0 and tile 1.
+        let tx1 = make_tx_with_accounts(5_000, 300_000, vec![account(1)], vec![], false);
+        let tx2 = make_tx_with_accounts(4_000, 200_000, vec![account(2)], vec![], false);
+        scheduler.submit(tx1);
+        scheduler.submit(tx2);
+
+        let mb1 = scheduler.produce_microblock().unwrap();
+        let mb2 = scheduler.produce_microblock().unwrap();
+
+        assert_eq!(scheduler.per_tile_inflight_cus()[0], 300_000);
+        assert_eq!(scheduler.per_tile_inflight_cus()[1], 200_000);
+
+        // Complete with rebate — tile CUs still fully released.
+        scheduler.complete_microblock_with_rebate(
+            mb1.id,
+            MicroblockRebate {
+                requested_cus: 300_000,
+                consumed_cus: 100_000,
+                is_vote_only: false,
+            },
+        );
+        assert_eq!(scheduler.per_tile_inflight_cus()[0], 0);
+        assert_eq!(scheduler.per_tile_inflight_cus()[1], 200_000);
+
+        scheduler.complete_microblock(mb2.id);
+        assert_eq!(scheduler.per_tile_inflight_cus()[1], 0);
     }
 }
