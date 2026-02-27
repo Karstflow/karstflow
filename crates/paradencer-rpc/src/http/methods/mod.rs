@@ -37,7 +37,7 @@ pub(super) fn dispatch_method(
         | RpcMethod::GetMaxShredInsertSlot
         | RpcMethod::GetHighestSnapshotSlot
         | RpcMethod::GetMaxRetransmitSlot => {
-            basic::handle(method, request, snapshot, commitment, full_api)
+            basic::handle(method, request, snapshot, commitment, full_api, bank_access)
         }
 
         RpcMethod::GetSlot

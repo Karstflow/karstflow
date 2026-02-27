@@ -376,6 +376,7 @@ fn run_with_node_config(
         Some(rpc_bank_forks),
         Some(rpc_commitment_tracker),
         Some(rpc_cluster_info),
+        *identity.pubkey(),
     );
 
     // Save tower state to disk before shutdown so lockouts survive restarts.

@@ -27,7 +27,11 @@ pub(super) fn handle(
         RpcMethod::GetSignaturesForAddress | RpcMethod::GetConfirmedSignaturesForAddress2 => {
             build_signatures_for_address_response(request, snapshot, commitment)
         }
-        RpcMethod::GetClusterNodes => Ok(build_cluster_nodes_response(snapshot, commitment)),
+        RpcMethod::GetClusterNodes => Ok(build_cluster_nodes_response(
+            snapshot,
+            commitment,
+            bank_access,
+        )),
         RpcMethod::GetVoteAccounts => {
             build_vote_accounts_response(request, snapshot, commitment, bank_access)
         }
@@ -176,7 +180,30 @@ fn build_signatures_for_address_response(
 fn build_cluster_nodes_response(
     snapshot: RpcRuntimeSnapshot,
     commitment: RpcCommitment,
+    bank_access: Option<&Arc<dyn BankAccessProvider>>,
 ) -> serde_json::Value {
+    if let Some(bank) = bank_access {
+        let nodes = bank.get_cluster_nodes();
+        if !nodes.is_empty() {
+            let entries: Vec<serde_json::Value> = nodes
+                .into_iter()
+                .map(|node| {
+                    json!({
+                        "pubkey": node.pubkey,
+                        "gossip": node.gossip,
+                        "tpu": node.tpu,
+                        "rpc": node.rpc,
+                        "version": node.version,
+                        "featureSet": serde_json::Value::Null,
+                        "shredVersion": 0_u64
+                    })
+                })
+                .collect();
+            return json!(entries);
+        }
+    }
+
+    // Synthetic fallback
     let slot = snapshot.slot_for_commitment(commitment);
     let tvu_port = TVU_BASE_PORT.saturating_add((slot % TVU_PORT_SLOT_MODULUS) as u16);
     json!([

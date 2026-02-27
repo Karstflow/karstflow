@@ -16,7 +16,7 @@ pub use errors::{Result, RpcError};
 pub use filters::{apply_filters, parse_filter, parse_filters, RpcFilterType, SortOrder};
 pub use http::spawn_rpc_http_server;
 pub use state::{
-    metrics_file_provider, BankAccessProvider, RpcCommitment, RpcRuntimeSnapshot,
+    metrics_file_provider, BankAccessProvider, RpcClusterNode, RpcCommitment, RpcRuntimeSnapshot,
     RuntimeSnapshotProvider, TransactionSimulationResponse, TransactionSubmitter,
 };
 pub use utils::{

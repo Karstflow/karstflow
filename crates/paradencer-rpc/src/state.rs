@@ -124,6 +124,36 @@ pub trait BankAccessProvider: Send + Sync {
         replace_recent_blockhash: bool,
         commitment: RpcCommitment,
     ) -> TransactionSimulationResponse;
+
+    /// Get the validator identity pubkey as a base58 string.
+    ///
+    /// Returns `None` if the identity is not known (e.g., metrics-only mode).
+    fn get_identity(&self) -> Option<String> {
+        None
+    }
+
+    /// Get cluster node contact info from the gossip network.
+    ///
+    /// Returns a list of known cluster nodes with their pubkey and socket
+    /// addresses. Returns empty if cluster info is unavailable.
+    fn get_cluster_nodes(&self) -> Vec<RpcClusterNode> {
+        Vec::new()
+    }
+}
+
+/// Contact information for a cluster node, returned by `get_cluster_nodes`.
+#[derive(Debug, Clone)]
+pub struct RpcClusterNode {
+    /// Node identity pubkey (base58).
+    pub pubkey: String,
+    /// Gossip socket address, if known.
+    pub gossip: Option<String>,
+    /// TPU socket address, if known.
+    pub tpu: Option<String>,
+    /// RPC socket address, if known.
+    pub rpc: Option<String>,
+    /// Software version, if advertised.
+    pub version: Option<String>,
 }
 
 /// Result of simulating a transaction via `BankAccessProvider`.

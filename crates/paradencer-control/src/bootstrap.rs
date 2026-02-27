@@ -2021,7 +2021,7 @@ pub fn maybe_start_metrics_http_bridge(node_config: &NodeConfig) -> Result<()> {
 
 #[cfg(test)]
 fn maybe_start_rpc_http_server(node_config: &NodeConfig) -> Result<()> {
-    maybe_start_rpc_http_server_with_consensus(node_config, None, None, None)
+    maybe_start_rpc_http_server_with_consensus(node_config, None, None, None, [0u8; 32])
 }
 
 /// Start the RPC HTTP server with optional live consensus data.
@@ -2041,6 +2041,7 @@ pub fn maybe_start_rpc_http_server_with_consensus(
     bank_forks: Option<Arc<RwLock<BankForks>>>,
     commitment_tracker: Option<Arc<Mutex<CommitmentTracker>>>,
     cluster_info: Option<Arc<ClusterInfo>>,
+    identity_pubkey: [u8; 32],
 ) -> Result<()> {
     if !node_config.rpc_enabled {
         return Ok(());
@@ -2053,9 +2054,13 @@ pub fn maybe_start_rpc_http_server_with_consensus(
         if let Some(ref forks) = bank_forks {
             let snap: Option<Arc<dyn paradencer_rpc::RuntimeSnapshotProvider>> =
                 Some(Arc::new(ConsensusSnapshotProvider::new(forks.clone())));
-            let bank: Option<Arc<dyn BankAccessProvider>> = Some(Arc::new(
-                ConsensusBankAccessProvider::new(forks.clone(), commitment_tracker),
-            ));
+            let bank: Option<Arc<dyn BankAccessProvider>> =
+                Some(Arc::new(ConsensusBankAccessProvider::new(
+                    forks.clone(),
+                    commitment_tracker,
+                    identity_pubkey,
+                    cluster_info.clone(),
+                )));
             let submitter: Option<Arc<dyn TransactionSubmitter>> =
                 cluster_info.map(|ci| -> Arc<dyn TransactionSubmitter> {
                     Arc::new(ConsensusTransactionSubmitter::new(forks.clone(), ci))
@@ -2122,17 +2127,23 @@ struct ConsensusBankAccessProvider {
     bank_forks: Arc<RwLock<BankForks>>,
     commitment_tracker: Option<Arc<Mutex<CommitmentTracker>>>,
     execution_backend: SbpfBackend,
+    identity: [u8; 32],
+    cluster_info: Option<Arc<ClusterInfo>>,
 }
 
 impl ConsensusBankAccessProvider {
     fn new(
         bank_forks: Arc<RwLock<BankForks>>,
         commitment_tracker: Option<Arc<Mutex<CommitmentTracker>>>,
+        identity: [u8; 32],
+        cluster_info: Option<Arc<ClusterInfo>>,
     ) -> Self {
         Self {
             bank_forks,
             commitment_tracker,
             execution_backend: SbpfBackend::new(),
+            identity,
+            cluster_info,
         }
     }
 
@@ -2386,6 +2397,63 @@ impl BankAccessProvider for ConsensusBankAccessProvider {
             return_data,
         }
     }
+
+    fn get_identity(&self) -> Option<String> {
+        if self.identity == [0u8; 32] {
+            None
+        } else {
+            Some(bs58::encode(self.identity).into_string())
+        }
+    }
+
+    fn get_cluster_nodes(&self) -> Vec<paradencer_rpc::RpcClusterNode> {
+        let ci = match self.cluster_info.as_ref() {
+            Some(ci) => ci,
+            None => return Vec::new(),
+        };
+        let table = ci.crds_table().read();
+        table
+            .contact_info_entries()
+            .into_iter()
+            .filter_map(|entry| {
+                let contact = entry.value.data.as_contact_info()?;
+                let pubkey = bs58::encode(contact.pubkey).into_string();
+                let gossip = contact
+                    .sockets
+                    .get(paradencer_constants::gossip::SOCKET_GOSSIP)
+                    .copied()
+                    .flatten()
+                    .map(|a| a.to_string());
+                let tpu = contact
+                    .sockets
+                    .get(paradencer_constants::gossip::SOCKET_TPU)
+                    .copied()
+                    .flatten()
+                    .map(|a| a.to_string());
+                let rpc = contact
+                    .sockets
+                    .get(paradencer_constants::gossip::SOCKET_RPC)
+                    .copied()
+                    .flatten()
+                    .map(|a| a.to_string());
+                let version = {
+                    let v = &contact.version;
+                    if v.major > 0 || v.minor > 0 || v.patch > 0 {
+                        Some(format!("{}.{}.{}", v.major, v.minor, v.patch))
+                    } else {
+                        None
+                    }
+                };
+                Some(paradencer_rpc::RpcClusterNode {
+                    pubkey,
+                    gossip,
+                    tpu,
+                    rpc,
+                    version,
+                })
+            })
+            .collect()
+    }
 }
 
 /// Forwards transactions to the current leader's TPU socket via UDP.
@@ -2479,6 +2547,7 @@ pub fn run_runtime_phase(
         None,
         None,
         None,
+        [0u8; 32],
     )
 }
 
@@ -2496,6 +2565,7 @@ pub fn run_runtime_phase_with_consensus(
     bank_forks: Option<Arc<RwLock<BankForks>>>,
     commitment_tracker: Option<Arc<Mutex<CommitmentTracker>>>,
     cluster_info: Option<Arc<ClusterInfo>>,
+    identity_pubkey: [u8; 32],
 ) -> Result<()> {
     run_startup_checks(node_config, startup_services, "startup", 0)?;
     maybe_start_metrics_http_bridge(node_config)?;
@@ -2504,6 +2574,7 @@ pub fn run_runtime_phase_with_consensus(
         bank_forks,
         commitment_tracker,
         cluster_info,
+        identity_pubkey,
     )?;
     println!(
         "{}",

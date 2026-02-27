@@ -1,11 +1,12 @@
 use serde_json::json;
+use std::sync::Arc;
 
 use paradencer_constants::economics::{
     MIN_STAKE_DELEGATION_LAMPORTS, RENT_EXEMPTION_BASE_LAMPORTS, RENT_EXEMPTION_LAMPORTS_PER_BYTE,
 };
 use paradencer_constants::ledger::SLOTS_PER_EPOCH;
 
-use crate::state::{RpcCommitment, RpcRuntimeSnapshot};
+use crate::state::{BankAccessProvider, RpcCommitment, RpcRuntimeSnapshot};
 
 use super::super::method_error::RpcMethodError;
 use super::super::registry::RpcMethod;
@@ -17,6 +18,7 @@ pub(super) fn handle(
     snapshot: RpcRuntimeSnapshot,
     commitment: RpcCommitment,
     full_api: bool,
+    bank_access: Option<&Arc<dyn BankAccessProvider>>,
 ) -> Result<serde_json::Value, RpcMethodError> {
     match method {
         RpcMethod::GetHealth => Ok(json!("ok")),
@@ -26,7 +28,10 @@ pub(super) fn handle(
         })),
         RpcMethod::GetGenesisHash => Ok(json!("5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp6H6r6Q4QvJf4")),
         RpcMethod::GetIdentity => {
-            Ok(json!({"identity": "ParaDancer11111111111111111111111111111111"}))
+            let identity = bank_access
+                .and_then(|bank| bank.get_identity())
+                .unwrap_or_else(|| "ParaDancer11111111111111111111111111111111".to_string());
+            Ok(json!({"identity": identity}))
         }
         RpcMethod::GetEpochSchedule => Ok(json!({
             "slotsPerEpoch": SLOTS_PER_EPOCH,
