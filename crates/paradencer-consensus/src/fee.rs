@@ -6,12 +6,13 @@
 /// - Network sustainability (validator compensation)
 /// - Economic burn (deflationary pressure via fee burning)
 use paradencer_constants::economics::*;
+use serde::{Deserialize, Serialize};
 
 /// Simple fee calculator based on lamports per signature.
 ///
 /// Associates a blockhash with a specific fee rate. When users create transactions,
 /// they reference a recent blockhash, which locks in the fee rate.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FeeCalculator {
     /// Cost in lamports for each signature on a transaction
     pub lamports_per_signature: u64,
@@ -49,7 +50,7 @@ impl Default for FeeCalculator {
 /// - Fees increase when network is congested (high signature count)
 /// - Fees decrease when network is underutilized (low signature count)
 /// - Bounded by min/max limits to prevent extreme values
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FeeRateGovernor {
     /// Target fee rate (lamports per signature)
     pub target_lamports_per_signature: u64,

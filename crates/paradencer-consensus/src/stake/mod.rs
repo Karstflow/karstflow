@@ -24,6 +24,7 @@ pub use warmup_cooldown::{warmup_cooldown_rate, ActivationStatus};
 
 use paradencer_constants::stake_program as constants;
 use paradencer_storage::Pubkey;
+use serde::{Deserialize, Serialize};
 
 /// Authority type for stake account operations.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -57,7 +58,7 @@ impl AuthorityType {
 ///
 /// The staker can perform delegation operations while the withdrawer
 /// can withdraw funds and change both authorities.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Authorized {
     /// Public key authorized to delegate and deactivate
     pub staker: Pubkey,
@@ -126,7 +127,7 @@ impl Default for Authorized {
 ///
 /// When a lockup is active, withdrawals require the custodian's signature.
 /// Either a Unix timestamp or epoch threshold can be set (or both).
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Lockup {
     /// Unix timestamp after which withdrawal is allowed
     pub unix_timestamp: i64,
@@ -178,7 +179,7 @@ impl Default for Lockup {
 /// Metadata common to all initialized stake states.
 ///
 /// Contains the rent-exempt reserve, authorization info, and lockup conditions.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Meta {
     /// Minimum lamports that must remain in the account for rent exemption
     pub rent_exempt_reserve: u64,
@@ -208,7 +209,7 @@ impl Meta {
 }
 
 /// Bitflags for stake account behavior modifiers.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct StakeFlags {
     pub bits: u8,
 }
@@ -249,7 +250,7 @@ impl StakeFlags {
 ///
 /// Accounts progress through: Uninitialized -> Initialized -> Delegated.
 /// RewardsPool is a special state for the rewards pool account.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum StakeState {
     /// Account has been created but not yet initialized with authorities
     Uninitialized,

@@ -3,6 +3,7 @@
 /// Maintains a rolling history of network-wide stake activation and deactivation
 /// across epochs. Used for accurate warmup/cooldown calculations when delegating
 /// or withdrawing stake.
+use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
 
 /// Maximum number of epochs to track in stake history.
@@ -13,7 +14,7 @@ pub const STAKE_HISTORY_CAP: usize = 512;
 /// Tracks the total stake in various states: fully effective (activated),
 /// in the process of activating (warming up), or in the process of
 /// deactivating (cooling down).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct StakeHistoryEntry {
     /// Fully activated stake (effective for consensus)
     pub effective: u64,

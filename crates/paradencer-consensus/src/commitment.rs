@@ -13,12 +13,13 @@ use paradencer_constants::consensus::{
     DUPLICATE_CONFIRMATION_THRESHOLD, PROPAGATED_THRESHOLD, SUPERMAJORITY_THRESHOLD,
     SUPER_CONFIRMATION_THRESHOLD,
 };
+use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 
 /// External-facing commitment levels for slots.
 ///
 /// These are the levels visible to RPC clients and downstream consumers.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum CommitmentLevel {
     /// Block has been processed by this validator.
     Processed,
@@ -47,7 +48,7 @@ impl CommitmentLevel {
 /// Internal confirmation status based on stake thresholds.
 ///
 /// Tracks finer-grained confirmation progress than the external CommitmentLevel.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub enum ConfirmationStatus {
     /// No threshold reached yet.
     Unconfirmed,

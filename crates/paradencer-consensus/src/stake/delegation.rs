@@ -7,12 +7,14 @@ use crate::stake::warmup_cooldown::warmup_cooldown_rate;
 use crate::stake_history::{StakeHistory, StakeHistoryEntry};
 use paradencer_constants::stake_program as constants;
 use paradencer_storage::Pubkey;
+use serde::{Deserialize, Serialize};
 
 /// Active delegation to a validator's vote account.
 ///
 /// Contains the delegation parameters and tracks credits observed
 /// for reward calculation.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[allow(deprecated)]
 pub struct Delegation {
     /// Vote account this stake is delegated to
     pub voter_pubkey: Pubkey,
@@ -219,7 +221,7 @@ impl Delegation {
 ///
 /// Contains the delegation parameters plus the last observed vote credits
 /// for calculating rewards.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct StakeAccount {
     /// The delegation details
     pub delegation: Delegation,

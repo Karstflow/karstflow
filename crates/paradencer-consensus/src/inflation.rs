@@ -3,8 +3,9 @@
 /// Controls how new tokens are minted and distributed to validators and foundation
 /// over time, with decreasing inflation rates.
 use paradencer_constants::economics::*;
+use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct Inflation {
     /// Starting inflation rate when network launches
     pub initial_rate: f64,
