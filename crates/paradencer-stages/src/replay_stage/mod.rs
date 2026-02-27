@@ -304,6 +304,15 @@ impl ReplayStage {
         {
             Ok(outcome) => outcome,
             Err(e) => {
+                // Mark the slot dead and evict it from the fork tree.
+                let evicted = self.bank_transition.mark_slot_dead(block.slot);
+                if evicted > 0 {
+                    info!(
+                        slot = block.slot,
+                        evicted, "dead bank evicted after block processing failure",
+                    );
+                }
+
                 // Emit SlotDead signal on block processing failure.
                 self.emit_signal(ReplaySignal::SlotDead(SlotDeadInfo {
                     slot: block.slot,
@@ -337,6 +346,15 @@ impl ReplayStage {
             let finalization = match self.bank_transition.freeze_bank(block.slot) {
                 Ok(f) => f,
                 Err(e) => {
+                    // Mark the slot dead and evict it from the fork tree.
+                    let evicted = self.bank_transition.mark_slot_dead(block.slot);
+                    if evicted > 0 {
+                        info!(
+                            slot = block.slot,
+                            evicted, "dead bank evicted after freeze failure",
+                        );
+                    }
+
                     self.emit_signal(ReplaySignal::SlotDead(SlotDeadInfo {
                         slot: block.slot,
                         parent_slot: block.parent_slot,

@@ -197,6 +197,20 @@ impl BankTransition {
         }
     }
 
+    /// Mark a slot and all its descendants as dead and eagerly evict them.
+    ///
+    /// Called when block processing or bank finalization fails, indicating
+    /// that the slot produced an invalid block. Dead banks and their
+    /// descendants are removed from the fork tree to prevent memory leaks
+    /// and exclude them from fork choice.
+    ///
+    /// Returns the number of slots evicted.
+    pub fn mark_slot_dead(&mut self, slot: u64) -> usize {
+        let mut bank_forks = self.bank_forks.write().unwrap();
+        let report = bank_forks.mark_dead_and_evict(slot);
+        report.total_evicted()
+    }
+
     /// Check if a bank exists for a slot
     pub fn has_bank(&self, slot: u64) -> bool {
         let bank_forks = self.bank_forks.read().unwrap();
@@ -342,6 +356,79 @@ mod tests {
         let fork_choice = Arc::new(Mutex::new(ForkChoice::new(1000)));
         let transition = BankTransition::new(bank_forks, fork_choice);
 
+        assert_eq!(transition.bank_count(), 1);
+    }
+
+    #[test]
+    fn mark_slot_dead_evicts_bank_and_descendants() {
+        let bank_forks = create_test_bank_forks();
+        let fork_choice = Arc::new(Mutex::new(ForkChoice::new(1000)));
+        let mut transition = BankTransition::new(bank_forks.clone(), fork_choice);
+
+        // Freeze genesis bank and create children: 0 → 1, 0 → 2
+        {
+            let parent = transition.get_working_bank(0).unwrap();
+            for _ in 0..paradencer_constants::ledger::TICKS_PER_SLOT {
+                parent.register_tick().unwrap();
+            }
+            parent.freeze().unwrap();
+        }
+
+        transition.create_child_bank(0, 1).unwrap();
+        transition.create_child_bank(0, 2).unwrap();
+        assert_eq!(transition.bank_count(), 3);
+
+        // Mark slot 1 dead — should evict it immediately
+        let evicted = transition.mark_slot_dead(1);
+        assert_eq!(evicted, 1);
+        assert_eq!(transition.bank_count(), 2);
+        assert!(!transition.has_bank(1));
+        assert!(transition.has_bank(0));
+        assert!(transition.has_bank(2));
+    }
+
+    #[test]
+    fn mark_slot_dead_cascades_to_descendants() {
+        let bank_forks = create_test_bank_forks();
+        let fork_choice = Arc::new(Mutex::new(ForkChoice::new(1000)));
+        let mut transition = BankTransition::new(bank_forks.clone(), fork_choice);
+
+        // Build chain: 0 → 1 → 2
+        {
+            let parent = transition.get_working_bank(0).unwrap();
+            for _ in 0..paradencer_constants::ledger::TICKS_PER_SLOT {
+                parent.register_tick().unwrap();
+            }
+            parent.freeze().unwrap();
+        }
+        transition.create_child_bank(0, 1).unwrap();
+        {
+            let bank1 = transition.get_working_bank(1).unwrap();
+            for _ in 0..paradencer_constants::ledger::TICKS_PER_SLOT {
+                bank1.register_tick().unwrap();
+            }
+            bank1.freeze().unwrap();
+        }
+        transition.create_child_bank(1, 2).unwrap();
+        assert_eq!(transition.bank_count(), 3);
+
+        // Mark slot 1 dead — cascades to slot 2
+        let evicted = transition.mark_slot_dead(1);
+        assert_eq!(evicted, 2);
+        assert_eq!(transition.bank_count(), 1);
+        assert!(transition.has_bank(0));
+        assert!(!transition.has_bank(1));
+        assert!(!transition.has_bank(2));
+    }
+
+    #[test]
+    fn mark_slot_dead_nonexistent_is_noop() {
+        let bank_forks = create_test_bank_forks();
+        let fork_choice = Arc::new(Mutex::new(ForkChoice::new(1000)));
+        let mut transition = BankTransition::new(bank_forks, fork_choice);
+
+        let evicted = transition.mark_slot_dead(999);
+        assert_eq!(evicted, 0);
         assert_eq!(transition.bank_count(), 1);
     }
 }
