@@ -363,16 +363,16 @@ impl BlockProcessor {
         Ok(results)
     }
 
-    /// Dependency-aware transaction execution using the dispatch graph.
+    /// Dependency-aware parallel transaction execution using the dispatch graph.
     ///
     /// 1. Deserializes all transactions and resolves address lookups
     /// 2. Extracts write/read account sets for dependency analysis
     /// 3. Builds a DAG of WAW, RAW, WAR dependencies
-    /// 4. Dispatches ready transactions to execution lanes
+    /// 4. Dispatches ready transactions to parallel execution lanes
     ///
-    /// Currently executes on the calling thread in dispatch order.
-    // TODO: dispatch to parallel execution lanes when Bank supports
-    // concurrent transaction processing across tiles.
+    /// Transactions within each dispatch batch have no writable account
+    /// conflicts, so they execute concurrently on scoped threads. Single-
+    /// transaction batches execute inline to avoid thread spawn overhead.
     fn apply_transactions_dispatched(
         &mut self,
         transactions: &[Vec<u8>],
@@ -441,28 +441,72 @@ impl BlockProcessor {
         // Map from dispatcher index → original transaction index.
         let dispatch_to_original: Vec<usize> = deserialized.iter().map(|(i, _)| *i).collect();
 
-        // Phase 3: Execute in dispatch order.
+        // Phase 3: Execute dispatched batches in parallel.
+        //
+        // The dispatcher guarantees that transactions dispatched in the same
+        // batch do not share writable accounts, so they can safely execute
+        // concurrently. Bank internals use atomics, DashMap, and RwLock for
+        // thread-safe mutation.
+        let backend = &self.backend;
         loop {
             let (progress, dispatched) = dispatcher.dispatch_step();
             if progress.all_done && dispatched.is_empty() {
                 break;
             }
 
-            for (dispatch_idx, _lane) in dispatched {
+            if dispatched.len() == 1 {
+                // Single transaction — execute inline, avoid thread overhead.
+                let (dispatch_idx, _lane) = dispatched[0];
                 let original_idx = dispatch_to_original[dispatch_idx as usize];
                 let tx_index = starting_index + original_idx;
                 let sanitized = &deserialized[dispatch_idx as usize].1;
 
                 let exec_result =
-                    bank.process_transaction(sanitized, self.backend.as_ref(), MAX_COMPUTE_UNITS);
+                    bank.process_transaction(sanitized, backend.as_ref(), MAX_COMPUTE_UNITS);
 
                 if exec_result.success {
                     vote_updates.extend(exec_result.vote_updates.iter().cloned());
                 }
-
                 results[original_idx] =
                     Some(TransactionResult::from_execution(tx_index, &exec_result));
                 dispatcher.complete_transaction(dispatch_idx);
+            } else {
+                // Multiple independent transactions — execute in parallel.
+                let batch_results: Vec<_> = std::thread::scope(|s| {
+                    let handles: Vec<_> = dispatched
+                        .iter()
+                        .map(|&(dispatch_idx, _lane)| {
+                            let sanitized = &deserialized[dispatch_idx as usize].1;
+                            let bank_ref = &bank;
+                            let backend_ref = backend.as_ref();
+                            s.spawn(move || {
+                                let exec_result = bank_ref.process_transaction(
+                                    sanitized,
+                                    backend_ref,
+                                    MAX_COMPUTE_UNITS,
+                                );
+                                (dispatch_idx, exec_result)
+                            })
+                        })
+                        .collect();
+
+                    handles
+                        .into_iter()
+                        .map(|h| h.join().expect("execution lane panicked"))
+                        .collect()
+                });
+
+                for (dispatch_idx, exec_result) in batch_results {
+                    let original_idx = dispatch_to_original[dispatch_idx as usize];
+                    let tx_index = starting_index + original_idx;
+
+                    if exec_result.success {
+                        vote_updates.extend(exec_result.vote_updates.iter().cloned());
+                    }
+                    results[original_idx] =
+                        Some(TransactionResult::from_execution(tx_index, &exec_result));
+                    dispatcher.complete_transaction(dispatch_idx);
+                }
             }
         }
 
