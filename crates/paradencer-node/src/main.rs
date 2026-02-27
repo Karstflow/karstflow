@@ -326,6 +326,7 @@ fn run_with_node_config(
     // Keep handles to consensus state for the live RPC provider.
     let rpc_bank_forks = consensus.bank_forks.clone();
     let rpc_commitment_tracker = consensus.commitment_tracker.clone();
+    let rpc_cluster_info = cluster_info.clone();
 
     // Build the vote broadcast service. Monitors the shared Tower for
     // new consensus decisions and pushes them to gossip as CrdsValue
@@ -374,6 +375,7 @@ fn run_with_node_config(
         },
         Some(rpc_bank_forks),
         Some(rpc_commitment_tracker),
+        Some(rpc_cluster_info),
     );
 
     // Save tower state to disk before shutdown so lockouts survive restarts.

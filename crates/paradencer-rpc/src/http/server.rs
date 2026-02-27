@@ -1,5 +1,5 @@
 use crate::errors::{Result, RpcError};
-use crate::state::{BankAccessProvider, RuntimeSnapshotProvider};
+use crate::state::{BankAccessProvider, RuntimeSnapshotProvider, TransactionSubmitter};
 use jsonrpsee::server::{RpcModule, ServerBuilder};
 use jsonrpsee::types::{ErrorObjectOwned, Params};
 use serde_json::json;
@@ -18,6 +18,7 @@ pub fn spawn_rpc_http_server(
     private: bool,
     runtime_snapshot_provider: Option<Arc<dyn RuntimeSnapshotProvider>>,
     bank_access_provider: Option<Arc<dyn BankAccessProvider>>,
+    tx_submitter: Option<Arc<dyn TransactionSubmitter>>,
 ) -> Result<()> {
     let bind_probe = TcpListener::bind(bind_addr)
         .map_err(|source| RpcError::RpcHttpBind { bind_addr, source })?;
@@ -59,6 +60,7 @@ pub fn spawn_rpc_http_server(
                     let method_name = method.as_str();
                     let provider = runtime_snapshot_provider.clone();
                     let bank_access = bank_access_provider.clone();
+                    let submitter = tx_submitter.clone();
                     let registration =
                         module.register_method(method_name, move |params: Params<'_>, _, _| {
                             dispatch_via_legacy_renderer(
@@ -67,6 +69,7 @@ pub fn spawn_rpc_http_server(
                                 full_api,
                                 provider.as_ref(),
                                 bank_access.as_ref(),
+                                submitter.as_ref(),
                             )
                         });
                     if let Err(error) = registration {
@@ -99,6 +102,7 @@ fn dispatch_via_legacy_renderer(
     full_api: bool,
     runtime_snapshot_provider: Option<&Arc<dyn RuntimeSnapshotProvider>>,
     bank_access: Option<&Arc<dyn BankAccessProvider>>,
+    tx_submitter: Option<&Arc<dyn TransactionSubmitter>>,
 ) -> std::result::Result<serde_json::Value, ErrorObjectOwned> {
     let request_params = match params.parse::<Option<serde_json::Value>>() {
         Ok(Some(value)) => value,
@@ -133,6 +137,7 @@ fn dispatch_via_legacy_renderer(
         full_api,
         runtime_snapshot,
         bank_access,
+        tx_submitter,
     );
     let parsed_response: serde_json::Value = serde_json::from_str(&response).map_err(|error| {
         ErrorObjectOwned::owned(-32603, format!("Internal error: {error}"), None::<()>)

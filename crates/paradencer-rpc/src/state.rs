@@ -143,6 +143,22 @@ pub struct TransactionSimulationResponse {
     pub return_data: Option<(String, Vec<u8>)>,
 }
 
+/// Handles real transaction submission for `sendTransaction`.
+///
+/// Implementors decode the transaction, extract the signature,
+/// forward the raw bytes to the current leader's TPU socket,
+/// and return the transaction signature.
+pub trait TransactionSubmitter: Send + Sync {
+    /// Submit a transaction for processing.
+    ///
+    /// Takes the raw transaction bytes (already decoded from base58/base64),
+    /// forwards them to the current leader via TPU, and returns the first
+    /// signature from the transaction.
+    ///
+    /// Returns `Err` if the transaction is malformed or forwarding fails.
+    fn submit_transaction(&self, tx_bytes: &[u8]) -> Result<[u8; 64], String>;
+}
+
 pub struct MetricsFileRuntimeSnapshotProvider {
     metrics_file_path: PathBuf,
 }

@@ -8,7 +8,7 @@ mod params;
 pub(super) mod shared;
 mod transactions;
 
-use crate::state::{BankAccessProvider, RpcCommitment, RpcRuntimeSnapshot};
+use crate::state::{BankAccessProvider, RpcCommitment, RpcRuntimeSnapshot, TransactionSubmitter};
 use std::sync::Arc;
 
 use super::method_error::RpcMethodError;
@@ -21,6 +21,7 @@ pub(super) fn dispatch_method(
     commitment: RpcCommitment,
     full_api: bool,
     bank_access: Option<&Arc<dyn BankAccessProvider>>,
+    tx_submitter: Option<&Arc<dyn TransactionSubmitter>>,
 ) -> Result<serde_json::Value, RpcMethodError> {
     match method {
         RpcMethod::GetHealth
@@ -96,8 +97,13 @@ pub(super) fn dispatch_method(
             history::handle(method, request, snapshot, commitment)
         }
 
-        RpcMethod::SendTransaction | RpcMethod::SimulateTransaction => {
-            transactions::handle(method, request, snapshot, commitment, bank_access)
-        }
+        RpcMethod::SendTransaction | RpcMethod::SimulateTransaction => transactions::handle(
+            method,
+            request,
+            snapshot,
+            commitment,
+            bank_access,
+            tx_submitter,
+        ),
     }
 }

@@ -24,7 +24,9 @@ use paradencer_net::{
     ValidatorInfo,
 };
 use paradencer_observability::spawn_metrics_http_bridge;
-use paradencer_rpc::{metrics_file_provider, spawn_rpc_http_server, BankAccessProvider};
+use paradencer_rpc::{
+    metrics_file_provider, spawn_rpc_http_server, BankAccessProvider, TransactionSubmitter,
+};
 use paradencer_runtime::{build_pinned_affinity_plan, run_services, Service, ServiceProbeReport};
 use paradencer_stages::{
     ExecutionErrorHandlingPolicy, MetricsOutputTarget, PipelineHandle, PipelineServiceBuilder,
@@ -2019,7 +2021,7 @@ pub fn maybe_start_metrics_http_bridge(node_config: &NodeConfig) -> Result<()> {
 
 #[cfg(test)]
 fn maybe_start_rpc_http_server(node_config: &NodeConfig) -> Result<()> {
-    maybe_start_rpc_http_server_with_consensus(node_config, None, None)
+    maybe_start_rpc_http_server_with_consensus(node_config, None, None, None)
 }
 
 /// Start the RPC HTTP server with optional live consensus data.
@@ -2030,10 +2032,15 @@ fn maybe_start_rpc_http_server(node_config: &NodeConfig) -> Result<()> {
 /// live validator state. The optional `commitment_tracker` enables
 /// proper commitment-level resolution so confirmed/finalized queries
 /// return data from the correct bank fork.
+///
+/// When `cluster_info` is provided alongside `bank_forks`, the RPC
+/// server can forward `sendTransaction` requests to the current
+/// leader's TPU socket via UDP.
 pub fn maybe_start_rpc_http_server_with_consensus(
     node_config: &NodeConfig,
     bank_forks: Option<Arc<RwLock<BankForks>>>,
     commitment_tracker: Option<Arc<Mutex<CommitmentTracker>>>,
+    cluster_info: Option<Arc<ClusterInfo>>,
 ) -> Result<()> {
     if !node_config.rpc_enabled {
         return Ok(());
@@ -2042,21 +2049,26 @@ pub fn maybe_start_rpc_http_server_with_consensus(
         paradencer_config::ConfigError::RpcEnabledRequiresBindAddr,
     ))?;
 
-    let (runtime_snapshot_provider, bank_access_provider) = if let Some(ref forks) = bank_forks {
-        let snap: Option<Arc<dyn paradencer_rpc::RuntimeSnapshotProvider>> =
-            Some(Arc::new(ConsensusSnapshotProvider::new(forks.clone())));
-        let bank: Option<Arc<dyn BankAccessProvider>> = Some(Arc::new(
-            ConsensusBankAccessProvider::new(forks.clone(), commitment_tracker),
-        ));
-        (snap, bank)
-    } else {
-        let snapshot_provider: Option<Arc<dyn paradencer_rpc::RuntimeSnapshotProvider>> =
-            match &node_config.metrics_output_target {
-                MetricsOutputTarget::File(path) => Some(metrics_file_provider(path.clone())),
-                _ => None,
-            };
-        (snapshot_provider, None)
-    };
+    let (runtime_snapshot_provider, bank_access_provider, tx_submitter) =
+        if let Some(ref forks) = bank_forks {
+            let snap: Option<Arc<dyn paradencer_rpc::RuntimeSnapshotProvider>> =
+                Some(Arc::new(ConsensusSnapshotProvider::new(forks.clone())));
+            let bank: Option<Arc<dyn BankAccessProvider>> = Some(Arc::new(
+                ConsensusBankAccessProvider::new(forks.clone(), commitment_tracker),
+            ));
+            let submitter: Option<Arc<dyn TransactionSubmitter>> =
+                cluster_info.map(|ci| -> Arc<dyn TransactionSubmitter> {
+                    Arc::new(ConsensusTransactionSubmitter::new(forks.clone(), ci))
+                });
+            (snap, bank, submitter)
+        } else {
+            let snapshot_provider: Option<Arc<dyn paradencer_rpc::RuntimeSnapshotProvider>> =
+                match &node_config.metrics_output_target {
+                    MetricsOutputTarget::File(path) => Some(metrics_file_provider(path.clone())),
+                    _ => None,
+                };
+            (snapshot_provider, None, None)
+        };
 
     spawn_rpc_http_server(
         bind_addr,
@@ -2064,6 +2076,7 @@ pub fn maybe_start_rpc_http_server_with_consensus(
         node_config.rpc_private,
         runtime_snapshot_provider,
         bank_access_provider,
+        tx_submitter,
     )?;
     Ok(())
 }
@@ -2375,6 +2388,81 @@ impl BankAccessProvider for ConsensusBankAccessProvider {
     }
 }
 
+/// Forwards transactions to the current leader's TPU socket via UDP.
+///
+/// Resolves the current slot's leader from `BankForks` and looks up
+/// their TPU socket address via `ClusterInfo`. The raw transaction
+/// bytes are sent as a single UDP datagram. This is the standard
+/// Solana transaction forwarding path used by validators and RPC nodes.
+struct ConsensusTransactionSubmitter {
+    bank_forks: Arc<RwLock<BankForks>>,
+    cluster_info: Arc<ClusterInfo>,
+    socket: std::net::UdpSocket,
+}
+
+impl ConsensusTransactionSubmitter {
+    fn new(bank_forks: Arc<RwLock<BankForks>>, cluster_info: Arc<ClusterInfo>) -> Self {
+        let socket = std::net::UdpSocket::bind("0.0.0.0:0")
+            .expect("failed to bind UDP socket for transaction forwarding");
+        Self {
+            bank_forks,
+            cluster_info,
+            socket,
+        }
+    }
+}
+
+impl TransactionSubmitter for ConsensusTransactionSubmitter {
+    fn submit_transaction(&self, tx_bytes: &[u8]) -> std::result::Result<[u8; 64], String> {
+        // Extract the first signature from the raw transaction.
+        // Wire format: [num_signatures: compact-u16] [sig0: 64 bytes] ...
+        if tx_bytes.is_empty() {
+            return Err("empty transaction".to_string());
+        }
+        let num_sigs = tx_bytes[0] as usize;
+        if num_sigs == 0 {
+            return Err("transaction has no signatures".to_string());
+        }
+        if tx_bytes.len() < 1 + 64 {
+            return Err("transaction too short to contain a signature".to_string());
+        }
+        let mut sig = [0u8; 64];
+        sig.copy_from_slice(&tx_bytes[1..65]);
+
+        // Resolve current leader's TPU socket.
+        let tpu_addr = {
+            let forks = self
+                .bank_forks
+                .read()
+                .map_err(|e| format!("bank_forks lock poisoned: {e}"))?;
+            let bank = forks.working_bank();
+            let slot = bank.slot();
+            let epoch_schedule = bank.epoch_schedule();
+            let leader_schedule = bank.leader_schedule();
+
+            let leader = leader_schedule
+                .leader_for_absolute_slot(slot, epoch_schedule)
+                .ok_or_else(|| format!("no leader for slot {slot}"))?;
+
+            self.cluster_info
+                .lookup_socket(leader.as_bytes(), paradencer_constants::gossip::SOCKET_TPU)
+                .ok_or_else(|| {
+                    format!(
+                        "no TPU address for leader {}",
+                        bs58::encode(leader.as_bytes()).into_string()
+                    )
+                })?
+        };
+
+        // Forward the raw transaction via UDP.
+        self.socket
+            .send_to(tx_bytes, tpu_addr)
+            .map_err(|e| format!("UDP send failed: {e}"))?;
+
+        Ok(sig)
+    }
+}
+
 pub fn print_preflight_ok() {
     println!("{}", render_preflight_ok_line());
 }
@@ -2384,7 +2472,14 @@ pub fn run_runtime_phase(
     startup_services: &mut [Box<dyn Service>],
     runtime_bundle: ServiceBundle,
 ) -> Result<()> {
-    run_runtime_phase_with_consensus(node_config, startup_services, runtime_bundle, None, None)
+    run_runtime_phase_with_consensus(
+        node_config,
+        startup_services,
+        runtime_bundle,
+        None,
+        None,
+        None,
+    )
 }
 
 /// Run the main validator runtime with optional live consensus data for RPC.
@@ -2392,17 +2487,24 @@ pub fn run_runtime_phase(
 /// When `bank_forks` is provided, the RPC server reads real slot and
 /// transaction data from the consensus layer instead of from a metrics
 /// file on disk. The optional `commitment_tracker` enables proper
-/// commitment-level resolution for confirmed slots.
+/// commitment-level resolution for confirmed slots. When `cluster_info`
+/// is provided, the RPC server can forward transactions to leaders.
 pub fn run_runtime_phase_with_consensus(
     node_config: &NodeConfig,
     startup_services: &mut [Box<dyn Service>],
     runtime_bundle: ServiceBundle,
     bank_forks: Option<Arc<RwLock<BankForks>>>,
     commitment_tracker: Option<Arc<Mutex<CommitmentTracker>>>,
+    cluster_info: Option<Arc<ClusterInfo>>,
 ) -> Result<()> {
     run_startup_checks(node_config, startup_services, "startup", 0)?;
     maybe_start_metrics_http_bridge(node_config)?;
-    maybe_start_rpc_http_server_with_consensus(node_config, bank_forks, commitment_tracker)?;
+    maybe_start_rpc_http_server_with_consensus(
+        node_config,
+        bank_forks,
+        commitment_tracker,
+        cluster_info,
+    )?;
     println!(
         "{}",
         render_topology_line(

@@ -1,4 +1,4 @@
-use crate::state::{BankAccessProvider, RpcCommitment, RpcRuntimeSnapshot};
+use crate::state::{BankAccessProvider, RpcCommitment, RpcRuntimeSnapshot, TransactionSubmitter};
 use serde_json::json;
 use std::sync::Arc;
 
@@ -11,6 +11,7 @@ pub(super) fn render_json_rpc_response(
     full_api: bool,
     runtime_snapshot: Option<RpcRuntimeSnapshot>,
     bank_access: Option<&Arc<dyn BankAccessProvider>>,
+    tx_submitter: Option<&Arc<dyn TransactionSubmitter>>,
 ) -> String {
     let parsed: serde_json::Value = match serde_json::from_str(body) {
         Ok(value) => value,
@@ -40,7 +41,7 @@ pub(super) fn render_json_rpc_response(
             let mut responses = Vec::new();
             for request in requests {
                 if let Some(response) =
-                    render_single_request(request, full_api, snapshot, bank_access)
+                    render_single_request(request, full_api, snapshot, bank_access, tx_submitter)
                 {
                     responses.push(response);
                 }
@@ -51,7 +52,7 @@ pub(super) fn render_json_rpc_response(
                 serde_json::Value::Array(responses).to_string()
             }
         }
-        _ => match render_single_request(&parsed, full_api, snapshot, bank_access) {
+        _ => match render_single_request(&parsed, full_api, snapshot, bank_access, tx_submitter) {
             Some(response) => response.to_string(),
             None => String::new(),
         },
@@ -63,6 +64,7 @@ fn render_single_request(
     full_api: bool,
     snapshot: RpcRuntimeSnapshot,
     bank_access: Option<&Arc<dyn BankAccessProvider>>,
+    tx_submitter: Option<&Arc<dyn TransactionSubmitter>>,
 ) -> Option<serde_json::Value> {
     let parsed_object = match parsed.as_object() {
         Some(object) => object,
@@ -143,6 +145,7 @@ fn render_single_request(
         commitment,
         full_api,
         bank_access,
+        tx_submitter,
     );
 
     if is_notification {
@@ -211,12 +214,24 @@ fn validate_params_shape(request: &serde_json::Value) -> Result<(), RpcMethodErr
 
 #[cfg(test)]
 mod tests {
-    use super::{render_json_rpc_response, RpcRuntimeSnapshot};
+    use super::{render_json_rpc_response as render_json_rpc_response_full, RpcRuntimeSnapshot};
     use crate::http::methods::shared::format_blockhash_from_seed;
     use crate::http::registry::resolve_method;
     use crate::state::read_metrics_snapshot_for_test;
+    use crate::state::BankAccessProvider;
     use std::fs;
+    use std::sync::Arc;
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    /// Wrapper that supplies `None` for `tx_submitter` (most tests don't need it).
+    fn render_json_rpc_response(
+        body: &str,
+        full_api: bool,
+        snapshot: Option<RpcRuntimeSnapshot>,
+        bank_access: Option<&Arc<dyn BankAccessProvider>>,
+    ) -> String {
+        render_json_rpc_response_full(body, full_api, snapshot, bank_access, None)
+    }
 
     fn unique_temp_file(prefix: &str, extension: &str) -> std::path::PathBuf {
         let suffix = SystemTime::now()
@@ -3310,9 +3325,8 @@ mod tests {
 
     // --- BankAccessProvider integration tests ---
 
-    use crate::state::BankAccessProvider;
     use std::collections::HashMap;
-    use std::sync::{Arc, Mutex};
+    use std::sync::Mutex;
 
     struct MockBankAccess {
         accounts: Mutex<HashMap<paradencer_types::Pubkey, paradencer_types::Account>>,

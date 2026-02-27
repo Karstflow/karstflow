@@ -1,7 +1,7 @@
 use serde_json::{json, Map, Value};
 use std::sync::Arc;
 
-use crate::state::{BankAccessProvider, RpcCommitment, RpcRuntimeSnapshot};
+use crate::state::{BankAccessProvider, RpcCommitment, RpcRuntimeSnapshot, TransactionSubmitter};
 use paradencer_constants::rpc::{
     SEND_TX_COMMITMENT_BIAS_CONFIRMED, SEND_TX_COMMITMENT_BIAS_FINALIZED,
     SEND_TX_COMMITMENT_BIAS_PROCESSED, SEND_TX_ENCODING_BONUS_BASE58,
@@ -68,10 +68,11 @@ pub(super) fn handle(
     snapshot: RpcRuntimeSnapshot,
     commitment: RpcCommitment,
     bank_access: Option<&Arc<dyn BankAccessProvider>>,
+    tx_submitter: Option<&Arc<dyn TransactionSubmitter>>,
 ) -> Result<serde_json::Value, RpcMethodError> {
     match method {
         RpcMethod::SendTransaction => {
-            build_send_transaction_response(request, snapshot, commitment)
+            build_send_transaction_response(request, snapshot, commitment, tx_submitter)
         }
         RpcMethod::SimulateTransaction => {
             build_simulate_transaction_response(request, snapshot, commitment, bank_access)
@@ -84,6 +85,7 @@ fn build_send_transaction_response(
     request: &serde_json::Value,
     snapshot: RpcRuntimeSnapshot,
     commitment: RpcCommitment,
+    tx_submitter: Option<&Arc<dyn TransactionSubmitter>>,
 ) -> Result<serde_json::Value, RpcMethodError> {
     let transaction = params::first_param_non_empty_string(request)?;
     let config = parse_send_transaction_config(request)?;
@@ -92,6 +94,28 @@ fn build_send_transaction_response(
         snapshot.slot_for_commitment(commitment),
     )?;
 
+    // When a real transaction submitter is available, decode and forward
+    if let Some(submitter) = tx_submitter {
+        use base64::Engine;
+
+        let tx_bytes = match config.encoding {
+            TransactionEncoding::Base58 => bs58::decode(&transaction)
+                .into_vec()
+                .map_err(|_| RpcMethodError::InvalidParams)?,
+            TransactionEncoding::Base64 => base64::engine::general_purpose::STANDARD
+                .decode(&transaction)
+                .map_err(|_| RpcMethodError::InvalidParams)?,
+        };
+
+        let sig_bytes = submitter
+            .submit_transaction(&tx_bytes)
+            .map_err(|_| RpcMethodError::TransactionSubmissionFailed)?;
+
+        let sig_str = bs58::encode(sig_bytes).into_string();
+        return Ok(json!(sig_str));
+    }
+
+    // Synthetic fallback when no submitter is available
     let encoding_bonus = match config.encoding {
         TransactionEncoding::Base58 => SEND_TX_ENCODING_BONUS_BASE58,
         TransactionEncoding::Base64 => SEND_TX_ENCODING_BONUS_BASE64,

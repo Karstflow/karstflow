@@ -4,6 +4,7 @@ pub enum RpcMethodError {
     InvalidParams,
     MethodNotFound,
     MinimumContextSlotNotReached,
+    TransactionSubmissionFailed,
     Internal,
 }
 
@@ -14,6 +15,7 @@ impl RpcMethodError {
             Self::InvalidParams => -32602,
             Self::MethodNotFound => -32601,
             Self::MinimumContextSlotNotReached => -32016,
+            Self::TransactionSubmissionFailed => -32002,
             Self::Internal => -32603,
         }
     }
@@ -24,6 +26,7 @@ impl RpcMethodError {
             Self::InvalidParams => "Invalid params".to_string(),
             Self::MethodNotFound => format!("Method not found: {method}"),
             Self::MinimumContextSlotNotReached => "Minimum context slot not reached".to_string(),
+            Self::TransactionSubmissionFailed => "Transaction submission failed".to_string(),
             Self::Internal => "Internal error".to_string(),
         }
     }

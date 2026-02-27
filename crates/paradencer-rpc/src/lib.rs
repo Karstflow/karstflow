@@ -17,7 +17,7 @@ pub use filters::{apply_filters, parse_filter, parse_filters, RpcFilterType, Sor
 pub use http::spawn_rpc_http_server;
 pub use state::{
     metrics_file_provider, BankAccessProvider, RpcCommitment, RpcRuntimeSnapshot,
-    RuntimeSnapshotProvider, TransactionSimulationResponse,
+    RuntimeSnapshotProvider, TransactionSimulationResponse, TransactionSubmitter,
 };
 pub use utils::{
     calculate_rent_exemption, calculate_transaction_fee, generate_blockhash, generate_signature,
