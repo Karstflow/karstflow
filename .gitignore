@@ -1,7 +1,7 @@
 # Build artifacts
 /target/
 
-# Documentation (temporary)
+# Tech documentation (temporary)
 /docs/
 /docs/*
 .bgv
@@ -20,6 +20,7 @@
 
 # BGV governance (Claude Code only)
 CLAUDE.md
+MEMORY.md
 
 # Logs and temporary files
 *.log
