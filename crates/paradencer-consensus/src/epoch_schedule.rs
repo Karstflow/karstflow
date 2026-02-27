@@ -1,6 +1,7 @@
 use paradencer_constants::ledger::SLOTS_PER_EPOCH;
+use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EpochScheduleConfig {
     pub slots_per_epoch: u64,
     pub leader_schedule_slot_offset: u64,
@@ -21,7 +22,7 @@ impl Default for EpochScheduleConfig {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EpochSchedule {
     config: EpochScheduleConfig,
 }

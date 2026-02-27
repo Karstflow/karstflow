@@ -14,6 +14,7 @@ use paradencer_constants::vote_program::{
     VOTE_CREDITS_MAXIMUM_PER_SLOT,
 };
 use paradencer_storage::Pubkey;
+use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, VecDeque};
 
 /// A vote for a specific slot with confirmation count for lockout calculation.
@@ -21,7 +22,7 @@ use std::collections::{BTreeMap, VecDeque};
 /// Each vote has an associated lockout period that doubles with each
 /// subsequent confirmation. The confirmation_count tracks how many votes
 /// have been made since this one, determining the lockout duration.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct VoteLockout {
     /// Slot number that was voted on
     pub slot: u64,
@@ -85,7 +86,7 @@ impl VoteLockout {
 /// Tracks when the vote was submitted relative to when the slot was produced.
 /// The latency is used to compute timely vote credits: votes submitted faster
 /// earn more credits.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LandedVote {
     /// Latency in slots between slot production and vote submission
     pub latency: u8,
@@ -114,7 +115,7 @@ impl LandedVote {
 /// Credits earned in a specific epoch.
 ///
 /// Tracks voting participation and rewards for an epoch.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EpochCredits {
     /// Epoch number
     pub epoch: u64,
@@ -140,7 +141,7 @@ impl EpochCredits {
 }
 
 /// Block timestamp for last voted slot.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BlockTimestamp {
     /// Slot number
     pub slot: u64,
@@ -158,7 +159,7 @@ impl BlockTimestamp {
 ///
 /// Maintains a mapping from epoch to the authorized voter for that epoch,
 /// allowing vote authority to be changed effective at the next epoch boundary.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct AuthorizedVoters {
     /// Map from epoch to the authorized voter pubkey for that epoch.
     authorized_voters: BTreeMap<u64, Pubkey>,
@@ -291,7 +292,7 @@ impl AuthorizedVoters {
 ///
 /// When a vote authority changes, the prior authority is recorded here so
 /// that stake delegators can see who previously controlled the vote account.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PriorVoters {
     /// Circular buffer of prior voter entries: (pubkey, start_epoch, end_epoch)
     entries: Vec<(Pubkey, u64, u64)>,
@@ -351,7 +352,7 @@ impl Default for PriorVoters {
 /// Stores validator voting history, credits, and authorization info.
 /// This combines fields from VoteState versions 2, 3, and 4 to support
 /// full serialization round-tripping.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct VoteState {
     /// Validator node identity pubkey
     pub node_pubkey: Pubkey,

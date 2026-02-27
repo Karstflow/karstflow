@@ -6,9 +6,11 @@ use paradencer_constants::economics::{
     DEFAULT_EXEMPTION_THRESHOLD, DEFAULT_LAMPORTS_PER_BYTE_YEAR, DEFAULT_SLOTS_PER_YEAR,
 };
 
+use serde::{Deserialize, Serialize};
+
 use crate::EpochSchedule;
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct Rent {
     /// Annual rent cost per byte in lamports
     pub lamports_per_byte_year: u64,

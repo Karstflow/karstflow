@@ -1,6 +1,7 @@
 use crate::pubkey::Pubkey;
+use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AccountMeta {
     pub lamports: u64,
     pub owner: Pubkey,
@@ -34,7 +35,7 @@ impl Default for AccountMeta {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AccountData {
     data: Vec<u8>,
 }
@@ -101,7 +102,7 @@ impl AsRef<[u8]> for AccountData {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Account {
     pub meta: AccountMeta,
     pub data: AccountData,
