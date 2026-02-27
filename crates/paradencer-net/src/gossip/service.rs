@@ -509,6 +509,10 @@ impl GossipService {
     /// values that were inserted or updated since the previous cycle,
     /// plus our own self-value (always included for freshness).
     ///
+    /// Uses active set bucket rotation: each push cycle advances through
+    /// 25 stake-tier buckets, sampling weighted peers from the current
+    /// bucket. Full rotation cycle = 25 * push_interval ≈ 2.5 seconds.
+    ///
     /// Also runs a ContactInfo refresh timer that re-signs our own
     /// ContactInfo periodically (every ~7.5s) to maintain freshness
     /// across the cluster.
@@ -524,13 +528,16 @@ impl GossipService {
             gossip_const::CONTACT_INFO_REFRESH_INTERVAL_MS,
         ));
         let mut push_cursor: u64 = cluster_info.cursor();
+        let mut active_bucket: usize = 0;
 
         loop {
             tokio::select! {
                 _ = push_ticker.tick() => {
                     push_cursor = Self::do_push_gossip(
-                        &socket, &cluster_info, &stats, &config, push_cursor
+                        &socket, &cluster_info, &stats, &config, push_cursor,
+                        active_bucket,
                     ).await;
+                    active_bucket = (active_bucket + 1) % gossip_const::ACTIVE_SET_BUCKET_COUNT;
                 }
                 _ = refresh_ticker.tick() => {
                     // Refresh self ContactInfo wallclock to maintain freshness.
@@ -544,12 +551,17 @@ impl GossipService {
     }
 
     /// Execute one push gossip cycle. Returns the new cursor position.
+    ///
+    /// Selects push targets from the active set bucket at `bucket_idx`,
+    /// falling back to random weighted sampling if the bucket yields
+    /// insufficient peers.
     async fn do_push_gossip(
         socket: &Arc<UdpSocket>,
         cluster_info: &Arc<ClusterInfo>,
         stats: &GossipServiceStats,
         config: &GossipConfig,
         push_cursor: u64,
+        bucket_idx: usize,
     ) -> u64 {
         // Collect only new/updated values since our last push.
         let (new_values, new_cursor) = cluster_info.values_since_cursor(push_cursor);
@@ -577,7 +589,18 @@ impl GossipService {
         let mut exclude = HashSet::new();
         exclude.insert(cluster_info.node_id());
 
-        let targets = cluster_info.get_random_nodes(config.push_fanout, &exclude);
+        // Sample targets from the current active set bucket.
+        // Fall back to random weighted selection if bucket yields too few.
+        let mut targets =
+            cluster_info.get_active_set_peers(bucket_idx, config.push_fanout, &exclude);
+        if targets.len() < config.push_fanout {
+            let remaining = config.push_fanout - targets.len();
+            for ci in &targets {
+                exclude.insert(ci.node_id);
+            }
+            let extra = cluster_info.get_random_nodes(remaining, &exclude);
+            targets.extend(extra);
+        }
 
         if targets.is_empty() {
             return new_cursor;

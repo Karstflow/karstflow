@@ -504,6 +504,49 @@ impl ClusterInfo {
         selected
     }
 
+    /// Sample push targets from a specific active set bucket.
+    ///
+    /// Returns up to `count` peers weighted by stake from the given
+    /// bucket index (0..25). Each bucket represents a stake tier:
+    /// bucket = floor(log2(stake_sol)), clamped to [0, 24].
+    pub fn get_active_set_peers(
+        &self,
+        bucket: usize,
+        count: usize,
+        exclude: &HashSet<NodeId>,
+    ) -> Vec<ContactInfo> {
+        use rand::Rng;
+        let table = self.table.read();
+        let mut rng = rand::thread_rng();
+        let mut selected = Vec::with_capacity(count);
+        let mut seen = HashSet::new();
+
+        for _ in 0..count * 4 {
+            if selected.len() >= count {
+                break;
+            }
+            let random_value: u64 = rng.gen();
+            if let Some(peer_idx) = table.sample_active_set_peer(bucket, random_value) {
+                if seen.insert(peer_idx) {
+                    if let Some(entry) = table.entries_at(peer_idx) {
+                        if let Some(ci) = entry
+                            .value
+                            .data
+                            .as_contact_info()
+                            .and_then(ContactInfo::from_crds_contact_info)
+                        {
+                            if !exclude.contains(&ci.node_id) {
+                                selected.push(ci);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        selected
+    }
+
     /// Get all active nodes.
     pub fn get_active_nodes(&self) -> Vec<ContactInfo> {
         self.get_all()
