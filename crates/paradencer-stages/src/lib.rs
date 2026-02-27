@@ -29,6 +29,7 @@ mod fec_resolver;
 #[cfg(test)]
 mod integration_tests;
 mod leader_pipeline;
+pub mod metrics_aggregator;
 pub mod metrics_http;
 mod metrics_reporter;
 pub mod pack_stage;
@@ -59,6 +60,9 @@ pub use dedup_stage::{DedupOutcome, DedupStage, DedupStats, TransactionCache};
 pub use edge_intake::EdgeIntake;
 pub use errors::StageError;
 pub use execution_adapter::SbpfExecutionAdapter;
+pub use metrics_aggregator::{
+    AggregatedSnapshot, DedupSnapshot, FecCacheSnapshot, FecResolverSnapshot, MetricsAggregator,
+};
 pub use metrics_http::{
     shared_metrics_content, MetricsContent, MetricsHttpServer, MetricsHttpStats,
 };

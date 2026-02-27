@@ -2,6 +2,7 @@ mod format;
 mod sink;
 
 use crate::errors::StageError;
+use crate::metrics_aggregator::MetricsAggregator;
 use crate::metrics_http::MetricsContent;
 use crate::{
     BlockAssemblyStats, IngressFilterStats, MetricsOutputFormat, MetricsOutputTarget,
@@ -24,6 +25,8 @@ pub struct MetricsReporter {
     /// Shared buffer for HTTP metrics serving. Only used when
     /// `output_target` is `MetricsOutputTarget::Http`.
     http_content: Option<MetricsContent>,
+    /// Optional pipeline stage metrics aggregator.
+    aggregator: Option<MetricsAggregator>,
 }
 
 pub struct LinkTelemetryStats {
@@ -98,6 +101,7 @@ impl MetricsReporter {
             shred_filter_stats: stage_stats.shred_filter_stats,
             block_assembly_stats: stage_stats.block_assembly_stats,
             http_content: None,
+            aggregator: None,
         }
     }
 
@@ -109,6 +113,20 @@ impl MetricsReporter {
     pub fn with_http_content(mut self, content: MetricsContent) -> Self {
         self.http_content = Some(content);
         self
+    }
+
+    /// Set the pipeline stage metrics aggregator.
+    ///
+    /// When set, aggregated tile stats are appended to Prometheus output
+    /// alongside link and filter metrics.
+    pub fn with_aggregator(mut self, aggregator: MetricsAggregator) -> Self {
+        self.aggregator = Some(aggregator);
+        self
+    }
+
+    /// Mutable access to the aggregator for updating non-atomic stats.
+    pub fn aggregator_mut(&mut self) -> Option<&mut MetricsAggregator> {
+        self.aggregator.as_mut()
     }
 
     fn to_runtime_error(&self, error: StageError) -> RuntimeError {
@@ -190,7 +208,7 @@ impl Service for MetricsReporter {
                     .map_err(|error| self.to_runtime_error(error))?;
             }
             MetricsOutputFormat::PrometheusText => {
-                let lines = format::build_prometheus_lines(
+                let mut lines = format::build_prometheus_lines(
                     uptime_millis,
                     &packet_snapshot,
                     &shred_snapshot,
@@ -199,6 +217,12 @@ impl Service for MetricsReporter {
                     shred_filter_snapshot,
                     block_assembly_snapshot,
                 );
+
+                // Append aggregated tile stats if available.
+                if let Some(ref agg) = self.aggregator {
+                    let snap = agg.snapshot();
+                    lines.extend(snap.to_prometheus_lines());
+                }
 
                 // For Http target, join all lines and write to the shared buffer.
                 if matches!(self.output_target, MetricsOutputTarget::Http) {
