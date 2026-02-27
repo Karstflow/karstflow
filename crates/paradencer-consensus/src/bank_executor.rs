@@ -287,6 +287,24 @@ pub struct TransactionExecutionResult {
     pub return_data: Option<(Pubkey, Vec<u8>)>,
 }
 
+/// Outcome of simulating a transaction without committing state.
+///
+/// Unlike `TransactionExecutionResult`, this does not include fee or vote
+/// update information since simulation doesn't affect the ledger.
+#[derive(Debug, Clone)]
+pub struct TransactionSimulationResult {
+    /// Error description when the transaction fails, `None` on success.
+    pub error: Option<String>,
+    /// Execution logs from all instructions.
+    pub logs: Vec<String>,
+    /// Total compute units consumed.
+    pub compute_units_consumed: u64,
+    /// Accounts modified during simulation (post-execution state).
+    pub modified_accounts: HashMap<Pubkey, Account>,
+    /// Return data from the last instruction that set it.
+    pub return_data: Option<(Pubkey, Vec<u8>)>,
+}
+
 /// Errors that can occur during transaction execution.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TransactionExecutionError {
@@ -1871,6 +1889,252 @@ impl Bank {
         }
 
         summary
+    }
+
+    /// Simulate a transaction without committing any state changes.
+    ///
+    /// Runs the same execution pipeline as `process_transaction` but:
+    /// - Does not require `BankStatus::Processing`
+    /// - Optionally skips signature verification
+    /// - Optionally replaces the transaction's blockhash with the bank's latest
+    /// - Skips deduplication checks
+    /// - Does not reserve block capacity via cost tracker
+    /// - Does not write accounts to the database
+    /// - Does not collect fees or update counters
+    ///
+    /// Returns the simulation result including logs, compute units consumed,
+    /// modified account states, and any execution error.
+    pub fn simulate_transaction(
+        &self,
+        transaction: &SanitizedTransaction,
+        backend: &dyn ExecutionBackend,
+        sig_verify: bool,
+        replace_blockhash: bool,
+    ) -> TransactionSimulationResult {
+        // Validate account locks
+        if let Err(e) = validate_account_locks(transaction) {
+            return TransactionSimulationResult {
+                error: Some(format!("{e:?}")),
+                logs: vec![],
+                compute_units_consumed: 0,
+                modified_accounts: HashMap::new(),
+                return_data: None,
+            };
+        }
+
+        // Enforce instruction count limit
+        if transaction.instructions.len() > MAX_INSTRUCTIONS_PER_TRANSACTION {
+            return TransactionSimulationResult {
+                error: Some(format!(
+                    "too many instructions: {} (limit {})",
+                    transaction.instructions.len(),
+                    MAX_INSTRUCTIONS_PER_TRANSACTION,
+                )),
+                logs: vec![],
+                compute_units_consumed: 0,
+                modified_accounts: HashMap::new(),
+                return_data: None,
+            };
+        }
+
+        // Use the bank's latest blockhash for validation when replacing
+        let effective_blockhash = if replace_blockhash {
+            self.last_blockhash()
+        } else {
+            transaction.recent_blockhash
+        };
+
+        // Validate blockhash (skip if replacing since we just used the latest)
+        if !replace_blockhash && !self.is_blockhash_valid(&effective_blockhash) {
+            return TransactionSimulationResult {
+                error: Some("BlockhashNotFound".to_string()),
+                logs: vec![],
+                compute_units_consumed: 0,
+                modified_accounts: HashMap::new(),
+                return_data: None,
+            };
+        }
+
+        // Optionally verify signatures
+        if sig_verify && !transaction.signatures.is_empty() {
+            if let Err(err) = verify_transaction_signatures(transaction) {
+                return TransactionSimulationResult {
+                    error: Some(format!("{err:?}")),
+                    logs: vec![],
+                    compute_units_consumed: 0,
+                    modified_accounts: HashMap::new(),
+                    return_data: None,
+                };
+            }
+        }
+
+        // Parse compute budget
+        let budget_params = parse_compute_budget(transaction);
+
+        // Load accounts (read-only)
+        let account_state = match self
+            .load_transaction_accounts(transaction, budget_params.loaded_accounts_data_size_limit)
+        {
+            Ok(state) => state,
+            Err(err) => {
+                return TransactionSimulationResult {
+                    error: Some(format!("{err:?}")),
+                    logs: vec![],
+                    compute_units_consumed: 0,
+                    modified_accounts: HashMap::new(),
+                    return_data: None,
+                };
+            }
+        };
+
+        // Execute instructions (same logic as process_transaction step 4)
+        let effective_compute_limit = budget_params.compute_unit_limit;
+        let mut total_compute = 0u64;
+        let mut all_logs = Vec::new();
+        let mut log_bytes_written: usize = 0;
+        let mut log_truncated = false;
+        let mut modified = HashMap::new();
+        let mut exec_error: Option<String> = None;
+        let mut return_data: Option<(Pubkey, Vec<u8>)> = None;
+
+        let uses_instructions_sysvar = transaction.instructions.iter().any(|ix| {
+            ix.account_indices.iter().any(|&ai| {
+                transaction
+                    .account_keys
+                    .get(ai as usize)
+                    .is_some_and(|k| *k == INSTRUCTIONS_SYSVAR_ID)
+            })
+        });
+        let mut instructions_sysvar_data = if uses_instructions_sysvar {
+            Some(serialize_instructions_sysvar(transaction))
+        } else {
+            None
+        };
+
+        let mut sibling_instructions: Vec<ProcessedSibling> = Vec::new();
+
+        'sim_execution: for (idx, instruction) in transaction.instructions.iter().enumerate() {
+            let program_id = match transaction
+                .account_keys
+                .get(instruction.program_id_index as usize)
+            {
+                Some(id) => *id,
+                None => {
+                    exec_error = Some(format!(
+                        "invalid program_id_index {}",
+                        instruction.program_id_index
+                    ));
+                    break 'sim_execution;
+                }
+            };
+
+            let mut instr_accounts = Vec::with_capacity(instruction.account_indices.len());
+            let mut invalid_index = false;
+            for &ai in &instruction.account_indices {
+                let acct_idx = ai as usize;
+                let pubkey = match transaction.account_keys.get(acct_idx) {
+                    Some(k) => *k,
+                    None => {
+                        exec_error = Some(format!("invalid account index {ai}"));
+                        invalid_index = true;
+                        break;
+                    }
+                };
+
+                let account = if pubkey == INSTRUCTIONS_SYSVAR_ID {
+                    if let Some(ref mut sysvar_data) = instructions_sysvar_data {
+                        update_instructions_sysvar_index(sysvar_data, idx as u16);
+                        Account {
+                            data: AccountData::new(sysvar_data.clone()),
+                            ..Account::default()
+                        }
+                    } else {
+                        Account::default()
+                    }
+                } else {
+                    modified
+                        .get(&pubkey)
+                        .or_else(|| account_state.get(&pubkey))
+                        .cloned()
+                        .unwrap_or_default()
+                };
+
+                let writable = is_account_writable(transaction, acct_idx, &program_id);
+                let signer = transaction.is_signer(acct_idx);
+                instr_accounts.push((pubkey, account, writable, signer));
+            }
+            if invalid_index {
+                break 'sim_execution;
+            }
+
+            let info = InstructionInfo {
+                program_id,
+                accounts: instr_accounts,
+                data: instruction.data.clone(),
+                slot_context: self.slot_context(),
+                sibling_instructions: sibling_instructions.clone(),
+            };
+
+            let remaining = effective_compute_limit.saturating_sub(total_compute);
+            let result = backend.execute_instruction(&info, remaining);
+
+            total_compute = total_compute.saturating_add(result.compute_units_consumed);
+
+            if !log_truncated {
+                for log in &result.logs {
+                    let entry = format!("[ix {}] {}", idx, log);
+                    let new_total = log_bytes_written.saturating_add(entry.len());
+                    if new_total > paradencer_constants::syscalls::MAX_LOG_COLLECTOR_SIZE {
+                        log_truncated = true;
+                        all_logs.push("Log truncated".to_string());
+                        break;
+                    }
+                    log_bytes_written = new_total;
+                    all_logs.push(entry);
+                }
+            }
+
+            if !result.success {
+                for (k, v) in result.modified_accounts {
+                    modified.insert(k, v);
+                }
+                exec_error = Some(result.error.unwrap_or_else(|| "unknown error".to_string()));
+                break 'sim_execution;
+            }
+
+            for (k, v) in result.modified_accounts {
+                modified.insert(k, v);
+            }
+
+            sibling_instructions.push(ProcessedSibling {
+                program_id,
+                data: instruction.data.clone(),
+                accounts: instruction
+                    .account_indices
+                    .iter()
+                    .filter_map(|&ai| transaction.account_keys.get(ai as usize).copied())
+                    .collect(),
+            });
+
+            if result.return_data.is_some() {
+                return_data = result.return_data;
+            }
+
+            if total_compute > effective_compute_limit {
+                exec_error = Some(format!(
+                    "ComputeBudgetExceeded: consumed {total_compute}, limit {effective_compute_limit}"
+                ));
+                break 'sim_execution;
+            }
+        }
+
+        TransactionSimulationResult {
+            error: exec_error,
+            logs: all_logs,
+            compute_units_consumed: total_compute,
+            modified_accounts: modified,
+            return_data,
+        }
     }
 
     /// Load accounts referenced by a transaction from the account database.

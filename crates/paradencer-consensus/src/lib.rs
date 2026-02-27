@@ -31,6 +31,7 @@ mod tests;
 mod tower;
 mod tower_persistence;
 pub mod transaction_cache;
+pub mod transaction_wire;
 mod vote_account_cache;
 mod vote_processor;
 mod vote_state;
@@ -99,7 +100,7 @@ pub use bank_executor::{
     resolve_address_lookups, AddressLookupError, BatchExecutionSummary, CompiledInstruction,
     ExecutionBackend, InstructionInfo, InstructionResult, ProcessedSibling, ResolvedAddresses,
     SanitizedTransaction, SlotContext, TransactionExecutionError, TransactionExecutionResult,
-    VoteUpdate,
+    TransactionSimulationResult, VoteUpdate,
 };
 pub use cost_tracker::{CostTracker, CostTrackerError, TransactionCost};
 pub use features::{FeatureActivation, FeatureSet};
@@ -108,3 +109,4 @@ pub use snapshot_bootstrap::{
     BootstrapResult, FeatureInitStats, GenesisBootstrapResult, StakeInitStats,
 };
 pub use transaction_cache::{SeedEntry, TransactionCache};
+pub use transaction_wire::{deserialize_transaction, DeserializedTransaction};

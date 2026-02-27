@@ -8,12 +8,13 @@ use crate::{
 };
 use paradencer_config::{NodeConfig, ValidatorIdentity};
 use paradencer_consensus::{
-    bootstrap_from_snapshot, collect_validator_stakes, Bank, BankForks, CommitmentLevel,
-    CommitmentTracker, EpochSchedule, ForkChoice, LeaderSchedule, SavedTower, StakeTracker, Tower,
-    TowerPersistenceError, VoteProcessor, VoteProcessorConfig,
+    bootstrap_from_snapshot, collect_validator_stakes, deserialize_transaction,
+    resolve_address_lookups, Bank, BankForks, CommitmentLevel, CommitmentTracker, EpochSchedule,
+    ForkChoice, LeaderSchedule, SavedTower, StakeTracker, Tower, TowerPersistenceError,
+    VoteProcessor, VoteProcessorConfig,
 };
 use paradencer_core::{ExecutionMode, LinkKind, PinnedCorePolicy, StageKind};
-use paradencer_execution::ExecutionBridge;
+use paradencer_execution::{ExecutionBridge, SbpfBackend};
 use paradencer_mesh::{bounded_link, InPort, OutPort};
 use paradencer_net::{
     ClusterInfo, ContactInfo, GossipConfig, GossipService, InMemoryShredStore, IngressMode, NodeId,
@@ -2014,6 +2015,7 @@ impl paradencer_rpc::RuntimeSnapshotProvider for ConsensusSnapshotProvider {
 struct ConsensusBankAccessProvider {
     bank_forks: Arc<RwLock<BankForks>>,
     commitment_tracker: Option<Arc<Mutex<CommitmentTracker>>>,
+    execution_backend: SbpfBackend,
 }
 
 impl ConsensusBankAccessProvider {
@@ -2024,6 +2026,7 @@ impl ConsensusBankAccessProvider {
         Self {
             bank_forks,
             commitment_tracker,
+            execution_backend: SbpfBackend::new(),
         }
     }
 
@@ -2036,8 +2039,8 @@ impl ConsensusBankAccessProvider {
                 // then look up the bank at that slot in the fork tree.
                 if let Some(ref tracker) = self.commitment_tracker {
                     if let Ok(guard) = tracker.lock() {
-                        if let Some(confirmed_slot) = guard
-                            .highest_slot_with_commitment(CommitmentLevel::Confirmed)
+                        if let Some(confirmed_slot) =
+                            guard.highest_slot_with_commitment(CommitmentLevel::Confirmed)
                         {
                             if let Some(bank) = forks.get(confirmed_slot) {
                                 return Some(bank);
@@ -2196,6 +2199,86 @@ impl BankAccessProvider for ConsensusBankAccessProvider {
             }
         }
         Some(by_validator.into_iter().collect())
+    }
+
+    fn simulate_transaction(
+        &self,
+        raw_tx: &[u8],
+        sig_verify: bool,
+        replace_recent_blockhash: bool,
+        commitment: paradencer_rpc::RpcCommitment,
+    ) -> paradencer_rpc::TransactionSimulationResponse {
+        let bank = match self.bank_for_commitment(commitment) {
+            Some(bank) => bank,
+            None => {
+                return paradencer_rpc::TransactionSimulationResponse {
+                    error: Some("bank unavailable".to_string()),
+                    logs: vec![],
+                    units_consumed: 0,
+                    accounts: vec![],
+                    return_data: None,
+                };
+            }
+        };
+
+        // Deserialize transaction from wire format
+        let deserialized = match deserialize_transaction(raw_tx) {
+            Ok(d) => d,
+            Err(e) => {
+                return paradencer_rpc::TransactionSimulationResponse {
+                    error: Some(e),
+                    logs: vec![],
+                    units_consumed: 0,
+                    accounts: vec![],
+                    return_data: None,
+                };
+            }
+        };
+
+        // Resolve address lookup tables for V0 transactions
+        let mut tx = deserialized.tx;
+        if !deserialized.address_table_lookups.is_empty() {
+            let db = bank.accounts();
+            match resolve_address_lookups(&deserialized.address_table_lookups, |key| {
+                db.get_published_account(key)
+            }) {
+                Ok(resolved) => {
+                    tx.num_writable_lookup_keys = resolved.writable.len();
+                    tx.account_keys.extend(resolved.writable);
+                    tx.account_keys.extend(resolved.readonly);
+                }
+                Err(e) => {
+                    return paradencer_rpc::TransactionSimulationResponse {
+                        error: Some(format!("{e:?}")),
+                        logs: vec![],
+                        units_consumed: 0,
+                        accounts: vec![],
+                        return_data: None,
+                    };
+                }
+            }
+        }
+
+        // Run simulation
+        let result = bank.simulate_transaction(
+            &tx,
+            &self.execution_backend,
+            sig_verify,
+            replace_recent_blockhash,
+        );
+
+        // Map return data to base58 program ID
+        let return_data = result
+            .return_data
+            .map(|(program_id, data)| (bs58::encode(program_id.as_bytes()).into_string(), data));
+
+        paradencer_rpc::TransactionSimulationResponse {
+            error: result.error,
+            logs: result.logs,
+            units_consumed: result.compute_units_consumed,
+            accounts: vec![], // Populated by the RPC handler per requested addresses
+            return_data,
+        }
     }
 }
 

@@ -112,6 +112,35 @@ pub trait BankAccessProvider: Send + Sync {
         slot: u64,
         commitment: RpcCommitment,
     ) -> Option<Vec<(paradencer_types::Pubkey, Vec<u64>)>>;
+
+    /// Simulate a transaction without committing state changes.
+    ///
+    /// Deserializes the raw transaction bytes, loads accounts, executes
+    /// instructions, and returns the result without persisting any changes.
+    fn simulate_transaction(
+        &self,
+        raw_tx: &[u8],
+        sig_verify: bool,
+        replace_recent_blockhash: bool,
+        commitment: RpcCommitment,
+    ) -> TransactionSimulationResponse;
+}
+
+/// Result of simulating a transaction via `BankAccessProvider`.
+#[derive(Debug, Clone)]
+pub struct TransactionSimulationResponse {
+    /// Error description when the transaction fails, `None` on success.
+    pub error: Option<String>,
+    /// Execution logs from all instructions.
+    pub logs: Vec<String>,
+    /// Total compute units consumed.
+    pub units_consumed: u64,
+    /// Post-simulation account states for requested accounts.
+    /// Keyed by pubkey, value is the account after execution (or None if not found).
+    pub accounts: Vec<(paradencer_types::Pubkey, Option<paradencer_types::Account>)>,
+    /// Return data from the last instruction that set it.
+    /// Contains (program_id_base58, data_base64).
+    pub return_data: Option<(String, Vec<u8>)>,
 }
 
 pub struct MetricsFileRuntimeSnapshotProvider {

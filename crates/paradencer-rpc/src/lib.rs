@@ -21,7 +21,7 @@ pub use simulation::{
 };
 pub use state::{
     metrics_file_provider, BankAccessProvider, RpcCommitment, RpcRuntimeSnapshot,
-    RuntimeSnapshotProvider,
+    RuntimeSnapshotProvider, TransactionSimulationResponse,
 };
 pub use utils::{
     calculate_rent_exemption, calculate_transaction_fee, generate_blockhash, generate_signature,

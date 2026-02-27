@@ -140,6 +140,115 @@ fn build_simulate_transaction_response(
         .unwrap_or_else(|| snapshot.slot_for_commitment(commitment));
     ensure_min_context_slot(config.min_context_slot, slot)?;
 
+    // When bank access is available, run real transaction simulation
+    if let Some(bank) = bank_access {
+        return build_real_simulation_response(&transaction, config, commitment, bank, slot);
+    }
+
+    // Synthetic fallback when no bank access is available
+    build_synthetic_simulation_response(&transaction, config, snapshot, commitment, slot)
+}
+
+fn build_real_simulation_response(
+    transaction: &str,
+    config: SimulateTransactionConfig,
+    commitment: RpcCommitment,
+    bank_access: &Arc<dyn BankAccessProvider>,
+    slot: u64,
+) -> Result<serde_json::Value, RpcMethodError> {
+    use base64::Engine;
+
+    // Decode transaction bytes from the encoding
+    let raw_bytes = match config.encoding {
+        TransactionEncoding::Base58 => bs58::decode(transaction)
+            .into_vec()
+            .map_err(|_| RpcMethodError::InvalidParams)?,
+        TransactionEncoding::Base64 => base64::engine::general_purpose::STANDARD
+            .decode(transaction)
+            .map_err(|_| RpcMethodError::InvalidParams)?,
+    };
+
+    // Run simulation via the bank access provider
+    let sim_result = bank_access.simulate_transaction(
+        &raw_bytes,
+        config.sig_verify,
+        config.replace_recent_blockhash,
+        commitment,
+    );
+
+    // Format error for JSON response (Solana uses null for success)
+    let err_value = sim_result
+        .error
+        .as_ref()
+        .map(|e| json!(e))
+        .unwrap_or(serde_json::Value::Null);
+
+    // Format logs
+    let logs_value = json!(sim_result.logs);
+
+    // Format accounts if requested
+    let account_payload = config.accounts.map(|accounts| {
+        serde_json::Value::Array(
+            accounts
+                .addresses
+                .into_iter()
+                .map(|address| {
+                    if let Some(real_account) =
+                        parse_pubkey_and_lookup(bank_access, &address, commitment)
+                    {
+                        format_simulate_account(&real_account, &address, accounts.encoding)
+                    } else {
+                        serde_json::Value::Null
+                    }
+                })
+                .collect(),
+        )
+    });
+
+    // Format return data
+    let return_data_value = sim_result
+        .return_data
+        .map(|(program_id, data)| {
+            let encoded = base64::engine::general_purpose::STANDARD.encode(&data);
+            json!({
+                "programId": program_id,
+                "data": [encoded, "base64"]
+            })
+        })
+        .unwrap_or(serde_json::Value::Null);
+
+    // Format replacement blockhash
+    let replacement_blockhash = if config.replace_recent_blockhash {
+        let hash = bs58::encode(bank_access.get_latest_blockhash(commitment)).into_string();
+        let last_valid = bank_access.get_last_valid_block_height(commitment);
+        json!({
+            "blockhash": hash,
+            "lastValidBlockHeight": last_valid
+        })
+    } else {
+        serde_json::Value::Null
+    };
+
+    Ok(json!({
+        "context": {"slot": slot},
+        "value": {
+            "err": err_value,
+            "logs": logs_value,
+            "unitsConsumed": sim_result.units_consumed,
+            "accounts": account_payload.unwrap_or(serde_json::Value::Null),
+            "returnData": return_data_value,
+            "replacementBlockhash": replacement_blockhash
+        }
+    }))
+}
+
+fn build_synthetic_simulation_response(
+    transaction: &str,
+    config: SimulateTransactionConfig,
+    snapshot: RpcRuntimeSnapshot,
+    commitment: RpcCommitment,
+    slot: u64,
+) -> Result<serde_json::Value, RpcMethodError> {
     let base_units = SIMULATE_UNITS_CONSUMED_BASE
         .saturating_add(
             (transaction.len() as u64).saturating_mul(SIMULATE_UNITS_PER_TRANSACTION_CHAR),
@@ -160,13 +269,6 @@ fn build_simulate_transaction_response(
                 .addresses
                 .into_iter()
                 .map(|address| {
-                    // Try real account lookup first
-                    if let Some(bank) = bank_access {
-                        if let Some(real_account) = parse_pubkey_and_lookup(bank, &address, commitment) {
-                            return format_simulate_account(&real_account, &address, accounts.encoding);
-                        }
-                    }
-                    // Synthetic fallback
                     let data = match accounts.encoding {
                         AccountEncoding::Base58 => json!([address, TRANSACTION_ENCODING_BASE58]),
                         AccountEncoding::Base64 => json!([address, TRANSACTION_ENCODING_BASE64]),
@@ -189,26 +291,16 @@ fn build_simulate_transaction_response(
     });
 
     let replacement_blockhash = if config.replace_recent_blockhash {
-        if let Some(bank) = bank_access {
-            let hash = bs58::encode(bank.get_latest_blockhash(commitment)).into_string();
-            let last_valid = bank.get_last_valid_block_height(commitment);
-            json!({
-                "blockhash": hash,
-                "lastValidBlockHeight": last_valid
-            })
-        } else {
-            json!({
-                "blockhash": format!("{:064x}", snapshot.blockhash_seed_for_commitment(commitment)),
-                "lastValidBlockHeight": snapshot
-                    .block_height_for_commitment(commitment)
-                    .saturating_add(SIMULATE_REPLACEMENT_BLOCKHASH_VALIDITY_OFFSET)
-            })
-        }
+        json!({
+            "blockhash": format!("{:064x}", snapshot.blockhash_seed_for_commitment(commitment)),
+            "lastValidBlockHeight": snapshot
+                .block_height_for_commitment(commitment)
+                .saturating_add(SIMULATE_REPLACEMENT_BLOCKHASH_VALIDITY_OFFSET)
+        })
     } else {
         serde_json::Value::Null
     };
 
-    // TODO: Execute real transaction simulation via Bank
     Ok(json!({
         "context": {"slot": slot},
         "value": {

@@ -31,9 +31,11 @@ pub(super) fn handle(
         RpcMethod::GetVoteAccounts => {
             build_vote_accounts_response(request, snapshot, commitment, bank_access)
         }
-        RpcMethod::GetSlotLeader => {
-            Ok(build_slot_leader_response(snapshot, commitment, bank_access))
-        }
+        RpcMethod::GetSlotLeader => Ok(build_slot_leader_response(
+            snapshot,
+            commitment,
+            bank_access,
+        )),
         RpcMethod::GetSlotLeaders => {
             build_slot_leaders_response(request, snapshot, commitment, bank_access)
         }

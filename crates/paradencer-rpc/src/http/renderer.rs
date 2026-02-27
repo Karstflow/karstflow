@@ -3445,6 +3445,25 @@ mod tests {
         ) -> Option<Vec<(paradencer_types::Pubkey, Vec<u64>)>> {
             None
         }
+
+        fn simulate_transaction(
+            &self,
+            _raw_tx: &[u8],
+            _sig_verify: bool,
+            _replace_recent_blockhash: bool,
+            _commitment: crate::state::RpcCommitment,
+        ) -> crate::state::TransactionSimulationResponse {
+            crate::state::TransactionSimulationResponse {
+                error: None,
+                logs: vec![
+                    "Program 11111111111111111111111111111111 invoke [1]".to_string(),
+                    "Program 11111111111111111111111111111111 success".to_string(),
+                ],
+                units_consumed: 150,
+                accounts: vec![],
+                return_data: None,
+            }
+        }
     }
 
     fn test_pubkey_bytes() -> [u8; 32] {
@@ -3923,8 +3942,7 @@ mod tests {
             b
         };
         let token_acct_1 = paradencer_types::Pubkey::new(token_acct_1_bytes);
-        let account_1 =
-            paradencer_types::Account::new(2_039_280, token_data_1, token_program);
+        let account_1 = paradencer_types::Account::new(2_039_280, token_data_1, token_program);
 
         // Token account 2: owned by someone else
         let mut token_data_2 = vec![0u8; 165];
@@ -3936,8 +3954,7 @@ mod tests {
             b
         };
         let token_acct_2 = paradencer_types::Pubkey::new(token_acct_2_bytes);
-        let account_2 =
-            paradencer_types::Account::new(2_039_280, token_data_2, token_program);
+        let account_2 = paradencer_types::Account::new(2_039_280, token_data_2, token_program);
 
         let mock: Arc<dyn BankAccessProvider> = Arc::new(
             MockBankAccess::new()

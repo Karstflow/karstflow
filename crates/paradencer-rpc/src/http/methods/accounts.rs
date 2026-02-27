@@ -137,7 +137,8 @@ fn build_token_account_balance_response(
     if let Some(bank) = bank_access {
         let pubkey = parse_pubkey(&token_account_str)?;
         if let Some(account) = bank.get_account(&pubkey, commitment) {
-            if let Some((amount, decimals)) = parse_spl_token_account_balance(account.data.as_slice())
+            if let Some((amount, decimals)) =
+                parse_spl_token_account_balance(account.data.as_slice())
             {
                 return Ok(json!({
                     "context": {"slot": slot},
@@ -272,16 +273,14 @@ fn build_token_accounts_by_owner_response(
     if let Some(bank) = bank_access {
         // Look up accounts owned by SPL Token program, then filter by token owner
         let owner_pubkey = parse_pubkey(&_owner)?;
-        let token_program =
-            parse_pubkey("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA")?;
+        let token_program = parse_pubkey("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA")?;
         let all_token_accounts = bank.get_accounts_by_owner(&token_program, commitment);
         let value = all_token_accounts
             .into_iter()
             .filter(|(_, account)| {
                 // SPL Token account: owner is at bytes 32..64
                 let data = account.data.as_slice();
-                data.len() >= 64
-                    && data[32..64] == *owner_pubkey.as_bytes()
+                data.len() >= 64 && data[32..64] == *owner_pubkey.as_bytes()
             })
             .map(|(pubkey, account)| {
                 json!({
@@ -547,7 +546,8 @@ fn parse_spl_token_account_balance(data: &[u8]) -> Option<(u64, u8)> {
     if data.len() < SPL_TOKEN_ACCOUNT_MIN_LEN {
         return None;
     }
-    let amount_bytes: [u8; 8] = data[SPL_TOKEN_ACCOUNT_AMOUNT_OFFSET..SPL_TOKEN_ACCOUNT_AMOUNT_OFFSET + 8]
+    let amount_bytes: [u8; 8] = data
+        [SPL_TOKEN_ACCOUNT_AMOUNT_OFFSET..SPL_TOKEN_ACCOUNT_AMOUNT_OFFSET + 8]
         .try_into()
         .ok()?;
     let amount = u64::from_le_bytes(amount_bytes);
