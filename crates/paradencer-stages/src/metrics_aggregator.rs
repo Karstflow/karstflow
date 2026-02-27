@@ -147,6 +147,8 @@ pub struct FecResolverSnapshot {
     pub sets_spilled: u64,
     pub duplicates_rejected: u64,
     pub duplicate_shreds_rejected: u64,
+    pub equivocations_detected: u64,
+    pub chain_breaks: u64,
 }
 
 /// Snapshot of FEC cache counters.
@@ -374,6 +376,14 @@ impl AggregatedSnapshot {
                 "paradencer_fec_resolver_duplicate_shreds_rejected {}",
                 f.duplicate_shreds_rejected
             ));
+            lines.push(format!(
+                "paradencer_fec_resolver_equivocations_detected {}",
+                f.equivocations_detected
+            ));
+            lines.push(format!(
+                "paradencer_fec_resolver_chain_breaks {}",
+                f.chain_breaks
+            ));
         }
 
         if let Some(ref c) = self.fec_cache {
@@ -415,6 +425,8 @@ impl From<&crate::fec_resolver::FecResolverStats> for FecResolverSnapshot {
             sets_spilled: s.sets_spilled,
             duplicates_rejected: s.duplicates_rejected,
             duplicate_shreds_rejected: s.duplicate_shreds_rejected,
+            equivocations_detected: s.equivocations_detected,
+            chain_breaks: s.chain_breaks,
         }
     }
 }
@@ -582,6 +594,8 @@ mod tests {
             sets_spilled: 5,
             duplicates_rejected: 3,
             duplicate_shreds_rejected: 10,
+            equivocations_detected: 1,
+            chain_breaks: 0,
         };
 
         let cache = FecCacheSnapshot {
@@ -607,6 +621,7 @@ mod tests {
         assert!(text.contains("paradencer_fec_resolver_sets_spilled 5"));
         assert!(text.contains("paradencer_fec_resolver_duplicates_rejected 3"));
         assert!(text.contains("paradencer_fec_resolver_duplicate_shreds_rejected 10"));
+        assert!(text.contains("paradencer_fec_resolver_equivocations_detected 1"));
         assert!(text.contains("paradencer_fec_cache_hits 500"));
         assert!(text.contains("paradencer_fec_cache_misses 50"));
         assert!(text.contains("paradencer_fec_cache_inserts 100"));
@@ -672,6 +687,8 @@ mod tests {
             sets_spilled: 5,
             duplicates_rejected: 2,
             duplicate_shreds_rejected: 7,
+            equivocations_detected: 1,
+            chain_breaks: 0,
         };
 
         let snapshot = FecResolverSnapshot::from(&stats);
@@ -681,6 +698,7 @@ mod tests {
         assert_eq!(snapshot.sets_spilled, 5);
         assert_eq!(snapshot.duplicates_rejected, 2);
         assert_eq!(snapshot.duplicate_shreds_rejected, 7);
+        assert_eq!(snapshot.equivocations_detected, 1);
     }
 
     #[test]

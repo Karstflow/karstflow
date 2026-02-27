@@ -375,6 +375,16 @@ impl ShredNetworkStage {
                 // a position-level duplicate that had a different signature.
                 ShredInsertOutcome::Accepted
             }
+            ResolverInsertResult::Equivocation => {
+                // Different shred at the same (slot, index, position).
+                // The equivocation proof is stored in the resolver pool.
+                tracing::warn!(
+                    slot,
+                    fec_set_index,
+                    "equivocation detected: conflicting shred at same position"
+                );
+                ShredInsertOutcome::Duplicate
+            }
             ResolverInsertResult::Accepted => ShredInsertOutcome::Accepted,
         }
     }

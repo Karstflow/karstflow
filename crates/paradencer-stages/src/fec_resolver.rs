@@ -126,6 +126,34 @@ pub enum ResolverInsertResult {
     DuplicateFecSet,
     /// Duplicate: this exact shred (by position) was already inserted.
     DuplicateShred,
+    /// Equivocation: different shred at same (slot, index, position).
+    /// The leader produced conflicting shreds — evidence for slashing.
+    Equivocation,
+}
+
+/// Evidence of equivocation: two different shreds at the same position.
+#[derive(Debug, Clone)]
+pub struct EquivocationProof {
+    /// Slot where equivocation was detected.
+    pub slot: u64,
+    /// FEC set index.
+    pub fec_set_index: u32,
+    /// Shred position within the FEC set.
+    pub position: u32,
+    /// Signature of the existing (first-seen) shred.
+    pub existing_signature: [u8; 64],
+    /// Signature of the conflicting (second) shred.
+    pub conflicting_signature: [u8; 64],
+}
+
+/// Tracks the last completed FEC set index for a slot, enabling chaining validation.
+#[derive(Debug, Clone, Copy)]
+struct SlotChainState {
+    /// The expected start index for the next FEC set in this slot.
+    /// Equal to previous fec_set_index + num_data from that set.
+    next_expected_index: u32,
+    /// Number of FEC sets completed for this slot.
+    sets_completed: u32,
 }
 
 /// Pre-allocated FEC set resolver with depth-controlled buffer lifecycle.
@@ -142,6 +170,8 @@ pub struct FecResolverPool {
     completed_queue: VecDeque<usize>,
     /// Circular buffer of recently-completed FEC set signatures for dedup.
     done_signatures: VecDeque<[u8; 64]>,
+    /// Per-slot FEC chaining state for continuity validation.
+    slot_chain: HashMap<u64, SlotChainState>,
     /// Maximum concurrent in-progress FEC sets before eviction.
     depth: usize,
     /// Maximum completed buffers retained.
@@ -150,6 +180,8 @@ pub struct FecResolverPool {
     done_depth: usize,
     /// Spilled FEC set info from most recent eviction (for repair coordination).
     last_spilled: Option<SpilledFecSet>,
+    /// Recent equivocation proofs (bounded queue for consumer to drain).
+    equivocation_proofs: VecDeque<EquivocationProof>,
     /// Statistics.
     pub stats: FecResolverStats,
 }
@@ -169,6 +201,10 @@ pub struct FecResolverStats {
     pub duplicates_rejected: u64,
     /// Duplicate shreds rejected (same position in same FEC set).
     pub duplicate_shreds_rejected: u64,
+    /// Equivocation events detected (conflicting shreds at same position).
+    pub equivocations_detected: u64,
+    /// FEC chain breaks detected (gap or overlap in consecutive FEC sets).
+    pub chain_breaks: u64,
 }
 
 impl FecResolverPool {
@@ -192,10 +228,12 @@ impl FecResolverPool {
             in_progress_order: VecDeque::with_capacity(depth),
             completed_queue: VecDeque::with_capacity(complete_depth),
             done_signatures: VecDeque::with_capacity(done_depth),
+            slot_chain: HashMap::new(),
             depth,
             complete_depth,
             done_depth,
             last_spilled: None,
+            equivocation_proofs: VecDeque::new(),
             stats: FecResolverStats::default(),
         }
     }
@@ -239,8 +277,24 @@ impl FecResolverPool {
             buf.first_signature = shred.common_header.signature;
         }
 
-        // Reject duplicate shred position.
-        if buf.data_shreds.contains_key(&relative_index) {
+        // Check for duplicate or equivocation at this position.
+        if let Some(existing) = buf.data_shreds.get(&relative_index) {
+            if existing.common_header.signature != shred.common_header.signature {
+                // Different shred at same position = equivocation.
+                self.equivocation_proofs.push_back(EquivocationProof {
+                    slot,
+                    fec_set_index,
+                    position: relative_index,
+                    existing_signature: existing.common_header.signature,
+                    conflicting_signature: shred.common_header.signature,
+                });
+                self.stats.equivocations_detected += 1;
+                // Cap proof queue to avoid unbounded growth.
+                if self.equivocation_proofs.len() > 64 {
+                    self.equivocation_proofs.pop_front();
+                }
+                return ResolverInsertResult::Equivocation;
+            }
             self.stats.duplicate_shreds_rejected += 1;
             return ResolverInsertResult::DuplicateShred;
         }
@@ -283,8 +337,22 @@ impl FecResolverPool {
         // Learn FEC params.
         buf.learn_params(num_data, num_coding);
 
-        // Reject duplicate coding position.
-        if buf.coding_shreds.contains_key(&position) {
+        // Check for duplicate or equivocation at this coding position.
+        if let Some(existing) = buf.coding_shreds.get(&position) {
+            if existing.common_header.signature != shred.common_header.signature {
+                self.equivocation_proofs.push_back(EquivocationProof {
+                    slot,
+                    fec_set_index,
+                    position,
+                    existing_signature: existing.common_header.signature,
+                    conflicting_signature: shred.common_header.signature,
+                });
+                self.stats.equivocations_detected += 1;
+                if self.equivocation_proofs.len() > 64 {
+                    self.equivocation_proofs.pop_front();
+                }
+                return ResolverInsertResult::Equivocation;
+            }
             self.stats.duplicate_shreds_rejected += 1;
             return ResolverInsertResult::DuplicateShred;
         }
@@ -298,12 +366,21 @@ impl FecResolverPool {
     /// Mark a FEC set as resolved and move its buffer to the completed queue.
     ///
     /// Called after the consumer has extracted data from the buffer and
-    /// performed Reed-Solomon recovery if needed.
-    pub fn mark_completed(&mut self, key: FecSetKey) {
+    /// performed Reed-Solomon recovery if needed. Returns `true` if the
+    /// FEC set's position in the slot chain is valid (no gap or overlap),
+    /// `false` if a chain break was detected.
+    pub fn mark_completed(&mut self, key: FecSetKey) -> bool {
+        let chain_ok;
         if let Some(buf_idx) = self.in_progress.remove(&key) {
             self.in_progress_order.retain(|k| k != &key);
 
             self.buffers[buf_idx].resolved = true;
+
+            // Read num_data before validate_chain borrows self mutably.
+            let num_data = self.buffers[buf_idx].num_data;
+
+            // Validate FEC chain continuity for this slot.
+            chain_ok = self.validate_chain(key.slot, key.fec_set_index, num_data);
 
             // Record signature in done_map.
             let sig = self.buffers[buf_idx].first_signature;
@@ -319,7 +396,10 @@ impl FecResolverPool {
                 }
             }
             self.completed_queue.push_back(buf_idx);
+        } else {
+            chain_ok = true;
         }
+        chain_ok
     }
 
     /// Release a completed buffer back to the free pool.
@@ -370,6 +450,16 @@ impl FecResolverPool {
         self.last_spilled.take()
     }
 
+    /// Drain all pending equivocation proofs.
+    pub fn drain_equivocation_proofs(&mut self) -> Vec<EquivocationProof> {
+        self.equivocation_proofs.drain(..).collect()
+    }
+
+    /// Check if any equivocation proofs are pending.
+    pub fn has_equivocation_proofs(&self) -> bool {
+        !self.equivocation_proofs.is_empty()
+    }
+
     /// Number of in-progress FEC sets.
     pub fn in_progress_count(&self) -> usize {
         self.in_progress.len()
@@ -390,6 +480,13 @@ impl FecResolverPool {
         self.done_signatures.len()
     }
 
+    /// Get the chain state for a slot (for diagnostics).
+    pub fn slot_chain_state(&self, slot: u64) -> Option<(u32, u32)> {
+        self.slot_chain
+            .get(&slot)
+            .map(|s| (s.next_expected_index, s.sets_completed))
+    }
+
     /// Prune all FEC sets for slots below the given minimum.
     pub fn prune_slots_below(&mut self, min_slot: u64) {
         let keys_to_remove: Vec<FecSetKey> = self
@@ -406,6 +503,7 @@ impl FecResolverPool {
             }
         }
         self.in_progress_order.retain(|k| k.slot >= min_slot);
+        self.slot_chain.retain(|&slot, _| slot >= min_slot);
     }
 
     // -----------------------------------------------------------------------
@@ -478,6 +576,34 @@ impl FecResolverPool {
         } else {
             ResolverInsertResult::Accepted
         }
+    }
+
+    /// Validate that a completed FEC set continues the chain for its slot.
+    ///
+    /// The first FEC set in a slot can start at any index. Subsequent sets
+    /// must start exactly where the previous one ended (fec_set_index ==
+    /// prev.fec_set_index + prev.num_data). Returns true if chain is valid.
+    fn validate_chain(&mut self, slot: u64, fec_set_index: u32, num_data: u32) -> bool {
+        let chain = self.slot_chain.entry(slot).or_insert(SlotChainState {
+            next_expected_index: fec_set_index,
+            sets_completed: 0,
+        });
+
+        let valid = if chain.sets_completed == 0 {
+            // First FEC set for this slot — always valid.
+            true
+        } else {
+            fec_set_index == chain.next_expected_index
+        };
+
+        if !valid {
+            self.stats.chain_breaks += 1;
+        }
+
+        // Update chain state regardless (so we track from wherever we are).
+        chain.next_expected_index = fec_set_index + num_data;
+        chain.sets_completed += 1;
+        valid
     }
 
     /// Check if a signature belongs to a recently-completed FEC set.
@@ -857,5 +983,215 @@ mod tests {
             pool.free_count(),
             FEC_RESOLVER_DEPTH + FEC_RESOLVER_COMPLETE_DEPTH
         );
+    }
+
+    // --- Equivocation detection tests ---
+
+    fn make_data_shred_with_sig(slot: u64, index: u32, fec_set_index: u32, sig_byte: u8) -> Shred {
+        let mut sig = [0u8; 64];
+        sig[..8].copy_from_slice(&slot.to_le_bytes());
+        sig[8..12].copy_from_slice(&index.to_le_bytes());
+        sig[12..16].copy_from_slice(&fec_set_index.to_le_bytes());
+        sig[63] = sig_byte; // Distinguishing byte for different "leaders".
+        Shred::new(
+            ShredCommonHeader {
+                signature: sig,
+                variant: SHRED_TYPE_LEGACY_DATA | SHRED_LEGACY_DATA_NIBBLE,
+                slot,
+                index,
+                version: 1,
+                fec_set_index,
+            },
+            ShredVariant::LegacyData(DataShredHeader {
+                parent_offset: 1,
+                flags: 0,
+                size: DATA_SHRED_PAYLOAD_SIZE as u16,
+            }),
+            vec![0u8; DATA_SHRED_PAYLOAD_SIZE],
+        )
+    }
+
+    fn make_coding_shred_with_sig(
+        slot: u64,
+        index: u32,
+        fec_set_index: u32,
+        position: u16,
+        num_data: u16,
+        num_coding: u16,
+        sig_byte: u8,
+    ) -> Shred {
+        let mut sig = [0u8; 64];
+        sig[..8].copy_from_slice(&slot.to_le_bytes());
+        sig[8..12].copy_from_slice(&index.to_le_bytes());
+        sig[12..16].copy_from_slice(&fec_set_index.to_le_bytes());
+        sig[16] = 1;
+        sig[17..19].copy_from_slice(&position.to_le_bytes());
+        sig[63] = sig_byte;
+        Shred::new(
+            ShredCommonHeader {
+                signature: sig,
+                variant: SHRED_CODE_FLAG,
+                slot,
+                index,
+                version: 1,
+                fec_set_index,
+            },
+            ShredVariant::LegacyCoding(CodingShredHeader {
+                num_data_shreds: num_data,
+                num_coding_shreds: num_coding,
+                position,
+            }),
+            vec![0u8; DATA_SHRED_PAYLOAD_SIZE],
+        )
+    }
+
+    #[test]
+    fn equivocation_detected_on_data_shred() {
+        let mut pool = FecResolverPool::new(4, 4, 16);
+
+        // Insert first data shred at position 0.
+        let shred1 = make_data_shred_with_sig(100, 0, 0, 1);
+        let result = pool.insert_data_shred(100, 0, 0, shred1);
+        assert_eq!(result, ResolverInsertResult::Accepted);
+
+        // Insert different shred at same position (different signature).
+        let shred2 = make_data_shred_with_sig(100, 0, 0, 2);
+        let result = pool.insert_data_shred(100, 0, 0, shred2);
+        assert_eq!(result, ResolverInsertResult::Equivocation);
+        assert_eq!(pool.stats.equivocations_detected, 1);
+
+        // Proof should be available.
+        assert!(pool.has_equivocation_proofs());
+        let proofs = pool.drain_equivocation_proofs();
+        assert_eq!(proofs.len(), 1);
+        assert_eq!(proofs[0].slot, 100);
+        assert_eq!(proofs[0].fec_set_index, 0);
+        assert_eq!(proofs[0].position, 0);
+        assert_eq!(proofs[0].existing_signature[63], 1);
+        assert_eq!(proofs[0].conflicting_signature[63], 2);
+    }
+
+    #[test]
+    fn equivocation_detected_on_coding_shred() {
+        let mut pool = FecResolverPool::new(4, 4, 16);
+
+        let shred1 = make_coding_shred_with_sig(100, 2, 0, 0, 2, 2, 1);
+        let result = pool.insert_coding_shred(100, 0, 0, 2, 2, shred1);
+        assert_eq!(result, ResolverInsertResult::Accepted);
+
+        let shred2 = make_coding_shred_with_sig(100, 2, 0, 0, 2, 2, 2);
+        let result = pool.insert_coding_shred(100, 0, 0, 2, 2, shred2);
+        assert_eq!(result, ResolverInsertResult::Equivocation);
+        assert_eq!(pool.stats.equivocations_detected, 1);
+    }
+
+    #[test]
+    fn same_shred_at_same_position_is_duplicate_not_equivocation() {
+        let mut pool = FecResolverPool::new(4, 4, 16);
+
+        // Insert and re-insert identical shred.
+        let shred1 = make_data_shred_with_sig(100, 0, 0, 1);
+        pool.insert_data_shred(100, 0, 0, shred1);
+
+        let shred2 = make_data_shred_with_sig(100, 0, 0, 1); // same sig_byte
+        let result = pool.insert_data_shred(100, 0, 0, shred2);
+        assert_eq!(result, ResolverInsertResult::DuplicateShred);
+        assert_eq!(pool.stats.equivocations_detected, 0);
+        assert!(!pool.has_equivocation_proofs());
+    }
+
+    // --- FEC chaining verification tests ---
+
+    #[test]
+    fn chain_valid_consecutive_fec_sets() {
+        let mut pool = FecResolverPool::new(8, 8, 16);
+
+        // FEC set 0: starts at index 0, has 4 data shreds.
+        for i in 0..4 {
+            pool.insert_data_shred(100, 0, i, make_data_shred(100, i, 0));
+        }
+        pool.insert_coding_shred(100, 0, 0, 4, 4, make_coding_shred(100, 4, 0, 0, 4, 4));
+
+        let key0 = FecSetKey {
+            slot: 100,
+            fec_set_index: 0,
+        };
+        let valid = pool.mark_completed(key0);
+        assert!(valid); // First set — always valid.
+
+        // FEC set 1: starts at index 4 (= 0 + 4) — valid chain.
+        for i in 0..3 {
+            pool.insert_data_shred(100, 4, i, make_data_shred(100, 4 + i, 4));
+        }
+        pool.insert_coding_shred(100, 4, 0, 3, 3, make_coding_shred(100, 7, 4, 0, 3, 3));
+
+        let key1 = FecSetKey {
+            slot: 100,
+            fec_set_index: 4,
+        };
+        let valid = pool.mark_completed(key1);
+        assert!(valid); // Continues at expected index.
+        assert_eq!(pool.stats.chain_breaks, 0);
+    }
+
+    #[test]
+    fn chain_break_gap_detected() {
+        let mut pool = FecResolverPool::new(8, 8, 16);
+
+        // FEC set 0: starts at 0, 4 data shreds.
+        for i in 0..4 {
+            pool.insert_data_shred(100, 0, i, make_data_shred(100, i, 0));
+        }
+        pool.insert_coding_shred(100, 0, 0, 4, 4, make_coding_shred(100, 4, 0, 0, 4, 4));
+        pool.mark_completed(FecSetKey {
+            slot: 100,
+            fec_set_index: 0,
+        });
+
+        // FEC set 1: starts at 8 (should be 4) — GAP.
+        for i in 0..2 {
+            pool.insert_data_shred(100, 8, i, make_data_shred(100, 8 + i, 8));
+        }
+        pool.insert_coding_shred(100, 8, 0, 2, 2, make_coding_shred(100, 10, 8, 0, 2, 2));
+
+        let valid = pool.mark_completed(FecSetKey {
+            slot: 100,
+            fec_set_index: 8,
+        });
+        assert!(!valid); // Chain break.
+        assert_eq!(pool.stats.chain_breaks, 1);
+    }
+
+    #[test]
+    fn chain_state_pruned_with_slots() {
+        let mut pool = FecResolverPool::new(8, 8, 16);
+
+        pool.insert_data_shred(10, 0, 0, make_data_shred(10, 0, 0));
+        pool.insert_coding_shred(10, 0, 0, 1, 1, make_coding_shred(10, 1, 0, 0, 1, 1));
+        pool.mark_completed(FecSetKey {
+            slot: 10,
+            fec_set_index: 0,
+        });
+        assert!(pool.slot_chain_state(10).is_some());
+
+        pool.prune_slots_below(20);
+        assert!(pool.slot_chain_state(10).is_none());
+    }
+
+    #[test]
+    fn equivocation_proof_queue_bounded() {
+        let mut pool = FecResolverPool::new(128, 4, 16);
+
+        // Generate 70 equivocations — queue is capped at 64.
+        for i in 0..70u32 {
+            let shred1 = make_data_shred_with_sig(100, 0, i, 1);
+            pool.insert_data_shred(100, i, 0, shred1);
+            let shred2 = make_data_shred_with_sig(100, 0, i, 2);
+            pool.insert_data_shred(100, i, 0, shred2);
+        }
+
+        assert_eq!(pool.stats.equivocations_detected, 70);
+        let proofs = pool.drain_equivocation_proofs();
+        assert!(proofs.len() <= 64);
     }
 }

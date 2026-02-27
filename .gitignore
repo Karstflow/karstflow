@@ -18,6 +18,9 @@
 # macOS
 .DS_Store
 
+# BGV governance (Claude Code only)
+CLAUDE.md
+
 # Logs and temporary files
 *.log
 *.tmp
