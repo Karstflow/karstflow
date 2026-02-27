@@ -1555,9 +1555,7 @@ mod tests {
             None,
         );
         assert!(payload.contains(r#""context":{"slot":23}"#));
-        assert!(payload.contains(
-            r#""nonCirculatingAccounts":["ParaDancerReserve11111111111111111111111111111"]"#
-        ));
+        assert!(payload.contains(r#""nonCirculatingAccounts":[]"#));
     }
 
     #[test]
@@ -3544,7 +3542,7 @@ mod tests {
                 r#"{{"jsonrpc":"2.0","id":1,"method":"getAccountInfo","params":["{}"]}}"#,
                 test_pubkey_base58()
             ),
-            false,
+            true,
             Some(RpcRuntimeSnapshot {
                 slot: 10,
                 block_height: 10,
@@ -3570,7 +3568,7 @@ mod tests {
                 r#"{{"jsonrpc":"2.0","id":1,"method":"getAccountInfo","params":["{}"]}}"#,
                 test_pubkey_base58()
             ),
-            false,
+            true,
             Some(RpcRuntimeSnapshot {
                 slot: 10,
                 block_height: 10,
@@ -3600,7 +3598,7 @@ mod tests {
                 test_pubkey_base58(),
                 pubkey2_bs58
             ),
-            false,
+            true,
             Some(RpcRuntimeSnapshot {
                 slot: 10,
                 block_height: 10,
@@ -3727,7 +3725,7 @@ mod tests {
 
         let payload = render_json_rpc_response(
             r#"{"jsonrpc":"2.0","id":1,"method":"getSupply","params":[]}"#,
-            false,
+            true,
             Some(RpcRuntimeSnapshot {
                 slot: 10,
                 block_height: 10,
