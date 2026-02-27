@@ -34,9 +34,11 @@ pub(super) fn handle(
         RpcMethod::GetSlotLeader => {
             Ok(build_slot_leader_response(snapshot, commitment, bank_access))
         }
-        RpcMethod::GetSlotLeaders => build_slot_leaders_response(request, snapshot, commitment),
+        RpcMethod::GetSlotLeaders => {
+            build_slot_leaders_response(request, snapshot, commitment, bank_access)
+        }
         RpcMethod::GetLeaderSchedule => {
-            build_leader_schedule_response(request, snapshot, commitment)
+            build_leader_schedule_response(request, snapshot, commitment, bank_access)
         }
         RpcMethod::GetBlockProduction => {
             build_block_production_response(request, snapshot, commitment)
@@ -64,7 +66,11 @@ fn build_slot_leader_response(
     let slot = bank_access
         .map(|bank| bank.get_slot(commitment))
         .unwrap_or_else(|| snapshot.slot_for_commitment(commitment));
-    // TODO: Return real leader identity from leader schedule
+    if let Some(bank) = bank_access {
+        if let Some(leader) = bank.get_slot_leader(slot, commitment) {
+            return json!(leader.to_string());
+        }
+    }
     json!(synthetic_leader_identity(slot))
 }
 
@@ -72,6 +78,7 @@ fn build_slot_leaders_response(
     request: &serde_json::Value,
     snapshot: RpcRuntimeSnapshot,
     commitment: RpcCommitment,
+    bank_access: Option<&Arc<dyn BankAccessProvider>>,
 ) -> Result<serde_json::Value, RpcMethodError> {
     let params = params::params_array(request)?;
     let start_slot = params::first_param_u64(request)?;
@@ -83,7 +90,9 @@ fn build_slot_leaders_response(
         return Err(RpcMethodError::InvalidParams);
     }
 
-    let max_readable_slot = snapshot.slot_for_commitment(commitment);
+    let max_readable_slot = bank_access
+        .map(|bank| bank.get_slot(commitment))
+        .unwrap_or_else(|| snapshot.slot_for_commitment(commitment));
     if start_slot > max_readable_slot {
         return Ok(json!([]));
     }
@@ -91,7 +100,22 @@ fn build_slot_leaders_response(
     let max_count = max_readable_slot
         .saturating_sub(start_slot)
         .saturating_add(1);
-    let leaders = (0_u64..limit.min(max_count))
+    let effective_limit = limit.min(max_count);
+
+    if let Some(bank) = bank_access {
+        let leaders_range = bank.get_slot_leaders(start_slot, effective_limit, commitment);
+        let leaders: Vec<String> = leaders_range
+            .into_iter()
+            .map(|(slot, leader)| {
+                leader
+                    .map(|pk| pk.to_string())
+                    .unwrap_or_else(|| synthetic_leader_identity(slot))
+            })
+            .collect();
+        return Ok(json!(leaders));
+    }
+
+    let leaders = (0_u64..effective_limit)
         .map(|index| synthetic_leader_identity(start_slot.saturating_add(index)))
         .collect::<Vec<_>>();
     Ok(json!(leaders))
@@ -305,10 +329,31 @@ fn build_leader_schedule_response(
     request: &serde_json::Value,
     snapshot: RpcRuntimeSnapshot,
     commitment: RpcCommitment,
+    bank_access: Option<&Arc<dyn BankAccessProvider>>,
 ) -> Result<serde_json::Value, RpcMethodError> {
     ensure_min_context_slot_satisfied(request, snapshot, commitment)?;
     let identity_filter = parse_identity_filter_from_params(request)?;
-    let base_slot = snapshot.slot_for_commitment(commitment);
+    let base_slot = bank_access
+        .map(|bank| bank.get_slot(commitment))
+        .unwrap_or_else(|| snapshot.slot_for_commitment(commitment));
+
+    if let Some(bank) = bank_access {
+        if let Some(schedule_entries) = bank.get_leader_schedule(base_slot, commitment) {
+            let mut by_identity = serde_json::Map::new();
+            for (validator, slots) in schedule_entries {
+                let key = validator.to_string();
+                if let Some(ref filter) = identity_filter {
+                    if *filter != key {
+                        continue;
+                    }
+                }
+                by_identity.insert(key, json!(slots));
+            }
+            return Ok(json!(serde_json::Value::Object(by_identity)));
+        }
+    }
+
+    // Synthetic fallback
     let slot_offset = base_slot % LEADER_SCHEDULE_ROTATION;
     let schedule = vec![
         base_slot.saturating_add(slot_offset),

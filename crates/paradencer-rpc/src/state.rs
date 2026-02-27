@@ -87,6 +87,31 @@ pub trait BankAccessProvider: Send + Sync {
         owner: &paradencer_types::Pubkey,
         commitment: RpcCommitment,
     ) -> Vec<(paradencer_types::Pubkey, paradencer_types::Account)>;
+
+    /// Get the leader for a specific absolute slot.
+    ///
+    /// Returns `None` if the slot is outside the known leader schedule range.
+    fn get_slot_leader(
+        &self,
+        slot: u64,
+        commitment: RpcCommitment,
+    ) -> Option<paradencer_types::Pubkey>;
+
+    /// Get leaders for a range of consecutive slots starting at `start_slot`.
+    fn get_slot_leaders(
+        &self,
+        start_slot: u64,
+        count: u64,
+        commitment: RpcCommitment,
+    ) -> Vec<(u64, Option<paradencer_types::Pubkey>)>;
+
+    /// Get the leader schedule for the epoch containing the given slot,
+    /// grouped by validator pubkey → list of absolute slot numbers.
+    fn get_leader_schedule(
+        &self,
+        slot: u64,
+        commitment: RpcCommitment,
+    ) -> Option<Vec<(paradencer_types::Pubkey, Vec<u64>)>>;
 }
 
 pub struct MetricsFileRuntimeSnapshotProvider {

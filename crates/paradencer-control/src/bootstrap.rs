@@ -2103,6 +2103,69 @@ impl BankAccessProvider for ConsensusBankAccessProvider {
             .map(|bank| bank.accounts().get_accounts_by_owner(owner))
             .unwrap_or_default()
     }
+
+    fn get_slot_leader(
+        &self,
+        slot: u64,
+        commitment: paradencer_rpc::RpcCommitment,
+    ) -> Option<paradencer_types::Pubkey> {
+        let bank = self.bank_for_commitment(commitment)?;
+        let epoch_schedule = bank.epoch_schedule();
+        let (_, slot_index) = epoch_schedule.get_epoch_and_slot_index(slot);
+        bank.leader_schedule().get_leader(slot_index)
+    }
+
+    fn get_slot_leaders(
+        &self,
+        start_slot: u64,
+        count: u64,
+        commitment: paradencer_rpc::RpcCommitment,
+    ) -> Vec<(u64, Option<paradencer_types::Pubkey>)> {
+        let bank = match self.bank_for_commitment(commitment) {
+            Some(bank) => bank,
+            None => {
+                return (0..count)
+                    .map(|i| (start_slot.saturating_add(i), None))
+                    .collect();
+            }
+        };
+        let epoch_schedule = bank.epoch_schedule();
+        let schedule = bank.leader_schedule();
+        (0..count)
+            .map(|i| {
+                let slot = start_slot.saturating_add(i);
+                let (_, slot_index) = epoch_schedule.get_epoch_and_slot_index(slot);
+                (slot, schedule.get_leader(slot_index))
+            })
+            .collect()
+    }
+
+    fn get_leader_schedule(
+        &self,
+        slot: u64,
+        commitment: paradencer_rpc::RpcCommitment,
+    ) -> Option<Vec<(paradencer_types::Pubkey, Vec<u64>)>> {
+        let bank = self.bank_for_commitment(commitment)?;
+        let epoch_schedule = bank.epoch_schedule();
+        let schedule = bank.leader_schedule();
+        let (epoch, _) = epoch_schedule.get_epoch_and_slot_index(slot);
+
+        if schedule.get_epoch() != epoch {
+            return None;
+        }
+
+        let first_slot = epoch_schedule.get_first_slot_in_epoch(epoch);
+        let mut by_validator = std::collections::HashMap::new();
+        for i in 0..schedule.len() as u64 {
+            if let Some(leader) = schedule.get_leader(i) {
+                by_validator
+                    .entry(leader)
+                    .or_insert_with(Vec::new)
+                    .push(first_slot + i);
+            }
+        }
+        Some(by_validator.into_iter().collect())
+    }
 }
 
 pub fn print_preflight_ok() {

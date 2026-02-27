@@ -3418,6 +3418,33 @@ mod tests {
                 .map(|(pubkey, account)| (*pubkey, account.clone()))
                 .collect()
         }
+
+        fn get_slot_leader(
+            &self,
+            _slot: u64,
+            _commitment: crate::state::RpcCommitment,
+        ) -> Option<paradencer_types::Pubkey> {
+            None
+        }
+
+        fn get_slot_leaders(
+            &self,
+            start_slot: u64,
+            count: u64,
+            _commitment: crate::state::RpcCommitment,
+        ) -> Vec<(u64, Option<paradencer_types::Pubkey>)> {
+            (0..count)
+                .map(|i| (start_slot.saturating_add(i), None))
+                .collect()
+        }
+
+        fn get_leader_schedule(
+            &self,
+            _slot: u64,
+            _commitment: crate::state::RpcCommitment,
+        ) -> Option<Vec<(paradencer_types::Pubkey, Vec<u64>)>> {
+            None
+        }
     }
 
     fn test_pubkey_bytes() -> [u8; 32] {
