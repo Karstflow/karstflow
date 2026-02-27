@@ -22,6 +22,7 @@ pub mod flow;
 pub mod flow_control;
 pub mod fragment;
 pub mod meta_ring;
+pub mod orchestrator;
 pub mod stem;
 pub mod tag_cache;
 pub mod tempo;

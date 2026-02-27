@@ -8,3 +8,6 @@ authors.workspace = true
 [dependencies]
 crossbeam-channel.workspace = true
 paradencer-constants = { path = "../paradencer-constants" }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+libc = "0.2"

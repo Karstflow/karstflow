@@ -70,8 +70,11 @@ impl TileCnc {
     /// Transition from BOOT to RUN.
     ///
     /// Called by the tile after initialization completes.
+    /// Preserves any pending signals (e.g., halt requested during boot).
     pub fn signal_run(&self) {
-        self.state.store(CNC_STATE_RUN, Ordering::Release);
+        let current = self.state.load(Ordering::Acquire);
+        let signals = current & SIGNAL_MASK;
+        self.state.store(CNC_STATE_RUN | signals, Ordering::Release);
     }
 
     /// Transition to HALT.
