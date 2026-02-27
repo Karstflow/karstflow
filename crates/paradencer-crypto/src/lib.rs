@@ -34,6 +34,7 @@
 //! ```
 
 pub mod blake3;
+pub mod bmtree;
 pub mod bn254;
 pub mod ed25519_batch;
 pub mod keccak256;
