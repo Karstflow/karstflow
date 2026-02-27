@@ -434,6 +434,10 @@ impl TransactionProcessor {
     ///
     /// Deploy (discriminant 2): program account is at index 2.
     /// Upgrade (discriminant 3): program account is at index 1.
+    ///
+    /// Records the current slot as the deployment slot so the program
+    /// cache applies DELAY_VISIBILITY_SLOT_OFFSET before the program
+    /// becomes executable.
     fn invalidate_after_loader_instruction(&self, context: &ExecutionContext) {
         if context.instruction_data.len() < 4 {
             return;
@@ -449,7 +453,12 @@ impl TransactionProcessor {
             _ => None,
         };
         if let Some(id) = program_id {
-            self.bytecode_vm.invalidate_program(&id);
+            let deployment_slot = context
+                .sysvar_snapshot
+                .as_ref()
+                .map(|s| s.slot)
+                .unwrap_or(0);
+            self.bytecode_vm.invalidate_program(&id, deployment_slot);
         }
     }
 

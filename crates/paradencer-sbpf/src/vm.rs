@@ -134,6 +134,12 @@ impl SbpfVm for StubSbpfVm {
 /// Programs are cached after first load to avoid repeated parsing.
 pub struct BytecodeVm {
     cache: Mutex<ProgramCache>,
+    /// Tracks deployment slots for recently deployed/upgraded programs.
+    ///
+    /// When a program is deployed at slot N, its effective visibility
+    /// slot is N + DELAY_VISIBILITY_SLOT_OFFSET. This map records the
+    /// deployment slot so cache insertion applies the delay.
+    deployed_at: Mutex<HashMap<Pubkey, u64>>,
     syscall_dispatch: RuntimeSyscallDispatch,
     sysvar_snapshot: SysvarSnapshot,
 }
@@ -143,6 +149,7 @@ impl BytecodeVm {
     pub fn new() -> Self {
         Self {
             cache: Mutex::new(ProgramCache::new()),
+            deployed_at: Mutex::new(HashMap::new()),
             syscall_dispatch: RuntimeSyscallDispatch::with_standard_syscalls(),
             sysvar_snapshot: SysvarSnapshot::default(),
         }
@@ -152,6 +159,7 @@ impl BytecodeVm {
     pub fn with_cpi(executor: Arc<dyn InstructionExecutor>) -> Self {
         Self {
             cache: Mutex::new(ProgramCache::new()),
+            deployed_at: Mutex::new(HashMap::new()),
             syscall_dispatch: RuntimeSyscallDispatch::with_cpi_support(executor),
             sysvar_snapshot: SysvarSnapshot::default(),
         }
@@ -161,6 +169,7 @@ impl BytecodeVm {
     pub fn with_syscalls(syscall_dispatch: RuntimeSyscallDispatch) -> Self {
         Self {
             cache: Mutex::new(ProgramCache::new()),
+            deployed_at: Mutex::new(HashMap::new()),
             syscall_dispatch,
             sysvar_snapshot: SysvarSnapshot::default(),
         }
@@ -178,13 +187,18 @@ impl BytecodeVm {
         self.sysvar_snapshot = snapshot;
     }
 
-    /// Remove a program from the cache.
+    /// Remove a program from the cache after deployment or upgrade.
     ///
-    /// Called when a program is deployed or upgraded so that subsequent
-    /// invocations load the new bytecode from the updated account data.
-    pub fn invalidate_program(&self, program_id: &Pubkey) {
+    /// Records the deployment slot so that when the program is next
+    /// loaded, it receives an effective visibility delay of
+    /// `DELAY_VISIBILITY_SLOT_OFFSET` slots.
+    pub fn invalidate_program(&self, program_id: &Pubkey, deployment_slot: u64) {
         let mut cache = self.cache.lock().unwrap();
         cache.invalidate(program_id);
+        drop(cache);
+
+        let mut deployed = self.deployed_at.lock().unwrap();
+        deployed.insert(*program_id, deployment_slot);
     }
 
     /// Load and validate a program from raw ELF bytes.
@@ -408,22 +422,53 @@ impl SbpfVm for BytecodeVm {
             return Err(SbpfExecutionError::InvalidAccountData);
         }
 
+        // Current slot for cache visibility checks.
+        let current_slot = context
+            .sysvar_snapshot
+            .as_ref()
+            .map(|s| s.slot)
+            .unwrap_or(self.sysvar_snapshot.slot);
+
         // Try cache first
         {
             let mut cache = self.cache.lock().unwrap();
-            if let Some(program) = cache.get(&context.program_id, 0) {
+            if let Some(program) = cache.get(&context.program_id, current_slot) {
                 let program = program.clone();
                 drop(cache);
                 return self.run_program(&program, &context);
             }
         }
 
-        // Load, validate, cache, and execute
+        // Load, validate, cache, and execute.
         let program = self.load_program(elf_bytes)?;
+
+        // Compute effective_slot: if this program was recently deployed,
+        // apply DELAY_VISIBILITY_SLOT_OFFSET; otherwise it's always visible.
+        let effective_slot = {
+            let mut deployed = self.deployed_at.lock().unwrap();
+            if let Some(deploy_slot) = deployed.remove(&context.program_id) {
+                deploy_slot.saturating_add(
+                    paradencer_constants::program_cache::DELAY_VISIBILITY_SLOT_OFFSET,
+                )
+            } else {
+                0 // pre-existing program: always visible
+            }
+        };
+
+        // If the program is not yet visible, don't cache or execute it.
+        if current_slot < effective_slot {
+            return Err(SbpfExecutionError::InvalidProgram);
+        }
 
         {
             let mut cache = self.cache.lock().unwrap();
-            cache.insert(context.program_id, program.clone(), elf_bytes.len(), 0);
+            cache.insert(
+                context.program_id,
+                program.clone(),
+                elf_bytes.len(),
+                current_slot,
+                effective_slot,
+            );
         }
 
         self.run_program(&program, &context)
@@ -981,8 +1026,8 @@ mod tests {
             assert!(cache.get(&program_id, 0).is_some());
         }
 
-        // Invalidate
-        vm.invalidate_program(&program_id);
+        // Invalidate (deployed at slot 0)
+        vm.invalidate_program(&program_id, 0);
 
         // Verify cache is empty for this program
         {

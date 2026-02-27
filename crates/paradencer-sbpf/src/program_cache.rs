@@ -5,7 +5,8 @@
 /// when the cache reaches capacity.
 use crate::elf_loader::{ElfError, LoadedProgram, SbpfVersion};
 use paradencer_constants::program_cache::{
-    DEFAULT_MAX_CACHE_ENTRIES, EVICTION_THRESHOLD_PERCENT, MAX_PROGRAM_SIZE,
+    DEFAULT_MAX_CACHE_ENTRIES, DELAY_VISIBILITY_SLOT_OFFSET, EVICTION_THRESHOLD_PERCENT,
+    MAX_PROGRAM_SIZE,
 };
 use paradencer_types::Pubkey;
 use std::collections::HashMap;
@@ -25,6 +26,11 @@ pub struct CachedProgram {
     pub use_count: u64,
     /// Size of the original ELF binary (bytes).
     pub elf_size: usize,
+    /// Earliest slot at which this program is visible for execution.
+    ///
+    /// Programs deployed at slot N have `effective_slot = N + DELAY_VISIBILITY_SLOT_OFFSET`.
+    /// Programs loaded from pre-existing accounts use `effective_slot = 0` (always visible).
+    pub effective_slot: u64,
 }
 
 // ---------------------------------------------------------------------------
@@ -38,6 +44,8 @@ pub enum CacheError {
     ProgramTooLarge { size: usize, max: usize },
     /// ELF loading failed.
     LoadError(String),
+    /// Program exists but is not yet visible at the requested slot.
+    NotYetVisible { effective_slot: u64 },
 }
 
 impl std::fmt::Display for CacheError {
@@ -47,6 +55,9 @@ impl std::fmt::Display for CacheError {
                 write!(f, "program size {} exceeds maximum {}", size, max)
             }
             Self::LoadError(msg) => write!(f, "failed to load program: {}", msg),
+            Self::NotYetVisible { effective_slot } => {
+                write!(f, "program not visible until slot {}", effective_slot)
+            }
         }
     }
 }
@@ -102,15 +113,23 @@ impl ProgramCache {
 
     /// Look up a cached program, updating its usage stats.
     ///
-    /// Returns `None` if the program is not cached.
+    /// Returns `None` if the program is not cached or not yet visible
+    /// at the given slot (deployment visibility delay).
     pub fn get(&mut self, program_id: &Pubkey, slot: u64) -> Option<&LoadedProgram> {
         let entry = self.entries.get_mut(program_id)?;
+        if slot < entry.effective_slot {
+            return None;
+        }
         entry.last_used_slot = slot;
         entry.use_count += 1;
         Some(&entry.program)
     }
 
     /// Insert a pre-loaded program into the cache.
+    ///
+    /// `effective_slot` controls when the program becomes visible for execution.
+    /// Use `0` for pre-existing programs (always visible) or
+    /// `deployment_slot + DELAY_VISIBILITY_SLOT_OFFSET` for newly deployed programs.
     ///
     /// Evicts stale entries if the cache is at or above the eviction
     /// threshold before inserting.
@@ -120,6 +139,7 @@ impl ProgramCache {
         program: LoadedProgram,
         elf_size: usize,
         slot: u64,
+        effective_slot: u64,
     ) {
         self.evict_if_needed();
 
@@ -130,24 +150,33 @@ impl ProgramCache {
                 last_used_slot: slot,
                 use_count: 1,
                 elf_size,
+                effective_slot,
             },
         );
     }
 
     /// Load an ELF binary, cache it, and return a reference.
     ///
-    /// If the program is already cached, returns the cached version
-    /// (updating usage stats). Otherwise parses the ELF, caches
-    /// the result, and returns it.
+    /// If the program is already cached and visible at the given slot,
+    /// returns the cached version (updating usage stats). Otherwise
+    /// parses the ELF, caches the result, and returns it.
+    ///
+    /// `effective_slot` controls visibility delay for newly deployed programs.
+    /// Use `0` for pre-existing programs (always visible).
     pub fn get_or_load(
         &mut self,
         program_id: &Pubkey,
         elf_bytes: &[u8],
         slot: u64,
+        effective_slot: u64,
     ) -> Result<&LoadedProgram, CacheError> {
-        // Fast path: already cached
-        if self.entries.contains_key(program_id) {
-            let entry = self.entries.get_mut(program_id).unwrap();
+        // Fast path: already cached and visible
+        if let Some(entry) = self.entries.get_mut(program_id) {
+            if slot < entry.effective_slot {
+                return Err(CacheError::NotYetVisible {
+                    effective_slot: entry.effective_slot,
+                });
+            }
             entry.last_used_slot = slot;
             entry.use_count += 1;
             return Ok(&self.entries[program_id].program);
@@ -174,6 +203,7 @@ impl ProgramCache {
                 last_used_slot: slot,
                 use_count: 1,
                 elf_size,
+                effective_slot,
             },
         );
 
@@ -268,7 +298,7 @@ mod tests {
         let id = Pubkey::new_unique();
         let program = dummy_program();
 
-        cache.insert(id, program.clone(), 100, 42);
+        cache.insert(id, program.clone(), 100, 42, 0);
         assert_eq!(cache.len(), 1);
         assert!(cache.contains(&id));
 
@@ -289,7 +319,7 @@ mod tests {
         let mut cache = ProgramCache::new();
         let id = Pubkey::new_unique();
 
-        cache.insert(id, dummy_program(), 100, 0);
+        cache.insert(id, dummy_program(), 100, 0, 0);
         assert!(cache.contains(&id));
 
         assert!(cache.invalidate(&id));
@@ -307,7 +337,7 @@ mod tests {
     fn clear_empties_cache() {
         let mut cache = ProgramCache::new();
         for _ in 0..5 {
-            cache.insert(Pubkey::new_unique(), dummy_program(), 100, 0);
+            cache.insert(Pubkey::new_unique(), dummy_program(), 100, 0, 0);
         }
         assert_eq!(cache.len(), 5);
 
@@ -324,7 +354,7 @@ mod tests {
         let mut keys = Vec::new();
         for i in 0..9 {
             let id = Pubkey::new_unique();
-            cache.insert(id, dummy_program(), 100, i as u64);
+            cache.insert(id, dummy_program(), 100, i as u64, 0);
             keys.push(id);
         }
         assert_eq!(cache.len(), 9);
@@ -332,7 +362,7 @@ mod tests {
         // Insert one more — should trigger eviction
         // Eviction target: 75% of 10 = 7, so remove 9 - 7 = 2 oldest
         let new_id = Pubkey::new_unique();
-        cache.insert(new_id, dummy_program(), 100, 100);
+        cache.insert(new_id, dummy_program(), 100, 100, 0);
 
         // Should have evicted the 2 oldest entries (slot 0 and slot 1)
         assert!(cache.len() <= 8);
@@ -348,7 +378,7 @@ mod tests {
         let mut cache = ProgramCache::new();
         let id = Pubkey::new_unique();
 
-        cache.insert(id, dummy_program(), 100, 0);
+        cache.insert(id, dummy_program(), 100, 0, 0);
 
         // Access multiple times
         cache.get(&id, 1);
@@ -366,11 +396,58 @@ mod tests {
         let id = Pubkey::new_unique();
         let oversized = vec![0u8; MAX_PROGRAM_SIZE + 1];
 
-        let result = cache.get_or_load(&id, &oversized, 0);
+        let result = cache.get_or_load(&id, &oversized, 0, 0);
         assert!(result.is_err());
         assert!(matches!(
             result.unwrap_err(),
             CacheError::ProgramTooLarge { .. }
         ));
+    }
+
+    #[test]
+    fn delay_visibility_hides_program_until_effective_slot() {
+        let mut cache = ProgramCache::new();
+        let id = Pubkey::new_unique();
+
+        // Program deployed at slot 10 → effective at slot 11
+        let effective = 10 + DELAY_VISIBILITY_SLOT_OFFSET;
+        cache.insert(id, dummy_program(), 100, 10, effective);
+
+        // Not visible at deployment slot
+        assert!(cache.get(&id, 10).is_none());
+
+        // Visible at effective slot
+        assert!(cache.get(&id, 11).is_some());
+
+        // Visible at later slots
+        assert!(cache.get(&id, 100).is_some());
+    }
+
+    #[test]
+    fn zero_effective_slot_always_visible() {
+        let mut cache = ProgramCache::new();
+        let id = Pubkey::new_unique();
+
+        // Pre-existing program: effective_slot = 0
+        cache.insert(id, dummy_program(), 100, 0, 0);
+
+        assert!(cache.get(&id, 0).is_some());
+        assert!(cache.get(&id, 1).is_some());
+    }
+
+    #[test]
+    fn get_or_load_respects_effective_slot() {
+        let mut cache = ProgramCache::new();
+        let id = Pubkey::new_unique();
+
+        // Insert with delayed visibility
+        cache.insert(id, dummy_program(), 100, 5, 6);
+
+        // Query at slot 5 should fail (not yet visible)
+        let result = cache.get_or_load(&id, &[], 5, 6);
+        assert!(matches!(result, Err(CacheError::NotYetVisible { .. })));
+
+        // Query at slot 6 should succeed
+        assert!(cache.get(&id, 6).is_some());
     }
 }
