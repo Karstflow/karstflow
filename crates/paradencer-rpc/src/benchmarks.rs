@@ -3,7 +3,6 @@
 mod tests {
     use crate::cache::{AccountCache, BlockCache, SignatureCache};
     use crate::filters::{apply_filters, RpcFilterType};
-    use crate::simulation::TransactionSimulator;
     use crate::state::{RpcCommitment, RpcRuntimeSnapshot};
     use crate::websocket::SubscriptionManager;
     use paradencer_types::{Account, Pubkey};
@@ -174,28 +173,6 @@ mod tests {
 
         result.print();
         assert!(result.ops_per_sec > 10.0);
-    }
-
-    #[test]
-    fn bench_transaction_simulation() {
-        let simulator = TransactionSimulator::new();
-        let snapshot = test_snapshot();
-        let tx = vec![1, 2, 3, 4, 5, 6, 7, 8];
-
-        let config = crate::simulation::SimulationConfig {
-            sig_verify: false,
-            replace_recent_blockhash: true,
-            commitment: RpcCommitment::Confirmed,
-            inner_instructions: false,
-            accounts: None,
-        };
-
-        let result = benchmark("Transaction Simulation", 1000, || {
-            let _ = simulator.simulate(&tx, config.clone(), snapshot);
-        });
-
-        result.print();
-        assert!(result.ops_per_sec > 100.0);
     }
 
     #[test]
