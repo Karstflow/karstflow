@@ -4,7 +4,9 @@ mod errors;
 mod output;
 mod preflight;
 mod runner;
+pub mod snapshot_download;
 mod surface;
+pub mod wait_for_supermajority;
 
 pub use bootstrap::{
     build_blockstore, build_consensus_from_bank_forks, build_consensus_infrastructure,

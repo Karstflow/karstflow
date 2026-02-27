@@ -19,6 +19,7 @@ mod errors;
 pub mod filter;
 pub mod gossip;
 pub mod repair;
+pub mod snapshot_download;
 pub mod turbine;
 
 pub use errors::IngressError;

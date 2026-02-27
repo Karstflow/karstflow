@@ -90,6 +90,11 @@ pub struct NodeConfig {
     /// When set, the validator restores accounts from this archive on startup
     /// and initializes consensus from the snapshot bank state instead of genesis.
     pub snapshot_archive_path: Option<PathBuf>,
+    /// Enable network snapshot download via gossip peer discovery.
+    /// When true, the validator discovers snapshot-serving peers via gossip
+    /// and downloads the latest snapshot before starting consensus.
+    /// Ignored when `snapshot_archive_path` is set (local archive takes priority).
+    pub snapshot_download_enabled: bool,
     /// Minimum log level for stderr output. Defaults to "info".
     /// Can be overridden by `RUST_LOG` environment variable.
     pub log_stderr_level: String,
@@ -225,6 +230,9 @@ impl NodeConfig {
             data_dir,
             plugin_config_files,
             snapshot_archive_path,
+            snapshot_download_enabled: std::env::var("PARADENCER_SNAPSHOT_DOWNLOAD")
+                .map(|v| v == "true" || v == "1")
+                .unwrap_or(false),
             log_stderr_level,
             log_file_path,
             log_file_level,
