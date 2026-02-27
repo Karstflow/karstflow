@@ -47,7 +47,7 @@ pub(super) fn handle(
             build_leader_schedule_response(request, snapshot, commitment, bank_access)
         }
         RpcMethod::GetBlockProduction => {
-            build_block_production_response(request, snapshot, commitment)
+            build_block_production_response(request, snapshot, commitment, bank_access)
         }
         RpcMethod::GetRecentPrioritizationFees => {
             build_recent_prioritization_fees_response(request, snapshot, commitment)
@@ -415,9 +415,12 @@ fn build_block_production_response(
     request: &serde_json::Value,
     snapshot: RpcRuntimeSnapshot,
     commitment: RpcCommitment,
+    bank_access: Option<&Arc<dyn BankAccessProvider>>,
 ) -> Result<serde_json::Value, RpcMethodError> {
     ensure_min_context_slot_satisfied(request, snapshot, commitment)?;
-    let current_slot = snapshot.slot_for_commitment(commitment);
+    let current_slot = bank_access
+        .map(|bank| bank.get_slot(commitment))
+        .unwrap_or_else(|| snapshot.slot_for_commitment(commitment));
     let (requested_first, requested_last) = parse_slot_range_from_params(request)?;
     let first_slot = requested_first.unwrap_or(current_slot.saturating_sub(31));
     let last_slot = requested_last.unwrap_or(current_slot);
@@ -433,6 +436,39 @@ fn build_block_production_response(
         }));
     }
 
+    // Use real leader schedule to count slot assignments per validator.
+    if let Some(bank) = bank_access {
+        let leaders = bank.get_slot_leaders(
+            first_slot,
+            effective_last_slot
+                .saturating_sub(first_slot)
+                .saturating_add(1),
+            commitment,
+        );
+        let mut by_identity: std::collections::HashMap<String, [u64; 2]> =
+            std::collections::HashMap::new();
+        for (_slot, leader_opt) in &leaders {
+            if let Some(leader) = leader_opt {
+                let entry = by_identity.entry(leader.to_string()).or_insert([0, 0]);
+                // [leader_slots, blocks_produced] — we count all assigned slots as produced
+                // since we don't have block presence data yet.
+                entry[0] += 1;
+                entry[1] += 1;
+            }
+        }
+        if !by_identity.is_empty() {
+            let by_identity_json: serde_json::Map<String, serde_json::Value> = by_identity
+                .into_iter()
+                .map(|(k, v)| (k, json!(v)))
+                .collect();
+            return Ok(json!({
+                "byIdentity": by_identity_json,
+                "range": {"firstSlot": first_slot, "lastSlot": effective_last_slot}
+            }));
+        }
+    }
+
+    // Synthetic fallback
     let produced_count = effective_last_slot
         .saturating_sub(first_slot)
         .saturating_add(1);
