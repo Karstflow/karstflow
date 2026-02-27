@@ -1523,7 +1523,7 @@ mod tests {
         }
     }
 
-    /// Build a properly signed NetworkShred for testing.
+    /// Build a properly signed Merkle NetworkShred for testing.
     fn make_signed_network_shred(
         secret_key: &[u8; 32],
         slot: u64,
@@ -1531,13 +1531,12 @@ mod tests {
         fec_set_index: u32,
         source: ShredSource,
     ) -> NetworkShred {
-        let payload = vec![(index as u8).wrapping_mul(13); DATA_SHRED_PAYLOAD_SIZE];
-        let shred = crate::shred_verifier::make_signed_data_shred(
+        let shred = crate::shred_verifier::make_signed_merkle_data_shred(
             secret_key,
             slot,
             index,
             fec_set_index,
-            &payload,
+            2, // proof_depth
         );
         NetworkShred { shred, source }
     }

@@ -271,6 +271,8 @@ pub fn verify_shred(shred: &Shred, leader_pubkey: &[u8; 32]) -> ShredVerifyResul
 /// Build a legacy data shred signed by the given secret key.
 ///
 /// Available only in test builds for integration testing across modules.
+/// Note: legacy shreds are rejected by `verify_shred`; use
+/// `make_signed_merkle_data_shred` for tests that go through verification.
 #[cfg(test)]
 pub fn make_signed_data_shred(
     secret_key: &[u8; 32],
@@ -308,6 +310,102 @@ pub fn make_signed_data_shred(
     let message = legacy_signed_message(&shred);
     let signature = sign_message(secret_key, &message).unwrap();
     shred.common_header.signature = signature;
+    shred
+}
+
+/// Build a Merkle data shred with valid signature and proof tree.
+///
+/// Creates a properly laid-out wire-format Merkle shred, computes the leaf
+/// hash and root via a synthetic proof tree, signs it, then parses back.
+/// Available for cross-module integration tests.
+#[cfg(test)]
+pub fn make_signed_merkle_data_shred(
+    secret_key: &[u8; 32],
+    slot: u64,
+    shred_index: u32,
+    fec_set_index: u32,
+    proof_depth: u8,
+) -> Shred {
+    use paradencer_crypto::ed25519_batch::sign_message;
+    use paradencer_types::shred::SHRED_MIN_SIZE;
+
+    let variant_byte = paradencer_constants::shred::SHRED_TYPE_MERKLE_DATA | proof_depth;
+    let merkle_sz = proof_depth as usize * MERKLE_PROOF_NODE_BYTES;
+
+    // Build wire bytes: exactly SHRED_MIN_SIZE (1203) bytes.
+    let mut raw = vec![0u8; SHRED_MIN_SIZE];
+
+    // Leave signature blank (offset 0..64).
+    // Variant byte.
+    raw[64] = variant_byte;
+    // Slot.
+    raw[0x41..0x49].copy_from_slice(&slot.to_le_bytes());
+    // Index.
+    raw[0x49..0x4d].copy_from_slice(&shred_index.to_le_bytes());
+    // Version.
+    raw[0x4d..0x4f].copy_from_slice(&1u16.to_le_bytes());
+    // FEC set index.
+    raw[0x4f..0x53].copy_from_slice(&fec_set_index.to_le_bytes());
+    // Data header: parent_offset=1, flags=0, size=256.
+    raw[0x53..0x55].copy_from_slice(&1u16.to_le_bytes());
+    raw[0x55] = 0;
+    raw[0x56..0x58].copy_from_slice(&256u16.to_le_bytes());
+    // Payload: fill with pattern.
+    for i in 0x58..0x58usize.saturating_add(256) {
+        if i < raw.len() {
+            raw[i] = (i & 0xFF) as u8;
+        }
+    }
+
+    // Compute leaf hash.
+    let protected_sz = merkle_protected_sz(variant_byte);
+    let leaf = merkle_leaf_hash(&raw, protected_sz);
+
+    // Build a synthetic tree where our shred is leaf 0 and all sibling
+    // nodes are deterministic values.
+    let leaf_idx = (shred_index as usize).saturating_sub(fec_set_index as usize);
+    let mut current = leaf;
+    let mut proof_nodes: Vec<[u8; MERKLE_PROOF_NODE_BYTES]> = Vec::new();
+
+    for layer in 0..proof_depth as usize {
+        // Synthetic sibling: hash of layer index.
+        let sibling_full = Sha256Hasher::hash(&[layer as u8, 0xBB]);
+        let mut sibling = [0u8; MERKLE_PROOF_NODE_BYTES];
+        sibling.copy_from_slice(&sibling_full[..MERKLE_PROOF_NODE_BYTES]);
+        proof_nodes.push(sibling);
+
+        let mut sibling_32 = [0u8; 32];
+        sibling_32[..MERKLE_PROOF_NODE_BYTES].copy_from_slice(&sibling);
+
+        let is_left = ((leaf_idx * 2) & (1 << (layer + 1))) == 0;
+        current = if is_left {
+            merkle_merge(&current, &sibling_32)
+        } else {
+            merkle_merge(&sibling_32, &current)
+        };
+    }
+
+    let root = current;
+
+    // Write proof nodes at the tail.
+    let proof_start = SHRED_MIN_SIZE - merkle_sz;
+    for (i, node) in proof_nodes.iter().enumerate() {
+        let off = proof_start + i * MERKLE_PROOF_NODE_BYTES;
+        raw[off..off + MERKLE_PROOF_NODE_BYTES].copy_from_slice(node);
+    }
+
+    // Sign the Merkle root.
+    let signature = sign_message(secret_key, &root).unwrap();
+    raw[..64].copy_from_slice(&signature);
+
+    // Parse back into a Shred.
+    let shred = paradencer_types::shred::ShredParser::parse(&raw).unwrap();
+    match &shred.variant {
+        ShredVariant::MerkleData(_, p) => {
+            assert_eq!(p.proof.len(), proof_depth as usize);
+        }
+        _ => panic!("Expected MerkleData"),
+    }
     shred
 }
 
