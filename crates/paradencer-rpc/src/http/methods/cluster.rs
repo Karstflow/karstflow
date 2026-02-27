@@ -1,6 +1,7 @@
 use serde_json::json;
+use std::sync::Arc;
 
-use crate::state::{RpcCommitment, RpcRuntimeSnapshot};
+use crate::state::{BankAccessProvider, RpcCommitment, RpcRuntimeSnapshot};
 use paradencer_constants::economics::DEFAULT_VOTE_COMMISSION_PERCENT;
 use paradencer_constants::ledger::SLOTS_PER_EPOCH;
 use paradencer_constants::rpc::{
@@ -20,14 +21,19 @@ pub(super) fn handle(
     request: &serde_json::Value,
     snapshot: RpcRuntimeSnapshot,
     commitment: RpcCommitment,
+    bank_access: Option<&Arc<dyn BankAccessProvider>>,
 ) -> Result<serde_json::Value, RpcMethodError> {
     match method {
         RpcMethod::GetSignaturesForAddress | RpcMethod::GetConfirmedSignaturesForAddress2 => {
             build_signatures_for_address_response(request, snapshot, commitment)
         }
         RpcMethod::GetClusterNodes => Ok(build_cluster_nodes_response(snapshot, commitment)),
-        RpcMethod::GetVoteAccounts => build_vote_accounts_response(request, snapshot, commitment),
-        RpcMethod::GetSlotLeader => Ok(build_slot_leader_response(snapshot, commitment)),
+        RpcMethod::GetVoteAccounts => {
+            build_vote_accounts_response(request, snapshot, commitment, bank_access)
+        }
+        RpcMethod::GetSlotLeader => {
+            Ok(build_slot_leader_response(snapshot, commitment, bank_access))
+        }
         RpcMethod::GetSlotLeaders => build_slot_leaders_response(request, snapshot, commitment),
         RpcMethod::GetLeaderSchedule => {
             build_leader_schedule_response(request, snapshot, commitment)
@@ -53,8 +59,12 @@ struct VoteAccountsConfig {
 fn build_slot_leader_response(
     snapshot: RpcRuntimeSnapshot,
     commitment: RpcCommitment,
+    bank_access: Option<&Arc<dyn BankAccessProvider>>,
 ) -> serde_json::Value {
-    let slot = snapshot.slot_for_commitment(commitment);
+    let slot = bank_access
+        .map(|bank| bank.get_slot(commitment))
+        .unwrap_or_else(|| snapshot.slot_for_commitment(commitment));
+    // TODO: Return real leader identity from leader schedule
     json!(synthetic_leader_identity(slot))
 }
 
@@ -161,10 +171,51 @@ fn build_vote_accounts_response(
     request: &serde_json::Value,
     snapshot: RpcRuntimeSnapshot,
     commitment: RpcCommitment,
+    bank_access: Option<&Arc<dyn BankAccessProvider>>,
 ) -> Result<serde_json::Value, RpcMethodError> {
     let config = parse_vote_accounts_config(request)?;
-    let slot = snapshot.slot_for_commitment(commitment);
+    let slot = bank_access
+        .map(|bank| bank.get_slot(commitment))
+        .unwrap_or_else(|| snapshot.slot_for_commitment(commitment));
     ensure_optional_min_context_slot(config.min_context_slot, slot)?;
+
+    if let Some(bank) = bank_access {
+        // Scan vote program accounts for real vote state
+        if let Ok(vote_program_id) = parse_vote_program_pubkey() {
+            let vote_accounts = bank.get_accounts_by_owner(&vote_program_id, commitment);
+            if !vote_accounts.is_empty() {
+                let mut current = Vec::new();
+                let delinquent: Vec<serde_json::Value> = Vec::new();
+                for (vote_pubkey, account) in &vote_accounts {
+                    let vote_pubkey_str = vote_pubkey.to_string();
+                    if let Some(ref filter) = config.vote_pubkey {
+                        if *filter != vote_pubkey_str {
+                            continue;
+                        }
+                    }
+                    let data = account.data.as_slice();
+                    let (node_pubkey, last_vote, root_slot, commission) =
+                        parse_vote_state_summary(data, slot);
+                    current.push(json!({
+                        "votePubkey": vote_pubkey_str,
+                        "nodePubkey": node_pubkey,
+                        "activatedStake": account.meta.lamports,
+                        "commission": commission,
+                        "epochVoteAccount": true,
+                        "epochCredits": [[slot / SLOTS_PER_EPOCH, slot, 0]],
+                        "lastVote": last_vote,
+                        "rootSlot": root_slot
+                    }));
+                }
+                return Ok(json!({
+                    "current": current,
+                    "delinquent": delinquent
+                }));
+            }
+        }
+    }
+
+    // Synthetic fallback
     let activated_stake = snapshot
         .transaction_count
         .saturating_mul(1_000)
@@ -488,4 +539,42 @@ fn ensure_optional_min_context_slot(
         }
     }
     Ok(())
+}
+
+fn parse_vote_program_pubkey() -> Result<paradencer_types::Pubkey, ()> {
+    let bytes = bs58::decode("Vote111111111111111111111111111111111111111")
+        .into_vec()
+        .map_err(|_| ())?;
+    let array: [u8; 32] = bytes.try_into().map_err(|_| ())?;
+    Ok(paradencer_types::Pubkey::new(array))
+}
+
+/// Extract a summary of vote state from raw account data.
+///
+/// Vote state layout (simplified):
+/// - bytes 0..4: version tag (u32 LE)
+/// - bytes 4..36: node pubkey (32 bytes)
+/// - bytes 36..44: authorized_voter epoch (u64 LE)
+/// - bytes 44..76: authorized_voter pubkey (32 bytes)
+/// - byte 76: commission (u8)
+///
+/// Returns (node_pubkey_string, last_vote_slot, root_slot, commission).
+fn parse_vote_state_summary(data: &[u8], current_slot: u64) -> (String, u64, u64, u8) {
+    if data.len() < 77 {
+        return (
+            "11111111111111111111111111111111".to_string(),
+            current_slot,
+            current_slot.saturating_sub(VOTE_ROOT_SLOT_BACKTRACK),
+            DEFAULT_VOTE_COMMISSION_PERCENT,
+        );
+    }
+    let node_pubkey = bs58::encode(&data[4..36]).into_string();
+    let commission = data[76];
+    // TODO: Parse actual vote history to get last_vote and root_slot
+    (
+        node_pubkey,
+        current_slot,
+        current_slot.saturating_sub(VOTE_ROOT_SLOT_BACKTRACK),
+        commission,
+    )
 }

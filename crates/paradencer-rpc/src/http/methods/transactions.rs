@@ -1,6 +1,7 @@
 use serde_json::{json, Map, Value};
+use std::sync::Arc;
 
-use crate::state::{RpcCommitment, RpcRuntimeSnapshot};
+use crate::state::{BankAccessProvider, RpcCommitment, RpcRuntimeSnapshot};
 use paradencer_constants::rpc::{
     SEND_TX_COMMITMENT_BIAS_CONFIRMED, SEND_TX_COMMITMENT_BIAS_FINALIZED,
     SEND_TX_COMMITMENT_BIAS_PROCESSED, SEND_TX_ENCODING_BONUS_BASE58,
@@ -66,13 +67,14 @@ pub(super) fn handle(
     request: &serde_json::Value,
     snapshot: RpcRuntimeSnapshot,
     commitment: RpcCommitment,
+    bank_access: Option<&Arc<dyn BankAccessProvider>>,
 ) -> Result<serde_json::Value, RpcMethodError> {
     match method {
         RpcMethod::SendTransaction => {
             build_send_transaction_response(request, snapshot, commitment)
         }
         RpcMethod::SimulateTransaction => {
-            build_simulate_transaction_response(request, snapshot, commitment)
+            build_simulate_transaction_response(request, snapshot, commitment, bank_access)
         }
         _ => Err(RpcMethodError::MethodNotFound),
     }
@@ -129,10 +131,13 @@ fn build_simulate_transaction_response(
     request: &serde_json::Value,
     snapshot: RpcRuntimeSnapshot,
     commitment: RpcCommitment,
+    bank_access: Option<&Arc<dyn BankAccessProvider>>,
 ) -> Result<serde_json::Value, RpcMethodError> {
     let transaction = params::first_param_non_empty_string(request)?;
     let config = parse_simulate_transaction_config(request)?;
-    let slot = snapshot.slot_for_commitment(commitment);
+    let slot = bank_access
+        .map(|bank| bank.get_slot(commitment))
+        .unwrap_or_else(|| snapshot.slot_for_commitment(commitment));
     ensure_min_context_slot(config.min_context_slot, slot)?;
 
     let base_units = SIMULATE_UNITS_CONSUMED_BASE
@@ -155,6 +160,13 @@ fn build_simulate_transaction_response(
                 .addresses
                 .into_iter()
                 .map(|address| {
+                    // Try real account lookup first
+                    if let Some(bank) = bank_access {
+                        if let Some(real_account) = parse_pubkey_and_lookup(bank, &address, commitment) {
+                            return format_simulate_account(&real_account, &address, accounts.encoding);
+                        }
+                    }
+                    // Synthetic fallback
                     let data = match accounts.encoding {
                         AccountEncoding::Base58 => json!([address, TRANSACTION_ENCODING_BASE58]),
                         AccountEncoding::Base64 => json!([address, TRANSACTION_ENCODING_BASE64]),
@@ -176,6 +188,27 @@ fn build_simulate_transaction_response(
         )
     });
 
+    let replacement_blockhash = if config.replace_recent_blockhash {
+        if let Some(bank) = bank_access {
+            let hash = bs58::encode(bank.get_latest_blockhash(commitment)).into_string();
+            let last_valid = bank.get_last_valid_block_height(commitment);
+            json!({
+                "blockhash": hash,
+                "lastValidBlockHeight": last_valid
+            })
+        } else {
+            json!({
+                "blockhash": format!("{:064x}", snapshot.blockhash_seed_for_commitment(commitment)),
+                "lastValidBlockHeight": snapshot
+                    .block_height_for_commitment(commitment)
+                    .saturating_add(SIMULATE_REPLACEMENT_BLOCKHASH_VALIDITY_OFFSET)
+            })
+        }
+    } else {
+        serde_json::Value::Null
+    };
+
+    // TODO: Execute real transaction simulation via Bank
     Ok(json!({
         "context": {"slot": slot},
         "value": {
@@ -187,16 +220,7 @@ fn build_simulate_transaction_response(
             "unitsConsumed": base_units,
             "accounts": account_payload.unwrap_or(serde_json::Value::Null),
             "returnData": serde_json::Value::Null,
-            "replacementBlockhash": if config.replace_recent_blockhash {
-                json!({
-                    "blockhash": format!("{:064x}", snapshot.blockhash_seed_for_commitment(commitment)),
-                    "lastValidBlockHeight": snapshot
-                        .block_height_for_commitment(commitment)
-                        .saturating_add(SIMULATE_REPLACEMENT_BLOCKHASH_VALIDITY_OFFSET)
-                })
-            } else {
-                serde_json::Value::Null
-            }
+            "replacementBlockhash": replacement_blockhash
         }
     }))
 }
@@ -374,4 +398,45 @@ fn ensure_no_unknown_keys(
         }
     }
     Ok(())
+}
+
+fn parse_pubkey_and_lookup(
+    bank: &Arc<dyn BankAccessProvider>,
+    address: &str,
+    commitment: RpcCommitment,
+) -> Option<paradencer_types::Account> {
+    let bytes = bs58::decode(address).into_vec().ok()?;
+    let array: [u8; 32] = bytes.try_into().ok()?;
+    let pubkey = paradencer_types::Pubkey::new(array);
+    bank.get_account(&pubkey, commitment)
+}
+
+fn format_simulate_account(
+    account: &paradencer_types::Account,
+    _address: &str,
+    encoding: AccountEncoding,
+) -> serde_json::Value {
+    use base64::Engine;
+    let data = match encoding {
+        AccountEncoding::Base58 => {
+            let encoded = bs58::encode(account.data.as_slice()).into_string();
+            json!([encoded, TRANSACTION_ENCODING_BASE58])
+        }
+        AccountEncoding::Base64 => {
+            let encoded = base64::engine::general_purpose::STANDARD.encode(account.data.as_slice());
+            json!([encoded, TRANSACTION_ENCODING_BASE64])
+        }
+        AccountEncoding::JsonParsed => json!({
+            "program": "system",
+            "parsed": {"pubkey": _address}
+        }),
+    };
+    json!({
+        "lamports": account.meta.lamports,
+        "owner": account.meta.owner.to_string(),
+        "executable": account.meta.executable,
+        "rentEpoch": account.meta.rent_epoch,
+        "space": account.data.len(),
+        "data": data
+    })
 }

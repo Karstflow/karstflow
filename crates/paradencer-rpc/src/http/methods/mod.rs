@@ -81,7 +81,7 @@ pub(super) fn dispatch_method(
         | RpcMethod::GetLeaderSchedule
         | RpcMethod::GetBlockProduction
         | RpcMethod::GetRecentPrioritizationFees => {
-            cluster::handle(method, request, snapshot, commitment)
+            cluster::handle(method, request, snapshot, commitment, bank_access)
         }
 
         RpcMethod::GetBlocks
@@ -97,7 +97,7 @@ pub(super) fn dispatch_method(
         }
 
         RpcMethod::SendTransaction | RpcMethod::SimulateTransaction => {
-            transactions::handle(method, request, snapshot, commitment)
+            transactions::handle(method, request, snapshot, commitment, bank_access)
         }
     }
 }
