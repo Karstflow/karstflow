@@ -103,6 +103,7 @@ fn run_with_node_config(
             archive_path,
             node_config.data_dir.as_deref(),
             Some(&identity_pubkey),
+            node_config.wait_for_supermajority_bank_hash.as_deref(),
         )?;
         build_replay_service_with_consensus(
             paradencer_stages::ReplayServiceConfig::default(),

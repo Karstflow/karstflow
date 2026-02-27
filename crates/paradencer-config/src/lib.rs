@@ -61,6 +61,12 @@ pub struct NodeConfig {
     /// Allow gossip from private RFC1918 addresses. Defaults to `false`.
     /// Set to `true` for local development and testnet deployments.
     pub gossip_allow_private_addresses: bool,
+    /// Expected bank hash for wait-for-supermajority at snapshot slot.
+    ///
+    /// When set, the validator validates the loaded snapshot bank hash
+    /// matches this value before starting consensus. Used for coordinated
+    /// cluster restarts and hardforks. Format: base58-encoded 32-byte hash.
+    pub wait_for_supermajority_bank_hash: Option<String>,
     pub runtime_spec: RuntimeSpec,
     pub topology_spec: TopologySpec,
     pub ingress_policy: IngressPolicy,
@@ -198,6 +204,11 @@ impl NodeConfig {
             )
             .map(|v| v == "true" || v == "1")
             .unwrap_or(false),
+            wait_for_supermajority_bank_hash: std::env::var(
+                "PARADENCER_WAIT_FOR_SUPERMAJORITY_BANK_HASH",
+            )
+            .ok()
+            .filter(|s| !s.is_empty()),
             runtime_spec: build_runtime_spec(profile)?,
             topology_spec: build_topology_spec(profile)?,
             ingress_policy: build_ingress_policy(profile)?,

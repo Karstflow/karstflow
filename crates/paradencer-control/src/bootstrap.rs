@@ -470,6 +470,7 @@ pub fn restore_from_snapshot_archive(
     archive_path: &Path,
     data_dir: Option<&Path>,
     validator_identity: Option<&Pubkey>,
+    expected_bank_hash: Option<&str>,
 ) -> Result<ConsensusBundle> {
     info!(path = %archive_path.display(), "restoring from snapshot archive");
 
@@ -569,6 +570,41 @@ pub fn restore_from_snapshot_archive(
             computed = ?&bootstrap_result.computed_bank_hash[..8],
             expected = ?&bootstrap_result.expected_bank_hash[..8],
             "bank hash verification FAILED — consensus may produce incorrect results",
+        );
+    }
+
+    // Wait-for-supermajority: validate expected bank hash if configured.
+    // This is Phase 1 — validate the hash at startup. Phase 2 (gossip-based
+    // 80% online tracking before leader promotion) requires gossip integration.
+    if let Some(expected_hash_b58) = expected_bank_hash {
+        let expected_bytes = bs58::decode(expected_hash_b58).into_vec().map_err(|e| {
+            ControlPlaneError::Bootstrap {
+                message: format!("invalid wait_for_supermajority_bank_hash base58: {e}"),
+            }
+        })?;
+        if expected_bytes.len() != 32 {
+            return Err(ControlPlaneError::Bootstrap {
+                message: format!(
+                    "wait_for_supermajority_bank_hash must be 32 bytes, got {}",
+                    expected_bytes.len()
+                ),
+            });
+        }
+        if bootstrap_result.computed_bank_hash[..] != expected_bytes[..] {
+            return Err(ControlPlaneError::Bootstrap {
+                message: format!(
+                    "wait-for-supermajority bank hash mismatch at slot {}: \
+                     expected {}, computed {}",
+                    bootstrap_result.slot,
+                    expected_hash_b58,
+                    bs58::encode(&bootstrap_result.computed_bank_hash).into_string(),
+                ),
+            });
+        }
+        info!(
+            slot = bootstrap_result.slot,
+            bank_hash = expected_hash_b58,
+            "wait-for-supermajority bank hash validated",
         );
     }
 
@@ -3316,6 +3352,7 @@ mod tests {
 
         let result = restore_from_snapshot_archive(
             Path::new("/nonexistent/snapshot-123456.tar.zst"),
+            None,
             None,
             None,
         );
