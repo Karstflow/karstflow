@@ -399,6 +399,52 @@ impl SnapshotLoader {
             accounts_hash: computed_hash,
         })
     }
+
+    /// Load a complete snapshot chain: one full snapshot plus zero or more
+    /// incrementals applied in slot order.
+    ///
+    /// Returns the result of the final incremental (or the full snapshot if
+    /// no incrementals). After this call, `db` contains the full account state
+    /// at the chain's tip slot.
+    pub fn load_snapshot_chain(
+        &self,
+        chain: &crate::catalog::SnapshotChain,
+        db: &AccountDatabase,
+    ) -> Result<LoadedSnapshot, StorageError> {
+        // 1. Load the full (base) snapshot.
+        let base_result = self.load_snapshot(&chain.full_path, &chain.full_manifest_path, db)?;
+
+        tracing::info!(
+            slot = base_result.slot,
+            accounts = base_result.total_accounts,
+            "loaded base snapshot"
+        );
+
+        if chain.incrementals.is_empty() {
+            return Ok(base_result);
+        }
+
+        // 2. Apply each incremental in slot order with chain validation.
+        let mut last_result = base_result;
+        for (slot, snap_path, manifest_path) in &chain.incrementals {
+            let incr_result = self.apply_incremental_to_db_checked(
+                db,
+                snap_path,
+                manifest_path,
+                Some(chain.full_slot),
+            )?;
+
+            tracing::info!(
+                slot = *slot,
+                delta_accounts = incr_result.total_accounts,
+                "applied incremental snapshot"
+            );
+
+            last_result = incr_result;
+        }
+
+        Ok(last_result)
+    }
 }
 
 impl Default for SnapshotLoader {
@@ -940,5 +986,144 @@ mod tests {
         // Hash matches what we compute from restored DB.
         let (recomputed, _) = db2.compute_accounts_hash();
         assert_eq!(result.accounts_hash, recomputed);
+    }
+
+    // ── snapshot chain loading tests ─────────────────────────────────
+
+    #[test]
+    fn load_snapshot_chain_full_only() {
+        let db = AccountDatabase::new();
+        let config = SnapshotConfig::new();
+        let creator = SnapshotCreator::new(config);
+        let dir = tempfile::tempdir().unwrap();
+
+        let pk = Pubkey::new_unique();
+        let owner = Pubkey::new([10u8; 32]);
+        db.store_published_account(pk, make_account(1_000, vec![1, 2], owner));
+        creator.create_full_snapshot(&db, 100, dir.path()).unwrap();
+
+        // Build chain with only a full snapshot.
+        let chain = crate::catalog::SnapshotChain {
+            full_slot: 100,
+            full_path: dir.path().join("full-100.snapshot"),
+            full_manifest_path: dir.path().join("full-100.snapshot.manifest"),
+            incrementals: vec![],
+        };
+
+        let db2 = AccountDatabase::new();
+        let loader = SnapshotLoader::new();
+        let result = loader.load_snapshot_chain(&chain, &db2).unwrap();
+
+        assert_eq!(result.slot, 100);
+        assert_eq!(result.total_accounts, 1);
+        assert_eq!(db2.get_published_account(&pk).unwrap().meta.lamports, 1_000);
+    }
+
+    #[test]
+    fn load_snapshot_chain_with_incrementals() {
+        let db = AccountDatabase::new();
+        let config = SnapshotConfig::new();
+        let creator = SnapshotCreator::new(config);
+        let dir = tempfile::tempdir().unwrap();
+        let owner = Pubkey::new([10u8; 32]);
+
+        // Base state at slot 100.
+        let pk1 = Pubkey::new_unique();
+        let pk2 = Pubkey::new_unique();
+        db.store_published_account_at_slot(pk1, make_account(1_000, vec![1], owner), 100);
+        db.store_published_account_at_slot(pk2, make_account(2_000, vec![2], owner), 100);
+        creator.create_full_snapshot(&db, 100, dir.path()).unwrap();
+        db.drain_dirty_slots_through(100);
+
+        // Incremental 1: modify pk1 at slot 200.
+        db.store_published_account_at_slot(pk1, make_account(5_000, vec![5], owner), 200);
+        creator
+            .create_incremental_from_dirty_set(&db, 200, 100, dir.path())
+            .unwrap();
+        db.drain_dirty_slots_through(200);
+
+        // Incremental 2: add pk3 at slot 300.
+        let pk3 = Pubkey::new_unique();
+        db.store_published_account_at_slot(pk3, make_account(3_000, vec![3], owner), 300);
+        creator
+            .create_incremental_from_dirty_set(&db, 300, 100, dir.path())
+            .unwrap();
+
+        // Build chain.
+        let chain = crate::catalog::SnapshotChain {
+            full_slot: 100,
+            full_path: dir.path().join("full-100.snapshot"),
+            full_manifest_path: dir.path().join("full-100.snapshot.manifest"),
+            incrementals: vec![
+                (
+                    200,
+                    dir.path().join("incremental-200.snapshot"),
+                    dir.path().join("incremental-200.snapshot.manifest"),
+                ),
+                (
+                    300,
+                    dir.path().join("incremental-300.snapshot"),
+                    dir.path().join("incremental-300.snapshot.manifest"),
+                ),
+            ],
+        };
+
+        let db2 = AccountDatabase::new();
+        let loader = SnapshotLoader::new();
+        let result = loader.load_snapshot_chain(&chain, &db2).unwrap();
+
+        assert_eq!(result.slot, 300);
+
+        // Verify final state.
+        assert_eq!(
+            db2.get_published_account(&pk1).unwrap().meta.lamports,
+            5_000
+        );
+        assert_eq!(
+            db2.get_published_account(&pk2).unwrap().meta.lamports,
+            2_000
+        );
+        assert_eq!(
+            db2.get_published_account(&pk3).unwrap().meta.lamports,
+            3_000
+        );
+        assert_eq!(db2.get_account_count(), 3);
+    }
+
+    #[test]
+    fn load_snapshot_chain_via_catalog_discovery() {
+        let db = AccountDatabase::new();
+        let config = SnapshotConfig::new();
+        let creator = SnapshotCreator::new(config);
+        let dir = tempfile::tempdir().unwrap();
+        let owner = Pubkey::new([10u8; 32]);
+
+        // Create full + incremental on disk.
+        let pk = Pubkey::new_unique();
+        db.store_published_account_at_slot(pk, make_account(100, vec![1], owner), 50);
+        creator.create_full_snapshot(&db, 50, dir.path()).unwrap();
+        db.drain_dirty_slots_through(50);
+
+        db.store_published_account_at_slot(pk, make_account(999, vec![9, 9], owner), 80);
+        creator
+            .create_incremental_from_dirty_set(&db, 80, 50, dir.path())
+            .unwrap();
+
+        // Discover and load via catalog.
+        let mut catalog = crate::catalog::SnapshotCatalog::new();
+        let discovered = catalog.discover_snapshots(dir.path()).unwrap();
+        assert_eq!(discovered, 2);
+
+        let chain = catalog.find_best_chain().unwrap();
+        assert_eq!(chain.full_slot, 50);
+        assert_eq!(chain.incrementals.len(), 1);
+        assert_eq!(chain.tip_slot(), 80);
+
+        let db2 = AccountDatabase::new();
+        let loader = SnapshotLoader::new();
+        let result = loader.load_snapshot_chain(&chain, &db2).unwrap();
+
+        assert_eq!(result.slot, 80);
+        assert_eq!(db2.get_published_account(&pk).unwrap().meta.lamports, 999);
     }
 }

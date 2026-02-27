@@ -621,6 +621,164 @@ impl SnapshotCatalog {
     }
 }
 
+/// A snapshot chain: one full snapshot plus zero or more incrementals.
+///
+/// Used for bootstrap: load the full snapshot, then apply each incremental
+/// in slot order. The chain guarantees that each incremental's declared
+/// base slot matches the full snapshot.
+#[derive(Debug, Clone)]
+pub struct SnapshotChain {
+    /// Slot of the full (base) snapshot.
+    pub full_slot: u64,
+    /// Path to the full snapshot file.
+    pub full_path: PathBuf,
+    /// Path to the full snapshot manifest.
+    pub full_manifest_path: PathBuf,
+    /// Incremental snapshots in ascending slot order.
+    /// Each entry: (slot, snapshot_path, manifest_path).
+    pub incrementals: Vec<(u64, PathBuf, PathBuf)>,
+}
+
+impl SnapshotChain {
+    /// Total number of snapshots in the chain (1 full + N incrementals).
+    pub fn len(&self) -> usize {
+        1 + self.incrementals.len()
+    }
+
+    /// The highest slot covered by this chain.
+    pub fn tip_slot(&self) -> u64 {
+        self.incrementals
+            .last()
+            .map(|(slot, _, _)| *slot)
+            .unwrap_or(self.full_slot)
+    }
+}
+
+impl SnapshotCatalog {
+    /// Scan a directory for snapshot files and register them.
+    ///
+    /// Recognizes two formats:
+    /// - Internal: `full-{slot}.snapshot`, `incremental-{slot}.snapshot`
+    /// - Solana archive: `snapshot-{slot}-{hash}.tar.zst`,
+    ///   `incremental-snapshot-{base}-{slot}-{hash}.tar.zst`
+    ///
+    /// Returns the number of snapshots discovered.
+    pub fn discover_snapshots(&mut self, dir: &Path) -> Result<usize, StorageError> {
+        let entries = fs::read_dir(dir).map_err(|e| StorageError::AccountDatabaseError {
+            details: format!("Failed to read snapshot directory {:?}: {}", dir, e),
+        })?;
+
+        let mut count = 0;
+        for entry in entries {
+            let entry = entry.map_err(|e| StorageError::AccountDatabaseError {
+                details: format!("Failed to read directory entry: {}", e),
+            })?;
+            let path = entry.path();
+            let Some(filename) = path.file_name().and_then(|n| n.to_str()) else {
+                continue;
+            };
+
+            // Internal format: full-{slot}.snapshot
+            if let Some(rest) = filename.strip_prefix("full-") {
+                if let Some(slot_str) = rest.strip_suffix(".snapshot") {
+                    if !slot_str.contains('.') {
+                        // Not the manifest file
+                        if let Ok(slot) = slot_str.parse::<u64>() {
+                            self.full_snapshots.insert(slot, path.clone());
+                            count += 1;
+                        }
+                    }
+                }
+                continue;
+            }
+
+            // Solana archive: incremental-snapshot-{base}-{slot}-{hash}.tar.zst
+            // Must check BEFORE the internal `incremental-` prefix to avoid
+            // the `incremental-` strip consuming `incremental-snapshot-...`.
+            if filename.starts_with("incremental-snapshot-") && filename.ends_with(".tar.zst") {
+                let inner =
+                    &filename["incremental-snapshot-".len()..filename.len() - ".tar.zst".len()];
+                let parts: Vec<&str> = inner.splitn(3, '-').collect();
+                if parts.len() >= 2 {
+                    if let Ok(slot) = parts[1].parse::<u64>() {
+                        self.incremental_snapshots.insert(slot, path.clone());
+                        count += 1;
+                    }
+                }
+                continue;
+            }
+
+            // Internal format: incremental-{slot}.snapshot
+            if let Some(rest) = filename.strip_prefix("incremental-") {
+                if let Some(slot_str) = rest.strip_suffix(".snapshot") {
+                    if !slot_str.contains('.') {
+                        if let Ok(slot) = slot_str.parse::<u64>() {
+                            self.incremental_snapshots.insert(slot, path.clone());
+                            count += 1;
+                        }
+                    }
+                }
+                continue;
+            }
+
+            // Solana archive: snapshot-{slot}-{hash}.tar.zst
+            if filename.starts_with("snapshot-") && filename.ends_with(".tar.zst") {
+                let inner = &filename["snapshot-".len()..filename.len() - ".tar.zst".len()];
+                if let Some(dash_pos) = inner.find('-') {
+                    if let Ok(slot) = inner[..dash_pos].parse::<u64>() {
+                        self.full_snapshots.insert(slot, path.clone());
+                        count += 1;
+                    }
+                }
+                continue;
+            }
+        }
+
+        Ok(count)
+    }
+
+    /// Find the best snapshot chain from registered snapshots.
+    ///
+    /// Picks the latest full snapshot, then collects all incrementals
+    /// whose slots are after the full snapshot. Returns `None` if no
+    /// full snapshots are registered.
+    pub fn find_best_chain(&self) -> Option<SnapshotChain> {
+        let (&full_slot, full_path) = self.full_snapshots.iter().next_back()?;
+
+        let full_manifest_path = manifest_path_for(full_path);
+
+        let mut incrementals: Vec<(u64, PathBuf, PathBuf)> = self
+            .incremental_snapshots
+            .iter()
+            .filter(|(&slot, _)| slot > full_slot)
+            .map(|(&slot, path)| {
+                let manifest = manifest_path_for(path);
+                (slot, path.clone(), manifest)
+            })
+            .collect();
+
+        incrementals.sort_by_key(|(slot, _, _)| *slot);
+
+        Some(SnapshotChain {
+            full_slot,
+            full_path: full_path.clone(),
+            full_manifest_path,
+            incrementals,
+        })
+    }
+}
+
+/// Derive the manifest path from a snapshot path.
+///
+/// Convention: `foo.snapshot` → `foo.snapshot.manifest`
+/// For tar.zst: `foo.tar.zst` → `foo.tar.zst.manifest` (unlikely,
+/// but we keep the simple suffix approach).
+fn manifest_path_for(snapshot_path: &Path) -> PathBuf {
+    let mut manifest = snapshot_path.as_os_str().to_owned();
+    manifest.push(".manifest");
+    PathBuf::from(manifest)
+}
+
 impl Default for SnapshotCatalog {
     fn default() -> Self {
         Self::new()
@@ -948,6 +1106,95 @@ mod tests {
             .maybe_write_snapshot(&record, &hot_state, 0)
             .unwrap();
         assert!(!written);
+    }
+
+    // --- Discovery and chain selection ---
+
+    #[test]
+    fn discover_snapshots_finds_internal_format() {
+        let dir = std::env::temp_dir().join(format!("discover_test_{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+
+        // Create fake snapshot files.
+        fs::write(dir.join("full-100.snapshot"), b"data").unwrap();
+        fs::write(dir.join("full-100.snapshot.manifest"), b"manifest").unwrap();
+        fs::write(dir.join("full-200.snapshot"), b"data").unwrap();
+        fs::write(dir.join("full-200.snapshot.manifest"), b"manifest").unwrap();
+        fs::write(dir.join("incremental-150.snapshot"), b"data").unwrap();
+        fs::write(dir.join("incremental-150.snapshot.manifest"), b"manifest").unwrap();
+        fs::write(dir.join("incremental-250.snapshot"), b"data").unwrap();
+        fs::write(dir.join("unrelated.txt"), b"noise").unwrap();
+
+        let mut catalog = SnapshotCatalog::new();
+        let count = catalog.discover_snapshots(&dir).unwrap();
+
+        assert_eq!(count, 4); // 2 full + 2 incremental
+        assert_eq!(catalog.list_full_snapshots(), vec![100, 200]);
+        assert_eq!(catalog.list_incremental_snapshots(), vec![150, 250]);
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn discover_snapshots_finds_solana_archive_format() {
+        let dir = std::env::temp_dir().join(format!("discover_solana_{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+
+        fs::write(dir.join("snapshot-500-3Fv4abc.tar.zst"), b"archive").unwrap();
+        fs::write(
+            dir.join("incremental-snapshot-500-600-7Xyz.tar.zst"),
+            b"archive",
+        )
+        .unwrap();
+
+        let mut catalog = SnapshotCatalog::new();
+        let count = catalog.discover_snapshots(&dir).unwrap();
+
+        assert_eq!(count, 2);
+        assert_eq!(catalog.list_full_snapshots(), vec![500]);
+        assert_eq!(catalog.list_incremental_snapshots(), vec![600]);
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn find_best_chain_returns_none_without_full() {
+        let mut catalog = SnapshotCatalog::new();
+        catalog.register_incremental_snapshot(150, PathBuf::from("/inc-150"));
+        assert!(catalog.find_best_chain().is_none());
+    }
+
+    #[test]
+    fn find_best_chain_picks_latest_full() {
+        let mut catalog = SnapshotCatalog::new();
+        catalog.register_full_snapshot(100, PathBuf::from("/full-100.snapshot"));
+        catalog.register_full_snapshot(200, PathBuf::from("/full-200.snapshot"));
+        catalog.register_incremental_snapshot(150, PathBuf::from("/inc-150.snapshot"));
+        catalog.register_incremental_snapshot(250, PathBuf::from("/inc-250.snapshot"));
+        catalog.register_incremental_snapshot(300, PathBuf::from("/inc-300.snapshot"));
+
+        let chain = catalog.find_best_chain().unwrap();
+
+        // Should pick full-200 (latest).
+        assert_eq!(chain.full_slot, 200);
+        // Only incrementals > 200 are included.
+        assert_eq!(chain.incrementals.len(), 2);
+        assert_eq!(chain.incrementals[0].0, 250);
+        assert_eq!(chain.incrementals[1].0, 300);
+        assert_eq!(chain.tip_slot(), 300);
+        assert_eq!(chain.len(), 3);
+    }
+
+    #[test]
+    fn find_best_chain_full_only() {
+        let mut catalog = SnapshotCatalog::new();
+        catalog.register_full_snapshot(100, PathBuf::from("/full-100.snapshot"));
+
+        let chain = catalog.find_best_chain().unwrap();
+        assert_eq!(chain.full_slot, 100);
+        assert!(chain.incrementals.is_empty());
+        assert_eq!(chain.tip_slot(), 100);
+        assert_eq!(chain.len(), 1);
     }
 
     #[test]

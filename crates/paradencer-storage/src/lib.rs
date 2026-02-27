@@ -24,7 +24,7 @@ pub use blockstore::{
     AssembledBlock, Blockstore, BlockstoreError, ErasureMeta, FecInsertResult, FecTracker,
     ShredInsertResult, SlotMeta, SlotStatus,
 };
-pub use catalog::SnapshotCatalog;
+pub use catalog::{SnapshotCatalog, SnapshotChain};
 pub use durable::{
     compact_below_slot, compact_below_slot_and_reclaim, recover_accounts,
     recover_accounts_parallel, CfCompactionStats, CompactionStats, DurableStore, FileDurableStore,
