@@ -6,14 +6,18 @@ use crate::{
     ExecutionContext, ExecutionOutcome, LoaderV4Executor, MemoProgramExecutor,
     Secp256k1PrecompileExecutor, Secp256r1PrecompileExecutor, StakeProgramExecutor,
     SystemProgramExecutor, Token2022ProgramExecutor, TokenProgramExecutor, VoteProgramExecutor,
-    MAX_COMPUTE_UNITS,
+    ZkElGamalProofExecutor, MAX_COMPUTE_UNITS,
 };
 use paradencer_ids::{
-    features::{is_feature_active, ENABLE_LOADER_V4, ENABLE_SECP256R1_PRECOMPILE},
+    features::{
+        is_feature_active, ENABLE_LOADER_V4, ENABLE_SECP256R1_PRECOMPILE,
+        ZK_ELGAMAL_PROOF_PROGRAM_ENABLED,
+    },
     ADDRESS_LOOKUP_TABLE_PROGRAM_ID, ASSOCIATED_TOKEN_PROGRAM_ID, BPF_LOADER_PROGRAM_ID,
     COMPUTE_BUDGET_PROGRAM_ID, CONFIG_PROGRAM_ID, ED25519_PROGRAM_ID, LOADER_V4_PROGRAM_ID,
     MEMO_PROGRAM_ID, MEMO_PROGRAM_V3_ID, SECP256K1_PROGRAM_ID, SECP256R1_PROGRAM_ID,
     STAKE_PROGRAM_ID, SYSTEM_PROGRAM_ID, TOKEN_2022_PROGRAM_ID, TOKEN_PROGRAM_ID, VOTE_PROGRAM_ID,
+    ZK_ELGAMAL_PROOF_PROGRAM_ID,
 };
 use paradencer_types::{Account, Pubkey};
 use std::collections::HashMap;
@@ -131,6 +135,7 @@ pub struct TransactionProcessor {
     ed25519_precompile: Ed25519PrecompileExecutor,
     secp256k1_precompile: Secp256k1PrecompileExecutor,
     secp256r1_precompile: Secp256r1PrecompileExecutor,
+    zk_elgamal_proof: ZkElGamalProofExecutor,
     bytecode_vm: BytecodeVm,
     max_compute_units: u64,
 }
@@ -154,6 +159,7 @@ impl TransactionProcessor {
             ed25519_precompile: Ed25519PrecompileExecutor::new(200),
             secp256k1_precompile: Secp256k1PrecompileExecutor::new(200),
             secp256r1_precompile: Secp256r1PrecompileExecutor::new(200),
+            zk_elgamal_proof: ZkElGamalProofExecutor::new(200),
             bytecode_vm: BytecodeVm::new(),
             max_compute_units: MAX_COMPUTE_UNITS,
         }
@@ -396,6 +402,18 @@ impl TransactionProcessor {
                 return rejection;
             }
             self.secp256r1_precompile
+                .execute(context)
+                .unwrap_or_else(|err| ExecutionOutcome::failure(200, err))
+        } else if context.program_id == ZK_ELGAMAL_PROOF_PROGRAM_ID {
+            // ZK ElGamal proof program requires the enable feature gate.
+            if let Some(rejection) = self.reject_if_feature_inactive(
+                context,
+                &ZK_ELGAMAL_PROOF_PROGRAM_ENABLED,
+                "ZkElGamalProof",
+            ) {
+                return rejection;
+            }
+            self.zk_elgamal_proof
                 .execute(context)
                 .unwrap_or_else(|err| ExecutionOutcome::failure(200, err))
         } else {

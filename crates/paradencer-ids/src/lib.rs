@@ -197,6 +197,14 @@ pub const FEATURE_PROGRAM_ID: Pubkey = Pubkey::new([
 /// Alias: the BPF Loader Program ID is the upgradeable loader.
 pub const UPGRADEABLE_LOADER_PROGRAM_ID: Pubkey = BPF_LOADER_PROGRAM_ID;
 
+/// ZK ElGamal proof program — verifies zero-knowledge proofs for
+/// confidential transfers (SPL Token-2022).
+/// ZkE1Gama1Proof11111111111111111111111111111
+pub const ZK_ELGAMAL_PROOF_PROGRAM_ID: Pubkey = Pubkey::new([
+    0x08, 0x63, 0x75, 0xac, 0xe2, 0xae, 0xea, 0x28, 0x1a, 0x6b, 0x37, 0x4d, 0x68, 0x1b, 0xa7, 0x6a,
+    0x53, 0xcc, 0xf6, 0x38, 0xc0, 0x74, 0x55, 0x93, 0x6c, 0x05, 0xd0, 0x65, 0x40, 0x00, 0x00, 0x00,
+]);
+
 /// Secp256r1 ECDSA verification precompile
 /// Secp256r1SigVerify1111111111111111111111111
 pub const SECP256R1_PROGRAM_ID: Pubkey = Pubkey::new([

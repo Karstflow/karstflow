@@ -42,6 +42,7 @@ mod transaction_processor;
 pub mod validation;
 mod vm;
 mod vote;
+mod zk_elgamal_proof;
 
 pub use address_lookup_table::{
     AddressLookupTableExecutor, LookupTable, LookupTableMeta, LookupTableStatus,
@@ -74,6 +75,7 @@ pub use transaction_processor::{
 };
 pub use vm::{BytecodeVm, SbpfExecutionError, SbpfExecutionResult, SbpfVm};
 pub use vote::VoteProgramExecutor;
+pub use zk_elgamal_proof::{is_zk_elgamal_active, ZkElGamalProofExecutor};
 
 use paradencer_types::{Account, Pubkey};
 use std::collections::HashMap;
