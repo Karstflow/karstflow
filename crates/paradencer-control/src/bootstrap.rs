@@ -1851,6 +1851,7 @@ pub fn build_shred_pipeline(
 ///
 /// Uses TileLink for zero-copy shred transport between ShredFilter
 /// and ShredCollector instead of crossbeam channels.
+#[allow(dead_code)]
 pub struct ShredPipelineLinkBundle {
     /// The collector service to add to the node runtime.
     pub service: Box<dyn Service>,
@@ -1870,6 +1871,7 @@ pub struct ShredPipelineLinkBundle {
 ///
 /// The caller creates LinkProducer/LinkConsumer from the returned
 /// `shred_link` and wires them to ShredFilter and ShredNetworkService.
+#[allow(dead_code)]
 pub fn build_shred_pipeline_with_link(
     config: ShredCollectorConfig,
     blockstore: Option<Arc<Blockstore>>,
