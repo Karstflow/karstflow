@@ -111,3 +111,23 @@ pub const DATA_MERKLE_PROTECTED_BASE: usize = 1139;
 /// Base merkle-protected byte count for code shreds.
 /// `merkle_protected_sz = CODE_MERKLE_PROTECTED_BASE - MERKLE_PROOF_NODE_BYTES * depth - SHRED_SIGNATURE_BYTES * is_resigned`
 pub const CODE_MERKLE_PROTECTED_BASE: usize = 1164;
+
+// ---------------------------------------------------------------------------
+// FEC resolver pool constants
+// ---------------------------------------------------------------------------
+
+/// Maximum number of concurrently in-progress FEC sets in the resolver pool.
+/// When this limit is reached, the oldest incomplete FEC set is evicted.
+pub const FEC_RESOLVER_DEPTH: usize = 32;
+
+/// Number of completed FEC set buffers retained before recycling.
+/// Buffers remain in the completed queue until consumed, then return to free.
+pub const FEC_RESOLVER_COMPLETE_DEPTH: usize = 512;
+
+/// Number of recently-completed FEC set signatures tracked for duplicate detection.
+/// Prevents processing the same FEC set twice from different retransmit paths.
+pub const FEC_RESOLVER_DONE_DEPTH: usize = 4096;
+
+/// Maximum total data payload size in a single FEC set (bytes).
+/// Derived from max data shreds (67) * max payload per shred (~955 bytes).
+pub const FEC_SET_MAX_DATA_SIZE: usize = 63_985;

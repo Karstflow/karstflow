@@ -2,9 +2,10 @@
 ///
 /// Handles shreds from two sources: locally produced shreds (from block
 /// production) and network-received shreds (from turbine/retransmit).
-/// Manages FEC set completion, triggers Reed-Solomon reconstruction when
-/// enough coding shreds arrive, and makes retransmit decisions based on
-/// the turbine tree structure.
+/// Manages FEC set completion via a pre-allocated resolver pool, triggers
+/// Reed-Solomon reconstruction when enough coding shreds arrive, and
+/// makes retransmit decisions based on the turbine tree structure.
+use crate::fec_resolver::{FecResolverPool, FecSetKey, ResolverInsertResult};
 use crate::shred_verifier::{self, LeaderLookup, ShredVerifyResult};
 use paradencer_crypto::reed_solomon::FecReconstructor;
 use paradencer_mesh::{InPort, OutPort, ReceiveError, SendError};
@@ -80,76 +81,24 @@ pub struct CompletedFecSet {
     pub was_recovered: bool,
 }
 
-/// Tracks the state of a single FEC set.
-#[derive(Debug)]
-struct FecSetState {
-    /// Number of data shreds in this FEC set (learned from coding header).
-    num_data: u32,
-    /// Number of coding shreds in this FEC set (learned from coding header).
-    num_coding: u32,
-    /// Whether FEC parameters are known (from first coding shred).
-    params_known: bool,
-    /// Received data shreds (relative index within FEC set → shred).
-    data_shreds: HashMap<u32, Shred>,
-    /// Received coding shreds (position within FEC set → shred).
-    coding_shreds: HashMap<u32, Shred>,
-    /// Whether this FEC set has already been resolved.
-    resolved: bool,
-}
-
-impl FecSetState {
-    fn new() -> Self {
-        Self {
-            num_data: 0,
-            num_coding: 0,
-            params_known: false,
-            data_shreds: HashMap::new(),
-            coding_shreds: HashMap::new(),
-            resolved: false,
-        }
-    }
-
-    fn total_received(&self) -> u32 {
-        self.data_shreds.len() as u32 + self.coding_shreds.len() as u32
-    }
-
-    /// All data shreds received (no RS needed).
-    fn is_complete(&self) -> bool {
-        self.params_known && self.data_shreds.len() as u32 >= self.num_data && !self.resolved
-    }
-
-    /// Enough total shreds for RS recovery but not all data present.
-    fn is_recoverable(&self) -> bool {
-        self.params_known
-            && self.total_received() >= self.num_data
-            && (self.data_shreds.len() as u32) < self.num_data
-            && !self.resolved
-    }
-
-    /// Learn FEC parameters from a coding shred header.
-    fn learn_params(&mut self, num_data: u16, num_coding: u16) {
-        if !self.params_known {
-            self.num_data = num_data as u32;
-            self.num_coding = num_coding as u32;
-            self.params_known = true;
-        }
-    }
-}
-
-/// Tracks all FEC sets for a single slot.
+/// Tracks per-slot metadata (signature dedup and last-shred-seen flag).
+/// FEC set buffer management is handled by the FecResolverPool.
 #[derive(Debug)]
 struct SlotState {
-    fec_sets: HashMap<u32, FecSetState>,
+    /// Per-slot shred signature dedup set.
     seen_signatures: HashSet<[u8; 64]>,
+    /// Whether the last-in-slot flag has been seen.
     last_shred_seen: bool,
+    /// FEC set indices seen for this slot (for flush_complete_slots).
+    fec_set_indices: HashSet<u32>,
 }
 
 impl SlotState {
     fn new() -> Self {
         Self {
-            fec_sets: HashMap::new(),
             seen_signatures: HashSet::new(),
             last_shred_seen: false,
+            fec_set_indices: HashSet::new(),
         }
     }
 }
@@ -228,10 +177,12 @@ pub struct ShredNetworkStatsSnapshot {
 /// The shred networking stage.
 pub struct ShredNetworkStage {
     config: ShredNetworkConfig,
-    /// Per-slot tracking state.
+    /// Per-slot tracking state (signature dedup, last-shred-seen).
     slots: HashMap<u64, SlotState>,
     /// LRU order for slot eviction.
     slot_order: VecDeque<u64>,
+    /// Pre-allocated FEC set resolver pool with depth-controlled lifecycle.
+    resolver_pool: FecResolverPool,
     /// Pending retransmit decisions.
     pending_retransmits: Vec<RetransmitDecision>,
     /// Completed FEC sets waiting to be drained.
@@ -254,6 +205,7 @@ impl ShredNetworkStage {
         Self {
             slots: HashMap::new(),
             slot_order: VecDeque::new(),
+            resolver_pool: FecResolverPool::with_defaults(),
             pending_retransmits: Vec::new(),
             pending_completed: Vec::new(),
             leader_lookup: None,
@@ -352,60 +304,78 @@ impl ShredNetworkStage {
             slot_state.last_shred_seen = true;
         }
 
-        // Get or create FEC set state.
-        let fec = slot_state
-            .fec_sets
-            .entry(fec_set_index)
-            .or_insert_with(FecSetState::new);
+        // Track FEC set index for this slot (used by flush_complete_slots).
+        slot_state.fec_set_indices.insert(fec_set_index);
 
-        // Learn FEC params from coding shred headers.
-        if let Some(coding_header) = net_shred.shred.coding_header() {
-            fec.learn_params(
-                coding_header.num_data_shreds,
-                coding_header.num_coding_shreds,
-            );
-        }
-
-        // Insert shred into FEC set.
-        if net_shred.shred.is_coding() {
+        // Route shred insertion through the pre-allocated resolver pool.
+        let pool_result = if net_shred.shred.is_coding() {
             if let Some(coding_header) = net_shred.shred.coding_header() {
                 let position = coding_header.position as u32;
-                fec.coding_shreds.entry(position).or_insert(net_shred.shred);
+                self.resolver_pool.insert_coding_shred(
+                    slot,
+                    fec_set_index,
+                    position,
+                    coding_header.num_data_shreds,
+                    coding_header.num_coding_shreds,
+                    net_shred.shred,
+                )
+            } else {
+                return ShredInsertOutcome::Accepted;
             }
         } else {
-            // Data shred: relative index = absolute index - fec_set_index
             let relative_index = net_shred.shred.index().saturating_sub(fec_set_index);
-            fec.data_shreds
-                .entry(relative_index)
-                .or_insert(net_shred.shred);
-        }
+            self.resolver_pool.insert_data_shred(
+                slot,
+                fec_set_index,
+                relative_index,
+                net_shred.shred,
+            )
+        };
 
-        // Check FEC set status.
-        if fec.is_complete() {
-            self.stats
-                .fec_sets_completed
-                .fetch_add(1, Ordering::Relaxed);
+        // Map pool result to stage outcome.
+        match pool_result {
+            ResolverInsertResult::Complete => {
+                self.stats
+                    .fec_sets_completed
+                    .fetch_add(1, Ordering::Relaxed);
 
-            // Extract completed data shreds.
-            let fec = slot_state.fec_sets.get_mut(&fec_set_index).unwrap();
-            let completed = Self::extract_completed_set(slot, fec_set_index, fec, false);
-            self.pending_completed.push(completed);
-
-            ShredInsertOutcome::FecSetComplete { fec_set_index }
-        } else if fec.is_recoverable() {
-            self.stats
-                .fec_sets_recovered
-                .fetch_add(1, Ordering::Relaxed);
-
-            // Attempt RS recovery.
-            let fec = slot_state.fec_sets.get_mut(&fec_set_index).unwrap();
-            if let Some(completed) = Self::attempt_recovery(slot, fec_set_index, fec) {
+                let key = FecSetKey {
+                    slot,
+                    fec_set_index,
+                };
+                let completed =
+                    Self::extract_completed_from_pool(&mut self.resolver_pool, key, false);
                 self.pending_completed.push(completed);
-            }
 
-            ShredInsertOutcome::FecRecoverable { fec_set_index }
-        } else {
-            ShredInsertOutcome::Accepted
+                ShredInsertOutcome::FecSetComplete { fec_set_index }
+            }
+            ResolverInsertResult::Recoverable => {
+                self.stats
+                    .fec_sets_recovered
+                    .fetch_add(1, Ordering::Relaxed);
+
+                let key = FecSetKey {
+                    slot,
+                    fec_set_index,
+                };
+                if let Some(completed) =
+                    Self::attempt_recovery_from_pool(&mut self.resolver_pool, key)
+                {
+                    self.pending_completed.push(completed);
+                }
+
+                ShredInsertOutcome::FecRecoverable { fec_set_index }
+            }
+            ResolverInsertResult::DuplicateFecSet => {
+                self.stats.shreds_duplicate.fetch_add(1, Ordering::Relaxed);
+                ShredInsertOutcome::Duplicate
+            }
+            ResolverInsertResult::DuplicateShred => {
+                // Already tracked by slot-level signature dedup above; pool caught
+                // a position-level duplicate that had a different signature.
+                ShredInsertOutcome::Accepted
+            }
+            ResolverInsertResult::Accepted => ShredInsertOutcome::Accepted,
         }
     }
 
@@ -416,29 +386,27 @@ impl ShredNetworkStage {
     /// This handles data-only streams and ensures block assembly can proceed
     /// even without coding shreds for Reed-Solomon recovery.
     pub fn flush_complete_slots(&mut self) {
-        let complete_slots: Vec<u64> = self
+        let complete_slots: Vec<(u64, Vec<u32>)> = self
             .slots
             .iter()
             .filter(|(_, state)| state.last_shred_seen)
-            .map(|(&slot, _)| slot)
+            .map(|(&slot, state)| (slot, state.fec_set_indices.iter().copied().collect()))
             .collect();
 
-        for slot in complete_slots {
-            if let Some(slot_state) = self.slots.get_mut(&slot) {
-                let unresolved: Vec<u32> = slot_state
-                    .fec_sets
-                    .iter()
-                    .filter(|(_, fec)| !fec.resolved && !fec.data_shreds.is_empty())
-                    .map(|(&idx, _)| idx)
-                    .collect();
-
-                for fec_set_index in unresolved {
-                    if let Some(fec) = slot_state.fec_sets.get_mut(&fec_set_index) {
+        for (slot, fec_indices) in complete_slots {
+            for fec_set_index in fec_indices {
+                let key = FecSetKey {
+                    slot,
+                    fec_set_index,
+                };
+                // Check if the FEC set is still in-progress (not yet resolved).
+                if let Some(view) = self.resolver_pool.get_buffer(&key) {
+                    if !view.resolved && !view.data_shreds.is_empty() {
                         self.stats
                             .fec_sets_completed
                             .fetch_add(1, Ordering::Relaxed);
                         let completed =
-                            Self::extract_completed_set(slot, fec_set_index, fec, false);
+                            Self::extract_completed_from_pool(&mut self.resolver_pool, key, false);
                         self.pending_completed.push(completed);
                     }
                 }
@@ -471,25 +439,39 @@ impl ShredNetworkStage {
 
     /// Number of FEC sets tracked for a slot.
     pub fn fec_set_count(&self, slot: u64) -> usize {
-        self.slots.get(&slot).map(|s| s.fec_sets.len()).unwrap_or(0)
+        self.slots
+            .get(&slot)
+            .map(|s| s.fec_set_indices.len())
+            .unwrap_or(0)
     }
 
     /// Number of data shreds received for a specific FEC set.
     pub fn fec_data_count(&self, slot: u64, fec_set_index: u32) -> usize {
-        self.slots
-            .get(&slot)
-            .and_then(|s| s.fec_sets.get(&fec_set_index))
-            .map(|f| f.data_shreds.len())
+        let key = FecSetKey {
+            slot,
+            fec_set_index,
+        };
+        self.resolver_pool
+            .get_buffer(&key)
+            .map(|v| v.data_shreds.len())
             .unwrap_or(0)
     }
 
     /// Number of coding shreds received for a specific FEC set.
     pub fn fec_coding_count(&self, slot: u64, fec_set_index: u32) -> usize {
-        self.slots
-            .get(&slot)
-            .and_then(|s| s.fec_sets.get(&fec_set_index))
-            .map(|f| f.coding_shreds.len())
+        let key = FecSetKey {
+            slot,
+            fec_set_index,
+        };
+        self.resolver_pool
+            .get_buffer(&key)
+            .map(|v| v.coding_shreds.len())
             .unwrap_or(0)
+    }
+
+    /// Get the FEC resolver pool for inspection.
+    pub fn resolver_pool(&self) -> &FecResolverPool {
+        &self.resolver_pool
     }
 
     /// Set the minimum slot (prune older slots).
@@ -508,6 +490,9 @@ impl ShredNetworkStage {
             self.slots.remove(&slot);
         }
         self.slot_order.retain(|&s| s >= min_slot);
+
+        // Also prune the resolver pool.
+        self.resolver_pool.prune_slots_below(min_slot);
     }
 
     /// Ensure a slot is tracked, evicting the oldest if at capacity.
@@ -542,116 +527,140 @@ impl ShredNetworkStage {
         self.stats.retransmits_sent.fetch_add(1, Ordering::Relaxed);
     }
 
-    /// Extract a completed FEC set's data shreds in order.
-    fn extract_completed_set(
-        slot: u64,
-        fec_set_index: u32,
-        fec: &mut FecSetState,
+    /// Extract a completed FEC set from the resolver pool, mark it completed,
+    /// and return the assembled CompletedFecSet.
+    fn extract_completed_from_pool(
+        pool: &mut FecResolverPool,
+        key: FecSetKey,
         was_recovered: bool,
     ) -> CompletedFecSet {
-        fec.resolved = true;
+        // Read data shreds from the pool buffer before marking completed.
+        let data_shreds = if let Some(view) = pool.get_buffer(&key) {
+            let mut indices: Vec<u32> = view.data_shreds.keys().copied().collect();
+            indices.sort_unstable();
+            indices
+                .into_iter()
+                .filter_map(|idx| view.data_shreds.get(&idx).cloned())
+                .collect()
+        } else {
+            Vec::new()
+        };
 
-        // Collect data shreds sorted by relative index.
-        let mut indices: Vec<u32> = fec.data_shreds.keys().copied().collect();
-        indices.sort_unstable();
-
-        let data_shreds: Vec<Shred> = indices
-            .into_iter()
-            .filter_map(|idx| fec.data_shreds.get(&idx).cloned())
-            .collect();
+        pool.mark_completed(key);
 
         CompletedFecSet {
-            slot,
-            fec_set_index,
+            slot: key.slot,
+            fec_set_index: key.fec_set_index,
             data_shreds,
             was_recovered,
         }
     }
 
-    /// Attempt Reed-Solomon recovery on a FEC set that has enough total shreds.
-    fn attempt_recovery(
-        slot: u64,
-        fec_set_index: u32,
-        fec: &mut FecSetState,
+    /// Attempt Reed-Solomon recovery on a FEC set in the resolver pool.
+    fn attempt_recovery_from_pool(
+        pool: &mut FecResolverPool,
+        key: FecSetKey,
     ) -> Option<CompletedFecSet> {
-        let num_data = fec.num_data as usize;
-        let num_coding = fec.num_coding as usize;
+        // First, gather all info we need from the buffer view.
+        let (
+            num_data,
+            num_coding,
+            shard_size,
+            data_array,
+            coding_array,
+            ref_version,
+            ref_variant_byte,
+            ref_parent_offset,
+        ) = {
+            let view = pool.get_buffer(&key)?;
+            let num_data = view.num_data as usize;
+            let num_coding = view.num_coding as usize;
+
+            let shard_size = view
+                .data_shreds
+                .values()
+                .next()
+                .or_else(|| view.coding_shreds.values().next())
+                .map(|s| s.payload.len())?;
+
+            let data_array: Vec<Option<Vec<u8>>> = (0..num_data as u32)
+                .map(|rel_idx| {
+                    view.data_shreds.get(&rel_idx).map(|s| {
+                        let mut payload = s.payload.clone();
+                        payload.resize(shard_size, 0);
+                        payload
+                    })
+                })
+                .collect();
+
+            let coding_array: Vec<Option<Vec<u8>>> = (0..num_coding as u32)
+                .map(|pos| {
+                    view.coding_shreds.get(&pos).map(|s| {
+                        let mut payload = s.payload.clone();
+                        payload.resize(shard_size, 0);
+                        payload
+                    })
+                })
+                .collect();
+
+            let ref_shred = view
+                .data_shreds
+                .values()
+                .next()
+                .or_else(|| view.coding_shreds.values().next())?;
+
+            let ref_version = ref_shred.common_header.version;
+            let ref_variant_byte = ref_shred.common_header.variant;
+            let ref_parent_offset = ref_shred
+                .data_header()
+                .map(|h| h.parent_offset)
+                .unwrap_or(1);
+
+            (
+                num_data,
+                num_coding,
+                shard_size,
+                data_array,
+                coding_array,
+                ref_version,
+                ref_variant_byte,
+                ref_parent_offset,
+            )
+        };
 
         let reconstructor = FecReconstructor::new(num_data, num_coding).ok()?;
-
-        // Determine uniform shard size from any available shred payload.
-        let shard_size = fec
-            .data_shreds
-            .values()
-            .next()
-            .or_else(|| fec.coding_shreds.values().next())
-            .map(|s| s.payload.len())?;
-
-        // Build data shard array: Some(payload) for present, None for missing.
-        let data_array: Vec<Option<Vec<u8>>> = (0..num_data as u32)
-            .map(|rel_idx| {
-                fec.data_shreds.get(&rel_idx).map(|s| {
-                    let mut payload = s.payload.clone();
-                    payload.resize(shard_size, 0);
-                    payload
-                })
-            })
-            .collect();
-
-        // Build coding shard array: Some(payload) for present, None for missing.
-        let coding_array: Vec<Option<Vec<u8>>> = (0..num_coding as u32)
-            .map(|pos| {
-                fec.coding_shreds.get(&pos).map(|s| {
-                    let mut payload = s.payload.clone();
-                    payload.resize(shard_size, 0);
-                    payload
-                })
-            })
-            .collect();
-
         let result = reconstructor.reconstruct(data_array, coding_array).ok()?;
 
-        // Get a reference data shred for reconstructing headers.
-        let ref_shred = fec
-            .data_shreds
-            .values()
-            .next()
-            .or_else(|| fec.coding_shreds.values().next())?;
-
-        let ref_version = ref_shred.common_header.version;
-        let ref_variant_byte = ref_shred.common_header.variant;
-        let ref_parent_offset = ref_shred
-            .data_header()
-            .map(|h| h.parent_offset)
-            .unwrap_or(1);
-
-        // Insert recovered data shreds into the FEC set.
-        for (rel_idx, maybe_recovered) in result.data_shreds.into_iter().enumerate() {
-            if let Some(payload) = maybe_recovered {
-                let abs_index = fec_set_index + rel_idx as u32;
-                let recovered_shred = Shred::new(
-                    ShredCommonHeader {
-                        signature: [0u8; 64], // Erasure-recovered shreds cannot carry a valid leader signature
-                        variant: ref_variant_byte,
-                        slot,
-                        index: abs_index,
-                        version: ref_version,
-                        fec_set_index,
-                    },
-                    ShredVariant::LegacyData(DataShredHeader {
-                        parent_offset: ref_parent_offset,
-                        flags: 0,
-                        size: payload.len() as u16,
-                    }),
-                    payload,
-                );
-                fec.data_shreds
-                    .entry(rel_idx as u32)
-                    .or_insert(recovered_shred);
+        // Insert recovered data shreds back into the pool buffer.
+        if let Some(view_mut) = pool.get_buffer_mut(&key) {
+            for (rel_idx, maybe_recovered) in result.data_shreds.into_iter().enumerate() {
+                if let Some(payload) = maybe_recovered {
+                    let abs_index = key.fec_set_index + rel_idx as u32;
+                    let recovered_shred = Shred::new(
+                        ShredCommonHeader {
+                            signature: [0u8; 64],
+                            variant: ref_variant_byte,
+                            slot: key.slot,
+                            index: abs_index,
+                            version: ref_version,
+                            fec_set_index: key.fec_set_index,
+                        },
+                        ShredVariant::LegacyData(DataShredHeader {
+                            parent_offset: ref_parent_offset,
+                            flags: 0,
+                            size: payload.len() as u16,
+                        }),
+                        payload,
+                    );
+                    view_mut
+                        .data_shreds
+                        .entry(rel_idx as u32)
+                        .or_insert(recovered_shred);
+                }
             }
         }
 
-        Some(Self::extract_completed_set(slot, fec_set_index, fec, true))
+        Some(Self::extract_completed_from_pool(pool, key, true))
     }
 }
 
