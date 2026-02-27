@@ -2093,6 +2093,16 @@ impl BankAccessProvider for ConsensusBankAccessProvider {
             .map(|bank| bank.capitalization())
             .unwrap_or(0)
     }
+
+    fn get_accounts_by_owner(
+        &self,
+        owner: &paradencer_types::Pubkey,
+        commitment: paradencer_rpc::RpcCommitment,
+    ) -> Vec<(paradencer_types::Pubkey, paradencer_types::Account)> {
+        self.bank_for_commitment(commitment)
+            .map(|bank| bank.accounts().get_accounts_by_owner(owner))
+            .unwrap_or_default()
+    }
 }
 
 pub fn print_preflight_ok() {

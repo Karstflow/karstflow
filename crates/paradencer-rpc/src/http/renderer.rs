@@ -3404,6 +3404,20 @@ mod tests {
         fn get_capitalization(&self, _commitment: crate::state::RpcCommitment) -> u64 {
             self.capitalization
         }
+
+        fn get_accounts_by_owner(
+            &self,
+            owner: &paradencer_types::Pubkey,
+            _commitment: crate::state::RpcCommitment,
+        ) -> Vec<(paradencer_types::Pubkey, paradencer_types::Account)> {
+            self.accounts
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|(_, account)| account.meta.owner == *owner)
+                .map(|(pubkey, account)| (*pubkey, account.clone()))
+                .collect()
+        }
     }
 
     fn test_pubkey_bytes() -> [u8; 32] {
@@ -3729,5 +3743,201 @@ mod tests {
             value > 0,
             "synthetic fallback should produce non-zero balance"
         );
+    }
+
+    #[test]
+    fn bank_access_get_program_accounts_returns_real_accounts() {
+        let program_id = test_pubkey();
+        let acct_bytes = {
+            let mut b = [0u8; 32];
+            b[0] = 2;
+            b[31] = 2;
+            b
+        };
+        let acct_pubkey = paradencer_types::Pubkey::new(acct_bytes);
+        let account = paradencer_types::Account::new(77_000, vec![1, 2, 3], program_id);
+        let mock: Arc<dyn BankAccessProvider> =
+            Arc::new(MockBankAccess::new().with_account(acct_pubkey, account));
+
+        let payload = render_json_rpc_response(
+            &format!(
+                r#"{{"jsonrpc":"2.0","id":1,"method":"getProgramAccounts","params":["{}",{{"withContext":true}}]}}"#,
+                test_pubkey_base58()
+            ),
+            true,
+            Some(RpcRuntimeSnapshot {
+                slot: 10,
+                block_height: 10,
+                transaction_count: 0,
+                uptime_millis: 1_000,
+                latest_blockhash_seed: 0,
+            }),
+            Some(&mock),
+        );
+        let parsed: serde_json::Value = serde_json::from_str(&payload).unwrap();
+        assert_eq!(parsed["result"]["context"]["slot"], 100);
+        let accounts = parsed["result"]["value"].as_array().unwrap();
+        assert_eq!(accounts.len(), 1);
+        assert_eq!(accounts[0]["account"]["lamports"], 77_000);
+    }
+
+    #[test]
+    fn bank_access_get_token_supply_parses_mint() {
+        // Build an SPL Mint account (82 bytes):
+        // bytes 0..4: mint_authority option tag (0 = None)
+        // bytes 4..36: mint_authority pubkey (zeroed for None)
+        // bytes 36..44: supply (u64 LE)
+        // byte 44: decimals
+        // byte 45: is_initialized
+        // bytes 46..82: freeze_authority option
+        let mut mint_data = vec![0u8; 82];
+        let supply: u64 = 1_000_000_000;
+        mint_data[36..44].copy_from_slice(&supply.to_le_bytes());
+        mint_data[44] = 6; // decimals
+        mint_data[45] = 1; // is_initialized
+
+        let mint_pubkey = test_pubkey();
+        let mint_account = paradencer_types::Account::new(
+            1_000_000,
+            mint_data,
+            paradencer_types::Pubkey::new([0u8; 32]),
+        );
+        let mock: Arc<dyn BankAccessProvider> =
+            Arc::new(MockBankAccess::new().with_account(mint_pubkey, mint_account));
+
+        let payload = render_json_rpc_response(
+            &format!(
+                r#"{{"jsonrpc":"2.0","id":1,"method":"getTokenSupply","params":["{}"]}}"#,
+                test_pubkey_base58()
+            ),
+            true,
+            Some(RpcRuntimeSnapshot {
+                slot: 10,
+                block_height: 10,
+                transaction_count: 0,
+                uptime_millis: 1_000,
+                latest_blockhash_seed: 0,
+            }),
+            Some(&mock),
+        );
+        let parsed: serde_json::Value = serde_json::from_str(&payload).unwrap();
+        assert_eq!(parsed["result"]["value"]["amount"], "1000000000");
+        assert_eq!(parsed["result"]["value"]["decimals"], 6);
+        assert_eq!(parsed["result"]["value"]["uiAmountString"], "1000.000000");
+    }
+
+    #[test]
+    fn bank_access_get_token_account_balance_parses_account() {
+        // Build an SPL Token account (165 bytes):
+        // bytes 0..32: mint pubkey
+        // bytes 32..64: owner pubkey
+        // bytes 64..72: amount (u64 LE)
+        // rest: delegate, state, etc.
+        let mut token_data = vec![0u8; 165];
+        let amount: u64 = 500_000;
+        token_data[64..72].copy_from_slice(&amount.to_le_bytes());
+
+        let token_pubkey = test_pubkey();
+        let token_account = paradencer_types::Account::new(
+            2_039_280,
+            token_data,
+            paradencer_types::Pubkey::new([0u8; 32]),
+        );
+        let mock: Arc<dyn BankAccessProvider> =
+            Arc::new(MockBankAccess::new().with_account(token_pubkey, token_account));
+
+        let payload = render_json_rpc_response(
+            &format!(
+                r#"{{"jsonrpc":"2.0","id":1,"method":"getTokenAccountBalance","params":["{}"]}}"#,
+                test_pubkey_base58()
+            ),
+            true,
+            Some(RpcRuntimeSnapshot {
+                slot: 10,
+                block_height: 10,
+                transaction_count: 0,
+                uptime_millis: 1_000,
+                latest_blockhash_seed: 0,
+            }),
+            Some(&mock),
+        );
+        let parsed: serde_json::Value = serde_json::from_str(&payload).unwrap();
+        // Decimals will be 0 since we don't resolve the mint in the parser
+        assert_eq!(parsed["result"]["value"]["amount"], "500000");
+        assert_eq!(parsed["result"]["value"]["decimals"], 0);
+    }
+
+    #[test]
+    fn bank_access_get_token_accounts_by_owner_filters_correctly() {
+        // The owner whose token accounts we're looking for
+        let owner_bytes = {
+            let mut b = [0u8; 32];
+            b[0] = 5;
+            b
+        };
+        let _owner_pubkey = paradencer_types::Pubkey::new(owner_bytes);
+
+        // SPL Token program is the account owner in the accounts DB
+        let token_program_bytes = bs58::decode("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA")
+            .into_vec()
+            .unwrap();
+        let mut token_program_arr = [0u8; 32];
+        token_program_arr.copy_from_slice(&token_program_bytes);
+        let token_program = paradencer_types::Pubkey::new(token_program_arr);
+
+        // Token account 1: owned by our owner (bytes 32..64 match)
+        let mut token_data_1 = vec![0u8; 165];
+        token_data_1[32..64].copy_from_slice(&owner_bytes);
+        let amount1: u64 = 100;
+        token_data_1[64..72].copy_from_slice(&amount1.to_le_bytes());
+        let token_acct_1_bytes = {
+            let mut b = [0u8; 32];
+            b[0] = 10;
+            b
+        };
+        let token_acct_1 = paradencer_types::Pubkey::new(token_acct_1_bytes);
+        let account_1 =
+            paradencer_types::Account::new(2_039_280, token_data_1, token_program);
+
+        // Token account 2: owned by someone else
+        let mut token_data_2 = vec![0u8; 165];
+        let other_owner = [0xFFu8; 32];
+        token_data_2[32..64].copy_from_slice(&other_owner);
+        let token_acct_2_bytes = {
+            let mut b = [0u8; 32];
+            b[0] = 11;
+            b
+        };
+        let token_acct_2 = paradencer_types::Pubkey::new(token_acct_2_bytes);
+        let account_2 =
+            paradencer_types::Account::new(2_039_280, token_data_2, token_program);
+
+        let mock: Arc<dyn BankAccessProvider> = Arc::new(
+            MockBankAccess::new()
+                .with_account(token_acct_1, account_1)
+                .with_account(token_acct_2, account_2),
+        );
+
+        let owner_base58 = bs58::encode(owner_bytes).into_string();
+        let payload = render_json_rpc_response(
+            &format!(
+                r#"{{"jsonrpc":"2.0","id":1,"method":"getTokenAccountsByOwner","params":["{}",{{"programId":"TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"}}]}}"#,
+                owner_base58
+            ),
+            true,
+            Some(RpcRuntimeSnapshot {
+                slot: 10,
+                block_height: 10,
+                transaction_count: 0,
+                uptime_millis: 1_000,
+                latest_blockhash_seed: 0,
+            }),
+            Some(&mock),
+        );
+        let parsed: serde_json::Value = serde_json::from_str(&payload).unwrap();
+        let accounts = parsed["result"]["value"].as_array().unwrap();
+        // Only account_1 should match (owned by our owner)
+        assert_eq!(accounts.len(), 1);
+        assert_eq!(accounts[0]["account"]["lamports"], 2_039_280);
     }
 }

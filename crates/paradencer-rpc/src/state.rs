@@ -80,6 +80,13 @@ pub trait BankAccessProvider: Send + Sync {
 
     /// Get the total capitalization (supply) in lamports.
     fn get_capitalization(&self, commitment: RpcCommitment) -> u64;
+
+    /// Get all accounts owned by the given program at the specified commitment level.
+    fn get_accounts_by_owner(
+        &self,
+        owner: &paradencer_types::Pubkey,
+        commitment: RpcCommitment,
+    ) -> Vec<(paradencer_types::Pubkey, paradencer_types::Account)>;
 }
 
 pub struct MetricsFileRuntimeSnapshotProvider {

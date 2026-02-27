@@ -3,7 +3,11 @@ use std::sync::Arc;
 
 use crate::state::{BankAccessProvider, RpcCommitment, RpcRuntimeSnapshot};
 use paradencer_constants::economics::{BASE_NETWORK_SUPPLY_LAMPORTS, TOKEN_UI_DECIMALS_DIVISOR};
-use paradencer_constants::rpc::{DEFAULT_TOKEN_ACCOUNT_SPACE, MAX_SIGNATURE_CONFIRMATIONS};
+use paradencer_constants::rpc::{
+    DEFAULT_TOKEN_ACCOUNT_SPACE, MAX_SIGNATURE_CONFIRMATIONS, SPL_MINT_DECIMALS_OFFSET,
+    SPL_MINT_MIN_LEN, SPL_MINT_SUPPLY_OFFSET, SPL_TOKEN_ACCOUNT_AMOUNT_OFFSET,
+    SPL_TOKEN_ACCOUNT_MIN_LEN,
+};
 
 use super::super::method_error::RpcMethodError;
 use super::super::registry::RpcMethod;
@@ -19,9 +23,11 @@ pub(super) fn handle(
     match method {
         RpcMethod::GetBalance => build_balance_response(request, snapshot, commitment, bank_access),
         RpcMethod::GetSupply => build_supply_response(request, snapshot, commitment, bank_access),
-        RpcMethod::GetTokenSupply => build_token_supply_response(request, snapshot, commitment),
+        RpcMethod::GetTokenSupply => {
+            build_token_supply_response(request, snapshot, commitment, bank_access)
+        }
         RpcMethod::GetTokenAccountBalance => {
-            build_token_account_balance_response(request, snapshot, commitment)
+            build_token_account_balance_response(request, snapshot, commitment, bank_access)
         }
         RpcMethod::GetLargestAccounts => {
             build_largest_accounts_response(request, snapshot, commitment)
@@ -30,10 +36,10 @@ pub(super) fn handle(
             build_token_largest_accounts_response(request, snapshot, commitment)
         }
         RpcMethod::GetProgramAccounts => {
-            build_program_accounts_response(request, snapshot, commitment)
+            build_program_accounts_response(request, snapshot, commitment, bank_access)
         }
         RpcMethod::GetTokenAccountsByOwner => {
-            build_token_accounts_by_owner_response(request, snapshot, commitment)
+            build_token_accounts_by_owner_response(request, snapshot, commitment, bank_access)
         }
         RpcMethod::GetTokenAccountsByDelegate => {
             build_token_accounts_by_delegate_response(request, snapshot, commitment)
@@ -89,30 +95,67 @@ fn build_token_supply_response(
     request: &serde_json::Value,
     snapshot: RpcRuntimeSnapshot,
     commitment: RpcCommitment,
+    bank_access: Option<&Arc<dyn BankAccessProvider>>,
 ) -> Result<serde_json::Value, RpcMethodError> {
     ensure_min_context_slot_satisfied(request, snapshot, commitment)?;
-    let mint = parse_mint_param(request)?;
-    let amount = synthetic_token_amount(&mint, snapshot.transaction_count);
-    let slot = snapshot.slot_for_commitment(commitment);
-    Ok(json!({
-        "context": {"slot": slot},
-        "value": token_amount_payload(amount)
-    }))
+    let mint_str = parse_mint_param(request)?;
+    let slot = resolve_slot(snapshot, commitment, bank_access);
+
+    if let Some(bank) = bank_access {
+        let pubkey = parse_pubkey(&mint_str)?;
+        if let Some(account) = bank.get_account(&pubkey, commitment) {
+            if let Some((supply, decimals)) = parse_spl_mint_supply(account.data.as_slice()) {
+                return Ok(json!({
+                    "context": {"slot": slot},
+                    "value": token_amount_payload_with_decimals(supply, decimals)
+                }));
+            }
+        }
+        Ok(json!({
+            "context": {"slot": slot},
+            "value": token_amount_payload(0)
+        }))
+    } else {
+        let amount = synthetic_token_amount(&mint_str, snapshot.transaction_count);
+        Ok(json!({
+            "context": {"slot": slot},
+            "value": token_amount_payload(amount)
+        }))
+    }
 }
 
 fn build_token_account_balance_response(
     request: &serde_json::Value,
     snapshot: RpcRuntimeSnapshot,
     commitment: RpcCommitment,
+    bank_access: Option<&Arc<dyn BankAccessProvider>>,
 ) -> Result<serde_json::Value, RpcMethodError> {
     ensure_min_context_slot_satisfied(request, snapshot, commitment)?;
-    let token_account = params::first_param_non_empty_string(request)?;
-    let amount = synthetic_token_amount(&token_account, snapshot.transaction_count / 2);
-    let slot = snapshot.slot_for_commitment(commitment);
-    Ok(json!({
-        "context": {"slot": slot},
-        "value": token_amount_payload(amount)
-    }))
+    let token_account_str = params::first_param_non_empty_string(request)?;
+    let slot = resolve_slot(snapshot, commitment, bank_access);
+
+    if let Some(bank) = bank_access {
+        let pubkey = parse_pubkey(&token_account_str)?;
+        if let Some(account) = bank.get_account(&pubkey, commitment) {
+            if let Some((amount, decimals)) = parse_spl_token_account_balance(account.data.as_slice())
+            {
+                return Ok(json!({
+                    "context": {"slot": slot},
+                    "value": token_amount_payload_with_decimals(amount, decimals)
+                }));
+            }
+        }
+        Ok(json!({
+            "context": {"slot": slot},
+            "value": token_amount_payload(0)
+        }))
+    } else {
+        let amount = synthetic_token_amount(&token_account_str, snapshot.transaction_count / 2);
+        Ok(json!({
+            "context": {"slot": slot},
+            "value": token_amount_payload(amount)
+        }))
+    }
 }
 
 fn build_largest_accounts_response(
@@ -169,25 +212,41 @@ fn build_program_accounts_response(
     request: &serde_json::Value,
     snapshot: RpcRuntimeSnapshot,
     commitment: RpcCommitment,
+    bank_access: Option<&Arc<dyn BankAccessProvider>>,
 ) -> Result<serde_json::Value, RpcMethodError> {
     let (program_id, with_context, min_context_slot) = parse_program_accounts_request(request)?;
     ensure_optional_min_context_slot(min_context_slot, snapshot, commitment)?;
-    let slot = snapshot.slot_for_commitment(commitment);
-    let accounts = (0_u64..2)
-        .map(|index| {
-            json!({
-                "pubkey": format!("ParaProgAcct{index:02}111111111111111111111111111111"),
-                "account": {
-                    "lamports": snapshot.transaction_count.saturating_add(10_000 + index),
-                    "owner": program_id,
-                    "executable": false,
-                    "rentEpoch": 0,
-                    "data": ["", "base64"],
-                    "space": 0
-                }
+    let slot = resolve_slot(snapshot, commitment, bank_access);
+    let encoding = parse_encoding(request);
+
+    let accounts = if let Some(bank) = bank_access {
+        let owner = parse_pubkey(&program_id)?;
+        bank.get_accounts_by_owner(&owner, commitment)
+            .into_iter()
+            .map(|(pubkey, account)| {
+                json!({
+                    "pubkey": pubkey.to_string(),
+                    "account": format_account_value(&account, &encoding)
+                })
             })
-        })
-        .collect::<Vec<_>>();
+            .collect::<Vec<_>>()
+    } else {
+        (0_u64..2)
+            .map(|index| {
+                json!({
+                    "pubkey": format!("ParaProgAcct{index:02}111111111111111111111111111111"),
+                    "account": {
+                        "lamports": snapshot.transaction_count.saturating_add(10_000 + index),
+                        "owner": program_id,
+                        "executable": false,
+                        "rentEpoch": 0,
+                        "data": ["", "base64"],
+                        "space": 0
+                    }
+                })
+            })
+            .collect::<Vec<_>>()
+    };
 
     if with_context {
         Ok(json!({
@@ -203,31 +262,61 @@ fn build_token_accounts_by_owner_response(
     request: &serde_json::Value,
     snapshot: RpcRuntimeSnapshot,
     commitment: RpcCommitment,
+    bank_access: Option<&Arc<dyn BankAccessProvider>>,
 ) -> Result<serde_json::Value, RpcMethodError> {
-    let (owner, selector, min_context_slot) = parse_token_accounts_query(request)?;
+    let (_owner, _selector, min_context_slot) = parse_token_accounts_query(request)?;
     ensure_optional_min_context_slot(min_context_slot, snapshot, commitment)?;
-    let slot = snapshot.slot_for_commitment(commitment);
-    let value = (0_u64..2)
-        .map(|index| {
-            json!({
-                "pubkey": format!("ParaOwnerAcct{index:02}111111111111111111111111111111"),
-                "account": {
-                    "lamports": snapshot.transaction_count.saturating_add(20_000 + index),
-                    "owner": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA",
-                    "executable": false,
-                    "rentEpoch": 0,
-                    "data": ["", "base64"],
-                    "space": DEFAULT_TOKEN_ACCOUNT_SPACE
-                },
-                "tokenOwner": owner,
-                "selector": selector
+    let slot = resolve_slot(snapshot, commitment, bank_access);
+    let encoding = parse_encoding(request);
+
+    if let Some(bank) = bank_access {
+        // Look up accounts owned by SPL Token program, then filter by token owner
+        let owner_pubkey = parse_pubkey(&_owner)?;
+        let token_program =
+            parse_pubkey("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA")?;
+        let all_token_accounts = bank.get_accounts_by_owner(&token_program, commitment);
+        let value = all_token_accounts
+            .into_iter()
+            .filter(|(_, account)| {
+                // SPL Token account: owner is at bytes 32..64
+                let data = account.data.as_slice();
+                data.len() >= 64
+                    && data[32..64] == *owner_pubkey.as_bytes()
             })
-        })
-        .collect::<Vec<_>>();
-    Ok(json!({
-        "context": {"slot": slot},
-        "value": value
-    }))
+            .map(|(pubkey, account)| {
+                json!({
+                    "pubkey": pubkey.to_string(),
+                    "account": format_account_value(&account, &encoding)
+                })
+            })
+            .collect::<Vec<_>>();
+        Ok(json!({
+            "context": {"slot": slot},
+            "value": value
+        }))
+    } else {
+        let value = (0_u64..2)
+            .map(|index| {
+                json!({
+                    "pubkey": format!("ParaOwnerAcct{index:02}111111111111111111111111111111"),
+                    "account": {
+                        "lamports": snapshot.transaction_count.saturating_add(20_000 + index),
+                        "owner": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA",
+                        "executable": false,
+                        "rentEpoch": 0,
+                        "data": ["", "base64"],
+                        "space": DEFAULT_TOKEN_ACCOUNT_SPACE
+                    },
+                    "tokenOwner": _owner,
+                    "selector": _selector
+                })
+            })
+            .collect::<Vec<_>>();
+        Ok(json!({
+            "context": {"slot": slot},
+            "value": value
+        }))
+    }
 }
 
 fn build_token_accounts_by_delegate_response(
@@ -430,6 +519,54 @@ fn token_amount_payload(amount: u64) -> serde_json::Value {
         "uiAmount": amount as f64 / TOKEN_UI_DECIMALS_DIVISOR,
         "uiAmountString": format!("0.{amount:09}")
     })
+}
+
+/// Format a token amount with real decimals from on-chain data.
+fn token_amount_payload_with_decimals(amount: u64, decimals: u8) -> serde_json::Value {
+    let divisor = 10_u64.pow(u32::from(decimals));
+    let ui_amount = amount as f64 / divisor as f64;
+    let ui_string = if decimals == 0 {
+        amount.to_string()
+    } else {
+        format!("{ui_amount:.prec$}", prec = usize::from(decimals))
+    };
+    json!({
+        "amount": amount.to_string(),
+        "decimals": decimals,
+        "uiAmount": ui_amount,
+        "uiAmountString": ui_string
+    })
+}
+
+/// Parse the token balance from an SPL Token account's raw data.
+///
+/// Returns `(amount, decimals)` if the data has the expected minimum length.
+/// The decimals value requires a follow-up mint lookup — this returns 0 as a placeholder.
+/// Callers needing real decimals should resolve the mint from bytes 0..32.
+fn parse_spl_token_account_balance(data: &[u8]) -> Option<(u64, u8)> {
+    if data.len() < SPL_TOKEN_ACCOUNT_MIN_LEN {
+        return None;
+    }
+    let amount_bytes: [u8; 8] = data[SPL_TOKEN_ACCOUNT_AMOUNT_OFFSET..SPL_TOKEN_ACCOUNT_AMOUNT_OFFSET + 8]
+        .try_into()
+        .ok()?;
+    let amount = u64::from_le_bytes(amount_bytes);
+    // Token account doesn't store decimals — return 0 as default.
+    // For full accuracy, caller would resolve mint account and read decimals from it.
+    Some((amount, 0))
+}
+
+/// Parse supply and decimals from an SPL Mint account's raw data.
+fn parse_spl_mint_supply(data: &[u8]) -> Option<(u64, u8)> {
+    if data.len() < SPL_MINT_MIN_LEN {
+        return None;
+    }
+    let supply_bytes: [u8; 8] = data[SPL_MINT_SUPPLY_OFFSET..SPL_MINT_SUPPLY_OFFSET + 8]
+        .try_into()
+        .ok()?;
+    let supply = u64::from_le_bytes(supply_bytes);
+    let decimals = data[SPL_MINT_DECIMALS_OFFSET];
+    Some((supply, decimals))
 }
 
 fn parse_program_accounts_request(

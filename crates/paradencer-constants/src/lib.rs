@@ -177,6 +177,22 @@ pub mod rpc {
 
     pub const DEFAULT_TOKEN_ACCOUNT_SPACE: u64 = 165;
     pub const MAX_SIGNATURE_CONFIRMATIONS: u64 = 32;
+
+    /// SPL Token account: minimum data length (165 bytes).
+    pub const SPL_TOKEN_ACCOUNT_MIN_LEN: usize = 165;
+    /// Byte offset of the u64 `amount` field in an SPL Token account.
+    pub const SPL_TOKEN_ACCOUNT_AMOUNT_OFFSET: usize = 64;
+    /// Byte offset of the token owner pubkey (32 bytes) in an SPL Token account.
+    pub const SPL_TOKEN_ACCOUNT_OWNER_OFFSET: usize = 32;
+    /// Byte offset of the mint pubkey (32 bytes) in an SPL Token account.
+    pub const SPL_TOKEN_ACCOUNT_MINT_OFFSET: usize = 0;
+
+    /// SPL Mint: minimum data length (82 bytes).
+    pub const SPL_MINT_MIN_LEN: usize = 82;
+    /// Byte offset of the u64 `supply` field in an SPL Mint account.
+    pub const SPL_MINT_SUPPLY_OFFSET: usize = 36;
+    /// Byte offset of the u8 `decimals` field in an SPL Mint account.
+    pub const SPL_MINT_DECIMALS_OFFSET: usize = 44;
     pub const LEADER_SCHEDULE_ROTATION: u64 = 4;
     pub const LEADER_SCHEDULE_ENTRIES: u64 = 3;
     pub const VOTE_ROOT_SLOT_BACKTRACK: u64 = 32;
