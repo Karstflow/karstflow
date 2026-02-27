@@ -1,4 +1,6 @@
+use crate::shred_link;
 use crate::{InboundPacket, ShredFilterStats};
+use paradencer_mesh::tile_link::LinkProducer;
 use paradencer_mesh::{InPort, OutPort, ReceiveError, SendError};
 use paradencer_net::{
     DedupDecision, IngressPolicy, ShredDecodeOutcome, ShredDecoder, SignatureDeduplicator,
@@ -8,12 +10,23 @@ use paradencer_types::shred::Shred;
 use std::sync::Arc;
 use std::time::Duration;
 
+/// Output mode for the shred filter.
+///
+/// Either a crossbeam channel (OutPort) for backward compatibility,
+/// or a zero-copy TileLink producer for the high-performance path.
+enum ShredOutput {
+    /// Crossbeam channel output (copies the Shred struct).
+    Channel(OutPort<Shred>),
+    /// Zero-copy TileLink producer (writes raw wire bytes to DataRegion).
+    Link(LinkProducer<'static>),
+}
+
 pub struct ShredFilter {
     incoming_packets: InPort<InboundPacket>,
     shred_decoder: ShredDecoder,
     signature_deduplicator: SignatureDeduplicator,
     shred_filter_stats: Arc<ShredFilterStats>,
-    shred_output: Option<OutPort<Shred>>,
+    shred_output: Option<ShredOutput>,
 }
 
 impl ShredFilter {
@@ -43,7 +56,27 @@ impl ShredFilter {
             incoming_packets,
             ingress_policy,
             shred_filter_stats,
-            Some(shred_output),
+            Some(ShredOutput::Channel(shred_output)),
+        )
+    }
+
+    /// Create a shred filter that writes parsed shreds to a zero-copy TileLink.
+    ///
+    /// # Safety
+    ///
+    /// The TileLink that owns the producer's resources must outlive this filter.
+    /// The caller must ensure single-producer access to the link.
+    pub unsafe fn with_link_output(
+        incoming_packets: InPort<InboundPacket>,
+        ingress_policy: IngressPolicy,
+        shred_filter_stats: Arc<ShredFilterStats>,
+        producer: LinkProducer<'static>,
+    ) -> Self {
+        Self::build(
+            incoming_packets,
+            ingress_policy,
+            shred_filter_stats,
+            Some(ShredOutput::Link(producer)),
         )
     }
 
@@ -51,7 +84,7 @@ impl ShredFilter {
         incoming_packets: InPort<InboundPacket>,
         mut ingress_policy: IngressPolicy,
         shred_filter_stats: Arc<ShredFilterStats>,
-        shred_output: Option<OutPort<Shred>>,
+        shred_output: Option<ShredOutput>,
     ) -> Self {
         if ingress_policy.validate().is_err() {
             ingress_policy = IngressPolicy::default();
@@ -68,6 +101,48 @@ impl ShredFilter {
             signature_deduplicator: SignatureDeduplicator::new(dedup_window_capacity),
             shred_filter_stats,
             shred_output,
+        }
+    }
+
+    /// Send a parsed shred through the configured output.
+    fn send_shred(
+        &mut self,
+        parsed_shred: Shred,
+        raw_data: &[u8],
+        context: &ServiceContext,
+    ) -> RuntimeResult<()> {
+        match &mut self.shred_output {
+            Some(ShredOutput::Channel(output)) => match output.try_send(parsed_shred) {
+                Ok(()) => Ok(()),
+                Err(SendError::QueueFull(_)) => {
+                    self.shred_filter_stats
+                        .increment_drop_reason(paradencer_net::DropReason::DownstreamBackpressure);
+                    Ok(())
+                }
+                Err(SendError::QueueClosed(_)) => {
+                    context.shutdown.request_stop();
+                    Err(RuntimeError::service_failure(
+                        self.name(),
+                        "shred output link closed",
+                    ))
+                }
+            },
+            Some(ShredOutput::Link(producer)) => {
+                let sig = shred_link::raw_sig_fingerprint(raw_data);
+                let ctl =
+                    shred_link::shred_source_to_ctl(crate::shred_network::ShredSource::Turbine);
+                match producer.send(sig, raw_data, ctl) {
+                    Some(_seq) => Ok(()),
+                    None => {
+                        // Backpressure — consumer is slow.
+                        self.shred_filter_stats.increment_drop_reason(
+                            paradencer_net::DropReason::DownstreamBackpressure,
+                        );
+                        Ok(())
+                    }
+                }
+            }
+            None => Ok(()),
         }
     }
 }
@@ -101,29 +176,13 @@ impl Service for ShredFilter {
                 }
                 self.shred_filter_stats.increment_accepted();
 
-                if let Some(output) = &self.shred_output {
-                    if !packet.data.is_empty() {
-                        match self.shred_decoder.parse_shred(&packet.data) {
-                            Ok(parsed_shred) => match output.try_send(parsed_shred) {
-                                Ok(()) => {}
-                                Err(SendError::QueueFull(_)) => {
-                                    self.shred_filter_stats.increment_drop_reason(
-                                        paradencer_net::DropReason::DownstreamBackpressure,
-                                    );
-                                }
-                                Err(SendError::QueueClosed(_)) => {
-                                    context.shutdown.request_stop();
-                                    return Err(RuntimeError::service_failure(
-                                        self.name(),
-                                        "shred output link closed",
-                                    ));
-                                }
-                            },
-                            Err(_parse_error) => {
-                                // Raw bytes failed to parse into a valid shred structure.
-                                // The frame-level checks passed but the shred format is invalid.
-                                self.shred_filter_stats.increment_parse_failures();
-                            }
+                if self.shred_output.is_some() && !packet.data.is_empty() {
+                    match self.shred_decoder.parse_shred(&packet.data) {
+                        Ok(parsed_shred) => {
+                            self.send_shred(parsed_shred, &packet.data, context)?;
+                        }
+                        Err(_parse_error) => {
+                            self.shred_filter_stats.increment_parse_failures();
                         }
                     }
                 }

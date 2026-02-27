@@ -687,7 +687,7 @@ impl ShredNetworkStage {
 pub struct ShredNetworkService {
     stage: ShredNetworkStage,
     /// Parsed shreds from the ingress filter.
-    incoming_shreds: InPort<Shred>,
+    incoming_shreds: ShredInput,
     /// Completed FEC sets sent to ShredCollector.
     completed_output: OutPort<CompletedFecSet>,
     /// Retransmit decisions sent to turbine broadcaster.
@@ -696,8 +696,19 @@ pub struct ShredNetworkService {
     default_source: ShredSource,
 }
 
+/// Input mode for ShredNetworkService.
+///
+/// Either a crossbeam channel (InPort) for backward compatibility,
+/// or a zero-copy TileLink consumer for the high-performance path.
+enum ShredInput {
+    /// Crossbeam channel input (receives owned Shred structs).
+    Channel(InPort<Shred>),
+    /// Zero-copy TileLink consumer (reads raw wire bytes from DataRegion).
+    Link(paradencer_mesh::tile_link::LinkConsumer<'static>),
+}
+
 impl ShredNetworkService {
-    /// Create a new shred network service.
+    /// Create a new shred network service with crossbeam channel input.
     pub fn new(
         config: ShredNetworkConfig,
         incoming_shreds: InPort<Shred>,
@@ -705,7 +716,27 @@ impl ShredNetworkService {
     ) -> Self {
         Self {
             stage: ShredNetworkStage::with_config(config),
-            incoming_shreds,
+            incoming_shreds: ShredInput::Channel(incoming_shreds),
+            completed_output,
+            retransmit_output: None,
+            default_source: ShredSource::Turbine,
+        }
+    }
+
+    /// Create a new shred network service with zero-copy TileLink input.
+    ///
+    /// # Safety
+    ///
+    /// The TileLink that owns the consumer's resources must outlive this service.
+    /// The caller must ensure single-consumer access to the link.
+    pub unsafe fn with_link_input(
+        config: ShredNetworkConfig,
+        consumer: paradencer_mesh::tile_link::LinkConsumer<'static>,
+        completed_output: OutPort<CompletedFecSet>,
+    ) -> Self {
+        Self {
+            stage: ShredNetworkStage::with_config(config),
+            incoming_shreds: ShredInput::Link(consumer),
             completed_output,
             retransmit_output: None,
             default_source: ShredSource::Turbine,
@@ -729,22 +760,10 @@ impl ShredNetworkService {
         self.stage.stats()
     }
 
-    /// Drain all available shreds from the incoming channel and process them.
+    /// Drain all available shreds from the incoming source and process them.
     fn drain_and_process(&mut self) -> Result<(), ReceiveError> {
-        loop {
-            match self.incoming_shreds.try_recv() {
-                Ok(Some(shred)) => {
-                    let net_shred = NetworkShred {
-                        shred,
-                        source: self.default_source,
-                    };
-                    self.stage.insert_shred(net_shred);
-                }
-                Ok(None) => break,
-                Err(ReceiveError::QueueClosed) => return Err(ReceiveError::QueueClosed),
-            }
-        }
-        Ok(())
+        let default_source = self.default_source;
+        drain_shred_input(&mut self.incoming_shreds, &mut self.stage, default_source)
     }
 
     /// Push completed FEC sets to the output channel.
@@ -766,6 +785,62 @@ impl ShredNetworkService {
         } else {
             // Discard retransmits if no output channel configured.
             self.stage.drain_retransmits();
+        }
+    }
+}
+
+/// Drain shreds from the input source into the processing stage.
+///
+/// Factored as a free function to avoid borrow-checker issues with
+/// simultaneous mutable access to `incoming_shreds` and `stage`.
+fn drain_shred_input(
+    input: &mut ShredInput,
+    stage: &mut ShredNetworkStage,
+    default_source: ShredSource,
+) -> Result<(), ReceiveError> {
+    match input {
+        ShredInput::Channel(port) => {
+            loop {
+                match port.try_recv() {
+                    Ok(Some(shred)) => {
+                        let net_shred = NetworkShred {
+                            shred,
+                            source: default_source,
+                        };
+                        stage.insert_shred(net_shred);
+                    }
+                    Ok(None) => break,
+                    Err(ReceiveError::QueueClosed) => return Err(ReceiveError::QueueClosed),
+                }
+            }
+            Ok(())
+        }
+        ShredInput::Link(consumer) => {
+            use paradencer_mesh::tile_link::ReceiveResult;
+            use paradencer_types::shred::ShredParser;
+
+            loop {
+                match consumer.receive(1) {
+                    ReceiveResult::Ready { meta, payload } => {
+                        let source = crate::shred_link::ctl_to_shred_source(meta.ctl);
+                        match ShredParser::parse(payload) {
+                            Ok(shred) => {
+                                let net_shred = NetworkShred { shred, source };
+                                stage.insert_shred(net_shred);
+                            }
+                            Err(_) => {
+                                // Malformed shred in DataRegion — skip.
+                            }
+                        }
+                    }
+                    ReceiveResult::Overrun { recover_seq: _ } => {
+                        // Consumer fell behind — fragments lost. Continue
+                        // from the recovery point (auto-advanced).
+                    }
+                    ReceiveResult::Empty => break,
+                }
+            }
+            Ok(())
         }
     }
 }

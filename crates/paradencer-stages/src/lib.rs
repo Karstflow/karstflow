@@ -41,6 +41,7 @@ mod resolv_stage;
 mod shred_assembler;
 mod shred_collector;
 mod shred_filter;
+pub mod shred_link;
 mod shred_network;
 mod shred_store_service;
 pub mod shred_verifier;

@@ -1847,6 +1847,61 @@ pub fn build_shred_pipeline(
     }
 }
 
+/// Result of building the zero-copy shred pipeline.
+///
+/// Uses TileLink for zero-copy shred transport between ShredFilter
+/// and ShredCollector instead of crossbeam channels.
+pub struct ShredPipelineLinkBundle {
+    /// The collector service to add to the node runtime.
+    pub service: Box<dyn Service>,
+    /// TileLink for zero-copy shred transport. The caller must keep this alive
+    /// for the entire duration of the pipeline (LinkProducer/LinkConsumer reference it).
+    pub shred_link: Box<paradencer_mesh::tile_link::TileLink>,
+    /// Receiver for assembled blocks (connect to ReplayService).
+    pub block_receiver: InPort<paradencer_stages::AssembledBlock>,
+}
+
+/// Build a zero-copy shred collection pipeline using TileLink.
+///
+/// Creates a ShredCollector that receives shreds via a crossbeam channel
+/// (unchanged for now — TileLink on the collector input is Wave W003),
+/// but the shred_link field provides the TileLink for the
+/// ShredFilter → ShredNetworkService zero-copy path.
+///
+/// The caller creates LinkProducer/LinkConsumer from the returned
+/// `shred_link` and wires them to ShredFilter and ShredNetworkService.
+pub fn build_shred_pipeline_with_link(
+    config: ShredCollectorConfig,
+    blockstore: Option<Arc<Blockstore>>,
+    repair_notifier: Option<crossbeam_channel::Sender<ShredArrival>>,
+) -> ShredPipelineLinkBundle {
+    let shred_channel_depth = config.max_shreds_per_slot.max(256);
+    let block_channel_depth = config.max_buffered_slots.max(64);
+
+    // Crossbeam channel for ShredCollector input (to be replaced in W003).
+    let (_shred_tx, shred_rx) =
+        bounded_link::<paradencer_types::shred::Shred>(shred_channel_depth);
+    let (block_tx, block_rx) =
+        bounded_link::<paradencer_stages::AssembledBlock>(block_channel_depth);
+
+    let mut collector = ShredCollector::with_config(shred_rx, block_tx, config);
+    if let Some(bs) = blockstore {
+        collector.set_blockstore(bs);
+    }
+    if let Some(notifier) = repair_notifier {
+        collector.set_repair_notifier(notifier);
+    }
+
+    // TileLink for ShredFilter → ShredNetworkService zero-copy path.
+    let shred_link = Box::new(paradencer_stages::shred_link::new_shred_link());
+
+    ShredPipelineLinkBundle {
+        service: Box::new(collector),
+        shred_link,
+        block_receiver: block_rx,
+    }
+}
+
 pub struct DiagnosticsSummary {
     pub topology_name: String,
     pub stage_count: usize,
