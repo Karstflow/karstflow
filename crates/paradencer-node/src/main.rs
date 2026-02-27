@@ -322,8 +322,9 @@ fn run_with_node_config(
     )?;
     let _repair_io = repair_bundle.io_handle;
 
-    // Keep a handle to bank forks for the live RPC snapshot provider.
+    // Keep handles to consensus state for the live RPC provider.
     let rpc_bank_forks = consensus.bank_forks.clone();
+    let rpc_commitment_tracker = consensus.commitment_tracker.clone();
 
     // Build the vote broadcast service. Monitors the shared Tower for
     // new consensus decisions and pushes them to gossip as CrdsValue
@@ -355,6 +356,7 @@ fn run_with_node_config(
             services,
         },
         Some(rpc_bank_forks),
+        Some(rpc_commitment_tracker),
     );
 
     // Save tower state to disk before shutdown so lockouts survive restarts.

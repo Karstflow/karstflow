@@ -8,8 +8,8 @@ use crate::{
 };
 use paradencer_config::{NodeConfig, ValidatorIdentity};
 use paradencer_consensus::{
-    bootstrap_from_snapshot, collect_validator_stakes, Bank, BankForks, CommitmentTracker,
-    EpochSchedule, ForkChoice, LeaderSchedule, SavedTower, StakeTracker, Tower,
+    bootstrap_from_snapshot, collect_validator_stakes, Bank, BankForks, CommitmentLevel,
+    CommitmentTracker, EpochSchedule, ForkChoice, LeaderSchedule, SavedTower, StakeTracker, Tower,
     TowerPersistenceError, VoteProcessor, VoteProcessorConfig,
 };
 use paradencer_core::{ExecutionMode, LinkKind, PinnedCorePolicy, StageKind};
@@ -1925,7 +1925,7 @@ pub fn maybe_start_metrics_http_bridge(node_config: &NodeConfig) -> Result<()> {
 
 #[cfg(test)]
 fn maybe_start_rpc_http_server(node_config: &NodeConfig) -> Result<()> {
-    maybe_start_rpc_http_server_with_consensus(node_config, None)
+    maybe_start_rpc_http_server_with_consensus(node_config, None, None)
 }
 
 /// Start the RPC HTTP server with optional live consensus data.
@@ -1933,10 +1933,13 @@ fn maybe_start_rpc_http_server(node_config: &NodeConfig) -> Result<()> {
 /// When `bank_forks` is provided, the RPC server reads real slot, block
 /// height, and transaction count data from the consensus layer instead
 /// of from a metrics file on disk. This enables RPC methods to return
-/// live validator state.
+/// live validator state. The optional `commitment_tracker` enables
+/// proper commitment-level resolution so confirmed/finalized queries
+/// return data from the correct bank fork.
 pub fn maybe_start_rpc_http_server_with_consensus(
     node_config: &NodeConfig,
     bank_forks: Option<Arc<RwLock<BankForks>>>,
+    commitment_tracker: Option<Arc<Mutex<CommitmentTracker>>>,
 ) -> Result<()> {
     if !node_config.rpc_enabled {
         return Ok(());
@@ -1948,8 +1951,9 @@ pub fn maybe_start_rpc_http_server_with_consensus(
     let (runtime_snapshot_provider, bank_access_provider) = if let Some(ref forks) = bank_forks {
         let snap: Option<Arc<dyn paradencer_rpc::RuntimeSnapshotProvider>> =
             Some(Arc::new(ConsensusSnapshotProvider::new(forks.clone())));
-        let bank: Option<Arc<dyn BankAccessProvider>> =
-            Some(Arc::new(ConsensusBankAccessProvider::new(forks.clone())));
+        let bank: Option<Arc<dyn BankAccessProvider>> = Some(Arc::new(
+            ConsensusBankAccessProvider::new(forks.clone(), commitment_tracker),
+        ));
         (snap, bank)
     } else {
         let snapshot_provider: Option<Arc<dyn paradencer_rpc::RuntimeSnapshotProvider>> =
@@ -2001,24 +2005,51 @@ impl paradencer_rpc::RuntimeSnapshotProvider for ConsensusSnapshotProvider {
 /// Provides access to real account and blockhash data from the consensus layer.
 ///
 /// Resolves commitment levels to the appropriate bank fork:
-/// - Processed/Confirmed → working bank (CommitmentTracker integration deferred)
-/// - Finalized → root bank
+/// - Processed → working bank (tip of the chain)
+/// - Confirmed → highest optimistically confirmed bank (2/3+ stake)
+/// - Finalized → root bank (irreversible)
+///
+/// When the commitment tracker is unavailable, Confirmed falls back to the
+/// working bank so the RPC layer degrades gracefully.
 struct ConsensusBankAccessProvider {
     bank_forks: Arc<RwLock<BankForks>>,
+    commitment_tracker: Option<Arc<Mutex<CommitmentTracker>>>,
 }
 
 impl ConsensusBankAccessProvider {
-    fn new(bank_forks: Arc<RwLock<BankForks>>) -> Self {
-        Self { bank_forks }
+    fn new(
+        bank_forks: Arc<RwLock<BankForks>>,
+        commitment_tracker: Option<Arc<Mutex<CommitmentTracker>>>,
+    ) -> Self {
+        Self {
+            bank_forks,
+            commitment_tracker,
+        }
     }
 
     fn bank_for_commitment(&self, commitment: paradencer_rpc::RpcCommitment) -> Option<Arc<Bank>> {
         let forks = self.bank_forks.read().ok()?;
         match commitment {
             paradencer_rpc::RpcCommitment::Finalized => forks.root_bank(),
-            // Processed and Confirmed both use working bank for now.
-            // TODO: Use CommitmentTracker for proper confirmed bank resolution.
-            _ => Some(forks.working_bank()),
+            paradencer_rpc::RpcCommitment::Confirmed => {
+                // Use the commitment tracker to find the highest confirmed slot,
+                // then look up the bank at that slot in the fork tree.
+                if let Some(ref tracker) = self.commitment_tracker {
+                    if let Ok(guard) = tracker.lock() {
+                        if let Some(confirmed_slot) = guard
+                            .highest_slot_with_commitment(CommitmentLevel::Confirmed)
+                        {
+                            if let Some(bank) = forks.get(confirmed_slot) {
+                                return Some(bank);
+                            }
+                        }
+                    }
+                }
+                // Fall back to working bank when tracker is unavailable or has
+                // no confirmed slot yet (early startup).
+                Some(forks.working_bank())
+            }
+            paradencer_rpc::RpcCommitment::Processed => Some(forks.working_bank()),
         }
     }
 }
@@ -2177,23 +2208,25 @@ pub fn run_runtime_phase(
     startup_services: &mut [Box<dyn Service>],
     runtime_bundle: ServiceBundle,
 ) -> Result<()> {
-    run_runtime_phase_with_consensus(node_config, startup_services, runtime_bundle, None)
+    run_runtime_phase_with_consensus(node_config, startup_services, runtime_bundle, None, None)
 }
 
 /// Run the main validator runtime with optional live consensus data for RPC.
 ///
 /// When `bank_forks` is provided, the RPC server reads real slot and
 /// transaction data from the consensus layer instead of from a metrics
-/// file on disk.
+/// file on disk. The optional `commitment_tracker` enables proper
+/// commitment-level resolution for confirmed slots.
 pub fn run_runtime_phase_with_consensus(
     node_config: &NodeConfig,
     startup_services: &mut [Box<dyn Service>],
     runtime_bundle: ServiceBundle,
     bank_forks: Option<Arc<RwLock<BankForks>>>,
+    commitment_tracker: Option<Arc<Mutex<CommitmentTracker>>>,
 ) -> Result<()> {
     run_startup_checks(node_config, startup_services, "startup", 0)?;
     maybe_start_metrics_http_bridge(node_config)?;
-    maybe_start_rpc_http_server_with_consensus(node_config, bank_forks)?;
+    maybe_start_rpc_http_server_with_consensus(node_config, bank_forks, commitment_tracker)?;
     println!(
         "{}",
         render_topology_line(

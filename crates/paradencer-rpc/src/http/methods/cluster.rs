@@ -596,16 +596,19 @@ fn parse_vote_program_pubkey() -> Result<paradencer_types::Pubkey, ()> {
 
 /// Extract a summary of vote state from raw account data.
 ///
-/// Vote state layout (simplified):
-/// - bytes 0..4: version tag (u32 LE)
-/// - bytes 4..36: node pubkey (32 bytes)
-/// - bytes 36..44: authorized_voter epoch (u64 LE)
-/// - bytes 44..76: authorized_voter pubkey (32 bytes)
-/// - byte 76: commission (u8)
+/// Serialization layout:
+/// - bytes 0..32: node pubkey (32 bytes)
+/// - bytes 32..64: authorized voter pubkey (32 bytes)
+/// - bytes 64..96: authorized withdrawer pubkey (32 bytes)
+/// - byte 96: commission (u8)
+/// - bytes 97..101: vote count (u32 LE)
+/// - then vote_count entries of 12 bytes each (slot u64 LE + confirmation_count u32 LE)
+/// - after votes: root option (1 byte: 0=None, 1=Some) + root slot (u64 LE if present)
 ///
 /// Returns (node_pubkey_string, last_vote_slot, root_slot, commission).
 fn parse_vote_state_summary(data: &[u8], current_slot: u64) -> (String, u64, u64, u8) {
-    if data.len() < 77 {
+    // Minimum size: 32 (node) + 32 (voter) + 32 (withdrawer) + 1 (commission) + 4 (vote_count) = 101
+    if data.len() < 101 {
         return (
             "11111111111111111111111111111111".to_string(),
             current_slot,
@@ -613,13 +616,44 @@ fn parse_vote_state_summary(data: &[u8], current_slot: u64) -> (String, u64, u64
             DEFAULT_VOTE_COMMISSION_PERCENT,
         );
     }
-    let node_pubkey = bs58::encode(&data[4..36]).into_string();
-    let commission = data[76];
-    // TODO: Parse actual vote history to get last_vote and root_slot
-    (
-        node_pubkey,
-        current_slot,
-        current_slot.saturating_sub(VOTE_ROOT_SLOT_BACKTRACK),
-        commission,
-    )
+
+    let node_pubkey = bs58::encode(&data[0..32]).into_string();
+    let commission = data[96];
+
+    // Parse vote count
+    let vote_count = u32::from_le_bytes([data[97], data[98], data[99], data[100]]) as usize;
+
+    // Extract last vote slot from the vote history
+    let votes_start = 101;
+    let vote_entry_size = 12; // u64 slot + u32 confirmation_count
+    let last_vote = if vote_count > 0 {
+        let last_vote_offset = votes_start + (vote_count - 1) * vote_entry_size;
+        if last_vote_offset + 8 <= data.len() {
+            let mut slot_bytes = [0u8; 8];
+            slot_bytes.copy_from_slice(&data[last_vote_offset..last_vote_offset + 8]);
+            u64::from_le_bytes(slot_bytes)
+        } else {
+            current_slot
+        }
+    } else {
+        0
+    };
+
+    // Extract root slot after the votes section
+    let root_offset = votes_start + vote_count * vote_entry_size;
+    let root_slot = if root_offset < data.len() && data[root_offset] == 1 {
+        let root_value_offset = root_offset + 1;
+        if root_value_offset + 8 <= data.len() {
+            let mut root_bytes = [0u8; 8];
+            root_bytes.copy_from_slice(&data[root_value_offset..root_value_offset + 8]);
+            u64::from_le_bytes(root_bytes)
+        } else {
+            current_slot.saturating_sub(VOTE_ROOT_SLOT_BACKTRACK)
+        }
+    } else {
+        // No root or data too short — use 0 when no root is set
+        0
+    };
+
+    (node_pubkey, last_vote, root_slot, commission)
 }
