@@ -46,14 +46,26 @@ pub(super) fn handle(
         RpcMethod::GetStakeMinimumDelegation => {
             build_stake_minimum_delegation_response(request, snapshot, commitment)
         }
-        RpcMethod::GetEpochInfo => Ok(build_epoch_info_response(snapshot, commitment)),
+        RpcMethod::GetEpochInfo => Ok(build_epoch_info_response(snapshot, commitment, bank_access)),
         RpcMethod::GetFirstAvailableBlock => Ok(json!(0_u64)),
         RpcMethod::MinimumLedgerSlot => Ok(json!(0_u64)),
-        RpcMethod::GetMaxShredInsertSlot => Ok(json!(snapshot.slot_for_commitment(commitment))),
-        RpcMethod::GetHighestSnapshotSlot => {
-            Ok(build_highest_snapshot_slot_response(snapshot, commitment))
+        RpcMethod::GetMaxShredInsertSlot => {
+            let slot = bank_access
+                .map(|bank| bank.get_slot(commitment))
+                .unwrap_or_else(|| snapshot.slot_for_commitment(commitment));
+            Ok(json!(slot))
         }
-        RpcMethod::GetMaxRetransmitSlot => Ok(json!(snapshot.slot_for_commitment(commitment))),
+        RpcMethod::GetHighestSnapshotSlot => Ok(build_highest_snapshot_slot_response(
+            snapshot,
+            commitment,
+            bank_access,
+        )),
+        RpcMethod::GetMaxRetransmitSlot => {
+            let slot = bank_access
+                .map(|bank| bank.get_slot(commitment))
+                .unwrap_or_else(|| snapshot.slot_for_commitment(commitment));
+            Ok(json!(slot))
+        }
         _ => Err(RpcMethodError::MethodNotFound),
     }
 }
@@ -88,25 +100,37 @@ fn build_stake_minimum_delegation_response(
 fn build_epoch_info_response(
     snapshot: RpcRuntimeSnapshot,
     commitment: RpcCommitment,
+    bank_access: Option<&Arc<dyn BankAccessProvider>>,
 ) -> serde_json::Value {
-    let absolute_slot = snapshot.slot_for_commitment(commitment);
+    let absolute_slot = bank_access
+        .map(|bank| bank.get_slot(commitment))
+        .unwrap_or_else(|| snapshot.slot_for_commitment(commitment));
+    let block_height = bank_access
+        .map(|bank| bank.get_block_height(commitment))
+        .unwrap_or_else(|| snapshot.block_height_for_commitment(commitment));
+    let transaction_count = bank_access
+        .map(|bank| bank.get_transaction_count(commitment))
+        .unwrap_or(snapshot.transaction_count);
     let epoch = absolute_slot / SLOTS_PER_EPOCH;
     let slot_index = absolute_slot % SLOTS_PER_EPOCH;
     json!({
         "absoluteSlot": absolute_slot,
-        "blockHeight": snapshot.block_height_for_commitment(commitment),
+        "blockHeight": block_height,
         "epoch": epoch,
         "slotIndex": slot_index,
         "slotsInEpoch": SLOTS_PER_EPOCH,
-        "transactionCount": snapshot.transaction_count
+        "transactionCount": transaction_count
     })
 }
 
 fn build_highest_snapshot_slot_response(
     snapshot: RpcRuntimeSnapshot,
     commitment: RpcCommitment,
+    bank_access: Option<&Arc<dyn BankAccessProvider>>,
 ) -> serde_json::Value {
-    let committed_slot = snapshot.slot_for_commitment(commitment);
+    let committed_slot = bank_access
+        .map(|bank| bank.get_slot(commitment))
+        .unwrap_or_else(|| snapshot.slot_for_commitment(commitment));
     json!({
         "full": committed_slot,
         "incremental": committed_slot.saturating_sub(1)
