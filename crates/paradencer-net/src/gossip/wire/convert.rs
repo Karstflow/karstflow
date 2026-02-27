@@ -7,9 +7,10 @@
 
 use super::bloom::{WireBloom, WireCrdsFilter};
 use super::crds_data::{
-    WireAccountsHashes, WireCrdsData, WireDuplicateShred, WireLegacyContactInfo,
-    WireLegacyVersion2, WireLowestSlot, WireNodeInstance, WireSnapshotHashes, WireVersionEntry,
-    WireVote,
+    WireAccountsHashes, WireCrdsData, WireDuplicateShred, WireEpochSlots, WireLegacyContactInfo,
+    WireLegacyVersion1, WireLegacyVersion2, WireLegacyVersionEntry, WireLowestSlot,
+    WireNodeInstance, WireRestartHeaviestFork, WireRestartLastVotedForkSlots, WireSnapshotHashes,
+    WireVersionEntry, WireVote,
 };
 use super::crds_value::WireCrdsValue;
 use crate::gossip::cluster_info::ContactInfo;
@@ -137,7 +138,7 @@ pub fn wire_value_to_contact_info(wv: &WireCrdsValue) -> Option<ContactInfo> {
 /// Convert an internal CrdsValue to a wire-format WireCrdsValue.
 ///
 /// Moves origin/wallclock into the variant struct, converts nanos → millis.
-/// Only supports ContactInfo and NodeInstance types currently.
+/// Returns `None` only for the deprecated `AccountHashes` variant.
 /// The returned value has a zero signature — call `.sign()` before sending.
 pub fn internal_to_wire_value(value: &CrdsValue) -> Option<WireCrdsValue> {
     let wallclock_ms = (value.wallclock_nanos / 1_000_000) as u64;
@@ -256,7 +257,57 @@ pub fn internal_to_wire_value(value: &CrdsValue) -> Option<WireCrdsValue> {
                 wallclock: wallclock_ms,
             },
         ),
-        _ => return None,
+        CrdsValueData::EpochSlots(es) => {
+            // Internal stores compressed slots as bincode-serialized bytes.
+            let slots = match bincode::deserialize(&es.slots) {
+                Ok(s) => s,
+                Err(_) => return None,
+            };
+            WireCrdsData::EpochSlots(
+                es.index,
+                WireEpochSlots {
+                    from: origin,
+                    slots,
+                    wallclock: wallclock_ms,
+                },
+            )
+        }
+        CrdsValueData::LegacyVersion(v) => WireCrdsData::LegacyVersion(WireLegacyVersionEntry {
+            from: origin,
+            wallclock: wallclock_ms,
+            version: WireLegacyVersion1 {
+                major: v.major,
+                minor: v.minor,
+                patch: v.patch,
+                commit: Some(v.commit),
+            },
+        }),
+        CrdsValueData::RestartLastVotedForkSlots(rlv) => {
+            // Internal stores offsets as bincode-serialized bytes.
+            let offsets = match bincode::deserialize(&rlv.slots) {
+                Ok(o) => o,
+                Err(_) => return None,
+            };
+            WireCrdsData::RestartLastVotedForkSlots(WireRestartLastVotedForkSlots {
+                from: origin,
+                wallclock: wallclock_ms,
+                offsets,
+                last_voted_slot: rlv.last_voted_slot,
+                last_voted_hash: rlv.last_voted_hash,
+                shred_version: rlv.shred_version,
+            })
+        }
+        CrdsValueData::RestartHeaviestFork(rhf) => {
+            WireCrdsData::RestartHeaviestFork(WireRestartHeaviestFork {
+                from: origin,
+                wallclock: wallclock_ms,
+                last_slot: rhf.slot,
+                last_slot_hash: rhf.hash,
+                observed_stake: rhf.observed_stake,
+                shred_version: 0,
+            })
+        }
+        CrdsValueData::AccountHashes => return None,
     };
 
     Some(WireCrdsValue {
@@ -1067,5 +1118,188 @@ mod tests {
             }),
         };
         assert!(wire_to_internal_value(&rhf_wire).is_some());
+    }
+
+    #[test]
+    fn epoch_slots_wire_round_trip() {
+        use super::super::crds_data::{WireCompressedSlots, WireFlate2};
+
+        let pubkey = [15u8; 32];
+        let now_nanos: i64 = 1_700_000_000_000_000_000;
+
+        // Build wire compressed slots and serialize to internal byte format.
+        let wire_slots = vec![WireCompressedSlots::Flate2(WireFlate2 {
+            first_slot: 100,
+            num: 64,
+            compressed: vec![0xFF; 8],
+        })];
+        let slot_bytes = bincode::serialize(&wire_slots).unwrap();
+
+        let internal = CrdsValue {
+            origin: pubkey,
+            wallclock_nanos: now_nanos,
+            signature: [0u8; 64],
+            data: CrdsValueData::EpochSlots(EpochSlots {
+                index: 3,
+                slots: slot_bytes,
+            }),
+        };
+
+        let wire = internal_to_wire_value(&internal).unwrap();
+        if let WireCrdsData::EpochSlots(idx, ref es) = wire.data {
+            assert_eq!(idx, 3);
+            assert_eq!(es.from, pubkey);
+            assert_eq!(es.slots.len(), 1);
+            if let WireCompressedSlots::Flate2(ref f) = es.slots[0] {
+                assert_eq!(f.first_slot, 100);
+                assert_eq!(f.num, 64);
+            } else {
+                panic!("expected Flate2 variant");
+            }
+        } else {
+            panic!("expected EpochSlots variant");
+        }
+
+        // Round-trip back.
+        let back = wire_to_internal_value(&wire).unwrap();
+        if let CrdsValueData::EpochSlots(ref ep) = back.data {
+            assert_eq!(ep.index, 3);
+            // Bytes should match the original serialized form.
+            let rt_slots: Vec<WireCompressedSlots> = bincode::deserialize(&ep.slots).unwrap();
+            assert_eq!(rt_slots, wire_slots);
+        } else {
+            panic!("expected EpochSlots variant");
+        }
+    }
+
+    #[test]
+    fn legacy_version_wire_round_trip() {
+        let pubkey = [16u8; 32];
+        let now_nanos: i64 = 1_700_000_000_000_000_000;
+
+        let internal = CrdsValue {
+            origin: pubkey,
+            wallclock_nanos: now_nanos,
+            signature: [0u8; 64],
+            data: CrdsValueData::LegacyVersion(VersionInfo {
+                client: 0,
+                major: 1,
+                minor: 14,
+                patch: 3,
+                commit: 0xCAFE,
+                feature_set: 0, // not in legacy format
+            }),
+        };
+
+        let wire = internal_to_wire_value(&internal).unwrap();
+        if let WireCrdsData::LegacyVersion(ref lve) = wire.data {
+            assert_eq!(lve.from, pubkey);
+            assert_eq!(lve.version.major, 1);
+            assert_eq!(lve.version.minor, 14);
+            assert_eq!(lve.version.patch, 3);
+            assert_eq!(lve.version.commit, Some(0xCAFE));
+        } else {
+            panic!("expected LegacyVersion variant");
+        }
+
+        let back = wire_to_internal_value(&wire).unwrap();
+        if let CrdsValueData::LegacyVersion(ref vi) = back.data {
+            assert_eq!(vi.major, 1);
+            assert_eq!(vi.minor, 14);
+            assert_eq!(vi.patch, 3);
+            assert_eq!(vi.commit, 0xCAFE);
+            assert_eq!(vi.feature_set, 0);
+        } else {
+            panic!("expected LegacyVersion variant");
+        }
+    }
+
+    #[test]
+    fn restart_last_voted_fork_slots_wire_round_trip() {
+        use super::super::crds_data::WireSlotsOffsets;
+        use bv::BitVec;
+
+        let pubkey = [17u8; 32];
+        let now_nanos: i64 = 1_700_000_000_000_000_000;
+
+        // Build slot offsets and serialize to internal byte format.
+        let mut bv = BitVec::new_fill(false, 256);
+        bv.set(0, true);
+        bv.set(42, true);
+        bv.set(255, true);
+        let offsets = WireSlotsOffsets::RawOffsets(bv);
+        let offset_bytes = bincode::serialize(&offsets).unwrap();
+
+        let internal = CrdsValue {
+            origin: pubkey,
+            wallclock_nanos: now_nanos,
+            signature: [0u8; 64],
+            data: CrdsValueData::RestartLastVotedForkSlots(
+                crate::gossip::crds::RestartLastVotedForkSlots {
+                    slots: offset_bytes,
+                    last_voted_slot: 500,
+                    last_voted_hash: [0xBB; 32],
+                    shred_version: 77,
+                },
+            ),
+        };
+
+        let wire = internal_to_wire_value(&internal).unwrap();
+        if let WireCrdsData::RestartLastVotedForkSlots(ref rlv) = wire.data {
+            assert_eq!(rlv.from, pubkey);
+            assert_eq!(rlv.last_voted_slot, 500);
+            assert_eq!(rlv.last_voted_hash, [0xBB; 32]);
+            assert_eq!(rlv.shred_version, 77);
+        } else {
+            panic!("expected RestartLastVotedForkSlots variant");
+        }
+
+        let back = wire_to_internal_value(&wire).unwrap();
+        if let CrdsValueData::RestartLastVotedForkSlots(ref rlvfs) = back.data {
+            assert_eq!(rlvfs.last_voted_slot, 500);
+            assert_eq!(rlvfs.last_voted_hash, [0xBB; 32]);
+            assert_eq!(rlvfs.shred_version, 77);
+            // Deserialize offsets and verify bitmap.
+            let rt_offsets: WireSlotsOffsets = bincode::deserialize(&rlvfs.slots).unwrap();
+            assert_eq!(rt_offsets, offsets);
+        } else {
+            panic!("expected RestartLastVotedForkSlots variant");
+        }
+    }
+
+    #[test]
+    fn restart_heaviest_fork_wire_round_trip() {
+        let pubkey = [18u8; 32];
+        let now_nanos: i64 = 1_700_000_000_000_000_000;
+
+        let internal = CrdsValue {
+            origin: pubkey,
+            wallclock_nanos: now_nanos,
+            signature: [0u8; 64],
+            data: CrdsValueData::RestartHeaviestFork(crate::gossip::crds::RestartHeaviestFork {
+                slot: 1000,
+                hash: [0xCC; 32],
+                observed_stake: 5_000_000,
+            }),
+        };
+
+        let wire = internal_to_wire_value(&internal).unwrap();
+        if let WireCrdsData::RestartHeaviestFork(ref rhf) = wire.data {
+            assert_eq!(rhf.from, pubkey);
+            assert_eq!(rhf.last_slot, 1000);
+            assert_eq!(rhf.last_slot_hash, [0xCC; 32]);
+            assert_eq!(rhf.observed_stake, 5_000_000);
+        } else {
+            panic!("expected RestartHeaviestFork variant");
+        }
+
+        let back = wire_to_internal_value(&wire).unwrap();
+        if let CrdsValueData::RestartHeaviestFork(ref rhf) = back.data {
+            assert_eq!(rhf.slot, 1000);
+            assert_eq!(rhf.hash, [0xCC; 32]);
+            assert_eq!(rhf.observed_stake, 5_000_000);
+        } else {
+            panic!("expected RestartHeaviestFork variant");
+        }
     }
 }
