@@ -492,14 +492,6 @@ fn parse_vote_metadata(data: &[u8]) -> Option<(Pubkey, u8, u64)> {
 /// Creates a SysvarCache populated with clock, epoch schedule, and rent
 /// values derived from the snapshot manifest.
 fn initialize_sysvar_cache(bank_state: &SnapshotBankState) -> SysvarCache {
-    let clock = Clock {
-        slot: bank_state.slot,
-        epoch_start_timestamp: bank_state.genesis_creation_time,
-        epoch: bank_state.epoch,
-        leader_schedule_epoch: bank_state.epoch.saturating_add(1),
-        unix_timestamp: bank_state.genesis_creation_time,
-    };
-
     let epoch_schedule = EpochSchedule::new(EpochScheduleConfig {
         slots_per_epoch: bank_state.epoch_schedule.slots_per_epoch,
         leader_schedule_slot_offset: bank_state.epoch_schedule.leader_schedule_slot_offset,
@@ -507,6 +499,19 @@ fn initialize_sysvar_cache(bank_state: &SnapshotBankState) -> SysvarCache {
         first_normal_epoch: bank_state.epoch_schedule.first_normal_epoch,
         first_normal_slot: bank_state.epoch_schedule.first_normal_slot,
     });
+
+    // Derive leader_schedule_epoch from the epoch schedule rather than
+    // assuming current_epoch + 1. This is correct during warmup and at
+    // epoch boundaries where the offset isn't exactly one epoch.
+    let leader_schedule_epoch = epoch_schedule.get_leader_schedule_epoch(bank_state.slot);
+
+    let clock = Clock {
+        slot: bank_state.slot,
+        epoch_start_timestamp: bank_state.genesis_creation_time,
+        epoch: bank_state.epoch,
+        leader_schedule_epoch,
+        unix_timestamp: bank_state.genesis_creation_time,
+    };
 
     let rent = Rent {
         lamports_per_byte_year: bank_state.rent.lamports_per_byte_year,

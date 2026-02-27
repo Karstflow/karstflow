@@ -263,7 +263,8 @@ impl ShredNetworkStage {
                             ShredVerifyResult::Valid | ShredVerifyResult::Deferred => {}
                             ShredVerifyResult::Invalid
                             | ShredVerifyResult::ZeroSignature
-                            | ShredVerifyResult::UnknownLeader => {
+                            | ShredVerifyResult::UnknownLeader
+                            | ShredVerifyResult::LegacyRejected => {
                                 self.stats
                                     .shreds_signature_invalid
                                     .fetch_add(1, Ordering::Relaxed);

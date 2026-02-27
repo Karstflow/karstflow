@@ -40,6 +40,9 @@ pub enum ShredVerifyResult {
     Deferred,
     /// Leader pubkey unknown for this slot — cannot verify.
     UnknownLeader,
+    /// Legacy (non-Merkle) shred format rejected. Only Merkle shreds are
+    /// accepted on the current network.
+    LegacyRejected,
 }
 
 /// Check whether the signature bytes are all zeros.
@@ -254,12 +257,9 @@ pub fn verify_shred(shred: &Shred, leader_pubkey: &[u8; 32]) -> ShredVerifyResul
 
     match &shred.variant {
         ShredVariant::LegacyData(_) | ShredVariant::LegacyCoding(_) => {
-            let message = legacy_signed_message(shred);
-            match verify_signature(leader_pubkey, &message, signature) {
-                Ok(VerificationResult::Success) => ShredVerifyResult::Valid,
-                Ok(VerificationResult::Failed) => ShredVerifyResult::Invalid,
-                Err(_) => ShredVerifyResult::Invalid,
-            }
+            // The network requires Merkle shreds (fixed-32 format).
+            // Legacy shreds are no longer accepted.
+            ShredVerifyResult::LegacyRejected
         }
         ShredVariant::MerkleData(_, _) | ShredVariant::MerkleCoding(_, _) => match &shred.raw {
             Some(raw) => verify_merkle_shred(shred, raw, leader_pubkey),
@@ -360,58 +360,42 @@ mod tests {
     }
 
     #[test]
-    fn valid_legacy_data_shred_passes() {
+    fn legacy_data_shred_rejected() {
         let (secret, pubkey) = generate_keypair();
         let payload = vec![0xABu8; 512];
         let shred = make_signed_data_shred(&secret, 100, 0, 0, &payload);
 
-        assert_eq!(verify_shred(&shred, &pubkey), ShredVerifyResult::Valid);
+        // Legacy shreds must be rejected — only Merkle format accepted.
+        assert_eq!(
+            verify_shred(&shred, &pubkey),
+            ShredVerifyResult::LegacyRejected
+        );
     }
 
     #[test]
-    fn valid_legacy_coding_shred_passes() {
+    fn legacy_coding_shred_rejected() {
         let (secret, pubkey) = generate_keypair();
         let payload = vec![0xCDu8; 1024];
         let shred = make_signed_coding_shred(&secret, 200, 4, 0, 4, 4, 0, &payload);
 
-        assert_eq!(verify_shred(&shred, &pubkey), ShredVerifyResult::Valid);
+        assert_eq!(
+            verify_shred(&shred, &pubkey),
+            ShredVerifyResult::LegacyRejected
+        );
     }
 
     #[test]
-    fn wrong_leader_key_fails() {
+    fn legacy_shred_rejected_regardless_of_key() {
         let (secret, _pubkey) = generate_keypair();
         let (_, wrong_pubkey) = generate_keypair();
         let payload = vec![0xABu8; 512];
         let shred = make_signed_data_shred(&secret, 100, 0, 0, &payload);
 
+        // Even with wrong key, legacy rejection takes precedence.
         assert_eq!(
             verify_shred(&shred, &wrong_pubkey),
-            ShredVerifyResult::Invalid
+            ShredVerifyResult::LegacyRejected
         );
-    }
-
-    #[test]
-    fn corrupted_payload_fails() {
-        let (secret, pubkey) = generate_keypair();
-        let payload = vec![0xABu8; 512];
-        let mut shred = make_signed_data_shred(&secret, 100, 0, 0, &payload);
-
-        // Corrupt the payload after signing.
-        shred.payload[0] ^= 0xFF;
-
-        assert_eq!(verify_shred(&shred, &pubkey), ShredVerifyResult::Invalid);
-    }
-
-    #[test]
-    fn corrupted_slot_fails() {
-        let (secret, pubkey) = generate_keypair();
-        let payload = vec![0xABu8; 512];
-        let mut shred = make_signed_data_shred(&secret, 100, 0, 0, &payload);
-
-        // Tamper with the slot after signing.
-        shred.common_header.slot = 999;
-
-        assert_eq!(verify_shred(&shred, &pubkey), ShredVerifyResult::Invalid);
     }
 
     #[test]
@@ -473,19 +457,22 @@ mod tests {
     }
 
     #[test]
-    fn different_fec_set_index_fails() {
+    fn legacy_shred_rejected_even_with_tampered_fec_index() {
         let (secret, pubkey) = generate_keypair();
         let payload = vec![0xABu8; 256];
         let mut shred = make_signed_data_shred(&secret, 100, 5, 0, &payload);
 
-        // Change fec_set_index after signing.
+        // Change fec_set_index after signing — still rejected as legacy.
         shred.common_header.fec_set_index = 4;
 
-        assert_eq!(verify_shred(&shred, &pubkey), ShredVerifyResult::Invalid);
+        assert_eq!(
+            verify_shred(&shred, &pubkey),
+            ShredVerifyResult::LegacyRejected
+        );
     }
 
     #[test]
-    fn multiple_shreds_from_same_leader_all_valid() {
+    fn multiple_legacy_shreds_all_rejected() {
         let (secret, pubkey) = generate_keypair();
 
         for idx in 0..10 {
@@ -493,8 +480,8 @@ mod tests {
             let shred = make_signed_data_shred(&secret, 300, idx, 0, &payload);
             assert_eq!(
                 verify_shred(&shred, &pubkey),
-                ShredVerifyResult::Valid,
-                "Shred index {} should verify",
+                ShredVerifyResult::LegacyRejected,
+                "Legacy shred index {} should be rejected",
                 idx
             );
         }
