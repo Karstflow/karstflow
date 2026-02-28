@@ -51,7 +51,7 @@ pub(super) fn handle(
             build_multiple_accounts_response(request, snapshot, commitment, bank_access)
         }
         RpcMethod::GetSignatureStatuses => {
-            build_signature_statuses_response(request, snapshot, commitment)
+            build_signature_statuses_response(request, snapshot, commitment, bank_access)
         }
         _ => Err(RpcMethodError::MethodNotFound),
     }
@@ -459,10 +459,75 @@ fn build_signature_statuses_response(
     request: &serde_json::Value,
     snapshot: RpcRuntimeSnapshot,
     commitment: RpcCommitment,
+    bank_access: Option<&Arc<dyn BankAccessProvider>>,
 ) -> Result<serde_json::Value, RpcMethodError> {
     let config = parse_signature_statuses_config(request)?;
     ensure_optional_min_context_slot(config.min_context_slot, snapshot, commitment)?;
     let signatures = params::first_param_non_empty_string_array(request)?;
+    let slot = resolve_slot(snapshot, commitment, bank_access);
+
+    // Try real signature lookup first.
+    if let Some(bank) = bank_access {
+        let decoded: Vec<Option<[u8; 64]>> = signatures
+            .iter()
+            .map(|s| {
+                let bytes = bs58::decode(s).into_vec().ok()?;
+                if bytes.len() != 64 {
+                    return None;
+                }
+                let mut sig = [0u8; 64];
+                sig.copy_from_slice(&bytes);
+                Some(sig)
+            })
+            .collect();
+
+        // Only proceed with real lookup if all signatures decoded successfully.
+        let all_decoded = decoded.iter().all(|d| d.is_some());
+        if all_decoded {
+            let sig_array: Vec<[u8; 64]> = decoded.into_iter().map(|d| d.unwrap()).collect();
+            let results = bank.get_signature_statuses(&sig_array);
+
+            if results.iter().any(|r| r.is_some()) {
+                let statuses: Vec<serde_json::Value> = results
+                    .into_iter()
+                    .map(|opt| match opt {
+                        Some(status) => {
+                            let confirmations = slot.saturating_sub(status.slot);
+                            let confirmation_status = if confirmations >= 32 {
+                                "finalized"
+                            } else if confirmations >= 1 {
+                                "confirmed"
+                            } else {
+                                "processed"
+                            };
+                            let err = if status.succeeded {
+                                serde_json::Value::Null
+                            } else {
+                                status
+                                    .error
+                                    .map(|e| json!({"InstructionError": e}))
+                                    .unwrap_or(serde_json::Value::Null)
+                            };
+                            json!({
+                                "slot": status.slot,
+                                "confirmations": confirmations,
+                                "err": err,
+                                "confirmationStatus": confirmation_status
+                            })
+                        }
+                        None => serde_json::Value::Null,
+                    })
+                    .collect();
+
+                return Ok(json!({
+                    "context": {"slot": slot},
+                    "value": statuses
+                }));
+            }
+        }
+    }
+
+    // Synthetic fallback.
     let statuses = signatures
         .iter()
         .map(|signature| {

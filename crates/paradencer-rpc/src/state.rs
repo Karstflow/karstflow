@@ -181,6 +181,23 @@ pub trait BankAccessProvider: Send + Sync {
     fn get_block_data(&self, _slot: u64) -> Option<RpcBlockData> {
         None
     }
+
+    /// Look up transaction statuses by their first signature.
+    ///
+    /// Returns a vector of `Option<RpcSignatureStatus>` in the same order
+    /// as the input signatures. `None` means the signature was not found.
+    fn get_signature_statuses(&self, _signatures: &[[u8; 64]]) -> Vec<Option<RpcSignatureStatus>> {
+        Vec::new()
+    }
+
+    /// Look up a single transaction by its signature.
+    ///
+    /// Resolves the slot from the signature status cache, then fetches the
+    /// full block data and finds the matching transaction. Returns `None`
+    /// if the signature is unknown or the block data is unavailable.
+    fn get_transaction(&self, _signature: &[u8; 64]) -> Option<RpcTransactionData> {
+        None
+    }
 }
 
 /// Parsed block data returned by `get_block_data`.
@@ -199,6 +216,34 @@ pub struct RpcBlockData {
 /// A single transaction from a parsed block.
 #[derive(Debug, Clone)]
 pub struct RpcBlockTransaction {
+    /// Ed25519 signatures (base58-encoded).
+    pub signatures: Vec<String>,
+    /// Raw transaction bytes.
+    pub raw_bytes: Vec<u8>,
+}
+
+/// Status of a transaction identified by its signature.
+#[derive(Debug, Clone)]
+pub struct RpcSignatureStatus {
+    /// Slot in which the transaction was processed.
+    pub slot: u64,
+    /// Whether the transaction succeeded.
+    pub succeeded: bool,
+    /// Error description for failed transactions.
+    pub error: Option<String>,
+}
+
+/// Full transaction data returned by `get_transaction`.
+#[derive(Debug, Clone)]
+pub struct RpcTransactionData {
+    /// Slot in which the transaction was processed.
+    pub slot: u64,
+    /// Block time (unix timestamp), if known.
+    pub block_time: Option<i64>,
+    /// Whether the transaction succeeded.
+    pub succeeded: bool,
+    /// Error description for failed transactions.
+    pub error: Option<String>,
     /// Ed25519 signatures (base58-encoded).
     pub signatures: Vec<String>,
     /// Raw transaction bytes.

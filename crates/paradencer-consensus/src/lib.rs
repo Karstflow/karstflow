@@ -22,6 +22,7 @@ mod reward_application;
 mod rewards;
 pub mod rewards_calculator;
 pub mod rewards_distribution;
+pub mod signature_status;
 mod snapshot_bootstrap;
 mod stake;
 mod stake_history;
@@ -104,6 +105,7 @@ pub use bank_executor::{
 };
 pub use cost_tracker::{CostTracker, CostTrackerError, TransactionCost};
 pub use features::{FeatureActivation, FeatureSet};
+pub use signature_status::{SignatureStatus, SignatureStatusCache};
 pub use snapshot_bootstrap::{
     bootstrap_from_genesis, bootstrap_from_snapshot, collect_validator_stakes, BootstrapError,
     BootstrapResult, FeatureInitStats, GenesisBootstrapResult, StakeInitStats,

@@ -83,7 +83,7 @@ pub(super) fn handle(
             build_block_time_response(request, snapshot, commitment, bank_access)
         }
         RpcMethod::GetTransaction | RpcMethod::GetConfirmedTransaction => {
-            build_transaction_response(request, snapshot, commitment)
+            build_transaction_response(request, snapshot, commitment, bank_access)
         }
         _ => Err(RpcMethodError::MethodNotFound),
     }
@@ -342,11 +342,24 @@ fn build_transaction_response(
     request: &serde_json::Value,
     snapshot: RpcRuntimeSnapshot,
     commitment: RpcCommitment,
+    bank_access: Option<&Arc<dyn BankAccessProvider>>,
 ) -> Result<serde_json::Value, RpcMethodError> {
     ensure_min_context_slot_satisfied(request, snapshot, commitment)?;
     let config = parse_transaction_config(request)?;
-
     let signature = params::first_param_non_empty_string(request)?;
+
+    // Try real transaction lookup first.
+    if let Some(bank) = bank_access {
+        if let Some(sig_bytes) = decode_signature(&signature) {
+            if let Some(tx_data) = bank.get_transaction(&sig_bytes) {
+                return Ok(format_real_transaction_response(
+                    &tx_data, &config, snapshot, commitment,
+                ));
+            }
+        }
+    }
+
+    // Synthetic fallback.
     let signature_checksum = signature.bytes().fold(0_u64, |accumulator, byte| {
         accumulator.wrapping_add(u64::from(byte))
     });
@@ -372,6 +385,98 @@ fn build_transaction_response(
         },
         "version": transaction_version_payload(config.max_supported_transaction_version)
     }))
+}
+
+fn decode_signature(sig_str: &str) -> Option<[u8; 64]> {
+    let bytes = bs58::decode(sig_str).into_vec().ok()?;
+    if bytes.len() != 64 {
+        return None;
+    }
+    let mut sig = [0u8; 64];
+    sig.copy_from_slice(&bytes);
+    Some(sig)
+}
+
+fn format_real_transaction_response(
+    tx_data: &crate::state::RpcTransactionData,
+    config: &TransactionRequestConfig,
+    snapshot: RpcRuntimeSnapshot,
+    commitment: RpcCommitment,
+) -> serde_json::Value {
+    let block_time = tx_data
+        .block_time
+        .unwrap_or_else(|| shared::synthetic_block_time(snapshot.uptime_millis, tx_data.slot));
+
+    let err = if tx_data.succeeded {
+        serde_json::Value::Null
+    } else {
+        tx_data
+            .error
+            .as_ref()
+            .map(|e| json!({"InstructionError": e}))
+            .unwrap_or(serde_json::Value::Null)
+    };
+
+    let status = if tx_data.succeeded {
+        json!({"Ok": serde_json::Value::Null})
+    } else {
+        json!({"Err": &err})
+    };
+
+    let transaction = if tx_data.raw_bytes.is_empty() {
+        // No raw data available — use signature-only format.
+        let blockhash = shared::format_blockhash_from_seed(
+            snapshot
+                .blockhash_seed_for_commitment(commitment)
+                .wrapping_add(tx_data.slot.rotate_left(11)),
+        );
+        json!({
+            "signatures": tx_data.signatures,
+            "message": transaction_message_payload(&blockhash, config.encoding)
+        })
+    } else {
+        match config.encoding {
+            ResponseEncoding::Base64 => {
+                use base64::Engine;
+                json!([
+                    base64::engine::general_purpose::STANDARD.encode(&tx_data.raw_bytes),
+                    "base64"
+                ])
+            }
+            ResponseEncoding::Base58 => {
+                json!([bs58::encode(&tx_data.raw_bytes).into_string(), "base58"])
+            }
+            ResponseEncoding::Json | ResponseEncoding::JsonParsed => {
+                let blockhash = shared::format_blockhash_from_seed(
+                    snapshot
+                        .blockhash_seed_for_commitment(commitment)
+                        .wrapping_add(tx_data.slot.rotate_left(11)),
+                );
+                json!({
+                    "signatures": tx_data.signatures,
+                    "message": {
+                        "accountKeys": [],
+                        "recentBlockhash": blockhash,
+                        "instructions": []
+                    }
+                })
+            }
+        }
+    };
+
+    json!({
+        "slot": tx_data.slot,
+        "blockTime": block_time,
+        "meta": {
+            "err": err,
+            "fee": LAMPORTS_PER_SIGNATURE,
+            "preBalances": [],
+            "postBalances": [],
+            "status": status
+        },
+        "transaction": transaction,
+        "version": transaction_version_payload(config.max_supported_transaction_version)
+    })
 }
 
 fn ensure_min_context_slot_satisfied(

@@ -1771,6 +1771,12 @@ impl Bank {
                 );
             }
 
+            // Record first signature in the status cache for RPC lookups.
+            if let Some(sig) = transaction.signatures.first() {
+                self.signature_status_cache()
+                    .insert_failure(*sig, self.slot(), error.to_string());
+            }
+
             return TransactionExecutionResult {
                 success: false,
                 compute_units_consumed: total_compute,
@@ -1846,6 +1852,12 @@ impl Bank {
                 self.slot(),
                 self.slot(),
             );
+        }
+
+        // Record first signature in the status cache for RPC lookups.
+        if let Some(sig) = transaction.signatures.first() {
+            self.signature_status_cache()
+                .insert_success(*sig, self.slot());
         }
 
         TransactionExecutionResult {

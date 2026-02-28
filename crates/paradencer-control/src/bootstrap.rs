@@ -2507,6 +2507,81 @@ impl BankAccessProvider for ConsensusBankAccessProvider {
         self.genesis_hash.clone()
     }
 
+    fn get_signature_statuses(
+        &self,
+        signatures: &[[u8; 64]],
+    ) -> Vec<Option<paradencer_rpc::RpcSignatureStatus>> {
+        let forks = match self.bank_forks.read() {
+            Ok(f) => f,
+            Err(_) => return vec![None; signatures.len()],
+        };
+        let bank = forks.working_bank();
+        bank.signature_status_cache()
+            .get_batch(signatures)
+            .into_iter()
+            .map(|opt| {
+                opt.map(|s| paradencer_rpc::RpcSignatureStatus {
+                    slot: s.slot,
+                    succeeded: s.succeeded,
+                    error: s.error,
+                })
+            })
+            .collect()
+    }
+
+    fn get_transaction(&self, signature: &[u8; 64]) -> Option<paradencer_rpc::RpcTransactionData> {
+        // Look up the slot from the signature status cache.
+        let forks = self.bank_forks.read().ok()?;
+        let bank = forks.working_bank();
+        let status = bank.signature_status_cache().get(signature)?;
+
+        // Fetch block data from blockstore to find the matching transaction.
+        let bs = self.blockstore.as_ref()?;
+        let (_, entries) = bs.get_parsed_block(status.slot).ok()??;
+
+        let sig_b58 = bs58::encode(signature).into_string();
+        let block_time = bs.get_slot_meta(status.slot).ok().flatten().and_then(|m| {
+            if m.first_shred_timestamp > 0 {
+                Some(m.first_shred_timestamp)
+            } else {
+                None
+            }
+        });
+
+        // Find the transaction with the matching signature.
+        for entry in &entries {
+            for tx_bytes in &entry.transactions {
+                let sigs = paradencer_storage::extract_signatures(tx_bytes).unwrap_or_default();
+                if sigs
+                    .first()
+                    .map(|s| s == signature.as_slice())
+                    .unwrap_or(false)
+                {
+                    let sig_strings = sigs.iter().map(|s| bs58::encode(s).into_string()).collect();
+                    return Some(paradencer_rpc::RpcTransactionData {
+                        slot: status.slot,
+                        block_time,
+                        succeeded: status.succeeded,
+                        error: status.error.clone(),
+                        signatures: sig_strings,
+                        raw_bytes: tx_bytes.clone(),
+                    });
+                }
+            }
+        }
+
+        // Signature found in status cache but transaction not found in block data.
+        // Return status-only response with the queried signature.
+        Some(paradencer_rpc::RpcTransactionData {
+            slot: status.slot,
+            block_time,
+            succeeded: status.succeeded,
+            error: status.error,
+            signatures: vec![sig_b58],
+            raw_bytes: Vec::new(),
+        })
+    }
+
     fn get_block_data(&self, slot: u64) -> Option<paradencer_rpc::RpcBlockData> {
         use paradencer_storage::extract_signatures;
 

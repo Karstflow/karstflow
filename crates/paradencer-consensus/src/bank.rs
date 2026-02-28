@@ -6,6 +6,7 @@ use crate::epoch_schedule::EpochScheduleConfig;
 use crate::features::{process_feature_activations, FeatureSet};
 use crate::reward_application::RewardApplicator;
 use crate::rewards_distribution::RewardsDistributor;
+use crate::signature_status::SignatureStatusCache;
 use crate::sysvars::SysvarCache;
 use crate::transaction_cache::TransactionCache;
 use crate::vote_account_cache::VoteAccountCache;
@@ -107,6 +108,9 @@ pub struct Bank {
     // Transaction deduplication cache
     transaction_cache: Arc<TransactionCache>,
 
+    // Signature → status index for RPC queries
+    signature_status_cache: Arc<SignatureStatusCache>,
+
     // Per-block cost tracking for compute/data limits
     cost_tracker: Arc<crate::cost_tracker::CostTracker>,
 
@@ -201,6 +205,7 @@ impl Bank {
             last_blockhash: RwLock::new([0u8; 32]),
             blockhash_queue: RwLock::new(BlockhashQueue::default()),
             transaction_cache: Arc::new(TransactionCache::new()),
+            signature_status_cache: Arc::new(SignatureStatusCache::new()),
             cost_tracker: Arc::new(crate::cost_tracker::CostTracker::new()),
             accounts_data_size: AtomicI64::new(0),
             lamports_per_signature: AtomicU64::new(LAMPORTS_PER_SIGNATURE),
@@ -285,6 +290,7 @@ impl Bank {
             last_blockhash: RwLock::new(bank_state.last_blockhash.unwrap_or([0u8; 32])),
             blockhash_queue: RwLock::new(blockhash_queue),
             transaction_cache: Arc::new(TransactionCache::new()),
+            signature_status_cache: Arc::new(SignatureStatusCache::new()),
             cost_tracker: Arc::new(crate::cost_tracker::CostTracker::new()),
             accounts_data_size: AtomicI64::new(bank_state.accounts_data_len as i64),
             lamports_per_signature: AtomicU64::new(
@@ -369,6 +375,7 @@ impl Bank {
             last_blockhash: RwLock::new(parent_hash),
             blockhash_queue: RwLock::new(parent.blockhash_queue.read().unwrap().clone()),
             transaction_cache: parent.transaction_cache.clone(),
+            signature_status_cache: parent.signature_status_cache.clone(),
             cost_tracker: Arc::new(crate::cost_tracker::CostTracker::new()),
             accounts_data_size: AtomicI64::new(parent.accounts_data_size.load(Ordering::Acquire)),
             lamports_per_signature: AtomicU64::new(derive_fee_rate(
@@ -742,6 +749,11 @@ impl Bank {
     /// Get a reference to the blockhash queue lock.
     pub fn blockhash_queue(&self) -> &RwLock<BlockhashQueue> {
         &self.blockhash_queue
+    }
+
+    /// Access the signature status cache (shared across the fork tree).
+    pub fn signature_status_cache(&self) -> &SignatureStatusCache {
+        &self.signature_status_cache
     }
 
     /// Access the transaction deduplication cache.
