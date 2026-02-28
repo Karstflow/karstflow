@@ -165,6 +165,44 @@ pub trait BankAccessProvider: Send + Sync {
     fn get_parent_slot(&self, _slot: u64) -> Option<u64> {
         None
     }
+
+    /// Get the genesis hash as a base58-encoded string.
+    ///
+    /// Returns `None` if the genesis hash is not configured.
+    fn get_genesis_hash(&self) -> Option<String> {
+        None
+    }
+
+    /// Get a parsed block from the blockstore.
+    ///
+    /// Assembles the block from stored shreds, parses entries, and extracts
+    /// transaction signatures. Returns `None` if the slot is unavailable
+    /// or incomplete.
+    fn get_block_data(&self, _slot: u64) -> Option<RpcBlockData> {
+        None
+    }
+}
+
+/// Parsed block data returned by `get_block_data`.
+#[derive(Debug, Clone)]
+pub struct RpcBlockData {
+    /// Slot number.
+    pub slot: u64,
+    /// Parent slot number.
+    pub parent_slot: u64,
+    /// Block time (unix timestamp), if known.
+    pub block_time: Option<i64>,
+    /// Transactions extracted from block entries.
+    pub transactions: Vec<RpcBlockTransaction>,
+}
+
+/// A single transaction from a parsed block.
+#[derive(Debug, Clone)]
+pub struct RpcBlockTransaction {
+    /// Ed25519 signatures (base58-encoded).
+    pub signatures: Vec<String>,
+    /// Raw transaction bytes.
+    pub raw_bytes: Vec<u8>,
 }
 
 /// Contact information for a cluster node, returned by `get_cluster_nodes`.

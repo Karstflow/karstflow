@@ -13,7 +13,7 @@ mod shred_store;
 #[cfg(test)]
 mod tests;
 
-pub use block_assembly::{AssembledBlock, BlockAssembler};
+pub use block_assembly::{extract_signatures, AssembledBlock, BlockAssembler, ParsedEntry};
 pub use cleanup::BlockstoreCleanup;
 pub use fec_tracker::{FecInsertResult, FecTracker};
 pub use meta::{ErasureMeta, SlotMeta, SlotStatus};
@@ -349,6 +349,25 @@ impl Blockstore {
             .iter()
             .copied()
             .collect()
+    }
+
+    /// Assemble and parse a complete block from stored shreds.
+    ///
+    /// Returns the assembled block with parsed entries including raw
+    /// transaction bytes. Returns `None` if the slot is incomplete or
+    /// not found.
+    pub fn get_parsed_block(
+        &self,
+        slot: u64,
+    ) -> Result<Option<(AssembledBlock, Vec<ParsedEntry>)>, BlockstoreError> {
+        let meta = match self.get_slot_meta(slot)? {
+            Some(meta) if meta.is_complete() => meta,
+            _ => return Ok(None),
+        };
+        let store = ShredStore::new(&self.backend);
+        let assembled = BlockAssembler::assemble(&store, slot, &meta)?;
+        let entries = BlockAssembler::parse_entries(&assembled.entries)?;
+        Ok(Some((assembled, entries)))
     }
 
     /// Purge slots below the given slot.

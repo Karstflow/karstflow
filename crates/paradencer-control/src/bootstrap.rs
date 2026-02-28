@@ -2062,6 +2062,7 @@ pub fn maybe_start_rpc_http_server_with_consensus(
                     identity_pubkey,
                     cluster_info.clone(),
                     blockstore,
+                    node_config.expected_genesis_hash.clone(),
                 )));
             let submitter: Option<Arc<dyn TransactionSubmitter>> =
                 cluster_info.map(|ci| -> Arc<dyn TransactionSubmitter> {
@@ -2132,6 +2133,7 @@ struct ConsensusBankAccessProvider {
     identity: [u8; 32],
     cluster_info: Option<Arc<ClusterInfo>>,
     blockstore: Option<Arc<Blockstore>>,
+    genesis_hash: Option<String>,
 }
 
 impl ConsensusBankAccessProvider {
@@ -2141,6 +2143,7 @@ impl ConsensusBankAccessProvider {
         identity: [u8; 32],
         cluster_info: Option<Arc<ClusterInfo>>,
         blockstore: Option<Arc<Blockstore>>,
+        genesis_hash: Option<String>,
     ) -> Self {
         Self {
             bank_forks,
@@ -2149,6 +2152,7 @@ impl ConsensusBankAccessProvider {
             identity,
             cluster_info,
             blockstore,
+            genesis_hash,
         }
     }
 
@@ -2497,6 +2501,46 @@ impl BankAccessProvider for ConsensusBankAccessProvider {
         let bs = self.blockstore.as_ref()?;
         let meta = bs.get_slot_meta(slot).ok()??;
         meta.parent_slot
+    }
+
+    fn get_genesis_hash(&self) -> Option<String> {
+        self.genesis_hash.clone()
+    }
+
+    fn get_block_data(&self, slot: u64) -> Option<paradencer_rpc::RpcBlockData> {
+        use paradencer_storage::extract_signatures;
+
+        let bs = self.blockstore.as_ref()?;
+        let (assembled, entries) = bs.get_parsed_block(slot).ok()??;
+
+        let mut transactions = Vec::new();
+        for entry in &entries {
+            for tx_bytes in &entry.transactions {
+                let sigs = extract_signatures(tx_bytes)
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(|s| bs58::encode(s).into_string())
+                    .collect();
+                transactions.push(paradencer_rpc::RpcBlockTransaction {
+                    signatures: sigs,
+                    raw_bytes: tx_bytes.clone(),
+                });
+            }
+        }
+
+        let meta = bs.get_slot_meta(slot).ok()??;
+        let block_time = if meta.first_shred_timestamp > 0 {
+            Some(meta.first_shred_timestamp)
+        } else {
+            None
+        };
+
+        Some(paradencer_rpc::RpcBlockData {
+            slot,
+            parent_slot: assembled.parent_slot,
+            block_time,
+            transactions,
+        })
     }
 }
 

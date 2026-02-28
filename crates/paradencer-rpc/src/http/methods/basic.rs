@@ -26,7 +26,12 @@ pub(super) fn handle(
             "paradencer-core": env!("CARGO_PKG_VERSION"),
             "feature-set": if full_api { "full_api" } else { "subset_api" }
         })),
-        RpcMethod::GetGenesisHash => Ok(json!("5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp6H6r6Q4QvJf4")),
+        RpcMethod::GetGenesisHash => {
+            let hash = bank_access
+                .and_then(|bank| bank.get_genesis_hash())
+                .unwrap_or_else(|| "5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp6H6r6Q4QvJf4".to_string());
+            Ok(json!(hash))
+        }
         RpcMethod::GetIdentity => {
             let identity = bank_access
                 .and_then(|bank| bank.get_identity())

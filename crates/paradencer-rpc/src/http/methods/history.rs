@@ -161,7 +161,20 @@ fn build_block_response(
         return Ok(serde_json::Value::Null);
     }
 
-    // Use real block time and parent slot from blockstore when available.
+    // Try real block data from blockstore when available.
+    if let Some(bank) = bank_access {
+        if let Some(block_data) = bank.get_block_data(requested_slot) {
+            return Ok(format_real_block_response(
+                &block_data,
+                &config,
+                bank.get_block_height(commitment),
+                snapshot,
+                commitment,
+            ));
+        }
+    }
+
+    // Synthetic fallback when blockstore data is unavailable.
     let block_time = bank_access
         .and_then(|bank| bank.get_block_time(requested_slot))
         .unwrap_or_else(|| shared::synthetic_block_time(snapshot.uptime_millis, requested_slot));
@@ -586,6 +599,98 @@ fn transaction_message_payload(
         }),
         ResponseEncoding::Base58 | ResponseEncoding::Base64 => json!(recent_blockhash),
     }
+}
+
+fn format_real_block_response(
+    block_data: &crate::state::RpcBlockData,
+    config: &BlockRequestConfig,
+    block_height: u64,
+    snapshot: RpcRuntimeSnapshot,
+    commitment: RpcCommitment,
+) -> serde_json::Value {
+    let blockhash_seed = snapshot
+        .blockhash_seed_for_commitment(commitment)
+        .wrapping_add(block_data.slot.rotate_left(11));
+    let blockhash = shared::format_blockhash_from_seed(blockhash_seed);
+    let prev_blockhash = shared::format_blockhash_from_seed(blockhash_seed.wrapping_sub(1));
+
+    let block_time = block_data
+        .block_time
+        .unwrap_or_else(|| shared::synthetic_block_time(snapshot.uptime_millis, block_data.slot));
+
+    let transactions = match config.transaction_details {
+        BlockTransactionDetails::None => serde_json::Value::Array(Vec::new()),
+        BlockTransactionDetails::Signatures => {
+            let tx_list: Vec<serde_json::Value> = block_data
+                .transactions
+                .iter()
+                .map(|tx| {
+                    json!({
+                        "meta": serde_json::Value::Null,
+                        "transaction": {"signatures": tx.signatures},
+                        "version": transaction_version_payload(config.max_supported_transaction_version)
+                    })
+                })
+                .collect();
+            serde_json::Value::Array(tx_list)
+        }
+        BlockTransactionDetails::Full | BlockTransactionDetails::Accounts => {
+            let tx_list: Vec<serde_json::Value> = block_data
+                .transactions
+                .iter()
+                .map(|tx| {
+                    let encoded_data = match config.encoding {
+                        ResponseEncoding::Base64 => {
+                            use base64::Engine;
+                            json!([
+                                base64::engine::general_purpose::STANDARD.encode(&tx.raw_bytes),
+                                "base64"
+                            ])
+                        }
+                        ResponseEncoding::Base58 => {
+                            json!([bs58::encode(&tx.raw_bytes).into_string(), "base58"])
+                        }
+                        ResponseEncoding::Json | ResponseEncoding::JsonParsed => {
+                            json!({
+                                "signatures": tx.signatures,
+                                "message": {
+                                    "accountKeys": [],
+                                    "recentBlockhash": &blockhash,
+                                    "instructions": []
+                                }
+                            })
+                        }
+                    };
+                    json!({
+                        "meta": {
+                            "err": serde_json::Value::Null,
+                            "fee": LAMPORTS_PER_SIGNATURE,
+                            "status": {"Ok": serde_json::Value::Null}
+                        },
+                        "transaction": encoded_data,
+                        "version": transaction_version_payload(config.max_supported_transaction_version)
+                    })
+                })
+                .collect();
+            serde_json::Value::Array(tx_list)
+        }
+    };
+
+    let rewards = if config.include_rewards {
+        serde_json::Value::Array(Vec::new())
+    } else {
+        serde_json::Value::Null
+    };
+
+    json!({
+        "blockHeight": block_height,
+        "blockTime": block_time,
+        "blockhash": blockhash,
+        "parentSlot": block_data.parent_slot,
+        "previousBlockhash": prev_blockhash,
+        "transactions": transactions,
+        "rewards": rewards
+    })
 }
 
 fn block_transaction_payload(

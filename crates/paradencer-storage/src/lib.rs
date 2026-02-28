@@ -21,8 +21,8 @@ pub use accounts::{
     PUBKEY_BYTES, XID_BYTES,
 };
 pub use blockstore::{
-    AssembledBlock, Blockstore, BlockstoreError, ErasureMeta, FecInsertResult, FecTracker,
-    ShredInsertResult, SlotMeta, SlotStatus,
+    extract_signatures, AssembledBlock, BlockAssembler, Blockstore, BlockstoreError, ErasureMeta,
+    FecInsertResult, FecTracker, ParsedEntry, ShredInsertResult, ShredStore, SlotMeta, SlotStatus,
 };
 pub use catalog::{SnapshotCatalog, SnapshotChain};
 pub use durable::{
