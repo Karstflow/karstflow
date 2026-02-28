@@ -56,7 +56,9 @@ pub(super) fn dispatch_method(
 
         RpcMethod::GetInflationGovernor
         | RpcMethod::GetInflationRate
-        | RpcMethod::GetInflationReward => inflation::handle(method, request, snapshot, commitment),
+        | RpcMethod::GetInflationReward => {
+            inflation::handle(method, request, snapshot, commitment, bank_access)
+        }
 
         RpcMethod::GetBalance
         | RpcMethod::GetSupply

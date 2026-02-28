@@ -74,7 +74,7 @@ pub(super) fn handle(
             build_blocks_with_limit_response(request, snapshot, commitment, bank_access)
         }
         RpcMethod::GetBlockCommitment => {
-            build_block_commitment_response(request, snapshot, commitment)
+            build_block_commitment_response(request, snapshot, commitment, bank_access)
         }
         RpcMethod::GetBlock | RpcMethod::GetConfirmedBlock => {
             build_block_response(request, snapshot, commitment, bank_access)
@@ -222,6 +222,7 @@ fn build_block_commitment_response(
     request: &serde_json::Value,
     snapshot: RpcRuntimeSnapshot,
     commitment: RpcCommitment,
+    bank_access: Option<&Arc<dyn BankAccessProvider>>,
 ) -> Result<serde_json::Value, RpcMethodError> {
     let params = params::params_array(request)?;
     if params.len() > 2 {
@@ -229,17 +230,27 @@ fn build_block_commitment_response(
     }
     let raw_config = params.get(1);
     ensure_query_config_shape(raw_config, QUERY_REQUEST_ALLOWED_KEYS)?;
-    ensure_min_context_slot(
-        min_context_slot_from_config(raw_config)?,
-        snapshot.slot_for_commitment(commitment),
-    )?;
+    let max_readable_slot = bank_access
+        .map(|bank| bank.get_slot(commitment))
+        .unwrap_or_else(|| snapshot.slot_for_commitment(commitment));
+    ensure_min_context_slot(min_context_slot_from_config(raw_config)?, max_readable_slot)?;
 
     let requested_slot = params::first_param_u64(request)?;
-    let max_readable_slot = snapshot.slot_for_commitment(commitment);
     if requested_slot > max_readable_slot {
         return Ok(serde_json::Value::Null);
     }
 
+    // Try real commitment data from the commitment tracker.
+    if let Some(bank) = bank_access {
+        if let Some(bc) = bank.get_block_commitment(requested_slot) {
+            return Ok(json!({
+                "commitment": bc.commitment,
+                "totalStake": bc.total_stake
+            }));
+        }
+    }
+
+    // Synthetic fallback.
     let finalized_depth = max_readable_slot.saturating_sub(requested_slot).min(32);
     let confirmation_bucket = (31_u64.saturating_sub(finalized_depth)) as usize;
     let confirmation_stake = BASE_NETWORK_SUPPLY_LAMPORTS.saturating_sub(

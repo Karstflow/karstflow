@@ -1,4 +1,5 @@
 use serde_json::json;
+use std::sync::Arc;
 
 use paradencer_constants::economics::{
     DEFAULT_VOTE_COMMISSION_PERCENT, INFLATION_EPOCH_DECAY_STEP, INFLATION_FOUNDATION_RATE,
@@ -8,7 +9,7 @@ use paradencer_constants::economics::{
 };
 use paradencer_constants::ledger::SLOTS_PER_EPOCH;
 
-use crate::state::{RpcCommitment, RpcRuntimeSnapshot};
+use crate::state::{BankAccessProvider, RpcCommitment, RpcRuntimeSnapshot};
 
 use super::super::method_error::RpcMethodError;
 use super::super::registry::RpcMethod;
@@ -19,12 +20,17 @@ pub(super) fn handle(
     request: &serde_json::Value,
     snapshot: RpcRuntimeSnapshot,
     commitment: RpcCommitment,
+    bank_access: Option<&Arc<dyn BankAccessProvider>>,
 ) -> Result<serde_json::Value, RpcMethodError> {
     match method {
         RpcMethod::GetInflationGovernor => Ok(build_inflation_governor_response()),
-        RpcMethod::GetInflationRate => Ok(build_inflation_rate_response(snapshot, commitment)),
+        RpcMethod::GetInflationRate => Ok(build_inflation_rate_response(
+            snapshot,
+            commitment,
+            bank_access,
+        )),
         RpcMethod::GetInflationReward => {
-            build_inflation_reward_response(request, snapshot, commitment)
+            build_inflation_reward_response(request, snapshot, commitment, bank_access)
         }
         _ => Err(RpcMethodError::MethodNotFound),
     }
@@ -43,9 +49,28 @@ fn build_inflation_governor_response() -> serde_json::Value {
 fn build_inflation_rate_response(
     snapshot: RpcRuntimeSnapshot,
     commitment: RpcCommitment,
+    bank_access: Option<&Arc<dyn BankAccessProvider>>,
 ) -> serde_json::Value {
-    let slot = snapshot.slot_for_commitment(commitment);
-    let epoch = slot / SLOTS_PER_EPOCH;
+    let slot = bank_access
+        .map(|bank| bank.get_slot(commitment))
+        .unwrap_or_else(|| snapshot.slot_for_commitment(commitment));
+    let epoch = bank_access
+        .map(|bank| bank.get_epoch_for_slot(slot))
+        .unwrap_or_else(|| slot / SLOTS_PER_EPOCH);
+
+    // Try real inflation from bank's configured parameters.
+    if let Some(bank) = bank_access {
+        if let Some((total, validator, foundation)) = bank.get_inflation_rate(epoch) {
+            return json!({
+                "total": total,
+                "validator": validator,
+                "foundation": foundation,
+                "epoch": epoch
+            });
+        }
+    }
+
+    // Synthetic fallback.
     let total = INFLATION_TOTAL_BASE_RATE
         .max(0.02_f64 - (epoch as f64 * INFLATION_EPOCH_DECAY_STEP))
         .max(INFLATION_TERMINAL_RATE);
@@ -61,10 +86,17 @@ fn build_inflation_reward_response(
     request: &serde_json::Value,
     snapshot: RpcRuntimeSnapshot,
     commitment: RpcCommitment,
+    bank_access: Option<&Arc<dyn BankAccessProvider>>,
 ) -> Result<serde_json::Value, RpcMethodError> {
     let addresses = parse_pubkey_list_param(request)?;
-    let slot = snapshot.slot_for_commitment(commitment);
-    let epoch = slot / SLOTS_PER_EPOCH;
+    let slot = bank_access
+        .map(|bank| bank.get_slot(commitment))
+        .unwrap_or_else(|| snapshot.slot_for_commitment(commitment));
+    let epoch = bank_access
+        .map(|bank| bank.get_epoch_for_slot(slot))
+        .unwrap_or_else(|| slot / SLOTS_PER_EPOCH);
+
+    // Synthetic rewards — real epoch reward tracking is a future enhancement.
     let rewards = addresses
         .iter()
         .map(|address| {

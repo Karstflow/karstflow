@@ -2507,6 +2507,45 @@ impl BankAccessProvider for ConsensusBankAccessProvider {
         self.genesis_hash.clone()
     }
 
+    fn get_block_commitment(&self, slot: u64) -> Option<paradencer_rpc::RpcBlockCommitment> {
+        let tracker = self.commitment_tracker.as_ref()?;
+        let guard = tracker.lock().ok()?;
+        let sc = guard.get_commitment(slot)?;
+
+        // Build the 32-entry commitment array: for each depth bucket,
+        // the total stake that has confirmed this slot at >= that depth.
+        let mut commitment = vec![0_u64; 32];
+        let depth = sc.confirmation_depth.min(31);
+        commitment[depth] = sc.stake;
+        Some(paradencer_rpc::RpcBlockCommitment {
+            commitment,
+            total_stake: sc.total_stake,
+        })
+    }
+
+    fn get_epoch_for_slot(&self, slot: u64) -> u64 {
+        let forks = match self.bank_forks.read() {
+            Ok(f) => f,
+            Err(_) => return 0,
+        };
+        let bank = forks.working_bank();
+        let (epoch, _) = bank.epoch_schedule().get_epoch_and_slot_index(slot);
+        epoch
+    }
+
+    fn get_inflation_rate(&self, epoch: u64) -> Option<(f64, f64, f64)> {
+        let forks = self.bank_forks.read().ok()?;
+        let bank = forks.working_bank();
+        let inflation = bank.inflation();
+        let slots_per_epoch = bank.epoch_schedule().config().slots_per_epoch as f64;
+        let year = (epoch as f64 * slots_per_epoch)
+            / paradencer_constants::economics::DEFAULT_SLOTS_PER_YEAR;
+        let total = inflation.total_rate(year);
+        let validator = inflation.validator_rate(year);
+        let foundation = inflation.foundation_rate(year);
+        Some((total, validator, foundation))
+    }
+
     fn get_signature_statuses(
         &self,
         signatures: &[[u8; 64]],

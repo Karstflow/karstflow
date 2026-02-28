@@ -182,6 +182,27 @@ pub trait BankAccessProvider: Send + Sync {
         None
     }
 
+    /// Get the block commitment for a given slot.
+    ///
+    /// Returns the commitment stake array (32 entries) and total stake.
+    /// Returns `None` if commitment data is unavailable.
+    fn get_block_commitment(&self, _slot: u64) -> Option<RpcBlockCommitment> {
+        None
+    }
+
+    /// Get the epoch number for a given slot.
+    fn get_epoch_for_slot(&self, _slot: u64) -> u64 {
+        0
+    }
+
+    /// Get the inflation rate components for the given epoch.
+    ///
+    /// Returns (total, validator, foundation) inflation rates.
+    /// Returns `None` when real inflation config is unavailable.
+    fn get_inflation_rate(&self, _epoch: u64) -> Option<(f64, f64, f64)> {
+        None
+    }
+
     /// Look up transaction statuses by their first signature.
     ///
     /// Returns a vector of `Option<RpcSignatureStatus>` in the same order
@@ -231,6 +252,15 @@ pub struct RpcSignatureStatus {
     pub succeeded: bool,
     /// Error description for failed transactions.
     pub error: Option<String>,
+}
+
+/// Block commitment data returned by `get_block_commitment`.
+#[derive(Debug, Clone)]
+pub struct RpcBlockCommitment {
+    /// Commitment stake for each confirmation depth bucket (0..31).
+    pub commitment: Vec<u64>,
+    /// Total active stake in the cluster.
+    pub total_stake: u64,
 }
 
 /// Full transaction data returned by `get_transaction`.

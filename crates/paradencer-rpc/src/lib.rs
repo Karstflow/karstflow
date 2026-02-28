@@ -16,9 +16,10 @@ pub use errors::{Result, RpcError};
 pub use filters::{apply_filters, parse_filter, parse_filters, RpcFilterType, SortOrder};
 pub use http::spawn_rpc_http_server;
 pub use state::{
-    metrics_file_provider, BankAccessProvider, RpcBlockData, RpcBlockTransaction, RpcClusterNode,
-    RpcCommitment, RpcRuntimeSnapshot, RpcSignatureStatus, RpcTransactionData,
-    RuntimeSnapshotProvider, TransactionSimulationResponse, TransactionSubmitter,
+    metrics_file_provider, BankAccessProvider, RpcBlockCommitment, RpcBlockData,
+    RpcBlockTransaction, RpcClusterNode, RpcCommitment, RpcRuntimeSnapshot, RpcSignatureStatus,
+    RpcTransactionData, RuntimeSnapshotProvider, TransactionSimulationResponse,
+    TransactionSubmitter,
 };
 pub use utils::{
     calculate_rent_exemption, calculate_transaction_fee, generate_blockhash, generate_signature,
