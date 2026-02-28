@@ -1,4 +1,4 @@
-use paradencer_core::TopologySpec;
+use paradencer_core::{IpcMode, TopologySpec};
 use paradencer_mesh::{InPort, OutPort};
 use paradencer_runtime::Service;
 use paradencer_stages::{AssembledBlock, MetricsContent, RawTransaction, ShredArrival};
@@ -6,6 +6,8 @@ use paradencer_types::shred::Shred;
 
 pub struct MaterializedTopology {
     pub topology_spec: TopologySpec,
+    /// IPC mode used for dual-mode links within this topology.
+    pub ipc_mode: IpcMode,
     pub services: Vec<Box<dyn Service>>,
     /// Receiver for assembled blocks from the shred pipeline.
     /// Connect this to a ReplayService block input to close the shred path.

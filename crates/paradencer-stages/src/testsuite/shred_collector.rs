@@ -3,6 +3,7 @@ use crate::block_producer::PohEntry;
 use crate::shred_assembler::AssembledBlock;
 use crate::shred_network::{CompletedFecSet, ShredNetworkConfig, ShredNetworkService};
 use crate::{ShredCollector, ShredCollectorConfig};
+use paradencer_mesh::DualReceiver;
 use paradencer_types::shred::{
     DataShredHeader, Shred, ShredCommonHeader, ShredVariant, SHRED_LAST_IN_SLOT,
     SHRED_LEGACY_DATA_NIBBLE, SHRED_TYPE_LEGACY_DATA, SIGNATURE_SIZE,
@@ -221,7 +222,8 @@ fn full_pipeline_filter_to_fec_to_collector_to_block() {
         turbine_neighbor_count: 0,
         ..Default::default()
     };
-    let mut network_svc = ShredNetworkService::new(config, filter_rx, fec_tx);
+    let mut network_svc =
+        ShredNetworkService::new(config, DualReceiver::Channel(filter_rx), fec_tx);
     let mut collector = ShredCollector::with_fec_input(shred_direct_rx, fec_rx, block_tx);
     let context = ServiceContext::new(ShutdownSwitch::new());
 

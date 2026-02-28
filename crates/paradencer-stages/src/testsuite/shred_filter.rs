@@ -1,5 +1,6 @@
 use super::*;
 use crate::ShredFilter;
+use paradencer_mesh::DualSender;
 use paradencer_types::shred::Shred;
 
 /// Build a minimal valid legacy data shred byte vector for testing.
@@ -122,7 +123,7 @@ fn shred_filter_forwards_parsed_shreds_on_output_channel() {
         packet_inbound,
         IngressPolicy::default(),
         shred_stats.clone(),
-        shred_outbound,
+        DualSender::Channel(shred_outbound),
     );
     let context = ServiceContext::new(ShutdownSwitch::new());
 
@@ -185,7 +186,7 @@ fn shred_filter_skips_forwarding_for_empty_data_packets() {
         packet_inbound,
         IngressPolicy::default(),
         shred_stats.clone(),
-        shred_outbound,
+        DualSender::Channel(shred_outbound),
     );
     let context = ServiceContext::new(ShutdownSwitch::new());
 

@@ -2,8 +2,8 @@ use crate::errors::Result;
 use crate::topology_parts::types::MaterializedTopology;
 use crate::topology_parts::validation::{find_link_capacity, validate_topology_requirements};
 use paradencer_constants::ipc::PIPELINE_CHANNEL_DEPTH_PER_WORKER;
-use paradencer_core::{LinkKind, StageKind, TopologySpec};
-use paradencer_mesh::bounded_link;
+use paradencer_core::{IpcMode, LinkKind, StageKind, TopologySpec};
+use paradencer_mesh::{bounded_link, DualReceiver, DualSender};
 use paradencer_net::IngressPolicy;
 use paradencer_runtime::Service;
 use paradencer_stages::{
@@ -24,6 +24,7 @@ pub fn materialize_services(
     metrics_output_format: MetricsOutputFormat,
     metrics_output_target: MetricsOutputTarget,
     storage_runtime_policy: StorageRuntimePolicy,
+    ipc_mode: IpcMode,
 ) -> Result<MaterializedTopology> {
     materialize_services_with_blockstore(
         topology_spec,
@@ -32,6 +33,7 @@ pub fn materialize_services(
         metrics_output_target,
         storage_runtime_policy,
         None,
+        ipc_mode,
     )
 }
 
@@ -42,6 +44,7 @@ pub fn materialize_services_with_blockstore(
     metrics_output_target: MetricsOutputTarget,
     storage_runtime_policy: StorageRuntimePolicy,
     blockstore: Option<Arc<Blockstore>>,
+    ipc_mode: IpcMode,
 ) -> Result<MaterializedTopology> {
     validate_topology_requirements(&topology_spec)?;
 
@@ -182,14 +185,14 @@ pub fn materialize_services_with_blockstore(
                     shred_inbound,
                     ingress_policy.clone(),
                     shred_filter_stats.clone(),
-                    filtered_shred_tx.clone(),
+                    DualSender::Channel(filtered_shred_tx.clone()),
                 )));
                 // Add network service and collector once (after the first ShredSanitizer).
                 if !shred_collector_added {
                     // ShredNetworkService: FEC set tracking + Reed-Solomon recovery.
                     services.push(Box::new(ShredNetworkService::new(
                         ShredNetworkConfig::default(),
-                        filtered_shred_rx.clone(),
+                        DualReceiver::Channel(filtered_shred_rx.clone()),
                         fec_completed_tx.clone(),
                     )));
                     // ShredCollector: accumulates shreds by slot, emits assembled blocks.
@@ -263,6 +266,7 @@ pub fn materialize_services_with_blockstore(
 
     Ok(MaterializedTopology {
         topology_spec,
+        ipc_mode,
         services,
         shred_block_receiver: if shred_collector_added {
             Some(assembled_block_rx)

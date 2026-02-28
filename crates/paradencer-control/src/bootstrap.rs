@@ -1958,6 +1958,7 @@ pub fn materialize_services_from_config_with_blockstore(
         node_config.metrics_output_target.clone(),
         node_config.storage_runtime_policy.clone(),
         blockstore,
+        node_config.ipc_mode,
     )
     .map_err(ControlPlaneError::from)
 }

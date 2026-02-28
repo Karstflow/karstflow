@@ -11,6 +11,7 @@ pub use topology_parts::{
 #[cfg(test)]
 mod tests {
     use super::{load_topology_from_file, materialize_services, plan_default_topology};
+    use paradencer_core::IpcMode;
     use paradencer_net::IngressPolicy;
     use paradencer_stages::{MetricsOutputFormat, MetricsOutputTarget, StorageRuntimePolicy};
     use std::fs;
@@ -46,6 +47,7 @@ mod tests {
             MetricsOutputFormat::JsonLines,
             MetricsOutputTarget::Stdout,
             StorageRuntimePolicy::default(),
+            IpcMode::Channel,
         )
         .unwrap();
         // 5 topology stages + ShredNetworkService + ShredCollector = 7 services.
@@ -61,6 +63,7 @@ mod tests {
             MetricsOutputFormat::JsonLines,
             MetricsOutputTarget::Stdout,
             StorageRuntimePolicy::default(),
+            IpcMode::Channel,
         )
         .unwrap();
         // 8 topology stages + ShredNetworkService + ShredCollector = 10 services.
@@ -222,6 +225,7 @@ capacity = 64
             MetricsOutputFormat::JsonLines,
             MetricsOutputTarget::Stdout,
             StorageRuntimePolicy::default(),
+            IpcMode::Channel,
         )
         .unwrap();
 
