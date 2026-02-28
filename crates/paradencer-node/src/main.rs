@@ -299,19 +299,22 @@ fn run_with_node_config(
     // Build the repair service for slot recovery from peers.
     // The coordinator runs poll-driven in the node runtime; background I/O
     // handles actual UDP request/response on a dedicated thread.
-    // When persistent storage is available, serve shreds from the blockstore.
-    let shred_provider: Option<std::sync::Arc<dyn paradencer_net::ShredProvider>> = consensus
+    // When persistent storage is available, open the blockstore once and share
+    // the same Arc between the repair service and the RPC server.
+    let shared_blockstore: Option<std::sync::Arc<paradencer_storage::Blockstore>> = consensus
         .storage_engine
         .as_ref()
         .and_then(|engine| match engine.open_blockstore() {
-            Ok(bs) => Some(
-                std::sync::Arc::new(BlockstoreShredProvider::new(std::sync::Arc::new(bs)))
-                    as std::sync::Arc<dyn paradencer_net::ShredProvider>,
-            ),
+            Ok(bs) => Some(std::sync::Arc::new(bs)),
             Err(e) => {
-                warn!(error = %e, "failed to open blockstore for repair, using in-memory fallback");
+                warn!(error = %e, "failed to open blockstore, using in-memory fallback");
                 None
             }
+        });
+    let shred_provider: Option<std::sync::Arc<dyn paradencer_net::ShredProvider>> =
+        shared_blockstore.as_ref().map(|bs| {
+            std::sync::Arc::new(BlockstoreShredProvider::new(std::sync::Arc::clone(bs)))
+                as std::sync::Arc<dyn paradencer_net::ShredProvider>
         });
     let repair_bundle = build_repair_service(
         node_id,
@@ -377,6 +380,7 @@ fn run_with_node_config(
         Some(rpc_commitment_tracker),
         Some(rpc_cluster_info),
         *identity.pubkey(),
+        shared_blockstore,
     );
 
     // Save tower state to disk before shutdown so lockouts survive restarts.

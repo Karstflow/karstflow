@@ -1,6 +1,7 @@
 use serde_json::json;
+use std::sync::Arc;
 
-use crate::state::{RpcCommitment, RpcRuntimeSnapshot};
+use crate::state::{BankAccessProvider, RpcCommitment, RpcRuntimeSnapshot};
 use paradencer_constants::economics::{BASE_NETWORK_SUPPLY_LAMPORTS, LAMPORTS_PER_SIGNATURE};
 use paradencer_constants::rpc::{DEFAULT_BLOCKS_END_OFFSET, MAX_BLOCKS_RANGE_LEN};
 
@@ -63,21 +64,24 @@ pub(super) fn handle(
     request: &serde_json::Value,
     snapshot: RpcRuntimeSnapshot,
     commitment: RpcCommitment,
+    bank_access: Option<&Arc<dyn BankAccessProvider>>,
 ) -> Result<serde_json::Value, RpcMethodError> {
     match method {
         RpcMethod::GetBlocks | RpcMethod::GetConfirmedBlocks => {
-            build_blocks_response(request, snapshot, commitment)
+            build_blocks_response(request, snapshot, commitment, bank_access)
         }
         RpcMethod::GetBlocksWithLimit => {
-            build_blocks_with_limit_response(request, snapshot, commitment)
+            build_blocks_with_limit_response(request, snapshot, commitment, bank_access)
         }
         RpcMethod::GetBlockCommitment => {
             build_block_commitment_response(request, snapshot, commitment)
         }
         RpcMethod::GetBlock | RpcMethod::GetConfirmedBlock => {
-            build_block_response(request, snapshot, commitment)
+            build_block_response(request, snapshot, commitment, bank_access)
         }
-        RpcMethod::GetBlockTime => build_block_time_response(request, snapshot, commitment),
+        RpcMethod::GetBlockTime => {
+            build_block_time_response(request, snapshot, commitment, bank_access)
+        }
         RpcMethod::GetTransaction | RpcMethod::GetConfirmedTransaction => {
             build_transaction_response(request, snapshot, commitment)
         }
@@ -89,6 +93,7 @@ fn build_blocks_response(
     request: &serde_json::Value,
     snapshot: RpcRuntimeSnapshot,
     commitment: RpcCommitment,
+    bank_access: Option<&Arc<dyn BankAccessProvider>>,
 ) -> Result<serde_json::Value, RpcMethodError> {
     let params = params::params_array(request)?;
     if params.len() > 3 {
@@ -102,10 +107,10 @@ fn build_blocks_response(
     }
     let raw_config = params.get(2);
     ensure_query_config_shape(raw_config, QUERY_REQUEST_ALLOWED_KEYS)?;
-    ensure_min_context_slot(
-        min_context_slot_from_config(raw_config)?,
-        snapshot.slot_for_commitment(commitment),
-    )?;
+    let max_readable_slot = bank_access
+        .map(|bank| bank.get_slot(commitment))
+        .unwrap_or_else(|| snapshot.slot_for_commitment(commitment));
+    ensure_min_context_slot(min_context_slot_from_config(raw_config)?, max_readable_slot)?;
     let requested_end_slot = params
         .get(1)
         .and_then(|value| value.as_u64())
@@ -114,7 +119,6 @@ fn build_blocks_response(
         return Err(RpcMethodError::InvalidParams);
     }
 
-    let max_readable_slot = snapshot.slot_for_commitment(commitment);
     if start_slot > max_readable_slot {
         return Ok(json!([]));
     }
@@ -126,6 +130,15 @@ fn build_blocks_response(
         .min(MAX_BLOCKS_RANGE_LEN);
     let end_slot = start_slot.saturating_add(range_len.saturating_sub(1));
 
+    // When blockstore is available, return only confirmed/rooted slots.
+    if let Some(bank) = bank_access {
+        let confirmed = bank.get_confirmed_blocks(start_slot, end_slot);
+        if !confirmed.is_empty() {
+            return Ok(json!(confirmed));
+        }
+    }
+
+    // Synthetic fallback: all slots in range are reported as confirmed.
     Ok(json!((start_slot..=end_slot).collect::<Vec<u64>>()))
 }
 
@@ -133,15 +146,31 @@ fn build_block_response(
     request: &serde_json::Value,
     snapshot: RpcRuntimeSnapshot,
     commitment: RpcCommitment,
+    bank_access: Option<&Arc<dyn BankAccessProvider>>,
 ) -> Result<serde_json::Value, RpcMethodError> {
     let config = parse_block_config(request)?;
-    ensure_min_context_slot_satisfied(request, snapshot, commitment)?;
+    let max_readable_slot = bank_access
+        .map(|bank| bank.get_slot(commitment))
+        .unwrap_or_else(|| snapshot.slot_for_commitment(commitment));
+
+    let min_context_slot = params::min_context_slot_from_params(request)?;
+    ensure_min_context_slot(min_context_slot, max_readable_slot)?;
 
     let requested_slot = params::first_param_u64(request)?;
-    let max_readable_slot = snapshot.slot_for_commitment(commitment);
     if requested_slot > max_readable_slot {
         return Ok(serde_json::Value::Null);
     }
+
+    // Use real block time and parent slot from blockstore when available.
+    let block_time = bank_access
+        .and_then(|bank| bank.get_block_time(requested_slot))
+        .unwrap_or_else(|| shared::synthetic_block_time(snapshot.uptime_millis, requested_slot));
+    let parent_slot = bank_access
+        .and_then(|bank| bank.get_parent_slot(requested_slot))
+        .unwrap_or_else(|| requested_slot.saturating_sub(1));
+    let block_height = bank_access
+        .map(|bank| bank.get_block_height(commitment))
+        .unwrap_or(requested_slot);
 
     let blockhash_seed = snapshot
         .blockhash_seed_for_commitment(commitment)
@@ -166,10 +195,10 @@ fn build_block_response(
     };
 
     Ok(json!({
-        "blockHeight": requested_slot,
-        "blockTime": shared::synthetic_block_time(snapshot.uptime_millis, requested_slot),
+        "blockHeight": block_height,
+        "blockTime": block_time,
         "blockhash": blockhash,
-        "parentSlot": requested_slot.saturating_sub(1),
+        "parentSlot": parent_slot,
         "previousBlockhash": shared::format_blockhash_from_seed(blockhash_seed.wrapping_sub(1)),
         "transactions": transactions,
         "rewards": rewards
@@ -217,6 +246,7 @@ fn build_blocks_with_limit_response(
     request: &serde_json::Value,
     snapshot: RpcRuntimeSnapshot,
     commitment: RpcCommitment,
+    bank_access: Option<&Arc<dyn BankAccessProvider>>,
 ) -> Result<serde_json::Value, RpcMethodError> {
     let params = params::params_array(request)?;
     if params.len() > 3 {
@@ -229,15 +259,14 @@ fn build_blocks_with_limit_response(
         .ok_or(RpcMethodError::InvalidParams)?;
     let raw_config = params.get(2);
     ensure_query_config_shape(raw_config, QUERY_REQUEST_ALLOWED_KEYS)?;
-    ensure_min_context_slot(
-        min_context_slot_from_config(raw_config)?,
-        snapshot.slot_for_commitment(commitment),
-    )?;
+    let max_readable_slot = bank_access
+        .map(|bank| bank.get_slot(commitment))
+        .unwrap_or_else(|| snapshot.slot_for_commitment(commitment));
+    ensure_min_context_slot(min_context_slot_from_config(raw_config)?, max_readable_slot)?;
     if limit == 0 || limit > MAX_BLOCKS_RANGE_LEN {
         return Err(RpcMethodError::InvalidParams);
     }
 
-    let max_readable_slot = snapshot.slot_for_commitment(commitment);
     if start_slot > max_readable_slot {
         return Ok(json!([]));
     }
@@ -250,6 +279,14 @@ fn build_blocks_with_limit_response(
         .min(MAX_BLOCKS_RANGE_LEN);
     let end_slot = start_slot.saturating_add(range_len.saturating_sub(1));
 
+    // When blockstore is available, return only confirmed/rooted slots.
+    if let Some(bank) = bank_access {
+        let confirmed = bank.get_confirmed_blocks(start_slot, end_slot);
+        if !confirmed.is_empty() {
+            return Ok(json!(confirmed));
+        }
+    }
+
     Ok(json!((start_slot..=end_slot).collect::<Vec<u64>>()))
 }
 
@@ -257,6 +294,7 @@ fn build_block_time_response(
     request: &serde_json::Value,
     snapshot: RpcRuntimeSnapshot,
     commitment: RpcCommitment,
+    bank_access: Option<&Arc<dyn BankAccessProvider>>,
 ) -> Result<serde_json::Value, RpcMethodError> {
     let params = params::params_array(request)?;
     if params.len() > 2 {
@@ -264,15 +302,21 @@ fn build_block_time_response(
     }
     let raw_config = params.get(1);
     ensure_query_config_shape(raw_config, QUERY_REQUEST_ALLOWED_KEYS)?;
-    ensure_min_context_slot(
-        min_context_slot_from_config(raw_config)?,
-        snapshot.slot_for_commitment(commitment),
-    )?;
+    let max_readable_slot = bank_access
+        .map(|bank| bank.get_slot(commitment))
+        .unwrap_or_else(|| snapshot.slot_for_commitment(commitment));
+    ensure_min_context_slot(min_context_slot_from_config(raw_config)?, max_readable_slot)?;
 
     let requested_slot = params::first_param_u64(request)?;
-    let max_readable_slot = snapshot.slot_for_commitment(commitment);
     if requested_slot > max_readable_slot {
         return Ok(serde_json::Value::Null);
+    }
+
+    // Use real block time from blockstore when available.
+    if let Some(bank) = bank_access {
+        if let Some(ts) = bank.get_block_time(requested_slot) {
+            return Ok(json!(ts));
+        }
     }
 
     Ok(json!(shared::synthetic_block_time(

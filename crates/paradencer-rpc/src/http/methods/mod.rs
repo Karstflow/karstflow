@@ -94,7 +94,7 @@ pub(super) fn dispatch_method(
         | RpcMethod::GetBlockTime
         | RpcMethod::GetTransaction
         | RpcMethod::GetConfirmedTransaction => {
-            history::handle(method, request, snapshot, commitment)
+            history::handle(method, request, snapshot, commitment, bank_access)
         }
 
         RpcMethod::SendTransaction | RpcMethod::SimulateTransaction => transactions::handle(

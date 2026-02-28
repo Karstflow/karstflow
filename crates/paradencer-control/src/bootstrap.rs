@@ -2021,7 +2021,7 @@ pub fn maybe_start_metrics_http_bridge(node_config: &NodeConfig) -> Result<()> {
 
 #[cfg(test)]
 fn maybe_start_rpc_http_server(node_config: &NodeConfig) -> Result<()> {
-    maybe_start_rpc_http_server_with_consensus(node_config, None, None, None, [0u8; 32])
+    maybe_start_rpc_http_server_with_consensus(node_config, None, None, None, [0u8; 32], None)
 }
 
 /// Start the RPC HTTP server with optional live consensus data.
@@ -2042,6 +2042,7 @@ pub fn maybe_start_rpc_http_server_with_consensus(
     commitment_tracker: Option<Arc<Mutex<CommitmentTracker>>>,
     cluster_info: Option<Arc<ClusterInfo>>,
     identity_pubkey: [u8; 32],
+    blockstore: Option<Arc<Blockstore>>,
 ) -> Result<()> {
     if !node_config.rpc_enabled {
         return Ok(());
@@ -2060,6 +2061,7 @@ pub fn maybe_start_rpc_http_server_with_consensus(
                     commitment_tracker,
                     identity_pubkey,
                     cluster_info.clone(),
+                    blockstore,
                 )));
             let submitter: Option<Arc<dyn TransactionSubmitter>> =
                 cluster_info.map(|ci| -> Arc<dyn TransactionSubmitter> {
@@ -2129,6 +2131,7 @@ struct ConsensusBankAccessProvider {
     execution_backend: SbpfBackend,
     identity: [u8; 32],
     cluster_info: Option<Arc<ClusterInfo>>,
+    blockstore: Option<Arc<Blockstore>>,
 }
 
 impl ConsensusBankAccessProvider {
@@ -2137,6 +2140,7 @@ impl ConsensusBankAccessProvider {
         commitment_tracker: Option<Arc<Mutex<CommitmentTracker>>>,
         identity: [u8; 32],
         cluster_info: Option<Arc<ClusterInfo>>,
+        blockstore: Option<Arc<Blockstore>>,
     ) -> Self {
         Self {
             bank_forks,
@@ -2144,6 +2148,7 @@ impl ConsensusBankAccessProvider {
             execution_backend: SbpfBackend::new(),
             identity,
             cluster_info,
+            blockstore,
         }
     }
 
@@ -2454,6 +2459,45 @@ impl BankAccessProvider for ConsensusBankAccessProvider {
             })
             .collect()
     }
+
+    fn get_confirmed_blocks(&self, start_slot: u64, end_slot: u64) -> Vec<u64> {
+        let bs = match self.blockstore.as_ref() {
+            Some(bs) => bs,
+            None => return Vec::new(),
+        };
+        // slot_range returns all slots that have metadata in the range.
+        // Filter to only include root (confirmed/finalized) slots.
+        bs.slot_range(start_slot, end_slot)
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|slot| bs.is_root(*slot))
+            .collect()
+    }
+
+    fn get_block_time(&self, slot: u64) -> Option<i64> {
+        let bs = self.blockstore.as_ref()?;
+        let meta = bs.get_slot_meta(slot).ok()??;
+        let ts = meta.first_shred_timestamp;
+        if ts > 0 {
+            Some(ts)
+        } else {
+            None
+        }
+    }
+
+    fn has_slot(&self, slot: u64) -> bool {
+        let bs = match self.blockstore.as_ref() {
+            Some(bs) => bs,
+            None => return false,
+        };
+        bs.get_slot_meta(slot).ok().flatten().is_some()
+    }
+
+    fn get_parent_slot(&self, slot: u64) -> Option<u64> {
+        let bs = self.blockstore.as_ref()?;
+        let meta = bs.get_slot_meta(slot).ok()??;
+        meta.parent_slot
+    }
 }
 
 /// Forwards transactions to the current leader's TPU socket via UDP.
@@ -2548,6 +2592,7 @@ pub fn run_runtime_phase(
         None,
         None,
         [0u8; 32],
+        None,
     )
 }
 
@@ -2558,6 +2603,7 @@ pub fn run_runtime_phase(
 /// file on disk. The optional `commitment_tracker` enables proper
 /// commitment-level resolution for confirmed slots. When `cluster_info`
 /// is provided, the RPC server can forward transactions to leaders.
+#[allow(clippy::too_many_arguments)]
 pub fn run_runtime_phase_with_consensus(
     node_config: &NodeConfig,
     startup_services: &mut [Box<dyn Service>],
@@ -2566,6 +2612,7 @@ pub fn run_runtime_phase_with_consensus(
     commitment_tracker: Option<Arc<Mutex<CommitmentTracker>>>,
     cluster_info: Option<Arc<ClusterInfo>>,
     identity_pubkey: [u8; 32],
+    blockstore: Option<Arc<Blockstore>>,
 ) -> Result<()> {
     run_startup_checks(node_config, startup_services, "startup", 0)?;
     maybe_start_metrics_http_bridge(node_config)?;
@@ -2575,6 +2622,7 @@ pub fn run_runtime_phase_with_consensus(
         commitment_tracker,
         cluster_info,
         identity_pubkey,
+        blockstore,
     )?;
     println!(
         "{}",

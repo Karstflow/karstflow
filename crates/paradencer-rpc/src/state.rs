@@ -139,6 +139,32 @@ pub trait BankAccessProvider: Send + Sync {
     fn get_cluster_nodes(&self) -> Vec<RpcClusterNode> {
         Vec::new()
     }
+
+    /// Get confirmed/rooted slots within a range.
+    ///
+    /// Returns slot numbers that have been confirmed in the blockstore.
+    /// When blockstore is unavailable, returns empty.
+    fn get_confirmed_blocks(&self, _start_slot: u64, _end_slot: u64) -> Vec<u64> {
+        Vec::new()
+    }
+
+    /// Get the block time (unix timestamp) for a given slot.
+    ///
+    /// Returns the timestamp recorded when the first shred for this slot
+    /// was received. Returns `None` if the slot is not in the blockstore.
+    fn get_block_time(&self, _slot: u64) -> Option<i64> {
+        None
+    }
+
+    /// Check whether a slot exists in the blockstore.
+    fn has_slot(&self, _slot: u64) -> bool {
+        false
+    }
+
+    /// Get the parent slot for a given slot from the blockstore.
+    fn get_parent_slot(&self, _slot: u64) -> Option<u64> {
+        None
+    }
 }
 
 /// Contact information for a cluster node, returned by `get_cluster_nodes`.
