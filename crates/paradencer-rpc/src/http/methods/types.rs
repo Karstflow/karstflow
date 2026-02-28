@@ -327,3 +327,101 @@ pub struct BlockCommitmentResponse {
     #[serde(rename = "totalStake")]
     pub total_stake: u64,
 }
+
+// ── WebSocket notification types ──
+
+#[derive(Serialize, Debug, Clone)]
+pub struct SlotNotification {
+    pub parent: u64,
+    pub slot: u64,
+    pub root: u64,
+}
+
+#[derive(Serialize, Debug, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct AccountNotificationValue {
+    pub lamports: u64,
+    pub owner: String,
+    pub data: AccountData,
+    pub executable: bool,
+    pub rent_epoch: u64,
+    pub pubkey: String,
+    pub space: usize,
+}
+
+#[derive(Serialize, Debug, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct SignatureNotificationValue {
+    pub err: serde_json::Value,
+    pub confirmation_status: &'static str,
+    pub signature: String,
+}
+
+#[derive(Serialize, Debug, Clone)]
+pub struct VoteNotification {
+    pub hash: String,
+    pub slots: Vec<u64>,
+    pub timestamp: u128,
+}
+
+#[derive(Serialize, Debug, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct LogsNotificationValue {
+    pub signature: String,
+    pub err: serde_json::Value,
+    #[serde(rename = "logsFilter")]
+    pub logs_filter: String,
+    pub logs: Vec<String>,
+}
+
+#[derive(Serialize, Debug, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct ProgramNotificationAccount {
+    pub lamports: u64,
+    pub owner: String,
+    pub data: AccountData,
+    pub executable: bool,
+    pub rent_epoch: u64,
+}
+
+#[derive(Serialize, Debug, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct ProgramNotificationValue {
+    pub pubkey: String,
+    pub account: ProgramNotificationAccount,
+}
+
+#[derive(Serialize, Debug, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct ProgramNotificationSyntheticValue {
+    pub pubkey: String,
+    #[serde(rename = "filtersApplied")]
+    pub filters_applied: serde_json::Value,
+    pub account: ProgramNotificationAccount,
+}
+
+#[derive(Serialize, Debug, Clone)]
+pub struct SlotsUpdateNotification {
+    #[serde(rename = "type")]
+    pub update_type: &'static str,
+    pub slot: u64,
+    pub parent: u64,
+    pub timestamp: u128,
+}
+
+#[derive(Serialize, Debug, Clone)]
+pub struct ProgramFilterDataSize {
+    #[serde(rename = "dataSize")]
+    pub data_size: u64,
+}
+
+#[derive(Serialize, Debug, Clone)]
+pub struct ProgramFilterMemcmp {
+    pub memcmp: ProgramFilterMemcmpInner,
+}
+
+#[derive(Serialize, Debug, Clone)]
+pub struct ProgramFilterMemcmpInner {
+    pub offset: usize,
+    pub bytes: String,
+}

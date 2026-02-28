@@ -3,6 +3,11 @@ use super::params::{
     BlockSubscriptionFilter, BlockTransactionDetails, DataSlice, LogsSubscriptionFilter,
     ProgramAccountFilter, ProgramSubscriptionConfig, SignatureSubscriptionConfig,
 };
+use crate::http::methods::types::{
+    self, AccountData, AccountNotificationValue, LogsNotificationValue, ProgramNotificationAccount,
+    ProgramNotificationSyntheticValue, ProgramNotificationValue, RpcResponse,
+    SignatureNotificationValue, SlotNotification, SlotsUpdateNotification, VoteNotification,
+};
 use crate::state::{BankAccessProvider, RpcCommitment, RpcRuntimeSnapshot};
 use jsonrpsee::{core::SubscriptionResult, SubscriptionMessage};
 use serde_json::json;
@@ -28,11 +33,12 @@ pub(super) async fn run_slot_subscription_loop(
                     continue;
                 }
                 last_emitted_slot = Some(slot);
-                let message = SubscriptionMessage::from_json(&json!({
-                    "parent": slot.saturating_sub(1),
-                    "slot": slot,
-                    "root": snapshot.slot_for_commitment(RpcCommitment::Finalized),
-                }))?;
+                let notification = SlotNotification {
+                    parent: slot.saturating_sub(1),
+                    slot,
+                    root: snapshot.slot_for_commitment(RpcCommitment::Finalized),
+                };
+                let message = SubscriptionMessage::from_json(&notification)?;
                 sink.send(message).await?;
             }
         }
@@ -98,19 +104,17 @@ pub(super) async fn run_account_subscription_loop(
                     if let Some(account) = bank.get_account(pk, commitment) {
                         let owner = account.meta.owner.to_string();
                         let data_bytes = account.data.as_slice();
-                        let encoded = encode_account_data(data_bytes, config.data_encoding(), config.data_slice());
-                        let message = SubscriptionMessage::from_json(&json!({
-                            "context": {"slot": slot},
-                            "value": {
-                                "lamports": account.meta.lamports,
-                                "owner": owner,
-                                "data": encoded,
-                                "executable": account.meta.executable,
-                                "rentEpoch": account.meta.rent_epoch,
-                                "pubkey": pubkey,
-                                "space": data_bytes.len()
-                            }
-                        }))?;
+                        let encoded = encode_account_data_typed(data_bytes, config.data_encoding(), config.data_slice());
+                        let notification = RpcResponse::new(slot, AccountNotificationValue {
+                            lamports: account.meta.lamports,
+                            owner,
+                            data: encoded,
+                            executable: account.meta.executable,
+                            rent_epoch: account.meta.rent_epoch,
+                            pubkey: pubkey.clone(),
+                            space: data_bytes.len(),
+                        });
+                        let message = SubscriptionMessage::from_json(&notification)?;
                         sink.send(message).await?;
                         continue;
                     }
@@ -123,31 +127,27 @@ pub(super) async fn run_account_subscription_loop(
                 let full_data = format!("{:016x}", pubkey_checksum.wrapping_add(slot));
                 let sliced_data = apply_data_slice(&full_data, config.data_slice());
                 let data_payload = match config.data_encoding() {
-                    AccountDataEncoding::Base58 => json!([sliced_data, "base58"]),
-                    AccountDataEncoding::Base64 => json!([sliced_data, "base64"]),
-                    AccountDataEncoding::Base64Zstd => json!([sliced_data, "base64+zstd"]),
-                    AccountDataEncoding::JsonParsed => json!({
-                        "program": "system",
-                        "parsed": {
+                    AccountDataEncoding::Base58 => AccountData::Encoded(sliced_data, "base58".into()),
+                    AccountDataEncoding::Base64 => AccountData::Encoded(sliced_data, "base64".into()),
+                    AccountDataEncoding::Base64Zstd => AccountData::Encoded(sliced_data, "base64+zstd".into()),
+                    AccountDataEncoding::JsonParsed => AccountData::JsonParsed {
+                        program: "system".into(),
+                        parsed: json!({
                             "type": "account",
-                            "info": {
-                                "data": sliced_data,
-                            }
-                        },
-                        "space": full_data.len(),
-                    }),
+                            "info": { "data": sliced_data }
+                        }),
+                    },
                 };
-                let message = SubscriptionMessage::from_json(&json!({
-                    "context": {"slot": slot},
-                    "value": {
-                        "lamports": lamports,
-                        "owner": "11111111111111111111111111111111",
-                        "data": data_payload,
-                        "executable": false,
-                        "rentEpoch": 0_u64,
-                        "pubkey": pubkey
-                    }
-                }))?;
+                let notification = RpcResponse::new(slot, AccountNotificationValue {
+                    lamports,
+                    owner: "11111111111111111111111111111111".into(),
+                    data: data_payload,
+                    executable: false,
+                    rent_epoch: 0,
+                    pubkey: pubkey.clone(),
+                    space: full_data.len(),
+                });
+                let message = SubscriptionMessage::from_json(&notification)?;
                 sink.send(message).await?;
             }
         }
@@ -199,19 +199,12 @@ pub(super) async fn run_signature_subscription_loop(
                         let err = status.error.as_ref()
                             .map(|e| json!({"InstructionError": e}))
                             .unwrap_or(serde_json::Value::Null);
-                        let value = json!({
-                            "err": err,
-                            "confirmationStatus": match commitment {
-                                RpcCommitment::Processed => "processed",
-                                RpcCommitment::Confirmed => "confirmed",
-                                RpcCommitment::Finalized => "finalized",
-                            },
-                            "signature": signature
+                        let notification = RpcResponse::new(status.slot, SignatureNotificationValue {
+                            err,
+                            confirmation_status: commitment_str(commitment),
+                            signature: signature.clone(),
                         });
-                        let message = SubscriptionMessage::from_json(&json!({
-                            "context": {"slot": status.slot},
-                            "value": value
-                        }))?;
+                        let message = SubscriptionMessage::from_json(&notification)?;
                         sink.send(message).await?;
                         continue;
                     }
@@ -228,23 +221,25 @@ pub(super) async fn run_signature_subscription_loop(
                 {
                     serde_json::Value::String("receivedSignature".to_string())
                 } else {
-                    json!({
-                        "err": serde_json::Value::Null,
-                        "confirmationStatus": match commitment {
-                            RpcCommitment::Processed => "processed",
-                            RpcCommitment::Confirmed => "confirmed",
-                            RpcCommitment::Finalized => "finalized",
-                        },
-                        "signature": signature
+                    types::to_value(&SignatureNotificationValue {
+                        err: serde_json::Value::Null,
+                        confirmation_status: commitment_str(commitment),
+                        signature: signature.clone(),
                     })
                 };
-                let message = SubscriptionMessage::from_json(&json!({
-                    "context": {"slot": status_slot},
-                    "value": value
-                }))?;
+                let notification = RpcResponse::new(status_slot, value);
+                let message = SubscriptionMessage::from_json(&notification)?;
                 sink.send(message).await?;
             }
         }
+    }
+}
+
+fn commitment_str(commitment: RpcCommitment) -> &'static str {
+    match commitment {
+        RpcCommitment::Processed => "processed",
+        RpcCommitment::Confirmed => "confirmed",
+        RpcCommitment::Finalized => "finalized",
     }
 }
 
@@ -268,11 +263,12 @@ pub(super) async fn run_vote_subscription_loop(
                     continue;
                 }
                 last_emitted_slot = Some(slot);
-                let message = SubscriptionMessage::from_json(&json!({
-                    "hash": format!("{:016x}", snapshot.blockhash_seed_for_commitment(commitment)),
-                    "slots": [slot.saturating_sub(1), slot, slot.saturating_add(1)],
-                    "timestamp": snapshot.uptime_millis,
-                }))?;
+                let notification = VoteNotification {
+                    hash: format!("{:016x}", snapshot.blockhash_seed_for_commitment(commitment)),
+                    slots: vec![slot.saturating_sub(1), slot, slot.saturating_add(1)],
+                    timestamp: snapshot.uptime_millis,
+                };
+                let message = SubscriptionMessage::from_json(&notification)?;
                 sink.send(message).await?;
             }
         }
@@ -313,18 +309,16 @@ pub(super) async fn run_logs_subscription_loop(
                     snapshot.blockhash_seed_for_commitment(commitment),
                     filter_checksum ^ slot
                 );
-                let message = SubscriptionMessage::from_json(&json!({
-                    "context": {"slot": slot},
-                    "value": {
-                        "signature": signature,
-                        "err": serde_json::Value::Null,
-                        "logsFilter": filter_name,
-                        "logs": [
-                            format!("Program log: filter={filter_name}"),
-                            format!("Program log: slot={slot}"),
-                        ]
-                    }
-                }))?;
+                let notification = RpcResponse::new(slot, LogsNotificationValue {
+                    signature,
+                    err: serde_json::Value::Null,
+                    logs_filter: filter_name.clone(),
+                    logs: vec![
+                        format!("Program log: filter={filter_name}"),
+                        format!("Program log: slot={slot}"),
+                    ],
+                });
+                let message = SubscriptionMessage::from_json(&notification)?;
                 sink.send(message).await?;
             }
         }
@@ -364,24 +358,20 @@ pub(super) async fn run_program_subscription_loop(
                 if let (Some(bank), Some(ref owner)) = (bank_access, &parsed_owner) {
                     let accounts = bank.get_accounts_by_owner(owner, commitment);
                     if !accounts.is_empty() {
-                        // Emit first matching account (simplified — full implementation
-                        // would track changes per-account and emit deltas).
                         if let Some((pubkey, account)) = accounts.first() {
                             let data_bytes = account.data.as_slice();
-                            let encoded = encode_account_data(data_bytes, config.data_encoding(), config.data_slice());
-                            let message = SubscriptionMessage::from_json(&json!({
-                                "context": {"slot": slot},
-                                "value": {
-                                    "pubkey": pubkey.to_string(),
-                                    "account": {
-                                        "lamports": account.meta.lamports,
-                                        "owner": program_id,
-                                        "data": encoded,
-                                        "executable": account.meta.executable,
-                                        "rentEpoch": account.meta.rent_epoch,
-                                    }
-                                }
-                            }))?;
+                            let encoded = encode_account_data_typed(data_bytes, config.data_encoding(), config.data_slice());
+                            let notification = RpcResponse::new(slot, ProgramNotificationValue {
+                                pubkey: pubkey.to_string(),
+                                account: ProgramNotificationAccount {
+                                    lamports: account.meta.lamports,
+                                    owner: program_id.clone(),
+                                    data: encoded,
+                                    executable: account.meta.executable,
+                                    rent_epoch: account.meta.rent_epoch,
+                                },
+                            });
+                            let message = SubscriptionMessage::from_json(&notification)?;
                             sink.send(message).await?;
                             continue;
                         }
@@ -397,34 +387,32 @@ pub(super) async fn run_program_subscription_loop(
                 let full_data = format!("{:016x}", program_checksum.wrapping_add(slot));
                 let sliced_data = apply_data_slice(&full_data, config.data_slice());
                 let data_payload = match config.data_encoding() {
-                    AccountDataEncoding::Base58 => json!([sliced_data, "base58"]),
-                    AccountDataEncoding::Base64 => json!([sliced_data, "base64"]),
-                    AccountDataEncoding::Base64Zstd => json!([sliced_data, "base64+zstd"]),
-                    AccountDataEncoding::JsonParsed => json!({
-                        "program": "spl-token",
-                        "parsed": {
+                    AccountDataEncoding::Base58 => AccountData::Encoded(sliced_data, "base58".into()),
+                    AccountDataEncoding::Base64 => AccountData::Encoded(sliced_data, "base64".into()),
+                    AccountDataEncoding::Base64Zstd => AccountData::Encoded(sliced_data, "base64+zstd".into()),
+                    AccountDataEncoding::JsonParsed => AccountData::JsonParsed {
+                        program: "spl-token".into(),
+                        parsed: json!({
                             "type": "account",
-                            "info": {
-                                "data": sliced_data,
-                            }
-                        },
-                        "space": full_data.len(),
-                    }),
+                            "info": { "data": sliced_data }
+                        }),
+                    },
                 };
-                let message = SubscriptionMessage::from_json(&json!({
-                    "context": {"slot": slot},
-                    "value": {
-                        "pubkey": account_pubkey,
-                        "filtersApplied": filters_applied,
-                        "account": {
-                            "lamports": 1_000_000_u64.saturating_add(program_checksum % 25_000).saturating_add(slot % 2_000),
-                            "owner": program_id,
-                            "data": data_payload,
-                            "executable": false,
-                            "rentEpoch": 0_u64,
-                        }
-                    }
-                }))?;
+                let lamports = 1_000_000_u64
+                    .saturating_add(program_checksum % 25_000)
+                    .saturating_add(slot % 2_000);
+                let notification = RpcResponse::new(slot, ProgramNotificationSyntheticValue {
+                    pubkey: account_pubkey,
+                    filters_applied: filters_applied.clone(),
+                    account: ProgramNotificationAccount {
+                        lamports,
+                        owner: program_id.clone(),
+                        data: data_payload,
+                        executable: false,
+                        rent_epoch: 0,
+                    },
+                });
+                let message = SubscriptionMessage::from_json(&notification)?;
                 sink.send(message).await?;
             }
         }
@@ -451,11 +439,11 @@ fn parse_signature_bytes(encoded: &str) -> Option<[u8; 64]> {
     Some(sig)
 }
 
-fn encode_account_data(
+fn encode_account_data_typed(
     data: &[u8],
     encoding: AccountDataEncoding,
     data_slice: Option<DataSlice>,
-) -> serde_json::Value {
+) -> AccountData {
     use base64::Engine;
     let sliced = if let Some(slice) = data_slice {
         let start = slice.offset.min(data.len());
@@ -466,7 +454,7 @@ fn encode_account_data(
     };
     match encoding {
         AccountDataEncoding::Base58 => {
-            json!([bs58::encode(sliced).into_string(), "base58"])
+            AccountData::Encoded(bs58::encode(sliced).into_string(), "base58".into())
         }
         AccountDataEncoding::Base64 | AccountDataEncoding::Base64Zstd => {
             let label = if matches!(encoding, AccountDataEncoding::Base64Zstd) {
@@ -474,17 +462,15 @@ fn encode_account_data(
             } else {
                 "base64"
             };
-            json!([
+            AccountData::Encoded(
                 base64::engine::general_purpose::STANDARD.encode(sliced),
-                label
-            ])
+                label.into(),
+            )
         }
-        AccountDataEncoding::JsonParsed => {
-            json!([
-                base64::engine::general_purpose::STANDARD.encode(sliced),
-                "base64"
-            ])
-        }
+        AccountDataEncoding::JsonParsed => AccountData::Encoded(
+            base64::engine::general_purpose::STANDARD.encode(sliced),
+            "base64".into(),
+        ),
     }
 }
 
@@ -492,9 +478,18 @@ fn render_program_filters(filters: &[ProgramAccountFilter]) -> serde_json::Value
     let rendered: Vec<serde_json::Value> = filters
         .iter()
         .map(|filter| match filter {
-            ProgramAccountFilter::DataSize(data_size) => json!({"dataSize": data_size}),
+            ProgramAccountFilter::DataSize(data_size) => {
+                types::to_value(&types::ProgramFilterDataSize {
+                    data_size: *data_size,
+                })
+            }
             ProgramAccountFilter::Memcmp { offset, bytes } => {
-                json!({"memcmp": {"offset": offset, "bytes": bytes}})
+                types::to_value(&types::ProgramFilterMemcmp {
+                    memcmp: types::ProgramFilterMemcmpInner {
+                        offset: *offset,
+                        bytes: bytes.clone(),
+                    },
+                })
             }
         })
         .collect();
@@ -520,12 +515,13 @@ pub(super) async fn run_slots_updates_subscription_loop(
                     continue;
                 }
                 last_emitted_slot = Some(slot);
-                let message = SubscriptionMessage::from_json(&json!({
-                    "type": "completed",
-                    "slot": slot,
-                    "parent": slot.saturating_sub(1),
-                    "timestamp": snapshot.uptime_millis,
-                }))?;
+                let notification = SlotsUpdateNotification {
+                    update_type: "completed",
+                    slot,
+                    parent: slot.saturating_sub(1),
+                    timestamp: snapshot.uptime_millis,
+                };
+                let message = SubscriptionMessage::from_json(&notification)?;
                 sink.send(message).await?;
             }
         }
@@ -613,7 +609,7 @@ pub(super) async fn run_block_subscription_loop(
                     },
                     "filter": match &filter {
                         BlockSubscriptionFilter::All => serde_json::Value::String("all".to_string()),
-                        BlockSubscriptionFilter::MentionsAccountOrProgram(value) => serde_json::json!({
+                        BlockSubscriptionFilter::MentionsAccountOrProgram(value) => json!({
                             "mentionsAccountOrProgram": value
                         }),
                     }
