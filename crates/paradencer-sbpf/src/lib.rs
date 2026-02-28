@@ -43,6 +43,7 @@ pub mod validation;
 mod vm;
 mod vote;
 mod zk_elgamal_proof;
+mod zk_proofs;
 
 pub use address_lookup_table::{
     AddressLookupTableExecutor, LookupTable, LookupTableMeta, LookupTableStatus,

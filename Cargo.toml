@@ -54,7 +54,7 @@ tiny-keccak = { version = "2", features = ["keccak"] }
 k256 = { version = "0.13", features = ["ecdsa"] }
 p256 = { version = "0.13", features = ["ecdsa"] }
 substrate-bn = "0.6"
-curve25519-dalek = { version = "4.1", default-features = false }
+curve25519-dalek = { version = "4.1", default-features = false, features = ["alloc"] }
 light-poseidon = "0.2"
 ark-bn254 = "0.4"
 blst = "0.3"
@@ -69,6 +69,11 @@ serde-big-array = "0.5"
 
 # Compression
 zstd = "0.13"
+
+# ZK proof verification
+merlin = "3"
+sha3 = "0.10"
+subtle = "2.6"
 
 # Random
 rand = "0.8"

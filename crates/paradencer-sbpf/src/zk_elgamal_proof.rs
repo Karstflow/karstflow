@@ -187,20 +187,24 @@ impl ZkElGamalProofExecutor {
 
     /// Process a proof verification instruction.
     ///
-    /// Currently returns an error indicating proof verification is not yet
-    /// implemented (requires solana-zk-sdk integration). The program will
-    /// be rejected by the feature gate until enabled on the network.
+    /// Verifies the ZK proof and optionally writes the proof context to a
+    /// context state account. The proof data can come from instruction data
+    /// or from a referenced account.
     ///
-    /// TODO: Integrate solana-zk-sdk for actual proof verification.
+    /// Accounts (when writing context state):
+    ///   0. [writable] Context state account (will be initialized)
+    ///   1. [signer]   Authority for the context state
     fn process_verify_proof(
         &self,
         context: &ExecutionContext,
         compute_units: u64,
     ) -> Result<ExecutionOutcome, String> {
+        let discriminant = context.instruction_data[0];
+
         // Proof data can come from instruction data or an account.
         // If instruction data is exactly 5 bytes (1 discriminant + 4 u32 offset),
         // the proof data is read from an account at the given offset.
-        let _proof_data = if context.instruction_data.len() == 5 {
+        let proof_data = if context.instruction_data.len() == 5 {
             // Read proof from account.
             if context.accounts.is_empty() {
                 return Err("proof data account required".to_string());
@@ -221,13 +225,58 @@ impl ZkElGamalProofExecutor {
             return Err("proof data required".to_string());
         };
 
-        // TODO: Deserialize proof data based on discriminant and call verify_proof().
-        // This requires integrating solana-zk-sdk which provides the ZkProofData<T>
-        // trait with verify_proof() for each proof type.
-        //
-        // For now, return an error. The program is feature-gated and will only be
-        // called when the feature is enabled on the network.
-        Err("ZK proof verification not yet implemented".to_string())
+        // Verify the proof cryptographically.
+        let context_bytes = crate::zk_proofs::verify_proof(discriminant, proof_data)
+            .map_err(|e| format!("proof verification failed: {e}"))?;
+
+        // If a context state account is provided, write the proof context to it.
+        // Account layout: [ProofContextStateMeta (40 bytes)] [context_bytes]
+        //   ProofContextStateMeta: proof_type (1) + padding (7) + authority (32)
+        let mut outcome = ExecutionOutcome::success(compute_units);
+
+        // Determine if we should write context state.
+        // When proof data is inline (len > 5), accounts[0] is context state, accounts[1] is authority.
+        // When proof data is from account, accounts[1] is context state, accounts[2] is authority.
+        let (ctx_account_idx, auth_account_idx) = if context.instruction_data.len() == 5 {
+            (1usize, 2usize)
+        } else {
+            (0usize, 1usize)
+        };
+
+        if context.accounts.len() > auth_account_idx {
+            let (ctx_pubkey, ctx_account, ctx_writable) = &context.accounts[ctx_account_idx];
+            let (auth_pubkey, _auth_account, auth_signer) = &context.accounts[auth_account_idx];
+
+            if !ctx_writable {
+                return Err("context state account must be writable".to_string());
+            }
+            if !auth_signer {
+                return Err("authority must be signer".to_string());
+            }
+
+            // Context state account must be owned by the ZK proof program.
+            if ctx_account.meta.owner != ZK_ELGAMAL_PROOF_PROGRAM_ID {
+                return Err("context state account not owned by ZK proof program".to_string());
+            }
+
+            // Build context state data: meta (40 bytes) + context
+            let total_size = PROOF_CONTEXT_STATE_META_SIZE + context_bytes.len();
+            let mut data = vec![0u8; total_size];
+
+            // Write proof type
+            data[0] = discriminant;
+            // Padding bytes [1..8] are zero
+            // Write authority pubkey at offset 8
+            data[AUTHORITY_OFFSET..AUTHORITY_OFFSET + 32].copy_from_slice(auth_pubkey.as_bytes());
+            // Write context bytes
+            data[PROOF_CONTEXT_STATE_META_SIZE..].copy_from_slice(&context_bytes);
+
+            let modified_ctx =
+                Account::new(ctx_account.meta.lamports, data, ZK_ELGAMAL_PROOF_PROGRAM_ID);
+            outcome = outcome.with_modified_account(*ctx_pubkey, modified_ctx);
+        }
+
+        Ok(outcome)
     }
 }
 
@@ -373,13 +422,13 @@ mod tests {
     }
 
     #[test]
-    fn verify_proof_returns_not_implemented() {
+    fn verify_proof_rejects_invalid_data() {
         let executor = ZkElGamalProofExecutor::new(100);
-        // Discriminant 1 = VerifyZeroCiphertext, with some proof data.
+        // Discriminant 1 = VerifyZeroCiphertext, with insufficient proof data.
         let ctx = make_context(vec![VERIFY_ZERO_CIPHERTEXT, 0, 0, 0, 0, 0], vec![]);
         let result = executor.execute(&ctx);
         assert!(result.is_err());
-        assert!(result.unwrap_err().contains("not yet implemented"));
+        assert!(result.unwrap_err().contains("proof verification failed"));
     }
 
     #[test]
