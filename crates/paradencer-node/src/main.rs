@@ -363,6 +363,9 @@ fn run_with_node_config(
     // Uses the gossip-derived identity and cluster state to route shreds
     // through the turbine tree.
     let turbine_bundle = build_turbine_service(node_id, cluster_info.clone())?;
+    // Keep retransmit handle alive — its Arc prevents the transport socket
+    // from closing. Cross-service shred submission will use this handle
+    // once the ShredNetworkService retransmit channel is connected.
     let _retransmit = turbine_bundle.retransmit;
 
     // Build the repair service for slot recovery from peers.
@@ -394,6 +397,8 @@ fn run_with_node_config(
         shred_provider,
         shred_arrival_rx,
     )?;
+    // Keep repair I/O handle alive — its JoinHandle keeps the background
+    // UDP requester/server thread running for the repair service lifetime.
     let _repair_io = repair_bundle.io_handle;
 
     // Keep handles to consensus state for the live RPC provider.
@@ -462,8 +467,11 @@ fn run_with_node_config(
     services.push(turbine_bundle.service);
     services.push(repair_bundle.service);
     services.push(vote_broadcast_bundle.service);
-    if let Ok(bundle) = vote_sender_bundle {
-        services.push(bundle.service);
+    match vote_sender_bundle {
+        Ok(bundle) => services.push(bundle.service),
+        Err(ref e) => {
+            warn!(error = %e, "vote sender service unavailable, direct vote propagation disabled")
+        }
     }
 
     // Storage maintenance: periodic compaction and flush of the durable store.
