@@ -8,5 +8,5 @@ pub mod quic_tile;
 pub mod reassembly;
 
 pub use net_tile::NetworkTile;
-pub use quic_tile::QuicTile;
+pub use quic_tile::{QuicTile, QuicTransaction};
 pub use reassembly::TpuReassembler;
