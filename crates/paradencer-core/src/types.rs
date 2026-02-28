@@ -37,6 +37,9 @@ impl fmt::Display for IpcMode {
 pub enum ExecutionMode {
     Tokio,
     Pinned,
+    /// Tile execution: poll-driven spin-loop with CnC lifecycle,
+    /// heartbeat monitoring, and metrics — Firedancer-style.
+    Tile,
 }
 
 impl ExecutionMode {
@@ -44,6 +47,7 @@ impl ExecutionMode {
         match value.to_ascii_lowercase().as_str() {
             "tokio" => Some(Self::Tokio),
             "pinned" => Some(Self::Pinned),
+            "tile" => Some(Self::Tile),
             _ => None,
         }
     }
@@ -54,6 +58,7 @@ impl fmt::Display for ExecutionMode {
         match self {
             Self::Tokio => write!(f, "tokio"),
             Self::Pinned => write!(f, "pinned"),
+            Self::Tile => write!(f, "tile"),
         }
     }
 }

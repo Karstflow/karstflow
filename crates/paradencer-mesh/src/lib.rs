@@ -10,6 +10,7 @@ pub use codec::FragmentCodec;
 pub use dual::{dual_link, DualReceiveError, DualReceiver, DualSendError, DualSender, IpcBackend};
 pub use ports::{bounded_link, InPort, OutPort};
 pub use stats::ChannelStats;
+pub use tile::Tile;
 pub use types::{ChannelSnapshot, ReceiveError, SendError};
 
 // Type aliases for convenience

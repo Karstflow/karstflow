@@ -1,5 +1,6 @@
 use crate::affinity::{build_pinned_affinity_plan_from_available_cores, PinnedAssignmentSource};
 use crate::service::{Service, ServiceContext, ShutdownSwitch};
+use crate::tile_executor::run_tiles;
 use crate::{RuntimeError, RuntimeResult};
 use paradencer_core::{ExecutionMode, RuntimeSpec};
 use std::collections::HashMap;
@@ -40,6 +41,7 @@ pub fn run_services(spec: &RuntimeSpec, services: Vec<Box<dyn Service>>) -> Runt
     match spec.mode {
         ExecutionMode::Tokio => run_tokio(spec, services, stop_flag),
         ExecutionMode::Pinned => run_pinned(spec, services, stop_flag),
+        ExecutionMode::Tile => run_tiles(spec, services, stop_flag),
     }
 }
 

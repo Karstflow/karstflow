@@ -3279,14 +3279,18 @@ pub fn evaluate_mainnet_readiness(
     }
     if readiness_policy.require_pinned_runtime_mode {
         checks_total = checks_total.saturating_add(1);
-        if node_config.runtime_spec.mode != ExecutionMode::Pinned {
+        if node_config.runtime_spec.mode != ExecutionMode::Pinned
+            && node_config.runtime_spec.mode != ExecutionMode::Tile
+        {
             failed_checks.push(format!(
-                "runtime mode is '{}', expected 'pinned'",
+                "runtime mode is '{}', expected 'pinned' or 'tile'",
                 node_config.runtime_spec.mode
             ));
         }
     }
-    if node_config.runtime_spec.mode == ExecutionMode::Pinned {
+    if node_config.runtime_spec.mode == ExecutionMode::Pinned
+        || node_config.runtime_spec.mode == ExecutionMode::Tile
+    {
         if let Some(explicit_core_ids) = node_config.runtime_spec.pinned_service_core_ids.as_ref() {
             checks_total = checks_total.saturating_add(1);
             if explicit_core_ids.len() != diagnostics_summary.runtime_service_names.len() {

@@ -1729,6 +1729,7 @@ version = "0.1.0"
 dependencies = [
  "core_affinity",
  "paradencer-core",
+ "paradencer-mesh",
  "thiserror 2.0.18",
  "tokio",
  "tracing",

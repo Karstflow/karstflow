@@ -11,3 +11,4 @@ thiserror.workspace = true
 tokio.workspace = true
 core_affinity.workspace = true
 paradencer-core = { path = "../paradencer-core" }
+paradencer-mesh = { path = "../paradencer-mesh" }

@@ -19,7 +19,7 @@ pub fn build_pinned_affinity_plan(
     runtime_spec: &RuntimeSpec,
     service_count: usize,
 ) -> RuntimeResult<Option<PinnedAffinityPlan>> {
-    if runtime_spec.mode != ExecutionMode::Pinned {
+    if runtime_spec.mode != ExecutionMode::Pinned && runtime_spec.mode != ExecutionMode::Tile {
         return Ok(None);
     }
     let available_core_ids = core_affinity::get_core_ids()
