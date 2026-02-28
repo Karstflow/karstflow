@@ -7,11 +7,12 @@ use paradencer_mesh::{bounded_link, DualReceiver, DualSender};
 use paradencer_net::IngressPolicy;
 use paradencer_runtime::Service;
 use paradencer_stages::{
-    shared_metrics_content, AssembledBlock, BlockAssembler, BlockAssemblyStats, CompletedFecSet,
-    EdgeIntake, InboundPacket, IngressFilterStats, LinkTelemetryStats, MetricsContent,
-    MetricsOutputFormat, MetricsOutputTarget, MetricsReporter, RawTransaction,
-    SanitizedTransaction, ShredArrival, ShredCollector, ShredFilter, ShredFilterStats,
-    ShredNetworkConfig, ShredNetworkService, StageTelemetryStats, StorageRuntimePolicy, TxFilter,
+    shared_health_status, shared_metrics_content, AssembledBlock, BlockAssembler,
+    BlockAssemblyStats, CompletedFecSet, EdgeIntake, InboundPacket, IngressFilterStats,
+    LinkTelemetryStats, MetricsContent, MetricsOutputFormat, MetricsOutputTarget, MetricsReporter,
+    RawTransaction, SanitizedTransaction, SharedHealthStatus, ShredArrival, ShredCollector,
+    ShredFilter, ShredFilterStats, ShredNetworkConfig, ShredNetworkService, StageTelemetryStats,
+    StorageRuntimePolicy, TxFilter,
 };
 use paradencer_storage::Blockstore;
 use paradencer_types::shred::Shred;
@@ -146,6 +147,7 @@ pub fn materialize_services_with_blockstore(
     let mut shred_collector_added = false;
     let mut pipeline_inputs: Vec<paradencer_mesh::InPort<RawTransaction>> = Vec::new();
     let mut metrics_http_content: Option<MetricsContent> = None;
+    let mut health_status: Option<SharedHealthStatus> = None;
 
     for stage in &topology_spec.stages {
         match stage.stage_kind {
@@ -247,6 +249,10 @@ pub fn materialize_services_with_blockstore(
                     reporter = reporter.with_http_content(content.clone());
                     metrics_http_content = Some(content);
                 }
+                // Create shared health status for probe endpoints.
+                let hs = shared_health_status();
+                reporter = reporter.with_health(hs.clone());
+                health_status = Some(hs);
                 services.push(Box::new(reporter))
             }
             // Signature verification and blockhash resolution stages
@@ -285,5 +291,6 @@ pub fn materialize_services_with_blockstore(
             None
         },
         metrics_http_content,
+        health_status,
     })
 }

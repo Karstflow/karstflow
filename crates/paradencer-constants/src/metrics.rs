@@ -16,3 +16,7 @@ pub const METRICS_HTTP_READ_TIMEOUT_MS: u64 = 2_000;
 
 /// Write timeout for metrics HTTP connections in milliseconds.
 pub const METRICS_HTTP_WRITE_TIMEOUT_MS: u64 = 2_000;
+
+/// Maximum slot lag before the `/ready` probe reports not-ready.
+/// Validators within this many slots of the network tip are considered synced.
+pub const READY_SLOT_LAG_THRESHOLD: u64 = 128;

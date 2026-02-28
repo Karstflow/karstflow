@@ -1,7 +1,9 @@
 use paradencer_core::{IpcMode, TopologySpec};
 use paradencer_mesh::{InPort, OutPort};
 use paradencer_runtime::Service;
-use paradencer_stages::{AssembledBlock, MetricsContent, RawTransaction, ShredArrival};
+use paradencer_stages::{
+    AssembledBlock, MetricsContent, RawTransaction, SharedHealthStatus, ShredArrival,
+};
 use paradencer_types::shred::Shred;
 
 pub struct MaterializedTopology {
@@ -27,4 +29,7 @@ pub struct MaterializedTopology {
     /// Present when metrics output target is `Http`. Pass this to
     /// `MetricsHttpServer` to serve Prometheus metrics over HTTP.
     pub metrics_http_content: Option<MetricsContent>,
+    /// Shared health status for `/health`, `/ready`, `/alive` probe endpoints.
+    /// Pass this to `MetricsHttpServer` via `.with_health()`.
+    pub health_status: Option<SharedHealthStatus>,
 }

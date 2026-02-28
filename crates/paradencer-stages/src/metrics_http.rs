@@ -13,9 +13,10 @@ use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use crate::health::SharedHealthStatus;
 use paradencer_constants::metrics::{
     MAX_METRICS_HTTP_CONNECTIONS, MAX_METRICS_REQUEST_SIZE, METRICS_HTTP_READ_TIMEOUT_MS,
-    METRICS_HTTP_WRITE_TIMEOUT_MS,
+    METRICS_HTTP_WRITE_TIMEOUT_MS, READY_SLOT_LAG_THRESHOLD,
 };
 
 /// Shared metrics content buffer updated by the reporter and read by
@@ -54,6 +55,7 @@ pub struct MetricsHttpStats {
 pub struct MetricsHttpServer {
     listener: TcpListener,
     content: MetricsContent,
+    health: Option<SharedHealthStatus>,
     stats: MetricsHttpStats,
     active_connections: usize,
 }
@@ -69,9 +71,16 @@ impl MetricsHttpServer {
         Ok(Self {
             listener,
             content,
+            health: None,
             stats: MetricsHttpStats::default(),
             active_connections: 0,
         })
+    }
+
+    /// Attach a shared health status for `/health`, `/ready`, and `/alive` endpoints.
+    pub fn with_health(mut self, health: SharedHealthStatus) -> Self {
+        self.health = Some(health);
+        self
     }
 
     /// The local address the server is listening on.
@@ -165,7 +174,35 @@ impl MetricsHttpServer {
                     self.stats.requests_failed += 1;
                 }
             }
-            "/" | "/health" => {
+            "/health" => {
+                let (status, body) = match &self.health {
+                    Some(h) => (200, h.to_json()),
+                    None => (200, r#"{"status":"ok"}"#.to_string()),
+                };
+                let _ = write_response(&mut stream, status, "application/json", &body);
+                self.stats.requests_ok += 1;
+            }
+            "/ready" => {
+                let (status, body) = match &self.health {
+                    Some(h) if h.is_ready(READY_SLOT_LAG_THRESHOLD) => {
+                        (200, r#"{"ready":true}"#.to_string())
+                    }
+                    Some(h) => (
+                        503,
+                        format!(r#"{{"ready":false,"slot_lag":{}}}"#, h.slot_lag()),
+                    ),
+                    None => (200, r#"{"ready":true}"#.to_string()),
+                };
+                let _ = write_response(&mut stream, status, "application/json", &body);
+                self.stats.requests_ok += 1;
+            }
+            "/alive" => {
+                let heartbeat = self.health.as_ref().map_or(0, |h| h.heartbeat());
+                let body = format!(r#"{{"alive":true,"heartbeat":{heartbeat}}}"#);
+                let _ = write_response(&mut stream, 200, "application/json", &body);
+                self.stats.requests_ok += 1;
+            }
+            "/" => {
                 let _ = write_response(&mut stream, 200, "text/plain", "ok\n");
                 self.stats.requests_ok += 1;
             }
@@ -199,6 +236,7 @@ fn write_response(
         400 => "Bad Request",
         404 => "Not Found",
         405 => "Method Not Allowed",
+        503 => "Service Unavailable",
         _ => "Unknown",
     };
 
@@ -423,5 +461,109 @@ mod tests {
         // Should return immediately without error.
         server.poll();
         assert_eq!(server.stats().requests_total, 0);
+    }
+
+    #[test]
+    fn health_returns_json_with_health_state() {
+        let shared = shared_metrics_content();
+        let health = crate::health::shared_health_status();
+        health.update(42, 20, 500, 4, 10_000);
+        health.set_status("running");
+        let mut server = MetricsHttpServer::bind("127.0.0.1:0".parse().unwrap(), shared)
+            .unwrap()
+            .with_health(health);
+        let addr = server.local_addr().unwrap();
+
+        let handle = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(50));
+            server.poll();
+            server
+        });
+
+        std::thread::sleep(Duration::from_millis(10));
+        let (status, body) = http_get(addr, "/health");
+        let _ = handle.join().unwrap();
+
+        assert_eq!(status, 200);
+        let parsed: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(parsed["status"], "running");
+        assert_eq!(parsed["slot"], 42);
+    }
+
+    #[test]
+    fn ready_returns_200_when_synced() {
+        let shared = shared_metrics_content();
+        let health = crate::health::shared_health_status();
+        health.update(195, 90, 2000, 5, 30_000);
+        health.set_network_slot(200);
+        let mut server = MetricsHttpServer::bind("127.0.0.1:0".parse().unwrap(), shared)
+            .unwrap()
+            .with_health(health);
+        let addr = server.local_addr().unwrap();
+
+        let handle = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(50));
+            server.poll();
+            server
+        });
+
+        std::thread::sleep(Duration::from_millis(10));
+        let (status, body) = http_get(addr, "/ready");
+        let _ = handle.join().unwrap();
+
+        assert_eq!(status, 200);
+        assert!(body.contains(r#""ready":true"#));
+    }
+
+    #[test]
+    fn ready_returns_503_when_behind() {
+        let shared = shared_metrics_content();
+        let health = crate::health::shared_health_status();
+        health.update(10, 5, 100, 3, 5_000);
+        health.set_network_slot(500);
+        let mut server = MetricsHttpServer::bind("127.0.0.1:0".parse().unwrap(), shared)
+            .unwrap()
+            .with_health(health);
+        let addr = server.local_addr().unwrap();
+
+        let handle = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(50));
+            server.poll();
+            server
+        });
+
+        std::thread::sleep(Duration::from_millis(10));
+        let (status, body) = http_get(addr, "/ready");
+        let _ = handle.join().unwrap();
+
+        assert_eq!(status, 503);
+        assert!(body.contains(r#""ready":false"#));
+        assert!(body.contains(r#""slot_lag""#));
+    }
+
+    #[test]
+    fn alive_returns_heartbeat() {
+        let shared = shared_metrics_content();
+        let health = crate::health::shared_health_status();
+        health.update(10, 5, 100, 3, 5_000);
+        health.update(11, 6, 110, 3, 6_000);
+        let mut server = MetricsHttpServer::bind("127.0.0.1:0".parse().unwrap(), shared)
+            .unwrap()
+            .with_health(health);
+        let addr = server.local_addr().unwrap();
+
+        let handle = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(50));
+            server.poll();
+            server
+        });
+
+        std::thread::sleep(Duration::from_millis(10));
+        let (status, body) = http_get(addr, "/alive");
+        let _ = handle.join().unwrap();
+
+        assert_eq!(status, 200);
+        assert!(body.contains(r#""alive":true"#));
+        assert!(body.contains(r#""heartbeat":2"#));
     }
 }

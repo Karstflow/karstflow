@@ -31,7 +31,8 @@ use paradencer_runtime::{build_pinned_affinity_plan, run_services, Service, Serv
 use paradencer_stages::{
     ExecutionErrorHandlingPolicy, MetricsContent, MetricsHttpServer, MetricsOutputTarget,
     PipelineHandle, PipelineServiceBuilder, PipelineServiceConfig, RawTransaction, ReplayService,
-    ReplayServiceConfig, SbpfExecutionAdapter, ShredArrival, ShredCollector, ShredCollectorConfig,
+    ReplayServiceConfig, SbpfExecutionAdapter, SharedHealthStatus, ShredArrival, ShredCollector,
+    ShredCollectorConfig,
 };
 use paradencer_storage::{
     AccountDatabase, Blockstore, MaintenanceConfig, Pubkey, SnapshotAction, SnapshotConfig,
@@ -51,6 +52,8 @@ pub struct ServiceBundle {
     /// Shared metrics content buffer from topology materialization.
     /// Present when metrics output target is `Http`.
     pub metrics_http_content: Option<MetricsContent>,
+    /// Shared health status for probe endpoints.
+    pub health_status: Option<SharedHealthStatus>,
 }
 
 pub struct MaterializedServicePair {
@@ -2014,6 +2017,7 @@ pub fn run_startup_checks_with_probe_report(
 pub fn maybe_start_metrics_http_bridge(
     node_config: &NodeConfig,
     metrics_content: Option<MetricsContent>,
+    health_status: Option<SharedHealthStatus>,
 ) -> Result<()> {
     if let Some(bind_addr) = node_config.metrics_http_bind {
         match &node_config.metrics_output_target {
@@ -2025,11 +2029,14 @@ pub fn maybe_start_metrics_http_bridge(
                     message: "Http metrics target requires shared content buffer from topology"
                         .into(),
                 })?;
-                let server = MetricsHttpServer::bind(bind_addr, content).map_err(|e| {
+                let mut server = MetricsHttpServer::bind(bind_addr, content).map_err(|e| {
                     ControlPlaneError::Bootstrap {
                         message: format!("failed to bind metrics HTTP server on {bind_addr}: {e}"),
                     }
                 })?;
+                if let Some(hs) = health_status {
+                    server = server.with_health(hs);
+                }
                 info!(addr = %bind_addr, "starting Prometheus metrics HTTP server");
                 std::thread::Builder::new()
                     .name("metrics-http".into())
@@ -3025,7 +3032,11 @@ pub fn run_runtime_phase_with_consensus(
     blockstore: Option<Arc<Blockstore>>,
 ) -> Result<()> {
     run_startup_checks(node_config, startup_services, "startup", 0)?;
-    maybe_start_metrics_http_bridge(node_config, runtime_bundle.metrics_http_content.clone())?;
+    maybe_start_metrics_http_bridge(
+        node_config,
+        runtime_bundle.metrics_http_content.clone(),
+        runtime_bundle.health_status.clone(),
+    )?;
     maybe_start_rpc_http_server_with_consensus(
         node_config,
         bank_forks,

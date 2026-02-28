@@ -391,6 +391,7 @@ fn run_with_node_config(
     );
 
     let metrics_http_content = runtime_topology.metrics_http_content.clone();
+    let health_status = runtime_topology.health_status.clone();
     let mut services = runtime_topology.services;
     services.push(replay_bundle.service);
     services.push(pipeline_bundle.service);
@@ -413,6 +414,7 @@ fn run_with_node_config(
             link_count: runtime_topology.topology_spec.links.len(),
             services,
             metrics_http_content,
+            health_status,
         },
         Some(rpc_bank_forks),
         Some(rpc_commitment_tracker),

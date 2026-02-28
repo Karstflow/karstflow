@@ -9,7 +9,7 @@ fn maybe_start_metrics_http_bridge_rejects_non_file_metrics_target() {
     node_config.metrics_http_bind = Some("127.0.0.1:0".parse().unwrap());
     node_config.metrics_output_target = paradencer_stages::MetricsOutputTarget::Stdout;
 
-    let result = maybe_start_metrics_http_bridge(&node_config, None);
+    let result = maybe_start_metrics_http_bridge(&node_config, None, None);
     assert!(result.is_err());
 }
 
@@ -20,7 +20,7 @@ fn metrics_http_bridge_starts_with_http_target_and_content() {
     node_config.metrics_output_target = paradencer_stages::MetricsOutputTarget::Http;
 
     let content = paradencer_stages::shared_metrics_content();
-    let result = maybe_start_metrics_http_bridge(&node_config, Some(content));
+    let result = maybe_start_metrics_http_bridge(&node_config, Some(content), None);
     assert!(result.is_ok());
 }
 
@@ -30,7 +30,7 @@ fn metrics_http_bridge_fails_http_target_without_content() {
     node_config.metrics_http_bind = Some("127.0.0.1:0".parse().unwrap());
     node_config.metrics_output_target = paradencer_stages::MetricsOutputTarget::Http;
 
-    let result = maybe_start_metrics_http_bridge(&node_config, None);
+    let result = maybe_start_metrics_http_bridge(&node_config, None, None);
     assert!(result.is_err());
 }
 

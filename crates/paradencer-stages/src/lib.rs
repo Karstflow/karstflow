@@ -27,6 +27,7 @@ mod exec_stage;
 mod execution_adapter;
 mod fec_cache;
 mod fec_resolver;
+pub mod health;
 #[cfg(test)]
 mod integration_tests;
 mod leader_pipeline;
@@ -62,6 +63,7 @@ pub use dedup_stage::{DedupOutcome, DedupStage, DedupStats, TransactionCache};
 pub use edge_intake::EdgeIntake;
 pub use errors::StageError;
 pub use execution_adapter::SbpfExecutionAdapter;
+pub use health::{shared_health_status, SharedHealthStatus};
 pub use metrics_aggregator::{
     AggregatedSnapshot, DedupSnapshot, FecCacheSnapshot, FecResolverSnapshot, MetricsAggregator,
 };

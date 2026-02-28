@@ -2,15 +2,17 @@ mod format;
 mod sink;
 
 use crate::errors::StageError;
+use crate::health::SharedHealthStatus;
 use crate::metrics_aggregator::MetricsAggregator;
 use crate::metrics_http::MetricsContent;
 use crate::{
     BlockAssemblyStats, IngressFilterStats, MetricsOutputFormat, MetricsOutputTarget,
     ShredFilterStats,
 };
+use paradencer_consensus::BankForks;
 use paradencer_mesh::{ChannelSnapshot, ChannelStats};
 use paradencer_runtime::{RuntimeError, RuntimeResult, Service, ServiceContext};
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
 pub struct MetricsReporter {
@@ -27,6 +29,10 @@ pub struct MetricsReporter {
     http_content: Option<MetricsContent>,
     /// Optional pipeline stage metrics aggregator.
     aggregator: Option<MetricsAggregator>,
+    /// Shared health status for probe endpoints.
+    health: Option<SharedHealthStatus>,
+    /// Bank forks for slot/block_height/transaction_count in health status.
+    bank_forks: Option<Arc<RwLock<BankForks>>>,
 }
 
 pub struct LinkTelemetryStats {
@@ -102,6 +108,8 @@ impl MetricsReporter {
             block_assembly_stats: stage_stats.block_assembly_stats,
             http_content: None,
             aggregator: None,
+            health: None,
+            bank_forks: None,
         }
     }
 
@@ -112,6 +120,22 @@ impl MetricsReporter {
     /// this content on `GET /metrics`.
     pub fn with_http_content(mut self, content: MetricsContent) -> Self {
         self.http_content = Some(content);
+        self
+    }
+
+    /// Set the shared health status for probe endpoints.
+    ///
+    /// When set, each metrics reporter tick updates the health state with
+    /// the current uptime and tile count. The HTTP server reads this for
+    /// `/health`, `/ready`, and `/alive` responses.
+    pub fn with_health(mut self, health: SharedHealthStatus) -> Self {
+        self.health = Some(health);
+        self
+    }
+
+    /// Set the bank forks for slot/block_height data in health probes.
+    pub fn with_bank_forks(mut self, bank_forks: Arc<RwLock<BankForks>>) -> Self {
+        self.bank_forks = Some(bank_forks);
         self
     }
 
@@ -191,6 +215,30 @@ impl Service for MetricsReporter {
         let shred_filter_snapshot = self.shred_filter_stats.snapshot();
         let block_assembly_snapshot = self.block_assembly_stats.snapshot();
         let uptime_millis = context.launch_time.elapsed().as_millis();
+
+        // Update health status for probe endpoints.
+        if let Some(ref health) = self.health {
+            let tile_count = self.packet_link_stats.len()
+                + self.shred_link_stats.len()
+                + self.transaction_link_stats.len();
+            let (slot, block_height, tx_count) = self
+                .bank_forks
+                .as_ref()
+                .and_then(|bf| bf.read().ok())
+                .map(|forks| {
+                    let bank = forks.working_bank();
+                    (bank.slot(), bank.tick_height(), bank.transaction_count())
+                })
+                .unwrap_or((0, 0, 0));
+            health.update(
+                slot,
+                block_height,
+                tx_count,
+                tile_count as u64,
+                uptime_millis as u64,
+            );
+            health.set_status("running");
+        }
 
         match self.output_format {
             MetricsOutputFormat::JsonLines => {
