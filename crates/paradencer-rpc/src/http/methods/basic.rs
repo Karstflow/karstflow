@@ -1,4 +1,3 @@
-use serde_json::json;
 use std::sync::Arc;
 
 use paradencer_constants::economics::{
@@ -11,6 +10,10 @@ use crate::state::{BankAccessProvider, RpcCommitment, RpcRuntimeSnapshot};
 use super::super::method_error::RpcMethodError;
 use super::super::registry::RpcMethod;
 use super::params;
+use super::types::{
+    self, EpochInfo, EpochSchedule, GetIdentityResponse, GetVersionResponse, HighestSnapshotSlot,
+    RpcResponse,
+};
 
 pub(super) fn handle(
     method: RpcMethod,
@@ -21,30 +24,37 @@ pub(super) fn handle(
     bank_access: Option<&Arc<dyn BankAccessProvider>>,
 ) -> Result<serde_json::Value, RpcMethodError> {
     match method {
-        RpcMethod::GetHealth => Ok(json!("ok")),
-        RpcMethod::GetVersion => Ok(json!({
-            "paradencer-core": env!("CARGO_PKG_VERSION"),
-            "feature-set": if full_api { "full_api" } else { "subset_api" }
-        })),
+        RpcMethod::GetHealth => Ok(types::to_value(&"ok")),
+        RpcMethod::GetVersion => {
+            let response = GetVersionResponse {
+                paradencer_core: env!("CARGO_PKG_VERSION").to_string(),
+                feature_set: if full_api { "full_api" } else { "subset_api" }.to_string(),
+            };
+            Ok(types::to_value(&response))
+        }
         RpcMethod::GetGenesisHash => {
             let hash = bank_access
                 .and_then(|bank| bank.get_genesis_hash())
                 .unwrap_or_else(|| "5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp6H6r6Q4QvJf4".to_string());
-            Ok(json!(hash))
+            Ok(types::to_value(&hash))
         }
         RpcMethod::GetIdentity => {
             let identity = bank_access
                 .and_then(|bank| bank.get_identity())
                 .unwrap_or_else(|| "ParaDancer11111111111111111111111111111111".to_string());
-            Ok(json!({"identity": identity}))
+            let response = GetIdentityResponse { identity };
+            Ok(types::to_value(&response))
         }
-        RpcMethod::GetEpochSchedule => Ok(json!({
-            "slotsPerEpoch": SLOTS_PER_EPOCH,
-            "leaderScheduleSlotOffset": SLOTS_PER_EPOCH,
-            "warmup": false,
-            "firstNormalEpoch": 0_u64,
-            "firstNormalSlot": 0_u64
-        })),
+        RpcMethod::GetEpochSchedule => {
+            let response = EpochSchedule {
+                slots_per_epoch: SLOTS_PER_EPOCH,
+                leader_schedule_slot_offset: SLOTS_PER_EPOCH,
+                warmup: false,
+                first_normal_epoch: 0,
+                first_normal_slot: 0,
+            };
+            Ok(types::to_value(&response))
+        }
         RpcMethod::GetMinimumBalanceForRentExemption => {
             build_minimum_balance_for_rent_exemption_response(request)
         }
@@ -52,13 +62,13 @@ pub(super) fn handle(
             build_stake_minimum_delegation_response(request, snapshot, commitment)
         }
         RpcMethod::GetEpochInfo => Ok(build_epoch_info_response(snapshot, commitment, bank_access)),
-        RpcMethod::GetFirstAvailableBlock => Ok(json!(0_u64)),
-        RpcMethod::MinimumLedgerSlot => Ok(json!(0_u64)),
+        RpcMethod::GetFirstAvailableBlock => Ok(types::to_value(&0_u64)),
+        RpcMethod::MinimumLedgerSlot => Ok(types::to_value(&0_u64)),
         RpcMethod::GetMaxShredInsertSlot => {
             let slot = bank_access
                 .map(|bank| bank.get_slot(commitment))
                 .unwrap_or_else(|| snapshot.slot_for_commitment(commitment));
-            Ok(json!(slot))
+            Ok(types::to_value(&slot))
         }
         RpcMethod::GetHighestSnapshotSlot => Ok(build_highest_snapshot_slot_response(
             snapshot,
@@ -69,7 +79,7 @@ pub(super) fn handle(
             let slot = bank_access
                 .map(|bank| bank.get_slot(commitment))
                 .unwrap_or_else(|| snapshot.slot_for_commitment(commitment));
-            Ok(json!(slot))
+            Ok(types::to_value(&slot))
         }
         _ => Err(RpcMethodError::MethodNotFound),
     }
@@ -81,7 +91,7 @@ fn build_minimum_balance_for_rent_exemption_response(
     let data_len = params::first_param_u64(request)?;
     let required_lamports = RENT_EXEMPTION_BASE_LAMPORTS
         .saturating_add(data_len.saturating_mul(RENT_EXEMPTION_LAMPORTS_PER_BYTE));
-    Ok(json!(required_lamports))
+    Ok(types::to_value(&required_lamports))
 }
 
 fn build_stake_minimum_delegation_response(
@@ -96,10 +106,8 @@ fn build_stake_minimum_delegation_response(
         }
     }
 
-    Ok(json!({
-        "context": {"slot": committed_slot},
-        "value": MIN_STAKE_DELEGATION_LAMPORTS
-    }))
+    let response = RpcResponse::new(committed_slot, MIN_STAKE_DELEGATION_LAMPORTS);
+    Ok(types::to_value(&response))
 }
 
 fn build_epoch_info_response(
@@ -118,14 +126,16 @@ fn build_epoch_info_response(
         .unwrap_or(snapshot.transaction_count);
     let epoch = absolute_slot / SLOTS_PER_EPOCH;
     let slot_index = absolute_slot % SLOTS_PER_EPOCH;
-    json!({
-        "absoluteSlot": absolute_slot,
-        "blockHeight": block_height,
-        "epoch": epoch,
-        "slotIndex": slot_index,
-        "slotsInEpoch": SLOTS_PER_EPOCH,
-        "transactionCount": transaction_count
-    })
+
+    let response = EpochInfo {
+        absolute_slot,
+        block_height,
+        epoch,
+        slot_index,
+        slots_in_epoch: SLOTS_PER_EPOCH,
+        transaction_count,
+    };
+    types::to_value(&response)
 }
 
 fn build_highest_snapshot_slot_response(
@@ -136,8 +146,9 @@ fn build_highest_snapshot_slot_response(
     let committed_slot = bank_access
         .map(|bank| bank.get_slot(commitment))
         .unwrap_or_else(|| snapshot.slot_for_commitment(commitment));
-    json!({
-        "full": committed_slot,
-        "incremental": committed_slot.saturating_sub(1)
-    })
+    let response = HighestSnapshotSlot {
+        full: committed_slot,
+        incremental: committed_slot.saturating_sub(1),
+    };
+    types::to_value(&response)
 }

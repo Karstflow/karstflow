@@ -7,6 +7,7 @@ mod ledger;
 mod params;
 pub(super) mod shared;
 mod transactions;
+pub(crate) mod types;
 
 use crate::state::{BankAccessProvider, RpcCommitment, RpcRuntimeSnapshot, TransactionSubmitter};
 use std::sync::Arc;

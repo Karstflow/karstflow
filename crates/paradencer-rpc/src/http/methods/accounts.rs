@@ -12,6 +12,10 @@ use paradencer_constants::rpc::{
 use super::super::method_error::RpcMethodError;
 use super::super::registry::RpcMethod;
 use super::params;
+use super::types::{
+    self, AccountData, AccountValue, LargestAccount, ProgramAccount, RpcResponse, SignatureStatus,
+    SupplyValue, TokenAmount, TokenLargestAccount,
+};
 
 pub(super) fn handle(
     method: RpcMethod,
@@ -78,17 +82,15 @@ fn build_supply_response(
 
     // TODO: Implement real non-circulating account tracking
     let non_circulating = total / 20;
-    let non_circulating_accounts: Vec<&str> = Vec::new();
     let _ = exclude_non_circulating;
-    Ok(json!({
-        "context": {"slot": slot},
-        "value": {
-            "total": total,
-            "circulating": total.saturating_sub(non_circulating),
-            "nonCirculating": non_circulating,
-            "nonCirculatingAccounts": non_circulating_accounts
-        }
-    }))
+    let value = SupplyValue {
+        total,
+        circulating: total.saturating_sub(non_circulating),
+        non_circulating,
+        non_circulating_accounts: Vec::new(),
+    };
+    let response = RpcResponse::new(slot, value);
+    Ok(types::to_value(&response))
 }
 
 fn build_token_supply_response(
@@ -105,22 +107,19 @@ fn build_token_supply_response(
         let pubkey = parse_pubkey(&mint_str)?;
         if let Some(account) = bank.get_account(&pubkey, commitment) {
             if let Some((supply, decimals)) = parse_spl_mint_supply(account.data.as_slice()) {
-                return Ok(json!({
-                    "context": {"slot": slot},
-                    "value": token_amount_payload_with_decimals(supply, decimals)
-                }));
+                let value = token_amount_with_decimals(supply, decimals);
+                let response = RpcResponse::new(slot, value);
+                return Ok(types::to_value(&response));
             }
         }
-        Ok(json!({
-            "context": {"slot": slot},
-            "value": token_amount_payload(0)
-        }))
+        let value = token_amount(0);
+        let response = RpcResponse::new(slot, value);
+        Ok(types::to_value(&response))
     } else {
         let amount = synthetic_token_amount(&mint_str, snapshot.transaction_count);
-        Ok(json!({
-            "context": {"slot": slot},
-            "value": token_amount_payload(amount)
-        }))
+        let value = token_amount(amount);
+        let response = RpcResponse::new(slot, value);
+        Ok(types::to_value(&response))
     }
 }
 
@@ -140,22 +139,19 @@ fn build_token_account_balance_response(
             if let Some((amount, decimals)) =
                 parse_spl_token_account_balance(account.data.as_slice())
             {
-                return Ok(json!({
-                    "context": {"slot": slot},
-                    "value": token_amount_payload_with_decimals(amount, decimals)
-                }));
+                let value = token_amount_with_decimals(amount, decimals);
+                let response = RpcResponse::new(slot, value);
+                return Ok(types::to_value(&response));
             }
         }
-        Ok(json!({
-            "context": {"slot": slot},
-            "value": token_amount_payload(0)
-        }))
+        let value = token_amount(0);
+        let response = RpcResponse::new(slot, value);
+        Ok(types::to_value(&response))
     } else {
         let amount = synthetic_token_amount(&token_account_str, snapshot.transaction_count / 2);
-        Ok(json!({
-            "context": {"slot": slot},
-            "value": token_amount_payload(amount)
-        }))
+        let value = token_amount(amount);
+        let response = RpcResponse::new(slot, value);
+        Ok(types::to_value(&response))
     }
 }
 
@@ -173,36 +169,28 @@ fn build_largest_accounts_response(
     if let Some(bank) = bank_access {
         let largest = bank.get_largest_accounts(20, commitment);
         if !largest.is_empty() {
-            let accounts: Vec<serde_json::Value> = largest
+            let accounts: Vec<LargestAccount> = largest
                 .into_iter()
-                .map(|(pubkey, lamports)| {
-                    json!({
-                        "address": pubkey.to_string(),
-                        "lamports": lamports
-                    })
+                .map(|(pubkey, lamports)| LargestAccount {
+                    address: pubkey.to_string(),
+                    lamports,
                 })
                 .collect();
-            return Ok(json!({
-                "context": {"slot": slot},
-                "value": accounts
-            }));
+            let response = RpcResponse::new(slot, accounts);
+            return Ok(types::to_value(&response));
         }
     }
 
     // Synthetic fallback.
     let base = snapshot.transaction_count.saturating_add(100_000);
-    let accounts = (0_u64..5)
-        .map(|index| {
-            json!({
-                "address": format!("ParaLargest{:02}111111111111111111111111111111111", index),
-                "lamports": base.saturating_sub(index * 1_000)
-            })
+    let accounts: Vec<LargestAccount> = (0_u64..5)
+        .map(|index| LargestAccount {
+            address: format!("ParaLargest{:02}111111111111111111111111111111111", index),
+            lamports: base.saturating_sub(index * 1_000),
         })
-        .collect::<Vec<_>>();
-    Ok(json!({
-        "context": {"slot": slot},
-        "value": accounts
-    }))
+        .collect();
+    let response = RpcResponse::new(slot, accounts);
+    Ok(types::to_value(&response))
 }
 
 fn build_token_largest_accounts_response(
@@ -257,41 +245,39 @@ fn build_token_largest_accounts_response(
                 .unwrap_or(9);
             let divisor = 10_f64.powi(decimals as i32);
 
-            let accounts: Vec<serde_json::Value> = matching
+            let accounts: Vec<TokenLargestAccount> = matching
                 .into_iter()
-                .map(|(address, amount)| {
-                    json!({
-                        "address": address,
-                        "amount": amount.to_string(),
-                        "decimals": decimals,
-                        "uiAmount": amount as f64 / divisor,
-                        "uiAmountString": format_token_ui_amount(amount, decimals)
-                    })
+                .map(|(address, amount)| TokenLargestAccount {
+                    address,
+                    amount: amount.to_string(),
+                    decimals,
+                    ui_amount: amount as f64 / divisor,
+                    ui_amount_string: format_token_ui_amount(amount, decimals),
                 })
                 .collect();
-            return Ok(json!({
-                "context": {"slot": slot},
-                "value": accounts
-            }));
+            let response = RpcResponse::new(slot, accounts);
+            return Ok(types::to_value(&response));
         }
     }
 
     // Synthetic fallback.
     let base = snapshot.transaction_count.saturating_add(50_000);
-    let accounts = (0_u64..5)
+    let accounts: Vec<TokenLargestAccount> = (0_u64..5)
         .map(|index| {
-            json!({
-                "address": format!("ParaToken{:02}11111111111111111111111111111111", index),
-                "amount": base.saturating_sub(index * 500).to_string(),
-                "decimals": 9,
-                "uiAmount": (base.saturating_sub(index * 500)) as f64 / TOKEN_UI_DECIMALS_DIVISOR,
-                "uiAmountString": format!("0.{:09}", base.saturating_sub(index * 500))
-            })
+            let amount = base.saturating_sub(index * 500);
+            TokenLargestAccount {
+                address: format!("ParaToken{:02}11111111111111111111111111111111", index),
+                amount: amount.to_string(),
+                decimals: 9,
+                ui_amount: amount as f64 / TOKEN_UI_DECIMALS_DIVISOR,
+                ui_amount_string: format!("0.{:09}", amount),
+            }
         })
-        .collect::<Vec<_>>();
+        .collect();
+    // Synthetic includes mint field — use raw json for backward compat.
     Ok(json!({
         "context": {"slot": slot},
-        "value": accounts,
+        "value": types::to_value(&accounts),
         "mint": mint
     }))
 }
@@ -317,42 +303,36 @@ fn build_program_accounts_response(
     let slot = resolve_slot(snapshot, commitment, bank_access);
     let encoding = parse_encoding(request);
 
-    let accounts = if let Some(bank) = bank_access {
+    let accounts: Vec<ProgramAccount> = if let Some(bank) = bank_access {
         let owner = parse_pubkey(&program_id)?;
         bank.get_accounts_by_owner(&owner, commitment)
             .into_iter()
-            .map(|(pubkey, account)| {
-                json!({
-                    "pubkey": pubkey.to_string(),
-                    "account": format_account_value(&account, &encoding)
-                })
+            .map(|(pubkey, account)| ProgramAccount {
+                pubkey: pubkey.to_string(),
+                account: format_account_value(&account, &encoding),
             })
-            .collect::<Vec<_>>()
+            .collect()
     } else {
         (0_u64..2)
-            .map(|index| {
-                json!({
-                    "pubkey": format!("ParaProgAcct{index:02}111111111111111111111111111111"),
-                    "account": {
-                        "lamports": snapshot.transaction_count.saturating_add(10_000 + index),
-                        "owner": program_id,
-                        "executable": false,
-                        "rentEpoch": 0,
-                        "data": ["", "base64"],
-                        "space": 0
-                    }
-                })
+            .map(|index| ProgramAccount {
+                pubkey: format!("ParaProgAcct{index:02}111111111111111111111111111111"),
+                account: AccountValue {
+                    lamports: snapshot.transaction_count.saturating_add(10_000 + index),
+                    owner: program_id.clone(),
+                    executable: false,
+                    rent_epoch: 0,
+                    data: AccountData::Encoded(String::new(), "base64".to_string()),
+                    space: 0,
+                },
             })
-            .collect::<Vec<_>>()
+            .collect()
     };
 
     if with_context {
-        Ok(json!({
-            "context": {"slot": slot},
-            "value": accounts
-        }))
+        let response = RpcResponse::new(slot, &accounts);
+        Ok(types::to_value(&response))
     } else {
-        Ok(json!(accounts))
+        Ok(types::to_value(&accounts))
     }
 }
 
@@ -362,36 +342,31 @@ fn build_token_accounts_by_owner_response(
     commitment: RpcCommitment,
     bank_access: Option<&Arc<dyn BankAccessProvider>>,
 ) -> Result<serde_json::Value, RpcMethodError> {
-    let (_owner, _selector, min_context_slot) = parse_token_accounts_query(request)?;
+    let (owner, selector, min_context_slot) = parse_token_accounts_query(request)?;
     ensure_optional_min_context_slot(min_context_slot, snapshot, commitment)?;
     let slot = resolve_slot(snapshot, commitment, bank_access);
     let encoding = parse_encoding(request);
 
     if let Some(bank) = bank_access {
-        // Look up accounts owned by SPL Token program, then filter by token owner
-        let owner_pubkey = parse_pubkey(&_owner)?;
+        let owner_pubkey = parse_pubkey(&owner)?;
         let token_program = parse_pubkey("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA")?;
         let all_token_accounts = bank.get_accounts_by_owner(&token_program, commitment);
-        let value = all_token_accounts
+        let value: Vec<ProgramAccount> = all_token_accounts
             .into_iter()
             .filter(|(_, account)| {
                 // SPL Token account: owner is at bytes 32..64
                 let data = account.data.as_slice();
                 data.len() >= 64 && data[32..64] == *owner_pubkey.as_bytes()
             })
-            .map(|(pubkey, account)| {
-                json!({
-                    "pubkey": pubkey.to_string(),
-                    "account": format_account_value(&account, &encoding)
-                })
+            .map(|(pubkey, account)| ProgramAccount {
+                pubkey: pubkey.to_string(),
+                account: format_account_value(&account, &encoding),
             })
-            .collect::<Vec<_>>();
-        Ok(json!({
-            "context": {"slot": slot},
-            "value": value
-        }))
+            .collect();
+        let response = RpcResponse::new(slot, value);
+        Ok(types::to_value(&response))
     } else {
-        let value = (0_u64..2)
+        let value: Vec<serde_json::Value> = (0_u64..2)
             .map(|index| {
                 json!({
                     "pubkey": format!("ParaOwnerAcct{index:02}111111111111111111111111111111"),
@@ -403,11 +378,11 @@ fn build_token_accounts_by_owner_response(
                         "data": ["", "base64"],
                         "space": DEFAULT_TOKEN_ACCOUNT_SPACE
                     },
-                    "tokenOwner": _owner,
-                    "selector": _selector
+                    "tokenOwner": owner,
+                    "selector": selector
                 })
             })
-            .collect::<Vec<_>>();
+            .collect();
         Ok(json!({
             "context": {"slot": slot},
             "value": value
@@ -431,29 +406,23 @@ fn build_token_accounts_by_delegate_response(
         let delegate_pubkey = parse_pubkey(&delegate)?;
         let token_program = parse_pubkey("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA")?;
         let all_token_accounts = bank.get_accounts_by_owner(&token_program, commitment);
-        let value: Vec<serde_json::Value> = all_token_accounts
+        let value: Vec<ProgramAccount> = all_token_accounts
             .into_iter()
             .filter(|(_, account)| {
-                // SPL Token account delegate is at bytes 76..108 (after
-                // mint[0..32] + owner[32..64] + amount[64..72] + delegate_option[72..76])
                 let data = account.data.as_slice();
                 data.len() >= 108 && data[76..108] == *delegate_pubkey.as_bytes()
             })
-            .map(|(pubkey, account)| {
-                json!({
-                    "pubkey": pubkey.to_string(),
-                    "account": format_account_value(&account, &encoding)
-                })
+            .map(|(pubkey, account)| ProgramAccount {
+                pubkey: pubkey.to_string(),
+                account: format_account_value(&account, &encoding),
             })
             .collect();
-        return Ok(json!({
-            "context": {"slot": slot},
-            "value": value
-        }));
+        let response = RpcResponse::new(slot, value);
+        return Ok(types::to_value(&response));
     }
 
     // Synthetic fallback.
-    let value = (0_u64..2)
+    let value: Vec<serde_json::Value> = (0_u64..2)
         .map(|index| {
             json!({
                 "pubkey": format!("ParaDelegAcct{index:02}111111111111111111111111111111"),
@@ -469,7 +438,7 @@ fn build_token_accounts_by_delegate_response(
                 "selector": selector
             })
         })
-        .collect::<Vec<_>>();
+        .collect();
     Ok(json!({
         "context": {"slot": slot},
         "value": value
@@ -489,28 +458,24 @@ fn build_account_info_response(
 
     if let Some(bank) = bank_access {
         let pubkey = parse_pubkey(&pubkey_str)?;
-        let value = match bank.get_account(&pubkey, commitment) {
-            Some(account) => format_account_value(&account, &encoding),
-            None => serde_json::Value::Null,
-        };
-        Ok(json!({
-            "context": {"slot": slot},
-            "value": value
-        }))
+        let value: Option<AccountValue> = bank
+            .get_account(&pubkey, commitment)
+            .map(|account| format_account_value(&account, &encoding));
+        let response = RpcResponse::new(slot, value);
+        Ok(types::to_value(&response))
     } else {
         let synthetic_lamports =
             synthetic_lamports_from_pubkey(&pubkey_str, snapshot.transaction_count);
-        Ok(json!({
-            "context": {"slot": slot},
-            "value": {
-                "lamports": synthetic_lamports,
-                "owner": "11111111111111111111111111111111",
-                "executable": false,
-                "rentEpoch": 0,
-                "data": ["", "base64"],
-                "space": 0
-            }
-        }))
+        let value = AccountValue {
+            lamports: synthetic_lamports,
+            owner: "11111111111111111111111111111111".to_string(),
+            executable: false,
+            rent_epoch: 0,
+            data: AccountData::Encoded(String::new(), "base64".to_string()),
+            space: 0,
+        };
+        let response = RpcResponse::new(slot, value);
+        Ok(types::to_value(&response))
     }
 }
 
@@ -525,15 +490,14 @@ fn build_multiple_accounts_response(
     let encoding = parse_encoding(request);
     let slot = resolve_slot(snapshot, commitment, bank_access);
 
-    let accounts = if let Some(bank) = bank_access {
+    let accounts: Vec<Option<AccountValue>> = if let Some(bank) = bank_access {
         pubkeys
             .iter()
             .map(|pubkey_str| {
                 let pubkey = parse_pubkey(pubkey_str)?;
-                Ok(match bank.get_account(&pubkey, commitment) {
-                    Some(account) => format_account_value(&account, &encoding),
-                    None => serde_json::Value::Null,
-                })
+                Ok(bank
+                    .get_account(&pubkey, commitment)
+                    .map(|account| format_account_value(&account, &encoding)))
             })
             .collect::<Result<Vec<_>, RpcMethodError>>()?
     } else {
@@ -541,22 +505,20 @@ fn build_multiple_accounts_response(
             .iter()
             .map(|pubkey| {
                 let lamports = synthetic_lamports_from_pubkey(pubkey, snapshot.transaction_count);
-                json!({
-                    "lamports": lamports,
-                    "owner": "11111111111111111111111111111111",
-                    "executable": false,
-                    "rentEpoch": 0,
-                    "data": ["", "base64"],
-                    "space": 0
+                Some(AccountValue {
+                    lamports,
+                    owner: "11111111111111111111111111111111".to_string(),
+                    executable: false,
+                    rent_epoch: 0,
+                    data: AccountData::Encoded(String::new(), "base64".to_string()),
+                    space: 0,
                 })
             })
-            .collect::<Vec<_>>()
+            .collect()
     };
 
-    Ok(json!({
-        "context": {"slot": slot},
-        "value": accounts
-    }))
+    let response = RpcResponse::new(slot, accounts);
+    Ok(types::to_value(&response))
 }
 
 fn build_balance_response(
@@ -576,10 +538,8 @@ fn build_balance_response(
         synthetic_lamports_from_pubkey(&pubkey_str, snapshot.transaction_count)
     };
 
-    Ok(json!({
-        "context": {"slot": slot},
-        "value": lamports
-    }))
+    let response = RpcResponse::new(slot, lamports);
+    Ok(types::to_value(&response))
 }
 
 fn build_signature_statuses_response(
@@ -615,10 +575,10 @@ fn build_signature_statuses_response(
             let results = bank.get_signature_statuses(&sig_array);
 
             if results.iter().any(|r| r.is_some()) {
-                let statuses: Vec<serde_json::Value> = results
+                let statuses: Vec<Option<SignatureStatus>> = results
                     .into_iter()
-                    .map(|opt| match opt {
-                        Some(status) => {
+                    .map(|opt| {
+                        opt.map(|status| {
                             let confirmations = slot.saturating_sub(status.slot);
                             let confirmation_status = if confirmations >= 32 {
                                 "finalized"
@@ -635,27 +595,24 @@ fn build_signature_statuses_response(
                                     .map(|e| json!({"InstructionError": e}))
                                     .unwrap_or(serde_json::Value::Null)
                             };
-                            json!({
-                                "slot": status.slot,
-                                "confirmations": confirmations,
-                                "err": err,
-                                "confirmationStatus": confirmation_status
-                            })
-                        }
-                        None => serde_json::Value::Null,
+                            SignatureStatus {
+                                slot: status.slot,
+                                confirmations,
+                                err,
+                                confirmation_status: confirmation_status.to_string(),
+                            }
+                        })
                     })
                     .collect();
 
-                return Ok(json!({
-                    "context": {"slot": slot},
-                    "value": statuses
-                }));
+                let response = RpcResponse::new(slot, statuses);
+                return Ok(types::to_value(&response));
             }
         }
     }
 
     // Synthetic fallback.
-    let statuses = signatures
+    let statuses: Vec<Option<SignatureStatus>> = signatures
         .iter()
         .map(|signature| {
             let checksum = signature.bytes().fold(0_u64, |accumulator, byte| {
@@ -663,23 +620,23 @@ fn build_signature_statuses_response(
             });
 
             if !config.search_transaction_history && checksum % 5 == 0 {
-                return serde_json::Value::Null;
+                return None;
             }
 
             let confirmations = checksum % MAX_SIGNATURE_CONFIRMATIONS;
-            json!({
-                "slot": snapshot.slot_for_commitment(commitment).saturating_sub(confirmations),
-                "confirmations": confirmations,
-                "err": serde_json::Value::Null,
-                "confirmationStatus": confirmation_status_label(commitment)
+            Some(SignatureStatus {
+                slot: snapshot
+                    .slot_for_commitment(commitment)
+                    .saturating_sub(confirmations),
+                confirmations,
+                err: serde_json::Value::Null,
+                confirmation_status: confirmation_status_label(commitment).to_string(),
             })
         })
-        .collect::<Vec<_>>();
+        .collect();
 
-    Ok(json!({
-        "context": {"slot": snapshot.slot_for_commitment(commitment)},
-        "value": statuses
-    }))
+    let response = RpcResponse::new(snapshot.slot_for_commitment(commitment), statuses);
+    Ok(types::to_value(&response))
 }
 
 #[derive(Clone, Copy)]
@@ -703,17 +660,17 @@ fn synthetic_token_amount(key: &str, seed: u64) -> u64 {
         })
 }
 
-fn token_amount_payload(amount: u64) -> serde_json::Value {
-    json!({
-        "amount": amount.to_string(),
-        "decimals": 9_u8,
-        "uiAmount": amount as f64 / TOKEN_UI_DECIMALS_DIVISOR,
-        "uiAmountString": format!("0.{amount:09}")
-    })
+fn token_amount(amount: u64) -> TokenAmount {
+    TokenAmount {
+        amount: amount.to_string(),
+        decimals: 9,
+        ui_amount: amount as f64 / TOKEN_UI_DECIMALS_DIVISOR,
+        ui_amount_string: format!("0.{amount:09}"),
+    }
 }
 
 /// Format a token amount with real decimals from on-chain data.
-fn token_amount_payload_with_decimals(amount: u64, decimals: u8) -> serde_json::Value {
+fn token_amount_with_decimals(amount: u64, decimals: u8) -> TokenAmount {
     let divisor = 10_u64.pow(u32::from(decimals));
     let ui_amount = amount as f64 / divisor as f64;
     let ui_string = if decimals == 0 {
@@ -721,19 +678,15 @@ fn token_amount_payload_with_decimals(amount: u64, decimals: u8) -> serde_json::
     } else {
         format!("{ui_amount:.prec$}", prec = usize::from(decimals))
     };
-    json!({
-        "amount": amount.to_string(),
-        "decimals": decimals,
-        "uiAmount": ui_amount,
-        "uiAmountString": ui_string
-    })
+    TokenAmount {
+        amount: amount.to_string(),
+        decimals,
+        ui_amount,
+        ui_amount_string: ui_string,
+    }
 }
 
 /// Parse the token balance from an SPL Token account's raw data.
-///
-/// Returns `(amount, decimals)` if the data has the expected minimum length.
-/// The decimals value requires a follow-up mint lookup — this returns 0 as a placeholder.
-/// Callers needing real decimals should resolve the mint from bytes 0..32.
 fn parse_spl_token_account_balance(data: &[u8]) -> Option<(u64, u8)> {
     if data.len() < SPL_TOKEN_ACCOUNT_MIN_LEN {
         return None;
@@ -743,8 +696,6 @@ fn parse_spl_token_account_balance(data: &[u8]) -> Option<(u64, u8)> {
         .try_into()
         .ok()?;
     let amount = u64::from_le_bytes(amount_bytes);
-    // Token account doesn't store decimals — return 0 as default.
-    // For full accuracy, caller would resolve mint account and read decimals from it.
     Some((amount, 0))
 }
 
@@ -940,28 +891,28 @@ fn resolve_slot(
         .unwrap_or_else(|| snapshot.slot_for_commitment(commitment))
 }
 
-fn format_account_value(account: &paradencer_types::Account, encoding: &str) -> serde_json::Value {
-    let data_value = encode_account_data(account.data.as_slice(), encoding);
-    json!({
-        "lamports": account.meta.lamports,
-        "owner": account.meta.owner.to_string(),
-        "executable": account.meta.executable,
-        "rentEpoch": account.meta.rent_epoch,
-        "data": data_value,
-        "space": account.data.len()
-    })
+fn format_account_value(account: &paradencer_types::Account, encoding: &str) -> AccountValue {
+    let data = encode_account_data(account.data.as_slice(), encoding);
+    AccountValue {
+        lamports: account.meta.lamports,
+        owner: account.meta.owner.to_string(),
+        executable: account.meta.executable,
+        rent_epoch: account.meta.rent_epoch,
+        data,
+        space: account.data.len(),
+    }
 }
 
-fn encode_account_data(data: &[u8], encoding: &str) -> serde_json::Value {
+fn encode_account_data(data: &[u8], encoding: &str) -> AccountData {
     use base64::Engine;
     match encoding {
         "base58" => {
             let encoded = bs58::encode(data).into_string();
-            json!([encoded, "base58"])
+            AccountData::Encoded(encoded, "base58".to_string())
         }
         _ => {
             let encoded = base64::engine::general_purpose::STANDARD.encode(data);
-            json!([encoded, "base64"])
+            AccountData::Encoded(encoded, "base64".to_string())
         }
     }
 }

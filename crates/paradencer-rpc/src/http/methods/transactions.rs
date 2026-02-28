@@ -1,4 +1,4 @@
-use serde_json::{json, Map, Value};
+use serde_json::{Map, Value};
 use std::sync::Arc;
 
 use crate::state::{BankAccessProvider, RpcCommitment, RpcRuntimeSnapshot, TransactionSubmitter};
@@ -17,6 +17,10 @@ use paradencer_constants::rpc::{
 use super::super::method_error::RpcMethodError;
 use super::super::registry::RpcMethod;
 use super::params;
+use super::types::{
+    self, AccountData, ReplacementBlockhash, ReturnData, RpcResponse, SimulateAccountValue,
+    SimulateTransactionValue,
+};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum TransactionEncoding {
@@ -112,7 +116,7 @@ fn build_send_transaction_response(
             .map_err(|_| RpcMethodError::TransactionSubmissionFailed)?;
 
         let sig_str = bs58::encode(sig_bytes).into_string();
-        return Ok(json!(sig_str));
+        return Ok(types::to_value(&sig_str));
     }
 
     // Synthetic fallback when no submitter is available
@@ -148,7 +152,7 @@ fn build_send_transaction_response(
             .wrapping_add(retry_bonus),
         snapshot.transaction_count.wrapping_add(commitment_bias)
     );
-    Ok(json!(signature))
+    Ok(types::to_value(&signature))
 }
 
 fn build_simulate_transaction_response(
@@ -200,70 +204,72 @@ fn build_real_simulation_response(
         commitment,
     );
 
-    // Format error for JSON response (Solana uses null for success)
+    // Format error (null for success)
     let err_value = sim_result
         .error
         .as_ref()
-        .map(|e| json!(e))
+        .map(|e| serde_json::to_value(e).unwrap_or(serde_json::Value::Null))
         .unwrap_or(serde_json::Value::Null);
 
-    // Format logs
-    let logs_value = json!(sim_result.logs);
-
     // Format accounts if requested
-    let account_payload = config.accounts.map(|accounts| {
-        serde_json::Value::Array(
-            accounts
+    let account_payload = config
+        .accounts
+        .map(|accounts| {
+            let list: Vec<serde_json::Value> = accounts
                 .addresses
                 .into_iter()
                 .map(|address| {
                     if let Some(real_account) =
                         parse_pubkey_and_lookup(bank_access, &address, commitment)
                     {
-                        format_simulate_account(&real_account, &address, accounts.encoding)
+                        let acct =
+                            format_simulate_account(&real_account, &address, accounts.encoding);
+                        types::to_value(&acct)
                     } else {
                         serde_json::Value::Null
                     }
                 })
-                .collect(),
-        )
-    });
+                .collect();
+            serde_json::Value::Array(list)
+        })
+        .unwrap_or(serde_json::Value::Null);
 
     // Format return data
     let return_data_value = sim_result
         .return_data
         .map(|(program_id, data)| {
             let encoded = base64::engine::general_purpose::STANDARD.encode(&data);
-            json!({
-                "programId": program_id,
-                "data": [encoded, "base64"]
-            })
+            let rd = ReturnData {
+                program_id,
+                data: (encoded, "base64".to_string()),
+            };
+            types::to_value(&rd)
         })
         .unwrap_or(serde_json::Value::Null);
 
     // Format replacement blockhash
-    let replacement_blockhash = if config.replace_recent_blockhash {
+    let replacement_blockhash_value = if config.replace_recent_blockhash {
         let hash = bs58::encode(bank_access.get_latest_blockhash(commitment)).into_string();
         let last_valid = bank_access.get_last_valid_block_height(commitment);
-        json!({
-            "blockhash": hash,
-            "lastValidBlockHeight": last_valid
-        })
+        let rb = ReplacementBlockhash {
+            blockhash: hash,
+            last_valid_block_height: last_valid,
+        };
+        types::to_value(&rb)
     } else {
         serde_json::Value::Null
     };
 
-    Ok(json!({
-        "context": {"slot": slot},
-        "value": {
-            "err": err_value,
-            "logs": logs_value,
-            "unitsConsumed": sim_result.units_consumed,
-            "accounts": account_payload.unwrap_or(serde_json::Value::Null),
-            "returnData": return_data_value,
-            "replacementBlockhash": replacement_blockhash
-        }
-    }))
+    let value = SimulateTransactionValue {
+        err: err_value,
+        logs: types::to_value(&sim_result.logs),
+        units_consumed: sim_result.units_consumed,
+        accounts: account_payload,
+        return_data: return_data_value,
+        replacement_blockhash: replacement_blockhash_value,
+    };
+    let response = RpcResponse::new(slot, value);
+    Ok(types::to_value(&response))
 }
 
 fn build_synthetic_simulation_response(
@@ -287,58 +293,72 @@ fn build_synthetic_simulation_response(
             0
         });
 
-    let account_payload = config.accounts.map(|accounts| {
-        serde_json::Value::Array(
-            accounts
+    let account_payload = config
+        .accounts
+        .map(|accounts| {
+            let list: Vec<serde_json::Value> = accounts
                 .addresses
                 .into_iter()
                 .map(|address| {
                     let data = match accounts.encoding {
-                        AccountEncoding::Base58 => json!([address, TRANSACTION_ENCODING_BASE58]),
-                        AccountEncoding::Base64 => json!([address, TRANSACTION_ENCODING_BASE64]),
-                        AccountEncoding::JsonParsed => json!({
-                            "program": "system",
-                            "parsed": {"pubkey": address}
-                        }),
+                        AccountEncoding::Base58 => AccountData::Encoded(
+                            address.clone(),
+                            TRANSACTION_ENCODING_BASE58.to_string(),
+                        ),
+                        AccountEncoding::Base64 => AccountData::Encoded(
+                            address.clone(),
+                            TRANSACTION_ENCODING_BASE64.to_string(),
+                        ),
+                        AccountEncoding::JsonParsed => AccountData::JsonParsed {
+                            program: "system".to_string(),
+                            parsed: serde_json::json!({"pubkey": address}),
+                        },
                     };
-                    json!({
-                        "lamports": SIMULATE_ACCOUNT_LAMPORTS,
-                        "owner": "11111111111111111111111111111111",
-                        "executable": false,
-                        "rentEpoch": 0_u64,
-                        "space": 0_u64,
-                        "data": data
-                    })
+                    let acct = SimulateAccountValue {
+                        lamports: SIMULATE_ACCOUNT_LAMPORTS,
+                        owner: "11111111111111111111111111111111".to_string(),
+                        executable: false,
+                        rent_epoch: 0,
+                        space: 0,
+                        data,
+                    };
+                    types::to_value(&acct)
                 })
-                .collect(),
-        )
-    });
-
-    let replacement_blockhash = if config.replace_recent_blockhash {
-        json!({
-            "blockhash": format!("{:064x}", snapshot.blockhash_seed_for_commitment(commitment)),
-            "lastValidBlockHeight": snapshot
-                .block_height_for_commitment(commitment)
-                .saturating_add(SIMULATE_REPLACEMENT_BLOCKHASH_VALIDITY_OFFSET)
+                .collect();
+            serde_json::Value::Array(list)
         })
+        .unwrap_or(serde_json::Value::Null);
+
+    let replacement_blockhash_value = if config.replace_recent_blockhash {
+        let rb = ReplacementBlockhash {
+            blockhash: format!(
+                "{:064x}",
+                snapshot.blockhash_seed_for_commitment(commitment)
+            ),
+            last_valid_block_height: snapshot
+                .block_height_for_commitment(commitment)
+                .saturating_add(SIMULATE_REPLACEMENT_BLOCKHASH_VALIDITY_OFFSET),
+        };
+        types::to_value(&rb)
     } else {
         serde_json::Value::Null
     };
 
-    Ok(json!({
-        "context": {"slot": slot},
-        "value": {
-            "err": serde_json::Value::Null,
-            "logs": [
-                "Program 11111111111111111111111111111111 invoke [1]",
-                "Program 11111111111111111111111111111111 success"
-            ],
-            "unitsConsumed": base_units,
-            "accounts": account_payload.unwrap_or(serde_json::Value::Null),
-            "returnData": serde_json::Value::Null,
-            "replacementBlockhash": replacement_blockhash
-        }
-    }))
+    let logs = vec![
+        "Program 11111111111111111111111111111111 invoke [1]".to_string(),
+        "Program 11111111111111111111111111111111 success".to_string(),
+    ];
+
+    let value = SimulateTransactionValue {
+        err: serde_json::Value::Null,
+        logs: types::to_value(&logs),
+        units_consumed: base_units,
+        accounts: account_payload,
+        return_data: serde_json::Value::Null,
+        replacement_blockhash: replacement_blockhash_value,
+    };
+    let response = RpcResponse::new(slot, value);
+    Ok(types::to_value(&response))
 }
 
 fn parse_send_transaction_config(
@@ -531,28 +551,28 @@ fn format_simulate_account(
     account: &paradencer_types::Account,
     _address: &str,
     encoding: AccountEncoding,
-) -> serde_json::Value {
+) -> SimulateAccountValue {
     use base64::Engine;
     let data = match encoding {
         AccountEncoding::Base58 => {
             let encoded = bs58::encode(account.data.as_slice()).into_string();
-            json!([encoded, TRANSACTION_ENCODING_BASE58])
+            AccountData::Encoded(encoded, TRANSACTION_ENCODING_BASE58.to_string())
         }
         AccountEncoding::Base64 => {
             let encoded = base64::engine::general_purpose::STANDARD.encode(account.data.as_slice());
-            json!([encoded, TRANSACTION_ENCODING_BASE64])
+            AccountData::Encoded(encoded, TRANSACTION_ENCODING_BASE64.to_string())
         }
-        AccountEncoding::JsonParsed => json!({
-            "program": "system",
-            "parsed": {"pubkey": _address}
-        }),
+        AccountEncoding::JsonParsed => AccountData::JsonParsed {
+            program: "system".to_string(),
+            parsed: serde_json::json!({"pubkey": _address}),
+        },
     };
-    json!({
-        "lamports": account.meta.lamports,
-        "owner": account.meta.owner.to_string(),
-        "executable": account.meta.executable,
-        "rentEpoch": account.meta.rent_epoch,
-        "space": account.data.len(),
-        "data": data
-    })
+    SimulateAccountValue {
+        lamports: account.meta.lamports,
+        owner: account.meta.owner.to_string(),
+        executable: account.meta.executable,
+        rent_epoch: account.meta.rent_epoch,
+        space: account.data.len(),
+        data,
+    }
 }

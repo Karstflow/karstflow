@@ -1,4 +1,3 @@
-use serde_json::json;
 use std::sync::Arc;
 
 use paradencer_constants::economics::{
@@ -14,6 +13,7 @@ use crate::state::{BankAccessProvider, RpcCommitment, RpcRuntimeSnapshot};
 use super::super::method_error::RpcMethodError;
 use super::super::registry::RpcMethod;
 use super::params;
+use super::types::{self, InflationGovernor, InflationRate, InflationReward};
 
 pub(super) fn handle(
     method: RpcMethod,
@@ -37,13 +37,14 @@ pub(super) fn handle(
 }
 
 fn build_inflation_governor_response() -> serde_json::Value {
-    json!({
-        "foundation": INFLATION_FOUNDATION_RATE,
-        "foundationTerm": INFLATION_FOUNDATION_TERM,
-        "initial": INFLATION_INITIAL_RATE,
-        "taper": INFLATION_TAPER_RATE,
-        "terminal": INFLATION_TERMINAL_RATE
-    })
+    let response = InflationGovernor {
+        foundation: INFLATION_FOUNDATION_RATE,
+        foundation_term: INFLATION_FOUNDATION_TERM,
+        initial: INFLATION_INITIAL_RATE,
+        taper: INFLATION_TAPER_RATE,
+        terminal: INFLATION_TERMINAL_RATE,
+    };
+    types::to_value(&response)
 }
 
 fn build_inflation_rate_response(
@@ -61,12 +62,13 @@ fn build_inflation_rate_response(
     // Try real inflation from bank's configured parameters.
     if let Some(bank) = bank_access {
         if let Some((total, validator, foundation)) = bank.get_inflation_rate(epoch) {
-            return json!({
-                "total": total,
-                "validator": validator,
-                "foundation": foundation,
-                "epoch": epoch
-            });
+            let response = InflationRate {
+                total,
+                validator,
+                foundation,
+                epoch,
+            };
+            return types::to_value(&response);
         }
     }
 
@@ -74,12 +76,13 @@ fn build_inflation_rate_response(
     let total = INFLATION_TOTAL_BASE_RATE
         .max(0.02_f64 - (epoch as f64 * INFLATION_EPOCH_DECAY_STEP))
         .max(INFLATION_TERMINAL_RATE);
-    json!({
-        "total": total,
-        "validator": total * 0.9_f64,
-        "foundation": total * 0.1_f64,
-        "epoch": epoch
-    })
+    let response = InflationRate {
+        total,
+        validator: total * 0.9_f64,
+        foundation: total * 0.1_f64,
+        epoch,
+    };
+    types::to_value(&response)
 }
 
 fn build_inflation_reward_response(
@@ -97,7 +100,7 @@ fn build_inflation_reward_response(
         .unwrap_or_else(|| slot / SLOTS_PER_EPOCH);
 
     // Synthetic rewards — real epoch reward tracking is a future enhancement.
-    let rewards = addresses
+    let rewards: Vec<InflationReward> = addresses
         .iter()
         .map(|address| {
             let checksum = address
@@ -105,16 +108,16 @@ fn build_inflation_reward_response(
                 .fold(0_u64, |sum, byte| sum.wrapping_add(u64::from(byte)));
             let amount =
                 (checksum % INFLATION_REWARD_MODULUS) as i64 + INFLATION_REWARD_BASE_AMOUNT;
-            json!({
-                "epoch": epoch,
-                "effectiveSlot": slot,
-                "amount": amount,
-                "postBalance": snapshot.transaction_count.saturating_add(checksum),
-                "commission": DEFAULT_VOTE_COMMISSION_PERCENT
-            })
+            InflationReward {
+                epoch,
+                effective_slot: slot,
+                amount,
+                post_balance: snapshot.transaction_count.saturating_add(checksum),
+                commission: DEFAULT_VOTE_COMMISSION_PERCENT,
+            }
         })
-        .collect::<Vec<_>>();
-    Ok(json!(rewards))
+        .collect();
+    Ok(types::to_value(&rewards))
 }
 
 fn parse_pubkey_list_param(request: &serde_json::Value) -> Result<Vec<String>, RpcMethodError> {

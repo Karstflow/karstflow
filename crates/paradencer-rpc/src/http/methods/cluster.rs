@@ -15,6 +15,10 @@ use super::super::method_error::RpcMethodError;
 use super::super::registry::RpcMethod;
 use super::params;
 use super::shared;
+use super::types::{
+    self, BlockProductionRange, BlockProductionValue, ClusterNode, PrioritizationFee, RpcResponse,
+    SignatureForAddress, VoteAccountInfo, VoteAccountsResponse,
+};
 
 pub(super) fn handle(
     method: RpcMethod,
@@ -74,10 +78,10 @@ fn build_slot_leader_response(
         .unwrap_or_else(|| snapshot.slot_for_commitment(commitment));
     if let Some(bank) = bank_access {
         if let Some(leader) = bank.get_slot_leader(slot, commitment) {
-            return json!(leader.to_string());
+            return types::to_value(&leader.to_string());
         }
     }
-    json!(synthetic_leader_identity(slot))
+    types::to_value(&synthetic_leader_identity(slot))
 }
 
 fn build_slot_leaders_response(
@@ -100,7 +104,8 @@ fn build_slot_leaders_response(
         .map(|bank| bank.get_slot(commitment))
         .unwrap_or_else(|| snapshot.slot_for_commitment(commitment));
     if start_slot > max_readable_slot {
-        return Ok(json!([]));
+        let empty: Vec<String> = Vec::new();
+        return Ok(types::to_value(&empty));
     }
 
     let max_count = max_readable_slot
@@ -118,13 +123,13 @@ fn build_slot_leaders_response(
                     .unwrap_or_else(|| synthetic_leader_identity(slot))
             })
             .collect();
-        return Ok(json!(leaders));
+        return Ok(types::to_value(&leaders));
     }
 
-    let leaders = (0_u64..effective_limit)
+    let leaders: Vec<String> = (0_u64..effective_limit)
         .map(|index| synthetic_leader_identity(start_slot.saturating_add(index)))
-        .collect::<Vec<_>>();
-    Ok(json!(leaders))
+        .collect();
+    Ok(types::to_value(&leaders))
 }
 
 fn build_signatures_for_address_response(
@@ -156,7 +161,7 @@ fn build_signatures_for_address_response(
         );
 
         if !entries.is_empty() {
-            let values: Vec<serde_json::Value> = entries
+            let values: Vec<SignatureForAddress> = entries
                 .into_iter()
                 .map(|e| {
                     let err = e
@@ -164,17 +169,17 @@ fn build_signatures_for_address_response(
                         .as_ref()
                         .map(|msg| json!({"InstructionError": msg}))
                         .unwrap_or(serde_json::Value::Null);
-                    json!({
-                        "signature": e.signature,
-                        "slot": e.slot,
-                        "err": err,
-                        "memo": serde_json::Value::Null,
-                        "blockTime": e.block_time,
-                        "confirmationStatus": confirmation_status_label(commitment),
-                    })
+                    SignatureForAddress {
+                        signature: e.signature,
+                        slot: e.slot,
+                        err,
+                        memo: serde_json::Value::Null,
+                        block_time: e.block_time,
+                        confirmation_status: confirmation_status_label(commitment).to_string(),
+                    }
                 })
                 .collect();
-            return Ok(json!(values));
+            return Ok(types::to_value(&values));
         }
     }
 
@@ -247,21 +252,19 @@ fn build_cluster_nodes_response(
     if let Some(bank) = bank_access {
         let nodes = bank.get_cluster_nodes();
         if !nodes.is_empty() {
-            let entries: Vec<serde_json::Value> = nodes
+            let entries: Vec<ClusterNode> = nodes
                 .into_iter()
-                .map(|node| {
-                    json!({
-                        "pubkey": node.pubkey,
-                        "gossip": node.gossip,
-                        "tpu": node.tpu,
-                        "rpc": node.rpc,
-                        "version": node.version,
-                        "featureSet": serde_json::Value::Null,
-                        "shredVersion": 0_u64
-                    })
+                .map(|node| ClusterNode {
+                    pubkey: node.pubkey,
+                    gossip: node.gossip,
+                    tpu: node.tpu,
+                    rpc: node.rpc,
+                    version: node.version,
+                    feature_set: None,
+                    shred_version: 0,
                 })
                 .collect();
-            return json!(entries);
+            return types::to_value(&entries);
         }
     }
 
@@ -300,7 +303,7 @@ fn build_vote_accounts_response(
             let vote_accounts = bank.get_accounts_by_owner(&vote_program_id, commitment);
             if !vote_accounts.is_empty() {
                 let mut current = Vec::new();
-                let delinquent: Vec<serde_json::Value> = Vec::new();
+                let delinquent: Vec<VoteAccountInfo> = Vec::new();
                 for (vote_pubkey, account) in &vote_accounts {
                     let vote_pubkey_str = vote_pubkey.to_string();
                     if let Some(ref filter) = config.vote_pubkey {
@@ -311,21 +314,22 @@ fn build_vote_accounts_response(
                     let data = account.data.as_slice();
                     let (node_pubkey, last_vote, root_slot, commission) =
                         parse_vote_state_summary(data, slot);
-                    current.push(json!({
-                        "votePubkey": vote_pubkey_str,
-                        "nodePubkey": node_pubkey,
-                        "activatedStake": account.meta.lamports,
-                        "commission": commission,
-                        "epochVoteAccount": true,
-                        "epochCredits": [[slot / SLOTS_PER_EPOCH, slot, 0]],
-                        "lastVote": last_vote,
-                        "rootSlot": root_slot
-                    }));
+                    current.push(VoteAccountInfo {
+                        vote_pubkey: vote_pubkey_str,
+                        node_pubkey,
+                        activated_stake: account.meta.lamports,
+                        epoch_vote_account: true,
+                        commission,
+                        last_vote,
+                        root_slot,
+                        epoch_credits: vec![(slot / SLOTS_PER_EPOCH, slot, 0)],
+                    });
                 }
-                return Ok(json!({
-                    "current": current,
-                    "delinquent": delinquent
-                }));
+                let response = VoteAccountsResponse {
+                    current,
+                    delinquent,
+                };
+                return Ok(types::to_value(&response));
             }
         }
     }
@@ -337,40 +341,49 @@ fn build_vote_accounts_response(
         .saturating_add(1_000_000);
 
     let current_vote_pubkey = "Vote111111111111111111111111111111111111111";
-    let current = json!({
-            "votePubkey": current_vote_pubkey,
-            "nodePubkey": "ParaDancer11111111111111111111111111111111",
-            "activatedStake": activated_stake,
-            "commission": DEFAULT_VOTE_COMMISSION_PERCENT,
-            "epochVoteAccount": true,
-            "epochCredits": [[slot / SLOTS_PER_EPOCH, slot, 0]],
-            "lastVote": slot,
-            "rootSlot": slot.saturating_sub(VOTE_ROOT_SLOT_BACKTRACK)
-    });
+    let current_entry = VoteAccountInfo {
+        vote_pubkey: current_vote_pubkey.to_string(),
+        node_pubkey: "ParaDancer11111111111111111111111111111111".to_string(),
+        activated_stake,
+        epoch_vote_account: true,
+        commission: DEFAULT_VOTE_COMMISSION_PERCENT,
+        last_vote: slot,
+        root_slot: slot.saturating_sub(VOTE_ROOT_SLOT_BACKTRACK),
+        epoch_credits: vec![(slot / SLOTS_PER_EPOCH, slot, 0)],
+    };
     let current_accounts = match config.vote_pubkey.as_deref() {
         Some(pubkey) if pubkey != current_vote_pubkey => Vec::new(),
-        _ => vec![current],
+        _ => vec![current_entry],
     };
 
     let delinquent = if config.keep_unstaked_delinquents {
-        vec![json!({
-            "votePubkey": "VoteDelinq11111111111111111111111111111111111",
-            "nodePubkey": "ParaDancer33333333333333333333333333333333",
-            "activatedStake": 0_u64,
-            "commission": DEFAULT_VOTE_COMMISSION_PERCENT,
-            "epochVoteAccount": false,
-            "epochCredits": [[slot / SLOTS_PER_EPOCH, slot.saturating_sub(config.delinquent_slot_distance), 0]],
-            "lastVote": slot.saturating_sub(config.delinquent_slot_distance),
-            "rootSlot": slot.saturating_sub(config.delinquent_slot_distance.saturating_add(VOTE_ROOT_SLOT_BACKTRACK))
-        })]
+        vec![VoteAccountInfo {
+            vote_pubkey: "VoteDelinq11111111111111111111111111111111111".to_string(),
+            node_pubkey: "ParaDancer33333333333333333333333333333333".to_string(),
+            activated_stake: 0,
+            epoch_vote_account: false,
+            commission: DEFAULT_VOTE_COMMISSION_PERCENT,
+            last_vote: slot.saturating_sub(config.delinquent_slot_distance),
+            root_slot: slot.saturating_sub(
+                config
+                    .delinquent_slot_distance
+                    .saturating_add(VOTE_ROOT_SLOT_BACKTRACK),
+            ),
+            epoch_credits: vec![(
+                slot / SLOTS_PER_EPOCH,
+                slot.saturating_sub(config.delinquent_slot_distance),
+                0,
+            )],
+        }]
     } else {
         Vec::new()
     };
 
-    Ok(json!({
-        "current": current_accounts,
-        "delinquent": delinquent
-    }))
+    let response = VoteAccountsResponse {
+        current: current_accounts,
+        delinquent,
+    };
+    Ok(types::to_value(&response))
 }
 
 fn parse_vote_accounts_config(
@@ -438,9 +451,9 @@ fn build_leader_schedule_response(
                         continue;
                     }
                 }
-                by_identity.insert(key, json!(slots));
+                by_identity.insert(key, types::to_value(&slots));
             }
-            return Ok(json!(serde_json::Value::Object(by_identity)));
+            return Ok(serde_json::Value::Object(by_identity));
         }
     }
 
@@ -457,20 +470,20 @@ fn build_leader_schedule_response(
     let fallback_identity = "ParaDancer22222222222222222222222222222222";
     match identity_filter {
         Some(identity) => {
-            by_identity.insert(identity, json!(schedule));
+            by_identity.insert(identity, types::to_value(&schedule));
         }
         None => {
-            by_identity.insert(default_identity.to_string(), json!(schedule));
+            by_identity.insert(default_identity.to_string(), types::to_value(&schedule));
             by_identity.insert(
                 fallback_identity.to_string(),
-                json!([
+                types::to_value(&vec![
                     base_slot.saturating_add(slot_offset + 1),
                     base_slot.saturating_add(slot_offset + LEADER_SCHEDULE_ROTATION + 1),
                 ]),
             );
         }
     }
-    Ok(json!(serde_json::Value::Object(by_identity)))
+    Ok(serde_json::Value::Object(by_identity))
 }
 
 fn build_block_production_response(
@@ -492,10 +505,15 @@ fn build_block_production_response(
 
     let effective_last_slot = last_slot.min(current_slot);
     if effective_last_slot < first_slot {
-        return Ok(json!({
-            "byIdentity": {},
-            "range": {"firstSlot": first_slot, "lastSlot": first_slot}
-        }));
+        let value = BlockProductionValue {
+            by_identity: types::to_value(&serde_json::Map::new()),
+            range: BlockProductionRange {
+                first_slot,
+                last_slot: first_slot,
+            },
+        };
+        let response = RpcResponse::new(current_slot, value);
+        return Ok(types::to_value(&response));
     }
 
     // Use real leader schedule to count slot assignments per validator.
@@ -512,8 +530,6 @@ fn build_block_production_response(
         for (_slot, leader_opt) in &leaders {
             if let Some(leader) = leader_opt {
                 let entry = by_identity.entry(leader.to_string()).or_insert([0, 0]);
-                // [leader_slots, blocks_produced] — we count all assigned slots as produced
-                // since we don't have block presence data yet.
                 entry[0] += 1;
                 entry[1] += 1;
             }
@@ -521,12 +537,17 @@ fn build_block_production_response(
         if !by_identity.is_empty() {
             let by_identity_json: serde_json::Map<String, serde_json::Value> = by_identity
                 .into_iter()
-                .map(|(k, v)| (k, json!(v)))
+                .map(|(k, v)| (k, types::to_value(&v)))
                 .collect();
-            return Ok(json!({
-                "byIdentity": by_identity_json,
-                "range": {"firstSlot": first_slot, "lastSlot": effective_last_slot}
-            }));
+            let value = BlockProductionValue {
+                by_identity: serde_json::Value::Object(by_identity_json),
+                range: BlockProductionRange {
+                    first_slot,
+                    last_slot: effective_last_slot,
+                },
+            };
+            let response = RpcResponse::new(current_slot, value);
+            return Ok(types::to_value(&response));
         }
     }
 
@@ -535,12 +556,20 @@ fn build_block_production_response(
         .saturating_sub(first_slot)
         .saturating_add(1);
     let identity = "ParaDancer11111111111111111111111111111111";
-    Ok(json!({
-        "byIdentity": {
-            identity: [produced_count, produced_count]
+    let mut by_identity_map = serde_json::Map::new();
+    by_identity_map.insert(
+        identity.to_string(),
+        types::to_value(&[produced_count, produced_count]),
+    );
+    let value = BlockProductionValue {
+        by_identity: serde_json::Value::Object(by_identity_map),
+        range: BlockProductionRange {
+            first_slot,
+            last_slot: effective_last_slot,
         },
-        "range": {"firstSlot": first_slot, "lastSlot": effective_last_slot}
-    }))
+    };
+    let response = RpcResponse::new(current_slot, value);
+    Ok(types::to_value(&response))
 }
 
 fn build_recent_prioritization_fees_response(
@@ -555,16 +584,14 @@ fn build_recent_prioritization_fees_response(
     if let Some(bank) = bank_access {
         let fees = bank.get_recent_prioritization_fees(commitment);
         if !fees.is_empty() {
-            let rows: Vec<serde_json::Value> = fees
+            let rows: Vec<PrioritizationFee> = fees
                 .into_iter()
-                .map(|f| {
-                    json!({
-                        "slot": f.slot,
-                        "prioritizationFee": f.prioritization_fee
-                    })
+                .map(|f| PrioritizationFee {
+                    slot: f.slot,
+                    prioritization_fee: f.prioritization_fee,
                 })
                 .collect();
-            return Ok(json!(rows));
+            return Ok(types::to_value(&rows));
         }
     }
 
@@ -574,15 +601,13 @@ fn build_recent_prioritization_fees_response(
     let base_fee = PRIORITIZATION_FEE_BASE
         .saturating_add(account_count as u64 * PRIORITIZATION_FEE_PER_ACCOUNT_STEP);
 
-    let rows = (0_u64..PRIORITIZATION_FEE_ROWS)
-        .map(|index| {
-            json!({
-                "slot": current_slot.saturating_sub(index),
-                "prioritizationFee": base_fee.saturating_add(index * PRIORITIZATION_FEE_PER_ROW_STEP)
-            })
+    let rows: Vec<PrioritizationFee> = (0_u64..PRIORITIZATION_FEE_ROWS)
+        .map(|index| PrioritizationFee {
+            slot: current_slot.saturating_sub(index),
+            prioritization_fee: base_fee.saturating_add(index * PRIORITIZATION_FEE_PER_ROW_STEP),
         })
-        .collect::<Vec<_>>();
-    Ok(json!(rows))
+        .collect();
+    Ok(types::to_value(&rows))
 }
 
 type SignaturesForAddressParams = (String, Option<String>, Option<String>, u64, Option<u64>);

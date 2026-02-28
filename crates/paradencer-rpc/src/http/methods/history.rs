@@ -9,6 +9,7 @@ use super::super::method_error::RpcMethodError;
 use super::super::registry::RpcMethod;
 use super::params;
 use super::shared;
+use super::types::{self, BlockCommitmentResponse};
 
 const ALLOWED_ENCODINGS: &[&str] = &["json", "jsonParsed", "base58", "base64"];
 const ALLOWED_BLOCK_TRANSACTION_DETAILS: &[&str] = &["full", "accounts", "signatures", "none"];
@@ -243,10 +244,11 @@ fn build_block_commitment_response(
     // Try real commitment data from the commitment tracker.
     if let Some(bank) = bank_access {
         if let Some(bc) = bank.get_block_commitment(requested_slot) {
-            return Ok(json!({
-                "commitment": bc.commitment,
-                "totalStake": bc.total_stake
-            }));
+            let response = BlockCommitmentResponse {
+                commitment: Some(bc.commitment),
+                total_stake: bc.total_stake,
+            };
+            return Ok(types::to_value(&response));
         }
     }
 
@@ -260,10 +262,11 @@ fn build_block_commitment_response(
     let mut commitment_levels = vec![0_u64; 32];
     commitment_levels[confirmation_bucket] = confirmation_stake;
 
-    Ok(json!({
-        "commitment": commitment_levels,
-        "totalStake": BASE_NETWORK_SUPPLY_LAMPORTS
-    }))
+    let response = BlockCommitmentResponse {
+        commitment: Some(commitment_levels),
+        total_stake: BASE_NETWORK_SUPPLY_LAMPORTS,
+    };
+    Ok(types::to_value(&response))
 }
 
 fn build_blocks_with_limit_response(

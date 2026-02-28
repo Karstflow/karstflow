@@ -1,4 +1,3 @@
-use serde_json::json;
 use std::sync::Arc;
 
 use crate::state::{BankAccessProvider, RpcCommitment, RpcRuntimeSnapshot};
@@ -9,6 +8,10 @@ use super::super::method_error::RpcMethodError;
 use super::super::registry::RpcMethod;
 use super::params;
 use super::shared;
+use super::types::{
+    self, FeeCalculator, FeesValue, LatestBlockhashValue, PerformanceSample, RecentBlockhashValue,
+    RpcResponse,
+};
 
 pub(super) fn handle(
     method: RpcMethod,
@@ -44,12 +47,9 @@ pub(super) fn handle(
         }
         RpcMethod::GetRecentPerformanceSamples => {
             let requested_limit = parse_performance_sample_limit(request)?.unwrap_or(1);
-            Ok(json!(build_performance_samples(
-                snapshot,
-                requested_limit,
-                commitment,
-                bank_access,
-            )))
+            let samples =
+                build_performance_samples(snapshot, requested_limit, commitment, bank_access);
+            Ok(types::to_value(&samples))
         }
         _ => Err(RpcMethodError::MethodNotFound),
     }
@@ -75,7 +75,7 @@ fn build_performance_samples(
     requested_limit: u64,
     commitment: RpcCommitment,
     bank_access: Option<&Arc<dyn BankAccessProvider>>,
-) -> Vec<serde_json::Value> {
+) -> Vec<PerformanceSample> {
     let limit = requested_limit.clamp(1, MAX_PERFORMANCE_SAMPLES) as usize;
 
     // Try real data from bank access provider.
@@ -84,14 +84,12 @@ fn build_performance_samples(
         if !samples.is_empty() {
             return samples
                 .into_iter()
-                .map(|s| {
-                    json!({
-                        "slot": s.slot,
-                        "numTransactions": s.num_transactions,
-                        "numSlots": s.num_slots,
-                        "samplePeriodSecs": s.sample_period_secs,
-                        "numNonVoteTransactions": s.num_non_vote_transactions,
-                    })
+                .map(|s| PerformanceSample {
+                    slot: s.slot,
+                    num_transactions: s.num_transactions,
+                    num_slots: s.num_slots,
+                    sample_period_secs: s.sample_period_secs,
+                    num_non_vote_transactions: s.num_non_vote_transactions,
                 })
                 .collect();
         }
@@ -105,14 +103,12 @@ fn build_performance_samples(
     let num_slots = estimated_slots_per_second.max(1);
 
     (0..limit as u64)
-        .map(|index| {
-            json!({
-                "slot": committed_slot.saturating_sub(index),
-                "numTransactions": snapshot.transaction_count,
-                "numSlots": num_slots,
-                "samplePeriodSecs": sample_period_secs,
-                "numNonVoteTransactions": snapshot.transaction_count,
-            })
+        .map(|index| PerformanceSample {
+            slot: committed_slot.saturating_sub(index),
+            num_transactions: snapshot.transaction_count,
+            num_slots,
+            sample_period_secs,
+            num_non_vote_transactions: snapshot.transaction_count,
         })
         .collect()
 }
@@ -127,7 +123,7 @@ fn build_transaction_count_response(
     let count = bank_access
         .map(|bank| bank.get_transaction_count(commitment))
         .unwrap_or(snapshot.transaction_count);
-    Ok(json!(count))
+    Ok(types::to_value(&count))
 }
 
 fn build_slot_response(
@@ -140,7 +136,7 @@ fn build_slot_response(
     let slot = bank_access
         .map(|bank| bank.get_slot(commitment))
         .unwrap_or_else(|| snapshot.slot_for_commitment(commitment));
-    Ok(json!(slot))
+    Ok(types::to_value(&slot))
 }
 
 fn build_block_height_response(
@@ -153,7 +149,7 @@ fn build_block_height_response(
     let height = bank_access
         .map(|bank| bank.get_block_height(commitment))
         .unwrap_or_else(|| snapshot.block_height_for_commitment(commitment));
-    Ok(json!(height))
+    Ok(types::to_value(&height))
 }
 
 fn build_block_count_response(
@@ -162,7 +158,9 @@ fn build_block_count_response(
     commitment: RpcCommitment,
 ) -> Result<serde_json::Value, RpcMethodError> {
     ensure_min_context_slot_satisfied(request, snapshot, commitment)?;
-    Ok(json!(snapshot.block_height_for_commitment(commitment)))
+    Ok(types::to_value(
+        &snapshot.block_height_for_commitment(commitment),
+    ))
 }
 
 fn build_is_blockhash_valid_response(
@@ -186,10 +184,8 @@ fn build_is_blockhash_valid_response(
         (context_slot, blockhash_str == reference_blockhash)
     };
 
-    Ok(json!({
-        "context": {"slot": context_slot},
-        "value": is_valid
-    }))
+    let response = RpcResponse::new(context_slot, is_valid);
+    Ok(types::to_value(&response))
 }
 
 fn build_fee_for_message_response(
@@ -216,10 +212,8 @@ fn build_fee_for_message_response(
         (context_slot, fee)
     };
 
-    Ok(json!({
-        "context": {"slot": context_slot},
-        "value": fee
-    }))
+    let response = RpcResponse::new(context_slot, fee);
+    Ok(types::to_value(&response))
 }
 
 fn build_recent_blockhash_response(
@@ -242,13 +236,14 @@ fn build_recent_blockhash_response(
         (slot, hash, LAMPORTS_PER_SIGNATURE)
     };
 
-    Ok(json!({
-        "context": {"slot": context_slot},
-        "value": {
-            "blockhash": blockhash,
-            "feeCalculator": {"lamportsPerSignature": fee}
-        }
-    }))
+    let value = RecentBlockhashValue {
+        blockhash,
+        fee_calculator: FeeCalculator {
+            lamports_per_signature: fee,
+        },
+    };
+    let response = RpcResponse::new(context_slot, value);
+    Ok(types::to_value(&response))
 }
 
 fn build_latest_blockhash_response(
@@ -276,13 +271,12 @@ fn build_latest_blockhash_response(
         )
     };
 
-    Ok(json!({
-        "context": {"slot": committed_slot},
-        "value": {
-            "blockhash": blockhash,
-            "lastValidBlockHeight": last_valid_block_height
-        }
-    }))
+    let value = LatestBlockhashValue {
+        blockhash,
+        last_valid_block_height,
+    };
+    let response = RpcResponse::new(committed_slot, value);
+    Ok(types::to_value(&response))
 }
 
 fn build_fees_response(
@@ -312,15 +306,16 @@ fn build_fees_response(
         )
     };
 
-    Ok(json!({
-        "context": {"slot": context_slot},
-        "value": {
-            "blockhash": blockhash,
-            "feeCalculator": {"lamportsPerSignature": fee},
-            "lastValidSlot": context_slot.saturating_add(RECENT_BLOCKHASH_VALIDITY_WINDOW),
-            "lastValidBlockHeight": last_valid_block_height
-        }
-    }))
+    let value = FeesValue {
+        blockhash,
+        fee_calculator: FeeCalculator {
+            lamports_per_signature: fee,
+        },
+        last_valid_slot: context_slot.saturating_add(RECENT_BLOCKHASH_VALIDITY_WINDOW),
+        last_valid_block_height,
+    };
+    let response = RpcResponse::new(context_slot, value);
+    Ok(types::to_value(&response))
 }
 
 fn build_fee_calculator_for_blockhash_response(
@@ -336,11 +331,13 @@ fn build_fee_calculator_for_blockhash_response(
         let slot = bank.get_slot(commitment);
         let hash_bytes = decode_blockhash(&requested_blockhash)?;
         let is_valid = bank.is_blockhash_valid(&hash_bytes, commitment);
-        let calc = if is_valid {
+        let calc: Option<FeeCalculator> = if is_valid {
             let fee = bank.get_lamports_per_signature(commitment);
-            json!({"lamportsPerSignature": fee})
+            Some(FeeCalculator {
+                lamports_per_signature: fee,
+            })
         } else {
-            serde_json::Value::Null
+            None
         };
         (slot, calc)
     } else {
@@ -348,17 +345,17 @@ fn build_fee_calculator_for_blockhash_response(
             shared::format_blockhash_from_seed(snapshot.blockhash_seed_for_commitment(commitment));
         let context_slot = snapshot.slot_for_commitment(commitment);
         let calc = if requested_blockhash == current_blockhash {
-            json!({"lamportsPerSignature": LAMPORTS_PER_SIGNATURE})
+            Some(FeeCalculator {
+                lamports_per_signature: LAMPORTS_PER_SIGNATURE,
+            })
         } else {
-            serde_json::Value::Null
+            None
         };
         (context_slot, calc)
     };
 
-    Ok(json!({
-        "context": {"slot": context_slot},
-        "value": fee_calculator
-    }))
+    let response = RpcResponse::new(context_slot, fee_calculator);
+    Ok(types::to_value(&response))
 }
 
 fn parse_blockhash_param(request: &serde_json::Value) -> Result<String, RpcMethodError> {
