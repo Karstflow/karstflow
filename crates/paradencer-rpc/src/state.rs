@@ -193,6 +193,19 @@ pub trait BankAccessProvider: Send + Sync {
         Vec::new()
     }
 
+    /// Get the lowest slot with block data available in the blockstore.
+    ///
+    /// Returns 0 if no blockstore is available or no roots exist.
+    fn get_first_available_block(&self) -> u64 {
+        0
+    }
+
+    /// Compute the non-circulating supply: total lamports locked in vote
+    /// and stake accounts.
+    fn get_non_circulating_supply(&self, _commitment: RpcCommitment) -> u64 {
+        0
+    }
+
     /// Get the block commitment for a given slot.
     ///
     /// Returns the commitment stake array (32 entries) and total stake.
@@ -277,6 +290,12 @@ pub struct RpcBlockData {
     pub parent_slot: u64,
     /// Block time (unix timestamp), if known.
     pub block_time: Option<i64>,
+    /// Blockhash for this slot (PoH hash), base58-encoded.
+    pub blockhash: Option<String>,
+    /// Previous blockhash (parent slot's hash), base58-encoded.
+    pub previous_blockhash: Option<String>,
+    /// Block height (may differ from slot if some slots were skipped).
+    pub block_height: Option<u64>,
     /// Transactions extracted from block entries.
     pub transactions: Vec<RpcBlockTransaction>,
 }

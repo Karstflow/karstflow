@@ -2534,6 +2534,38 @@ impl BankAccessProvider for ConsensusBankAccessProvider {
         all_accounts
     }
 
+    fn get_first_available_block(&self) -> u64 {
+        self.blockstore
+            .as_ref()
+            .and_then(|bs| {
+                let roots = bs.roots();
+                roots.into_iter().next()
+            })
+            .unwrap_or(0)
+    }
+
+    fn get_non_circulating_supply(&self, commitment: paradencer_rpc::RpcCommitment) -> u64 {
+        let bank = match self.bank_for_commitment(commitment) {
+            Some(bank) => bank,
+            None => return 0,
+        };
+        let db = bank.accounts();
+
+        // Non-circulating = lamports in vote accounts + stake accounts.
+        let vote_total: u64 = db
+            .get_accounts_by_owner(&paradencer_ids::VOTE_PROGRAM_ID)
+            .iter()
+            .map(|(_, acct)| acct.meta.lamports)
+            .sum();
+        let stake_total: u64 = db
+            .get_accounts_by_owner(&paradencer_ids::STAKE_PROGRAM_ID)
+            .iter()
+            .map(|(_, acct)| acct.meta.lamports)
+            .sum();
+
+        vote_total.saturating_add(stake_total)
+    }
+
     fn get_block_commitment(&self, slot: u64) -> Option<paradencer_rpc::RpcBlockCommitment> {
         let tracker = self.commitment_tracker.as_ref()?;
         let guard = tracker.lock().ok()?;
@@ -2785,10 +2817,28 @@ impl BankAccessProvider for ConsensusBankAccessProvider {
             None
         };
 
+        // Fetch blockhash and block height from the bank for this slot.
+        let (blockhash, prev_blockhash, block_height) = {
+            let forks = self.bank_forks.read().ok()?;
+            if let Some(bank) = forks.get(slot) {
+                let bh = bs58::encode(bank.last_blockhash()).into_string();
+                let parent_hash = meta
+                    .parent_slot
+                    .and_then(|ps| forks.get(ps))
+                    .map(|pb| bs58::encode(pb.last_blockhash()).into_string());
+                (Some(bh), parent_hash, Some(bank.slot()))
+            } else {
+                (None, None, None)
+            }
+        };
+
         Some(paradencer_rpc::RpcBlockData {
             slot,
             parent_slot: assembled.parent_slot,
             block_time,
+            blockhash,
+            previous_blockhash: prev_blockhash,
+            block_height,
             transactions,
         })
     }
@@ -2818,6 +2868,10 @@ impl ConsensusTransactionSubmitter {
     }
 }
 
+/// Number of upcoming leader slots to try when forwarding transactions.
+/// The current slot leader is tried first, then the next N-1 leaders.
+const TPU_FORWARD_LEADER_COUNT: u64 = 4;
+
 impl TransactionSubmitter for ConsensusTransactionSubmitter {
     fn submit_transaction(&self, tx_bytes: &[u8]) -> std::result::Result<[u8; 64], String> {
         // Extract the first signature from the raw transaction.
@@ -2835,8 +2889,10 @@ impl TransactionSubmitter for ConsensusTransactionSubmitter {
         let mut sig = [0u8; 64];
         sig.copy_from_slice(&tx_bytes[1..65]);
 
-        // Resolve current leader's TPU socket.
-        let tpu_addr = {
+        // Resolve TPU addresses for the current and next leaders.
+        // Try multiple leaders so the transaction reaches the network even
+        // if the current leader is unresponsive or its TPU is unknown.
+        let tpu_addrs = {
             let forks = self
                 .bank_forks
                 .read()
@@ -2846,24 +2902,52 @@ impl TransactionSubmitter for ConsensusTransactionSubmitter {
             let epoch_schedule = bank.epoch_schedule();
             let leader_schedule = bank.leader_schedule();
 
-            let leader = leader_schedule
-                .leader_for_absolute_slot(slot, epoch_schedule)
-                .ok_or_else(|| format!("no leader for slot {slot}"))?;
+            let mut addrs = Vec::with_capacity(TPU_FORWARD_LEADER_COUNT as usize);
+            let mut seen_leaders = Vec::with_capacity(TPU_FORWARD_LEADER_COUNT as usize);
 
-            self.cluster_info
-                .lookup_socket(leader.as_bytes(), paradencer_constants::gossip::SOCKET_TPU)
-                .ok_or_else(|| {
-                    format!(
-                        "no TPU address for leader {}",
-                        bs58::encode(leader.as_bytes()).into_string()
-                    )
-                })?
+            for offset in 0..TPU_FORWARD_LEADER_COUNT {
+                let target_slot = slot.saturating_add(offset);
+                if let Some(leader) =
+                    leader_schedule.leader_for_absolute_slot(target_slot, epoch_schedule)
+                {
+                    // Skip duplicate leaders (same leader for consecutive slots).
+                    if seen_leaders.contains(&leader) {
+                        continue;
+                    }
+                    seen_leaders.push(leader);
+
+                    if let Some(addr) = self
+                        .cluster_info
+                        .lookup_socket(leader.as_bytes(), paradencer_constants::gossip::SOCKET_TPU)
+                    {
+                        addrs.push(addr);
+                    }
+                }
+            }
+
+            addrs
         };
 
-        // Forward the raw transaction via UDP.
-        self.socket
-            .send_to(tx_bytes, tpu_addr)
-            .map_err(|e| format!("UDP send failed: {e}"))?;
+        if tpu_addrs.is_empty() {
+            return Err("no TPU address found for any upcoming leader".to_string());
+        }
+
+        // Forward to all resolved leader TPU addresses. A single success is
+        // enough — the transaction will propagate through the network.
+        let mut send_ok = 0_usize;
+        let mut last_err = None;
+        for addr in &tpu_addrs {
+            match self.socket.send_to(tx_bytes, addr) {
+                Ok(_) => send_ok += 1,
+                Err(e) => {
+                    last_err = Some(format!("UDP send to {addr} failed: {e}"));
+                }
+            }
+        }
+
+        if send_ok == 0 {
+            return Err(last_err.unwrap_or_else(|| "all TPU sends failed".to_string()));
+        }
 
         Ok(sig)
     }

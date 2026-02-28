@@ -1553,6 +1553,7 @@ dependencies = [
  "paradencer-core",
  "paradencer-crypto",
  "paradencer-execution",
+ "paradencer-ids",
  "paradencer-mesh",
  "paradencer-net",
  "paradencer-observability",

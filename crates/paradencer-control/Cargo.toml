@@ -14,6 +14,7 @@ paradencer-constants = { path = "../paradencer-constants" }
 paradencer-crypto = { path = "../paradencer-crypto" }
 paradencer-core = { path = "../paradencer-core" }
 paradencer-execution = { path = "../paradencer-execution" }
+paradencer-ids = { path = "../paradencer-ids" }
 paradencer-mesh = { path = "../paradencer-mesh" }
 paradencer-net = { path = "../paradencer-net" }
 paradencer-runtime = { path = "../paradencer-runtime" }

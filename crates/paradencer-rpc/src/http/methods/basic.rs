@@ -62,8 +62,18 @@ pub(super) fn handle(
             build_stake_minimum_delegation_response(request, snapshot, commitment)
         }
         RpcMethod::GetEpochInfo => Ok(build_epoch_info_response(snapshot, commitment, bank_access)),
-        RpcMethod::GetFirstAvailableBlock => Ok(types::to_value(&0_u64)),
-        RpcMethod::MinimumLedgerSlot => Ok(types::to_value(&0_u64)),
+        RpcMethod::GetFirstAvailableBlock => {
+            let slot = bank_access
+                .map(|bank| bank.get_first_available_block())
+                .unwrap_or(0);
+            Ok(types::to_value(&slot))
+        }
+        RpcMethod::MinimumLedgerSlot => {
+            let slot = bank_access
+                .map(|bank| bank.get_first_available_block())
+                .unwrap_or(0);
+            Ok(types::to_value(&slot))
+        }
         RpcMethod::GetMaxShredInsertSlot => {
             let slot = bank_access
                 .map(|bank| bank.get_slot(commitment))

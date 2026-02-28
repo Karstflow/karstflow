@@ -727,11 +727,19 @@ fn format_real_block_response(
     snapshot: RpcRuntimeSnapshot,
     commitment: RpcCommitment,
 ) -> serde_json::Value {
+    // Use real blockhash from bank when available, otherwise synthetic.
     let blockhash_seed = snapshot
         .blockhash_seed_for_commitment(commitment)
         .wrapping_add(block_data.slot.rotate_left(11));
-    let blockhash = shared::format_blockhash_from_seed(blockhash_seed);
-    let prev_blockhash = shared::format_blockhash_from_seed(blockhash_seed.wrapping_sub(1));
+    let blockhash = block_data
+        .blockhash
+        .clone()
+        .unwrap_or_else(|| shared::format_blockhash_from_seed(blockhash_seed));
+    let prev_blockhash = block_data
+        .previous_blockhash
+        .clone()
+        .unwrap_or_else(|| shared::format_blockhash_from_seed(blockhash_seed.wrapping_sub(1)));
+    let block_height = block_data.block_height.unwrap_or(block_height);
 
     let block_time = block_data
         .block_time

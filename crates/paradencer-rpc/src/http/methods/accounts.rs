@@ -80,8 +80,9 @@ fn build_supply_response(
             .saturating_add(BASE_NETWORK_SUPPLY_LAMPORTS)
     };
 
-    // TODO: Implement real non-circulating account tracking
-    let non_circulating = total / 20;
+    let non_circulating = bank_access
+        .map(|bank| bank.get_non_circulating_supply(commitment))
+        .unwrap_or_else(|| total / 20);
     let _ = exclude_non_circulating;
     let value = SupplyValue {
         total,
