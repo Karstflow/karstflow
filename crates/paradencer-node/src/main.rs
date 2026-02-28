@@ -128,9 +128,7 @@ fn run_with_node_config(
         let bank = forks.working_bank();
         if let Some(vote_cache) = bank.vote_account_cache() {
             let cache = vote_cache.read().unwrap();
-            let shred_version = node_config
-                .expected_shred_version
-                .unwrap_or(0);
+            let shred_version = node_config.expected_shred_version.unwrap_or(0);
             drop(forks);
             let wfs_config =
                 paradencer_control::wait_for_supermajority::WaitForSupermajorityConfig::default();
