@@ -198,6 +198,30 @@ impl RetransmitService {
             .map_err(|e| IngressError::ChannelSend(format!("Failed to queue request: {}", e)))
     }
 
+    /// Forward raw shred bytes to turbine tree children.
+    ///
+    /// Sends the data directly over UDP to all children in the current tree
+    /// without parsing or re-serializing. Use this when raw wire-format bytes
+    /// are available from the shred pipeline.
+    pub fn forward_raw(&self, data: &[u8]) {
+        let tree_guard = self.tree.read();
+        let Some(ref current_tree) = *tree_guard else {
+            return;
+        };
+        let children = current_tree.get_children(&self.node_id);
+        if children.is_empty() {
+            return;
+        }
+        for child_id in &children {
+            if let Some(node) = current_tree.get_node(child_id) {
+                let _ = self
+                    .transport
+                    .send_to(data, node.contact_info.tpu_quic_addr);
+            }
+        }
+        self.stats.record_retransmit(1, data.len() as u64);
+    }
+
     /// Start the retransmit service
     pub fn start(&self) {
         if self.running.swap(true, Ordering::SeqCst) {

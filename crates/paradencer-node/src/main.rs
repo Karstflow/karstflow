@@ -363,10 +363,7 @@ fn run_with_node_config(
     // Uses the gossip-derived identity and cluster state to route shreds
     // through the turbine tree.
     let turbine_bundle = build_turbine_service(node_id, cluster_info.clone())?;
-    // Keep retransmit handle alive — its Arc prevents the transport socket
-    // from closing. Cross-service shred submission will use this handle
-    // once the ShredNetworkService retransmit channel is connected.
-    let _retransmit = turbine_bundle.retransmit;
+    let retransmit_service = turbine_bundle.retransmit;
 
     // Build the repair service for slot recovery from peers.
     // The coordinator runs poll-driven in the node runtime; background I/O
@@ -480,8 +477,28 @@ fn run_with_node_config(
         services.push(maintenance.service);
     }
 
-    // Keep gossip and plugins alive until run_runtime_phase returns.
+    // Bridge retransmit decisions from the shred pipeline to the turbine
+    // retransmit service. Each decision carries raw shred bytes that get
+    // forwarded to turbine tree children via UDP.
+    let _retransmit_bridge = if let Some(retransmit_rx) = runtime_topology.retransmit_receiver {
+        let retransmit = std::sync::Arc::clone(&retransmit_service);
+        Some(
+            std::thread::Builder::new()
+                .name("retransmit-fwd".into())
+                .spawn(move || {
+                    while let Ok(decision) = retransmit_rx.recv() {
+                        retransmit.forward_raw(&decision.shred_data);
+                    }
+                })
+                .expect("failed to spawn retransmit forwarder thread"),
+        )
+    } else {
+        None
+    };
+
+    // Keep gossip, retransmit, and plugins alive until run_runtime_phase returns.
     let _gossip = gossip_handle;
+    let _retransmit = retransmit_service;
 
     let result = run_runtime_phase_with_consensus(
         &node_config,

@@ -10,9 +10,9 @@ use paradencer_stages::{
     shared_health_status, shared_metrics_content, AssembledBlock, BlockAssembler,
     BlockAssemblyStats, CompletedFecSet, EdgeIntake, InboundPacket, IngressFilterStats,
     LinkTelemetryStats, MetricsContent, MetricsOutputFormat, MetricsOutputTarget, MetricsReporter,
-    RawTransaction, SanitizedTransaction, SharedHealthStatus, ShredArrival, ShredCollector,
-    ShredFilter, ShredFilterStats, ShredNetworkConfig, ShredNetworkService, StageTelemetryStats,
-    StorageRuntimePolicy, TxFilter,
+    RawTransaction, RetransmitDecision, SanitizedTransaction, SharedHealthStatus, ShredArrival,
+    ShredCollector, ShredFilter, ShredFilterStats, ShredNetworkConfig, ShredNetworkService,
+    StageTelemetryStats, StorageRuntimePolicy, TxFilter,
 };
 use paradencer_storage::Blockstore;
 use paradencer_types::shred::Shred;
@@ -139,6 +139,12 @@ pub fn materialize_services_with_blockstore(
     // received data shred so the repair forest can track turbine progress.
     let (shred_arrival_tx, shred_arrival_rx) = crossbeam_channel::bounded::<ShredArrival>(4096);
 
+    // Channel for retransmit decisions from the shred network to the turbine
+    // broadcaster. Each RetransmitDecision carries raw shred data plus
+    // destination indices for forwarding through the turbine tree.
+    let retransmit_capacity = 512;
+    let (retransmit_tx, retransmit_rx) = bounded_link::<RetransmitDecision>(retransmit_capacity);
+
     let ingress_filter_stats = Arc::new(IngressFilterStats::default());
     let shred_filter_stats = Arc::new(ShredFilterStats::default());
     let block_assembly_stats = Arc::new(BlockAssemblyStats::default());
@@ -199,7 +205,8 @@ pub fn materialize_services_with_blockstore(
                         ShredNetworkConfig::default(),
                         DualReceiver::Channel(filtered_shred_rx.clone()),
                         fec_completed_tx.clone(),
-                    );
+                    )
+                    .with_retransmit_output(retransmit_tx.clone());
                     shred_network_stats_out = Some(shred_net.stats());
                     fec_resolver_stats_out = Some(shred_net.fec_resolver_stats());
                     services.push(Box::new(shred_net));
@@ -303,5 +310,10 @@ pub fn materialize_services_with_blockstore(
         reporter: reporter_out,
         shred_network_stats: shred_network_stats_out,
         fec_resolver_stats: fec_resolver_stats_out,
+        retransmit_receiver: if shred_collector_added {
+            Some(retransmit_rx)
+        } else {
+            None
+        },
     })
 }

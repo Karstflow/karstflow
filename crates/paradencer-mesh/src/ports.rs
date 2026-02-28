@@ -58,6 +58,20 @@ impl<MessageType> OutPort<MessageType> {
 }
 
 impl<MessageType> InPort<MessageType> {
+    /// Blocking receive — waits until a message is available or the channel closes.
+    pub fn recv(&self) -> Result<MessageType, ReceiveError> {
+        match self.receiver.recv() {
+            Ok(message) => {
+                self.stats.record_dequeue();
+                Ok(message)
+            }
+            Err(_) => {
+                self.stats.record_closed_receive();
+                Err(ReceiveError::QueueClosed)
+            }
+        }
+    }
+
     pub fn try_recv(&self) -> Result<Option<MessageType>, ReceiveError> {
         match self.receiver.try_recv() {
             Ok(message) => {
