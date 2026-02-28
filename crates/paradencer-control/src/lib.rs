@@ -6,6 +6,8 @@ mod preflight;
 mod runner;
 pub mod snapshot_download;
 mod surface;
+#[cfg(test)]
+mod testsuite;
 mod vote_sender;
 pub mod wait_for_supermajority;
 
