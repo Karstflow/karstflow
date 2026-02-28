@@ -192,6 +192,14 @@ impl NetworkTile {
         received
     }
 
+    /// Access the last received packet batch.
+    ///
+    /// Valid after `service()` returns > 0. Used by the bridge to feed
+    /// packets directly to the co-located QUIC tile without copying.
+    pub fn rx_batch_ref(&self) -> &[PacketBuffer] {
+        self.rx_batch.as_slice()
+    }
+
     /// Get the local bind address of the transport.
     pub fn local_addr(&self) -> Option<SocketAddrV4> {
         self.transport.local_addr()
