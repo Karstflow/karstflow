@@ -30,10 +30,10 @@ pub(super) fn handle(
             build_token_account_balance_response(request, snapshot, commitment, bank_access)
         }
         RpcMethod::GetLargestAccounts => {
-            build_largest_accounts_response(request, snapshot, commitment)
+            build_largest_accounts_response(request, snapshot, commitment, bank_access)
         }
         RpcMethod::GetTokenLargestAccounts => {
-            build_token_largest_accounts_response(request, snapshot, commitment)
+            build_token_largest_accounts_response(request, snapshot, commitment, bank_access)
         }
         RpcMethod::GetProgramAccounts => {
             build_program_accounts_response(request, snapshot, commitment, bank_access)
@@ -42,7 +42,7 @@ pub(super) fn handle(
             build_token_accounts_by_owner_response(request, snapshot, commitment, bank_access)
         }
         RpcMethod::GetTokenAccountsByDelegate => {
-            build_token_accounts_by_delegate_response(request, snapshot, commitment)
+            build_token_accounts_by_delegate_response(request, snapshot, commitment, bank_access)
         }
         RpcMethod::GetAccountInfo => {
             build_account_info_response(request, snapshot, commitment, bank_access)
@@ -163,10 +163,33 @@ fn build_largest_accounts_response(
     request: &serde_json::Value,
     snapshot: RpcRuntimeSnapshot,
     commitment: RpcCommitment,
+    bank_access: Option<&Arc<dyn BankAccessProvider>>,
 ) -> Result<serde_json::Value, RpcMethodError> {
     ensure_min_context_slot_satisfied(request, snapshot, commitment)?;
     let _ = parse_largest_accounts_filter(request)?;
-    let slot = snapshot.slot_for_commitment(commitment);
+    let slot = resolve_slot(snapshot, commitment, bank_access);
+
+    // Try real account data.
+    if let Some(bank) = bank_access {
+        let largest = bank.get_largest_accounts(20, commitment);
+        if !largest.is_empty() {
+            let accounts: Vec<serde_json::Value> = largest
+                .into_iter()
+                .map(|(pubkey, lamports)| {
+                    json!({
+                        "address": pubkey.to_string(),
+                        "lamports": lamports
+                    })
+                })
+                .collect();
+            return Ok(json!({
+                "context": {"slot": slot},
+                "value": accounts
+            }));
+        }
+    }
+
+    // Synthetic fallback.
     let base = snapshot.transaction_count.saturating_add(100_000);
     let accounts = (0_u64..5)
         .map(|index| {
@@ -186,10 +209,76 @@ fn build_token_largest_accounts_response(
     request: &serde_json::Value,
     snapshot: RpcRuntimeSnapshot,
     commitment: RpcCommitment,
+    bank_access: Option<&Arc<dyn BankAccessProvider>>,
 ) -> Result<serde_json::Value, RpcMethodError> {
     ensure_min_context_slot_satisfied(request, snapshot, commitment)?;
     let mint = parse_mint_param(request)?;
-    let slot = snapshot.slot_for_commitment(commitment);
+    let slot = resolve_slot(snapshot, commitment, bank_access);
+
+    // Try real token account data.
+    if let Some(bank) = bank_access {
+        let mint_pubkey = parse_pubkey(&mint)?;
+        let token_program = parse_pubkey("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA")?;
+        let all_token_accounts = bank.get_accounts_by_owner(&token_program, commitment);
+
+        // Filter by mint (bytes 0..32) and extract amounts (bytes 64..72).
+        let mut matching: Vec<(String, u64)> = all_token_accounts
+            .into_iter()
+            .filter(|(_, account)| {
+                let data = account.data.as_slice();
+                data.len() >= SPL_TOKEN_ACCOUNT_MIN_LEN as usize
+                    && data[..32] == *mint_pubkey.as_bytes()
+            })
+            .map(|(pubkey, account)| {
+                let data = account.data.as_slice();
+                let amount = u64::from_le_bytes(
+                    data[SPL_TOKEN_ACCOUNT_AMOUNT_OFFSET as usize
+                        ..SPL_TOKEN_ACCOUNT_AMOUNT_OFFSET as usize + 8]
+                        .try_into()
+                        .unwrap_or([0u8; 8]),
+                );
+                (pubkey.to_string(), amount)
+            })
+            .collect();
+
+        if !matching.is_empty() {
+            matching.sort_by(|a, b| b.1.cmp(&a.1));
+            matching.truncate(20);
+
+            // Read decimals from mint account.
+            let decimals = bank
+                .get_account(&mint_pubkey, commitment)
+                .and_then(|acct| {
+                    let data = acct.data.as_slice();
+                    if data.len() >= SPL_MINT_MIN_LEN as usize {
+                        Some(data[SPL_MINT_DECIMALS_OFFSET as usize])
+                    } else {
+                        None
+                    }
+                })
+                .unwrap_or(9);
+            let divisor = 10_f64.powi(decimals as i32);
+
+            let accounts: Vec<serde_json::Value> = matching
+                .into_iter()
+                .map(|(address, amount)| {
+                    json!({
+                        "address": address,
+                        "amount": amount.to_string(),
+                        "decimals": decimals,
+                        "uiAmount": amount as f64 / divisor,
+                        "uiAmountString": format_token_ui_amount(amount, decimals)
+                    })
+                })
+                .collect();
+            return Ok(json!({
+                "context": {"slot": slot},
+                "value": accounts
+            }));
+        }
+    }
+
+    // Synthetic fallback.
     let base = snapshot.transaction_count.saturating_add(50_000);
     let accounts = (0_u64..5)
         .map(|index| {
@@ -207,6 +296,16 @@ fn build_token_largest_accounts_response(
         "value": accounts,
         "mint": mint
     }))
+}
+
+fn format_token_ui_amount(amount: u64, decimals: u8) -> String {
+    if decimals == 0 {
+        return amount.to_string();
+    }
+    let divisor = 10_u64.pow(decimals as u32);
+    let whole = amount / divisor;
+    let frac = amount % divisor;
+    format!("{whole}.{frac:0>width$}", width = decimals as usize)
 }
 
 fn build_program_accounts_response(
@@ -322,10 +421,40 @@ fn build_token_accounts_by_delegate_response(
     request: &serde_json::Value,
     snapshot: RpcRuntimeSnapshot,
     commitment: RpcCommitment,
+    bank_access: Option<&Arc<dyn BankAccessProvider>>,
 ) -> Result<serde_json::Value, RpcMethodError> {
     let (delegate, selector, min_context_slot) = parse_token_accounts_query(request)?;
     ensure_optional_min_context_slot(min_context_slot, snapshot, commitment)?;
-    let slot = snapshot.slot_for_commitment(commitment);
+    let slot = resolve_slot(snapshot, commitment, bank_access);
+    let encoding = parse_encoding(request);
+
+    if let Some(bank) = bank_access {
+        // Look up all SPL Token accounts, filter by delegate field (bytes 76..108).
+        let delegate_pubkey = parse_pubkey(&delegate)?;
+        let token_program = parse_pubkey("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA")?;
+        let all_token_accounts = bank.get_accounts_by_owner(&token_program, commitment);
+        let value: Vec<serde_json::Value> = all_token_accounts
+            .into_iter()
+            .filter(|(_, account)| {
+                // SPL Token account delegate is at bytes 76..108 (after
+                // mint[0..32] + owner[32..64] + amount[64..72] + delegate_option[72..76])
+                let data = account.data.as_slice();
+                data.len() >= 108 && data[76..108] == *delegate_pubkey.as_bytes()
+            })
+            .map(|(pubkey, account)| {
+                json!({
+                    "pubkey": pubkey.to_string(),
+                    "account": format_account_value(&account, &encoding)
+                })
+            })
+            .collect();
+        return Ok(json!({
+            "context": {"slot": slot},
+            "value": value
+        }));
+    }
+
+    // Synthetic fallback.
     let value = (0_u64..2)
         .map(|index| {
             json!({

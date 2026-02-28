@@ -2507,6 +2507,26 @@ impl BankAccessProvider for ConsensusBankAccessProvider {
         self.genesis_hash.clone()
     }
 
+    fn get_largest_accounts(
+        &self,
+        limit: usize,
+        commitment: paradencer_rpc::RpcCommitment,
+    ) -> Vec<(paradencer_types::Pubkey, u64)> {
+        let bank = match self.bank_for_commitment(commitment) {
+            Some(bank) => bank,
+            None => return Vec::new(),
+        };
+        let db = bank.accounts();
+        let mut all_accounts: Vec<(paradencer_types::Pubkey, u64)> = db
+            .iter_published_accounts()
+            .into_iter()
+            .map(|(pubkey, account)| (pubkey, account.meta.lamports))
+            .collect();
+        all_accounts.sort_by(|a, b| b.1.cmp(&a.1));
+        all_accounts.truncate(limit);
+        all_accounts
+    }
+
     fn get_block_commitment(&self, slot: u64) -> Option<paradencer_rpc::RpcBlockCommitment> {
         let tracker = self.commitment_tracker.as_ref()?;
         let guard = tracker.lock().ok()?;

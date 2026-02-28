@@ -182,6 +182,17 @@ pub trait BankAccessProvider: Send + Sync {
         None
     }
 
+    /// Get the largest accounts by lamport balance.
+    ///
+    /// Returns up to `limit` accounts sorted by descending balance.
+    fn get_largest_accounts(
+        &self,
+        _limit: usize,
+        _commitment: RpcCommitment,
+    ) -> Vec<(paradencer_types::Pubkey, u64)> {
+        Vec::new()
+    }
+
     /// Get the block commitment for a given slot.
     ///
     /// Returns the commitment stake array (32 entries) and total stake.
