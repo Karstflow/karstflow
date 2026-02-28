@@ -25,7 +25,7 @@ pub(super) fn handle(
 ) -> Result<serde_json::Value, RpcMethodError> {
     match method {
         RpcMethod::GetSignaturesForAddress | RpcMethod::GetConfirmedSignaturesForAddress2 => {
-            build_signatures_for_address_response(request, snapshot, commitment)
+            build_signatures_for_address_response(request, snapshot, commitment, bank_access)
         }
         RpcMethod::GetClusterNodes => Ok(build_cluster_nodes_response(
             snapshot,
@@ -50,7 +50,7 @@ pub(super) fn handle(
             build_block_production_response(request, snapshot, commitment, bank_access)
         }
         RpcMethod::GetRecentPrioritizationFees => {
-            build_recent_prioritization_fees_response(request, snapshot, commitment)
+            build_recent_prioritization_fees_response(request, snapshot, commitment, bank_access)
         }
         _ => Err(RpcMethodError::MethodNotFound),
     }
@@ -131,12 +131,54 @@ fn build_signatures_for_address_response(
     request: &serde_json::Value,
     snapshot: RpcRuntimeSnapshot,
     commitment: RpcCommitment,
+    bank_access: Option<&Arc<dyn BankAccessProvider>>,
 ) -> Result<serde_json::Value, RpcMethodError> {
     let (address, before, until, limit, min_context_slot) =
         parse_signatures_for_address_params(request)?;
     let committed_slot = snapshot.slot_for_commitment(commitment);
     ensure_optional_min_context_slot(min_context_slot, committed_slot)?;
-    let entry_count = limit.min(SIGNATURES_FOR_ADDRESS_RESPONSE_MAX_ROWS);
+    let entry_count = limit.min(SIGNATURES_FOR_ADDRESS_RESPONSE_MAX_ROWS) as usize;
+
+    // Try real data from bank access provider.
+    if let Some(bank) = bank_access {
+        let address_pubkey =
+            parse_pubkey_from_base58(&address).ok_or(RpcMethodError::InvalidParams)?;
+
+        let before_sig = before.as_deref().and_then(decode_signature_bytes);
+        let until_sig = until.as_deref().and_then(decode_signature_bytes);
+
+        let entries = bank.get_signatures_for_address(
+            &address_pubkey,
+            entry_count,
+            before_sig.as_ref(),
+            until_sig.as_ref(),
+            commitment,
+        );
+
+        if !entries.is_empty() {
+            let values: Vec<serde_json::Value> = entries
+                .into_iter()
+                .map(|e| {
+                    let err = e
+                        .error
+                        .as_ref()
+                        .map(|msg| json!({"InstructionError": msg}))
+                        .unwrap_or(serde_json::Value::Null);
+                    json!({
+                        "signature": e.signature,
+                        "slot": e.slot,
+                        "err": err,
+                        "memo": serde_json::Value::Null,
+                        "blockTime": e.block_time,
+                        "confirmationStatus": confirmation_status_label(commitment),
+                    })
+                })
+                .collect();
+            return Ok(json!(values));
+        }
+    }
+
+    // Synthetic fallback.
     let start_slot = before
         .as_deref()
         .map(signature_anchor_slot)
@@ -147,7 +189,7 @@ fn build_signatures_for_address_response(
         .map(signature_anchor_slot)
         .map(|delta| committed_slot.saturating_sub(delta));
 
-    let values = (0_u64..entry_count)
+    let values = (0_u64..entry_count as u64)
         .filter_map(|index| {
             let slot = start_slot.saturating_sub(index);
             if until_slot.map(|boundary| slot < boundary).unwrap_or(false) {
@@ -175,6 +217,26 @@ fn build_signatures_for_address_response(
         })
         .collect::<Vec<_>>();
     Ok(json!(values))
+}
+
+fn decode_signature_bytes(sig_str: &str) -> Option<[u8; 64]> {
+    let bytes = bs58::decode(sig_str).into_vec().ok()?;
+    if bytes.len() != 64 {
+        return None;
+    }
+    let mut sig = [0u8; 64];
+    sig.copy_from_slice(&bytes);
+    Some(sig)
+}
+
+fn parse_pubkey_from_base58(encoded: &str) -> Option<paradencer_types::Pubkey> {
+    let bytes = bs58::decode(encoded.trim()).into_vec().ok()?;
+    if bytes.len() != 32 {
+        return None;
+    }
+    let mut key = [0u8; 32];
+    key.copy_from_slice(&bytes);
+    Some(paradencer_types::Pubkey::from(key))
 }
 
 fn build_cluster_nodes_response(
@@ -485,8 +547,28 @@ fn build_recent_prioritization_fees_response(
     request: &serde_json::Value,
     snapshot: RpcRuntimeSnapshot,
     commitment: RpcCommitment,
+    bank_access: Option<&Arc<dyn BankAccessProvider>>,
 ) -> Result<serde_json::Value, RpcMethodError> {
     ensure_min_context_slot_satisfied(request, snapshot, commitment)?;
+
+    // Try real data from bank access provider.
+    if let Some(bank) = bank_access {
+        let fees = bank.get_recent_prioritization_fees(commitment);
+        if !fees.is_empty() {
+            let rows: Vec<serde_json::Value> = fees
+                .into_iter()
+                .map(|f| {
+                    json!({
+                        "slot": f.slot,
+                        "prioritizationFee": f.prioritization_fee
+                    })
+                })
+                .collect();
+            return Ok(json!(rows));
+        }
+    }
+
+    // Synthetic fallback.
     let account_count = parse_optional_account_list_len(request)?;
     let current_slot = snapshot.slot_for_commitment(commitment);
     let base_fee = PRIORITIZATION_FEE_BASE

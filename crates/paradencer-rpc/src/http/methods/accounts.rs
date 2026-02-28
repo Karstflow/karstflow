@@ -226,14 +226,14 @@ fn build_token_largest_accounts_response(
             .into_iter()
             .filter(|(_, account)| {
                 let data = account.data.as_slice();
-                data.len() >= SPL_TOKEN_ACCOUNT_MIN_LEN as usize
+                data.len() >= SPL_TOKEN_ACCOUNT_MIN_LEN
                     && data[..32] == *mint_pubkey.as_bytes()
             })
             .map(|(pubkey, account)| {
                 let data = account.data.as_slice();
                 let amount = u64::from_le_bytes(
-                    data[SPL_TOKEN_ACCOUNT_AMOUNT_OFFSET as usize
-                        ..SPL_TOKEN_ACCOUNT_AMOUNT_OFFSET as usize + 8]
+                    data[SPL_TOKEN_ACCOUNT_AMOUNT_OFFSET
+                        ..SPL_TOKEN_ACCOUNT_AMOUNT_OFFSET + 8]
                         .try_into()
                         .unwrap_or([0u8; 8]),
                 );
@@ -250,8 +250,8 @@ fn build_token_largest_accounts_response(
                 .get_account(&mint_pubkey, commitment)
                 .and_then(|acct| {
                     let data = acct.data.as_slice();
-                    if data.len() >= SPL_MINT_MIN_LEN as usize {
-                        Some(data[SPL_MINT_DECIMALS_OFFSET as usize])
+                    if data.len() >= SPL_MINT_MIN_LEN {
+                        Some(data[SPL_MINT_DECIMALS_OFFSET])
                     } else {
                         None
                     }

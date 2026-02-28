@@ -230,6 +230,42 @@ pub trait BankAccessProvider: Send + Sync {
     fn get_transaction(&self, _signature: &[u8; 64]) -> Option<RpcTransactionData> {
         None
     }
+
+    /// Get recent transaction signatures that touched the given address.
+    ///
+    /// Returns up to `limit` entries sorted most-recent-first.
+    /// `before` and `until` are base58-encoded signature cursors for pagination.
+    fn get_signatures_for_address(
+        &self,
+        _address: &paradencer_types::Pubkey,
+        _limit: usize,
+        _before: Option<&[u8; 64]>,
+        _until: Option<&[u8; 64]>,
+        _commitment: RpcCommitment,
+    ) -> Vec<RpcAddressSignatureEntry> {
+        Vec::new()
+    }
+
+    /// Get priority fees from recent slots.
+    ///
+    /// Returns per-slot priority fee data for the last N slots.
+    fn get_recent_prioritization_fees(
+        &self,
+        _commitment: RpcCommitment,
+    ) -> Vec<RpcPrioritizationFee> {
+        Vec::new()
+    }
+
+    /// Get performance samples from recent slots.
+    ///
+    /// Returns per-sample data with transaction counts and timing.
+    fn get_recent_performance_samples(
+        &self,
+        _limit: usize,
+        _commitment: RpcCommitment,
+    ) -> Vec<RpcPerformanceSample> {
+        Vec::new()
+    }
 }
 
 /// Parsed block data returned by `get_block_data`.
@@ -289,6 +325,45 @@ pub struct RpcTransactionData {
     pub signatures: Vec<String>,
     /// Raw transaction bytes.
     pub raw_bytes: Vec<u8>,
+}
+
+/// A signature entry for `getSignaturesForAddress` responses.
+#[derive(Debug, Clone)]
+pub struct RpcAddressSignatureEntry {
+    /// Transaction signature (base58-encoded).
+    pub signature: String,
+    /// Slot in which the transaction was processed.
+    pub slot: u64,
+    /// Whether the transaction succeeded.
+    pub succeeded: bool,
+    /// Error description for failed transactions.
+    pub error: Option<String>,
+    /// Block time (unix timestamp), if known.
+    pub block_time: Option<i64>,
+}
+
+/// Per-slot prioritization fee data.
+#[derive(Debug, Clone)]
+pub struct RpcPrioritizationFee {
+    /// Slot number.
+    pub slot: u64,
+    /// Prioritization fee for this slot (in micro-lamports per CU).
+    pub prioritization_fee: u64,
+}
+
+/// Performance sample for a recent time period.
+#[derive(Debug, Clone)]
+pub struct RpcPerformanceSample {
+    /// Slot at the end of the sample period.
+    pub slot: u64,
+    /// Number of transactions processed.
+    pub num_transactions: u64,
+    /// Number of slots in the sample period.
+    pub num_slots: u64,
+    /// Sample period in seconds.
+    pub sample_period_secs: u64,
+    /// Number of non-vote transactions.
+    pub num_non_vote_transactions: u64,
 }
 
 /// Contact information for a cluster node, returned by `get_cluster_nodes`.

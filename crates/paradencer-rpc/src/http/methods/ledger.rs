@@ -47,7 +47,8 @@ pub(super) fn handle(
             Ok(json!(build_performance_samples(
                 snapshot,
                 requested_limit,
-                commitment
+                commitment,
+                bank_access,
             )))
         }
         _ => Err(RpcMethodError::MethodNotFound),
@@ -73,15 +74,37 @@ fn build_performance_samples(
     snapshot: RpcRuntimeSnapshot,
     requested_limit: u64,
     commitment: RpcCommitment,
+    bank_access: Option<&Arc<dyn BankAccessProvider>>,
 ) -> Vec<serde_json::Value> {
-    let limit = requested_limit.clamp(1, MAX_PERFORMANCE_SAMPLES);
+    let limit = requested_limit.clamp(1, MAX_PERFORMANCE_SAMPLES) as usize;
+
+    // Try real data from bank access provider.
+    if let Some(bank) = bank_access {
+        let samples = bank.get_recent_performance_samples(limit, commitment);
+        if !samples.is_empty() {
+            return samples
+                .into_iter()
+                .map(|s| {
+                    json!({
+                        "slot": s.slot,
+                        "numTransactions": s.num_transactions,
+                        "numSlots": s.num_slots,
+                        "samplePeriodSecs": s.sample_period_secs,
+                        "numNonVoteTransactions": s.num_non_vote_transactions,
+                    })
+                })
+                .collect();
+        }
+    }
+
+    // Synthetic fallback.
     let sample_period_secs = 1_u64;
     let nonzero_uptime_secs = (snapshot.uptime_millis.max(1) / 1000).max(1) as u64;
     let committed_slot = snapshot.slot_for_commitment(commitment);
     let estimated_slots_per_second = committed_slot.max(1) / nonzero_uptime_secs;
     let num_slots = estimated_slots_per_second.max(1);
 
-    (0..limit)
+    (0..limit as u64)
         .map(|index| {
             json!({
                 "slot": committed_slot.saturating_sub(index),

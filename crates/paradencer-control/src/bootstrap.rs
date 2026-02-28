@@ -2158,27 +2158,34 @@ impl ConsensusBankAccessProvider {
 
     fn bank_for_commitment(&self, commitment: paradencer_rpc::RpcCommitment) -> Option<Arc<Bank>> {
         let forks = self.bank_forks.read().ok()?;
+        Some(self.bank_for_commitment_inner(&forks, commitment))
+    }
+
+    /// Resolve bank for commitment level using an already-locked BankForks.
+    fn bank_for_commitment_inner(
+        &self,
+        forks: &BankForks,
+        commitment: paradencer_rpc::RpcCommitment,
+    ) -> Arc<Bank> {
         match commitment {
-            paradencer_rpc::RpcCommitment::Finalized => forks.root_bank(),
+            paradencer_rpc::RpcCommitment::Finalized => {
+                forks.root_bank().unwrap_or_else(|| forks.working_bank())
+            }
             paradencer_rpc::RpcCommitment::Confirmed => {
-                // Use the commitment tracker to find the highest confirmed slot,
-                // then look up the bank at that slot in the fork tree.
                 if let Some(ref tracker) = self.commitment_tracker {
                     if let Ok(guard) = tracker.lock() {
                         if let Some(confirmed_slot) =
                             guard.highest_slot_with_commitment(CommitmentLevel::Confirmed)
                         {
                             if let Some(bank) = forks.get(confirmed_slot) {
-                                return Some(bank);
+                                return bank;
                             }
                         }
                     }
                 }
-                // Fall back to working bank when tracker is unavailable or has
-                // no confirmed slot yet (early startup).
-                Some(forks.working_bank())
+                forks.working_bank()
             }
-            paradencer_rpc::RpcCommitment::Processed => Some(forks.working_bank()),
+            paradencer_rpc::RpcCommitment::Processed => forks.working_bank(),
         }
     }
 }
@@ -2639,6 +2646,115 @@ impl BankAccessProvider for ConsensusBankAccessProvider {
             signatures: vec![sig_b58],
             raw_bytes: Vec::new(),
         })
+    }
+
+    fn get_signatures_for_address(
+        &self,
+        address: &paradencer_types::Pubkey,
+        limit: usize,
+        before: Option<&[u8; 64]>,
+        until: Option<&[u8; 64]>,
+        _commitment: paradencer_rpc::RpcCommitment,
+    ) -> Vec<paradencer_rpc::RpcAddressSignatureEntry> {
+        let forks = match self.bank_forks.read() {
+            Ok(f) => f,
+            Err(_) => return Vec::new(),
+        };
+        let bank = forks.working_bank();
+        let entries = bank
+            .signature_status_cache()
+            .get_signatures_for_address(address, limit, before, until);
+
+        let bs = self.blockstore.as_ref();
+        entries
+            .into_iter()
+            .map(|e| {
+                let block_time = bs.and_then(|store| {
+                    store.get_slot_meta(e.slot).ok().flatten().and_then(|m| {
+                        if m.first_shred_timestamp > 0 {
+                            Some(m.first_shred_timestamp)
+                        } else {
+                            None
+                        }
+                    })
+                });
+                paradencer_rpc::RpcAddressSignatureEntry {
+                    signature: bs58::encode(e.signature).into_string(),
+                    slot: e.slot,
+                    succeeded: e.succeeded,
+                    error: e.error,
+                    block_time,
+                }
+            })
+            .collect()
+    }
+
+    fn get_recent_prioritization_fees(
+        &self,
+        commitment: paradencer_rpc::RpcCommitment,
+    ) -> Vec<paradencer_rpc::RpcPrioritizationFee> {
+        let forks = match self.bank_forks.read() {
+            Ok(f) => f,
+            Err(_) => return Vec::new(),
+        };
+        let bank = self.bank_for_commitment_inner(&forks, commitment);
+        let current_slot = bank.slot();
+        let root_slot = forks
+            .root_bank()
+            .map(|b| b.slot())
+            .unwrap_or(current_slot.saturating_sub(150));
+
+        // Collect priority fees from recent slots (up to 150).
+        let start = current_slot.saturating_sub(150).max(root_slot);
+        let mut fees = Vec::new();
+        for slot in (start..=current_slot).rev() {
+            if let Some(slot_bank) = forks.get(slot) {
+                fees.push(paradencer_rpc::RpcPrioritizationFee {
+                    slot,
+                    prioritization_fee: slot_bank.priority_fees(),
+                });
+            }
+            if fees.len() >= 150 {
+                break;
+            }
+        }
+        fees
+    }
+
+    fn get_recent_performance_samples(
+        &self,
+        limit: usize,
+        commitment: paradencer_rpc::RpcCommitment,
+    ) -> Vec<paradencer_rpc::RpcPerformanceSample> {
+        let forks = match self.bank_forks.read() {
+            Ok(f) => f,
+            Err(_) => return Vec::new(),
+        };
+        let bank = self.bank_for_commitment_inner(&forks, commitment);
+        let current_slot = bank.slot();
+        let root_slot = forks
+            .root_bank()
+            .map(|b| b.slot())
+            .unwrap_or(current_slot.saturating_sub(150));
+
+        // Build samples from recent slots. Each sample represents one slot.
+        let start = current_slot.saturating_sub(150).max(root_slot);
+        let mut samples = Vec::new();
+        for slot in (start..=current_slot).rev() {
+            if let Some(slot_bank) = forks.get(slot) {
+                samples.push(paradencer_rpc::RpcPerformanceSample {
+                    slot,
+                    num_transactions: slot_bank.transaction_count(),
+                    num_slots: 1,
+                    sample_period_secs: 1,
+                    num_non_vote_transactions: slot_bank.nonvote_transaction_count(),
+                });
+            }
+            if samples.len() >= limit {
+                break;
+            }
+        }
+        samples
     }
 
     fn get_block_data(&self, slot: u64) -> Option<paradencer_rpc::RpcBlockData> {

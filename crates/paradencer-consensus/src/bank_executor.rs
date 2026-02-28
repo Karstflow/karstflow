@@ -1775,6 +1775,14 @@ impl Bank {
             if let Some(sig) = transaction.signatures.first() {
                 self.signature_status_cache()
                     .insert_failure(*sig, self.slot(), error.to_string());
+                // Index by all account addresses for getSignaturesForAddress.
+                self.signature_status_cache().index_transaction_addresses(
+                    *sig,
+                    self.slot(),
+                    &transaction.account_keys,
+                    false,
+                    Some(error.to_string()),
+                );
             }
 
             return TransactionExecutionResult {
@@ -1858,6 +1866,14 @@ impl Bank {
         if let Some(sig) = transaction.signatures.first() {
             self.signature_status_cache()
                 .insert_success(*sig, self.slot());
+            // Index by all account addresses for getSignaturesForAddress.
+            self.signature_status_cache().index_transaction_addresses(
+                *sig,
+                self.slot(),
+                &transaction.account_keys,
+                true,
+                None,
+            );
         }
 
         TransactionExecutionResult {
