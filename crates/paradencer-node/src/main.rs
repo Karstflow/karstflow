@@ -7,19 +7,19 @@ use tracing::{info, warn};
 use paradencer_control::{
     build_diagnostics_summary_from_probe, build_pipeline_service, build_repair_service,
     build_replay_service_with_block_input, build_replay_service_with_consensus,
-    build_turbine_service, build_vote_broadcast_service, build_vote_sender_service,
-    dispatch_command, ensure_mainnet_readiness, evaluate_mainnet_readiness,
-    materialize_service_pair_from_config, materialize_services_from_config,
-    maybe_spawn_quic_bridge, parse_command, render_diagnostics_cluster_mode_line,
-    render_diagnostics_lane_capacity_line, render_diagnostics_ok_line,
-    render_diagnostics_probe_line, render_diagnostics_readiness_issue_line,
-    render_diagnostics_readiness_line, render_diagnostics_services_line,
-    render_diagnostics_stage_mix_line, render_diagnostics_topology_line,
-    render_preflight_readiness_issue_line, render_preflight_readiness_line,
-    render_readiness_policy_line, resolve_validator_identity, restore_from_snapshot_archive,
-    run_diagnostics_phase, run_preflight_phase, run_preflight_phase_with_probe_report,
-    run_runtime_phase_with_consensus, save_tower_to_disk, spawn_snapshot_thread,
-    start_gossip_service, BlockstoreShredProvider, ServiceBundle,
+    build_storage_maintenance_service, build_turbine_service, build_vote_broadcast_service,
+    build_vote_sender_service, dispatch_command, ensure_mainnet_readiness,
+    evaluate_mainnet_readiness, materialize_service_pair_from_config,
+    materialize_services_from_config, maybe_spawn_quic_bridge, parse_command,
+    render_diagnostics_cluster_mode_line, render_diagnostics_lane_capacity_line,
+    render_diagnostics_ok_line, render_diagnostics_probe_line,
+    render_diagnostics_readiness_issue_line, render_diagnostics_readiness_line,
+    render_diagnostics_services_line, render_diagnostics_stage_mix_line,
+    render_diagnostics_topology_line, render_preflight_readiness_issue_line,
+    render_preflight_readiness_line, render_readiness_policy_line, resolve_validator_identity,
+    restore_from_snapshot_archive, run_diagnostics_phase, run_preflight_phase,
+    run_preflight_phase_with_probe_report, run_runtime_phase_with_consensus, save_tower_to_disk,
+    spawn_snapshot_thread, start_gossip_service, BlockstoreShredProvider, ServiceBundle,
 };
 
 fn main() -> paradencer_control::Result<()> {
@@ -370,6 +370,7 @@ fn run_with_node_config(
     // handles actual UDP request/response on a dedicated thread.
     // When persistent storage is available, open the blockstore once and share
     // the same Arc between the repair service and the RPC server.
+    let storage_engine_for_maintenance = consensus.storage_engine.clone();
     let shared_blockstore: Option<std::sync::Arc<paradencer_storage::Blockstore>> = consensus
         .storage_engine
         .as_ref()
@@ -463,6 +464,12 @@ fn run_with_node_config(
     services.push(vote_broadcast_bundle.service);
     if let Ok(bundle) = vote_sender_bundle {
         services.push(bundle.service);
+    }
+
+    // Storage maintenance: periodic compaction and flush of the durable store.
+    if let Some(engine) = storage_engine_for_maintenance {
+        let maintenance = build_storage_maintenance_service(engine, Default::default());
+        services.push(maintenance.service);
     }
 
     // Keep gossip and plugins alive until run_runtime_phase returns.
