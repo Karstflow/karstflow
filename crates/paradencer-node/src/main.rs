@@ -120,6 +120,44 @@ fn run_with_node_config(
     };
     let consensus = replay_bundle.consensus;
 
+    // Wait-for-supermajority Phase 2: block until 80% of stake is online.
+    // Only activates when a bank hash is configured (coordinated restart).
+    // Gossip is already running, so peers accumulate while we poll.
+    if node_config.wait_for_supermajority_bank_hash.is_some() {
+        let forks = consensus.bank_forks.read().unwrap();
+        let bank = forks.working_bank();
+        if let Some(vote_cache) = bank.vote_account_cache() {
+            let cache = vote_cache.read().unwrap();
+            let shred_version = node_config
+                .expected_shred_version
+                .unwrap_or(0);
+            drop(forks);
+            let wfs_config =
+                paradencer_control::wait_for_supermajority::WaitForSupermajorityConfig::default();
+            match paradencer_control::wait_for_supermajority::wait_for_supermajority_phase2(
+                &cache,
+                &cluster_info,
+                identity.pubkey(),
+                shred_version,
+                &wfs_config,
+            ) {
+                Ok(status) => {
+                    info!(
+                        online_percent = status.online_percent,
+                        online_stake = status.online_stake,
+                        total_stake = status.total_stake,
+                        "supermajority online — proceeding with startup",
+                    );
+                }
+                Err(e) => {
+                    return Err(e);
+                }
+            }
+        } else {
+            warn!("no vote account cache available — skipping wait-for-supermajority phase 2");
+        }
+    }
+
     // Clone the tower handle for persistence (tower Arc moves into vote broadcast later).
     let tower_for_persist = std::sync::Arc::clone(&consensus.tower);
 
