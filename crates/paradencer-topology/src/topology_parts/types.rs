@@ -2,8 +2,8 @@ use paradencer_core::{IpcMode, TopologySpec};
 use paradencer_mesh::{InPort, OutPort};
 use paradencer_runtime::Service;
 use paradencer_stages::{
-    AssembledBlock, MetricsContent, MetricsReporter, RawTransaction, SharedHealthStatus,
-    ShredArrival, ShredNetworkStats,
+    AssembledBlock, AtomicFecResolverStats, MetricsContent, MetricsReporter, RawTransaction,
+    SharedHealthStatus, ShredArrival, ShredNetworkStats,
 };
 use paradencer_types::shred::Shred;
 use std::sync::Arc;
@@ -39,4 +39,6 @@ pub struct MaterializedTopology {
     pub reporter: Option<MetricsReporter>,
     /// Shred network stats for pipeline metrics aggregation.
     pub shred_network_stats: Option<Arc<ShredNetworkStats>>,
+    /// FEC resolver atomic stats for pipeline metrics aggregation.
+    pub fec_resolver_stats: Option<Arc<AtomicFecResolverStats>>,
 }

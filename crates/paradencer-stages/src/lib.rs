@@ -108,8 +108,8 @@ pub use exec_stage::{
 };
 pub use fec_cache::{CachedFecSet, FecCacheConfig, FecCacheStats, FecSetCache};
 pub use fec_resolver::{
-    EquivocationProof, FecBufferHandle, FecResolverPool, FecResolverStats, FecSetKey, FecSetView,
-    FecSetViewMut, ResolverInsertResult, SpilledFecSet,
+    AtomicFecResolverStats, EquivocationProof, FecBufferHandle, FecResolverPool, FecResolverStats,
+    FecSetKey, FecSetView, FecSetViewMut, ResolverInsertResult, SpilledFecSet,
 };
 pub use leader_pipeline::{
     LeaderPipeline, LeaderPipelineStats, PipelineStepResult, SbpfExecutionEngine,

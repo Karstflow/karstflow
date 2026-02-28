@@ -443,6 +443,9 @@ fn run_with_node_config(
         if let Some(ref shred_stats) = runtime_topology.shred_network_stats {
             aggregator = aggregator.with_shred_network(std::sync::Arc::clone(shred_stats));
         }
+        if let Some(ref fec_stats) = runtime_topology.fec_resolver_stats {
+            aggregator = aggregator.with_fec_resolver_live(std::sync::Arc::clone(fec_stats));
+        }
         rpt.with_aggregator(aggregator)
     });
 

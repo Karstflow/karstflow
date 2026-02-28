@@ -10,6 +10,8 @@ use paradencer_constants::shred::{
 };
 use paradencer_types::shred::Shred;
 use std::collections::{HashMap, VecDeque};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 
 /// Unique key identifying a FEC set within the network.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -182,11 +184,11 @@ pub struct FecResolverPool {
     last_spilled: Option<SpilledFecSet>,
     /// Recent equivocation proofs (bounded queue for consumer to drain).
     equivocation_proofs: VecDeque<EquivocationProof>,
-    /// Statistics.
-    pub stats: FecResolverStats,
+    /// Statistics (atomic for cross-service access).
+    pub stats: Arc<AtomicFecResolverStats>,
 }
 
-/// FEC resolver pool statistics.
+/// FEC resolver pool statistics (plain snapshot for serialization/display).
 #[derive(Debug, Default, Clone)]
 pub struct FecResolverStats {
     /// Total shreds inserted.
@@ -205,6 +207,50 @@ pub struct FecResolverStats {
     pub equivocations_detected: u64,
     /// FEC chain breaks detected (gap or overlap in consecutive FEC sets).
     pub chain_breaks: u64,
+}
+
+/// Atomic FEC resolver statistics for lock-free cross-service access.
+#[derive(Debug)]
+pub struct AtomicFecResolverStats {
+    pub shreds_inserted: AtomicU64,
+    pub sets_completed: AtomicU64,
+    pub sets_recoverable: AtomicU64,
+    pub sets_spilled: AtomicU64,
+    pub duplicates_rejected: AtomicU64,
+    pub duplicate_shreds_rejected: AtomicU64,
+    pub equivocations_detected: AtomicU64,
+    pub chain_breaks: AtomicU64,
+}
+
+impl Default for AtomicFecResolverStats {
+    fn default() -> Self {
+        Self {
+            shreds_inserted: AtomicU64::new(0),
+            sets_completed: AtomicU64::new(0),
+            sets_recoverable: AtomicU64::new(0),
+            sets_spilled: AtomicU64::new(0),
+            duplicates_rejected: AtomicU64::new(0),
+            duplicate_shreds_rejected: AtomicU64::new(0),
+            equivocations_detected: AtomicU64::new(0),
+            chain_breaks: AtomicU64::new(0),
+        }
+    }
+}
+
+impl AtomicFecResolverStats {
+    /// Take a point-in-time snapshot of all counters.
+    pub fn snapshot(&self) -> FecResolverStats {
+        FecResolverStats {
+            shreds_inserted: self.shreds_inserted.load(Ordering::Relaxed),
+            sets_completed: self.sets_completed.load(Ordering::Relaxed),
+            sets_recoverable: self.sets_recoverable.load(Ordering::Relaxed),
+            sets_spilled: self.sets_spilled.load(Ordering::Relaxed),
+            duplicates_rejected: self.duplicates_rejected.load(Ordering::Relaxed),
+            duplicate_shreds_rejected: self.duplicate_shreds_rejected.load(Ordering::Relaxed),
+            equivocations_detected: self.equivocations_detected.load(Ordering::Relaxed),
+            chain_breaks: self.chain_breaks.load(Ordering::Relaxed),
+        }
+    }
 }
 
 impl FecResolverPool {
@@ -234,7 +280,7 @@ impl FecResolverPool {
             done_depth,
             last_spilled: None,
             equivocation_proofs: VecDeque::new(),
-            stats: FecResolverStats::default(),
+            stats: Arc::new(AtomicFecResolverStats::default()),
         }
     }
 
@@ -265,7 +311,9 @@ impl FecResolverPool {
 
         // Check done_map for duplicate completed FEC set.
         if self.is_fec_set_done(&shred.common_header.signature) {
-            self.stats.duplicates_rejected += 1;
+            self.stats
+                .duplicates_rejected
+                .fetch_add(1, Ordering::Relaxed);
             return ResolverInsertResult::DuplicateFecSet;
         }
 
@@ -288,19 +336,23 @@ impl FecResolverPool {
                     existing_signature: existing.common_header.signature,
                     conflicting_signature: shred.common_header.signature,
                 });
-                self.stats.equivocations_detected += 1;
+                self.stats
+                    .equivocations_detected
+                    .fetch_add(1, Ordering::Relaxed);
                 // Cap proof queue to avoid unbounded growth.
                 if self.equivocation_proofs.len() > 64 {
                     self.equivocation_proofs.pop_front();
                 }
                 return ResolverInsertResult::Equivocation;
             }
-            self.stats.duplicate_shreds_rejected += 1;
+            self.stats
+                .duplicate_shreds_rejected
+                .fetch_add(1, Ordering::Relaxed);
             return ResolverInsertResult::DuplicateShred;
         }
 
         buf.data_shreds.insert(relative_index, shred);
-        self.stats.shreds_inserted += 1;
+        self.stats.shreds_inserted.fetch_add(1, Ordering::Relaxed);
 
         self.check_fec_status(buf_idx)
     }
@@ -322,7 +374,9 @@ impl FecResolverPool {
 
         // Check done_map for duplicate completed FEC set.
         if self.is_fec_set_done(&shred.common_header.signature) {
-            self.stats.duplicates_rejected += 1;
+            self.stats
+                .duplicates_rejected
+                .fetch_add(1, Ordering::Relaxed);
             return ResolverInsertResult::DuplicateFecSet;
         }
 
@@ -347,18 +401,22 @@ impl FecResolverPool {
                     existing_signature: existing.common_header.signature,
                     conflicting_signature: shred.common_header.signature,
                 });
-                self.stats.equivocations_detected += 1;
+                self.stats
+                    .equivocations_detected
+                    .fetch_add(1, Ordering::Relaxed);
                 if self.equivocation_proofs.len() > 64 {
                     self.equivocation_proofs.pop_front();
                 }
                 return ResolverInsertResult::Equivocation;
             }
-            self.stats.duplicate_shreds_rejected += 1;
+            self.stats
+                .duplicate_shreds_rejected
+                .fetch_add(1, Ordering::Relaxed);
             return ResolverInsertResult::DuplicateShred;
         }
 
         buf.coding_shreds.insert(position, shred);
-        self.stats.shreds_inserted += 1;
+        self.stats.shreds_inserted.fetch_add(1, Ordering::Relaxed);
 
         self.check_fec_status(buf_idx)
     }
@@ -386,7 +444,7 @@ impl FecResolverPool {
             let sig = self.buffers[buf_idx].first_signature;
             self.record_done_signature(sig);
 
-            self.stats.sets_completed += 1;
+            self.stats.sets_completed.fetch_add(1, Ordering::Relaxed);
 
             // Push to completed queue, recycling oldest completed if full.
             if self.completed_queue.len() >= self.complete_depth {
@@ -559,7 +617,7 @@ impl FecResolverPool {
             data_received: buf.data_shreds.len() as u32,
             coding_received: buf.coding_shreds.len() as u32,
         });
-        self.stats.sets_spilled += 1;
+        self.stats.sets_spilled.fetch_add(1, Ordering::Relaxed);
 
         self.buffers[buf_idx].reset();
         // Don't push to free_queue — caller will use this index directly.
@@ -597,7 +655,7 @@ impl FecResolverPool {
         };
 
         if !valid {
-            self.stats.chain_breaks += 1;
+            self.stats.chain_breaks.fetch_add(1, Ordering::Relaxed);
         }
 
         // Update chain state regardless (so we track from wherever we are).
@@ -729,7 +787,7 @@ mod tests {
         let result = pool.insert_data_shred(100, 0, 0, shred);
         assert_eq!(result, ResolverInsertResult::Accepted);
         assert_eq!(pool.in_progress_count(), 1);
-        assert_eq!(pool.stats.shreds_inserted, 1);
+        assert_eq!(pool.stats.shreds_inserted.load(Ordering::Relaxed), 1);
     }
 
     #[test]
@@ -766,7 +824,10 @@ mod tests {
         pool.insert_data_shred(100, 0, 0, make_data_shred(100, 0, 0));
         let result = pool.insert_data_shred(100, 0, 0, make_data_shred(100, 0, 0));
         assert_eq!(result, ResolverInsertResult::DuplicateShred);
-        assert_eq!(pool.stats.duplicate_shreds_rejected, 1);
+        assert_eq!(
+            pool.stats.duplicate_shreds_rejected.load(Ordering::Relaxed),
+            1
+        );
     }
 
     #[test]
@@ -821,7 +882,7 @@ mod tests {
         // Third insertion evicts oldest (slot 100).
         pool.insert_data_shred(300, 0, 0, make_data_shred(300, 0, 0));
         assert_eq!(pool.in_progress_count(), 2);
-        assert_eq!(pool.stats.sets_spilled, 1);
+        assert_eq!(pool.stats.sets_spilled.load(Ordering::Relaxed), 1);
 
         let spilled = pool.take_last_spilled().unwrap();
         assert_eq!(spilled.slot, 100);
@@ -845,7 +906,7 @@ mod tests {
         let shred = make_data_shred(100, 0, 0);
         let result = pool.insert_data_shred(100, 0, 0, shred);
         assert_eq!(result, ResolverInsertResult::DuplicateFecSet);
-        assert_eq!(pool.stats.duplicates_rejected, 1);
+        assert_eq!(pool.stats.duplicates_rejected.load(Ordering::Relaxed), 1);
     }
 
     #[test]
@@ -1058,7 +1119,7 @@ mod tests {
         let shred2 = make_data_shred_with_sig(100, 0, 0, 2);
         let result = pool.insert_data_shred(100, 0, 0, shred2);
         assert_eq!(result, ResolverInsertResult::Equivocation);
-        assert_eq!(pool.stats.equivocations_detected, 1);
+        assert_eq!(pool.stats.equivocations_detected.load(Ordering::Relaxed), 1);
 
         // Proof should be available.
         assert!(pool.has_equivocation_proofs());
@@ -1082,7 +1143,7 @@ mod tests {
         let shred2 = make_coding_shred_with_sig(100, 2, 0, 0, 2, 2, 2);
         let result = pool.insert_coding_shred(100, 0, 0, 2, 2, shred2);
         assert_eq!(result, ResolverInsertResult::Equivocation);
-        assert_eq!(pool.stats.equivocations_detected, 1);
+        assert_eq!(pool.stats.equivocations_detected.load(Ordering::Relaxed), 1);
     }
 
     #[test]
@@ -1096,7 +1157,7 @@ mod tests {
         let shred2 = make_data_shred_with_sig(100, 0, 0, 1); // same sig_byte
         let result = pool.insert_data_shred(100, 0, 0, shred2);
         assert_eq!(result, ResolverInsertResult::DuplicateShred);
-        assert_eq!(pool.stats.equivocations_detected, 0);
+        assert_eq!(pool.stats.equivocations_detected.load(Ordering::Relaxed), 0);
         assert!(!pool.has_equivocation_proofs());
     }
 
@@ -1131,7 +1192,7 @@ mod tests {
         };
         let valid = pool.mark_completed(key1);
         assert!(valid); // Continues at expected index.
-        assert_eq!(pool.stats.chain_breaks, 0);
+        assert_eq!(pool.stats.chain_breaks.load(Ordering::Relaxed), 0);
     }
 
     #[test]
@@ -1159,7 +1220,7 @@ mod tests {
             fec_set_index: 8,
         });
         assert!(!valid); // Chain break.
-        assert_eq!(pool.stats.chain_breaks, 1);
+        assert_eq!(pool.stats.chain_breaks.load(Ordering::Relaxed), 1);
     }
 
     #[test]
@@ -1190,7 +1251,10 @@ mod tests {
             pool.insert_data_shred(100, i, 0, shred2);
         }
 
-        assert_eq!(pool.stats.equivocations_detected, 70);
+        assert_eq!(
+            pool.stats.equivocations_detected.load(Ordering::Relaxed),
+            70
+        );
         let proofs = pool.drain_equivocation_proofs();
         assert!(proofs.len() <= 64);
     }

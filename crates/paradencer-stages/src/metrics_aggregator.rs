@@ -13,6 +13,7 @@
 use std::sync::Arc;
 
 use crate::exec_stage::{ExecStats, ExecStatsSnapshot};
+use crate::fec_resolver::AtomicFecResolverStats;
 use crate::pack_stage::{PackStats, PackStatsSnapshot};
 use crate::resolv_stage::{ResolvStats, ResolvStatsSnapshot};
 use crate::shred_network::{ShredNetworkStats, ShredNetworkStatsSnapshot};
@@ -30,6 +31,7 @@ pub struct MetricsAggregator {
     // Plain stats — stored as snapshot copies, updated externally.
     dedup: Option<DedupSnapshot>,
     fec_resolver: Option<FecResolverSnapshot>,
+    fec_resolver_atomic: Option<Arc<AtomicFecResolverStats>>,
     fec_cache: Option<FecCacheSnapshot>,
 }
 
@@ -45,6 +47,7 @@ impl MetricsAggregator {
             shred_network: None,
             dedup: None,
             fec_resolver: None,
+            fec_resolver_atomic: None,
             fec_cache: None,
         }
     }
@@ -91,6 +94,12 @@ impl MetricsAggregator {
         self
     }
 
+    /// Register FEC resolver atomic stats (snapshotted on demand, like verify/resolv/etc.).
+    pub fn with_fec_resolver_live(mut self, stats: Arc<AtomicFecResolverStats>) -> Self {
+        self.fec_resolver_atomic = Some(stats);
+        self
+    }
+
     /// Set initial FEC cache snapshot.
     pub fn with_fec_cache(mut self, snapshot: FecCacheSnapshot) -> Self {
         self.fec_cache = Some(snapshot);
@@ -124,7 +133,11 @@ impl MetricsAggregator {
             pack: self.pack.as_ref().map(|s| s.snapshot()),
             exec: self.exec.as_ref().map(|s| s.snapshot()),
             shred_network: self.shred_network.as_ref().map(|s| s.snapshot()),
-            fec_resolver: self.fec_resolver.clone(),
+            fec_resolver: self
+                .fec_resolver_atomic
+                .as_ref()
+                .map(|s| FecResolverSnapshot::from(&s.snapshot()))
+                .or_else(|| self.fec_resolver.clone()),
             fec_cache: self.fec_cache.clone(),
         }
     }

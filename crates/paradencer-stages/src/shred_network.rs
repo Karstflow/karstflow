@@ -224,6 +224,11 @@ impl ShredNetworkStage {
         Arc::clone(&self.stats)
     }
 
+    /// Get a shared reference to the FEC resolver atomic stats.
+    pub fn fec_resolver_stats(&self) -> Arc<crate::fec_resolver::AtomicFecResolverStats> {
+        Arc::clone(&self.resolver_pool.stats)
+    }
+
     /// Insert a shred into the stage. Returns the insertion outcome.
     pub fn insert_shred(&mut self, net_shred: NetworkShred) -> ShredInsertOutcome {
         self.stats.shreds_received.fetch_add(1, Ordering::Relaxed);
@@ -727,6 +732,11 @@ impl ShredNetworkService {
     /// Get a shared reference to the underlying statistics.
     pub fn stats(&self) -> Arc<ShredNetworkStats> {
         self.stage.stats()
+    }
+
+    /// Get a shared reference to the FEC resolver atomic stats.
+    pub fn fec_resolver_stats(&self) -> Arc<crate::fec_resolver::AtomicFecResolverStats> {
+        self.stage.fec_resolver_stats()
     }
 
     /// Drain all available shreds from the incoming source and process them.

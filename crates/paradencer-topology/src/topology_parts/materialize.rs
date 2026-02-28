@@ -150,6 +150,7 @@ pub fn materialize_services_with_blockstore(
     let mut health_status: Option<SharedHealthStatus> = None;
     let mut reporter_out: Option<MetricsReporter> = None;
     let mut shred_network_stats_out: Option<Arc<paradencer_stages::ShredNetworkStats>> = None;
+    let mut fec_resolver_stats_out: Option<Arc<paradencer_stages::AtomicFecResolverStats>> = None;
 
     for stage in &topology_spec.stages {
         match stage.stage_kind {
@@ -200,6 +201,7 @@ pub fn materialize_services_with_blockstore(
                         fec_completed_tx.clone(),
                     );
                     shred_network_stats_out = Some(shred_net.stats());
+                    fec_resolver_stats_out = Some(shred_net.fec_resolver_stats());
                     services.push(Box::new(shred_net));
                     // ShredCollector: accumulates shreds by slot, emits assembled blocks.
                     // Receives completed FEC sets from the network service, plus a
@@ -300,5 +302,6 @@ pub fn materialize_services_with_blockstore(
         health_status,
         reporter: reporter_out,
         shred_network_stats: shred_network_stats_out,
+        fec_resolver_stats: fec_resolver_stats_out,
     })
 }
