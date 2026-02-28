@@ -1785,6 +1785,24 @@ impl Bank {
                 );
             }
 
+            // Notify observers of the failed transaction.
+            if let Some(notifier) = self.notifier() {
+                if let Some(sig) = transaction.signatures.first() {
+                    let err_str = error.to_string();
+                    let info = crate::bank_notifier::TransactionInfo {
+                        signature: sig,
+                        is_vote,
+                        index: 0,
+                        account_keys: &transaction.account_keys,
+                        success: false,
+                        error: Some(&err_str),
+                        compute_units_consumed: total_compute,
+                        fee,
+                    };
+                    notifier.notify_transaction(self.slot(), &info);
+                }
+            }
+
             return TransactionExecutionResult {
                 success: false,
                 compute_units_consumed: total_compute,
@@ -1874,6 +1892,23 @@ impl Bank {
                 true,
                 None,
             );
+        }
+
+        // Notify observers of the successful transaction.
+        if let Some(notifier) = self.notifier() {
+            if let Some(sig) = transaction.signatures.first() {
+                let info = crate::bank_notifier::TransactionInfo {
+                    signature: sig,
+                    is_vote,
+                    index: 0,
+                    account_keys: &transaction.account_keys,
+                    success: true,
+                    error: None,
+                    compute_units_consumed: total_compute,
+                    fee,
+                };
+                notifier.notify_transaction(self.slot(), &info);
+            }
         }
 
         TransactionExecutionResult {
@@ -2283,6 +2318,13 @@ impl Bank {
             let _ = db.write_account(xid, *pubkey, account.clone());
         }
         let _ = db.publish_transaction(xid);
+
+        // Notify bank observers of account changes.
+        if let Some(notifier) = self.notifier() {
+            for (pubkey, account) in accounts {
+                notifier.notify_account_update(self.slot(), pubkey, account, None, false);
+            }
+        }
     }
 
     /// Update vote account cache for modified vote accounts.

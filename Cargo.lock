@@ -1670,6 +1670,7 @@ version = "0.1.0"
 dependencies = [
  "crossbeam-channel",
  "paradencer-config",
+ "paradencer-consensus",
  "paradencer-control",
  "paradencer-net",
  "paradencer-observability",

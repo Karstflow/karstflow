@@ -1,4 +1,5 @@
 use super::{Bank, BankStatus};
+use crate::bank_notifier::BankNotifier;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 
@@ -42,6 +43,9 @@ pub struct BankForks {
     /// Parent slot → direct children mapping for O(1) descendant queries.
     /// Maintained on insert/eviction to avoid O(n*h) ancestor scanning.
     child_index: HashMap<u64, Vec<u64>>,
+    /// Optional notifier injected into banks on insert so that account
+    /// and transaction state changes are forwarded to external observers.
+    notifier: Option<Arc<dyn BankNotifier>>,
 }
 
 impl BankForks {
@@ -59,6 +63,7 @@ impl BankForks {
             dead_slots: HashSet::new(),
             dead_queue: VecDeque::new(),
             child_index: HashMap::new(),
+            notifier: None,
         }
     }
 
@@ -84,6 +89,7 @@ impl BankForks {
             dead_slots: HashSet::new(),
             dead_queue: VecDeque::new(),
             child_index: HashMap::new(),
+            notifier: None,
         })
     }
 
@@ -103,7 +109,7 @@ impl BankForks {
         self.banks.get(&slot).cloned()
     }
 
-    pub fn insert(&mut self, bank: Bank) -> Result<(), BankForksError> {
+    pub fn insert(&mut self, mut bank: Bank) -> Result<(), BankForksError> {
         let slot = bank.slot();
 
         if slot <= self.root_slot {
@@ -129,8 +135,21 @@ impl BankForks {
             self.child_index.entry(parent_slot).or_default().push(slot);
         }
 
+        // Inject bank notifier if configured.
+        if let Some(ref notifier) = self.notifier {
+            bank.set_notifier(Arc::clone(notifier));
+        }
+
         self.banks.insert(slot, Arc::new(bank));
         Ok(())
+    }
+
+    /// Set the bank notifier for account/transaction state change notifications.
+    ///
+    /// The notifier is injected into every bank inserted via `insert()`.
+    /// Existing banks in the fork tree are not retroactively updated.
+    pub fn set_bank_notifier(&mut self, notifier: Arc<dyn BankNotifier>) {
+        self.notifier = Some(notifier);
     }
 
     /// Advance the root slot and evict banks below the new root.

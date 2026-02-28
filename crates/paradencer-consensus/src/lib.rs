@@ -1,6 +1,7 @@
 mod bank;
 mod bank_executor;
 mod bank_forks;
+mod bank_notifier;
 mod blockhash_queue;
 mod clock;
 mod commitment;
@@ -42,6 +43,7 @@ pub use bank::{
     BankTransactionError, SlotFinalizationResult, SlotInfo,
 };
 pub use bank_forks::{BankForks, BankForksError, EvictionReport};
+pub use bank_notifier::{BankNotifier, TransactionInfo};
 pub use blockhash_queue::{BlockhashInfo, BlockhashQueue, Hash, MAX_RECENT_BLOCKHASHES};
 pub use clock::{
     calculate_stake_weighted_timestamp, Clock, DEFAULT_HASHES_PER_TICK, DEFAULT_TICKS_PER_SECOND,

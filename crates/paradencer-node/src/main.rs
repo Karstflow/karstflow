@@ -1,3 +1,5 @@
+mod plugin_notifier;
+
 use paradencer_observability::{init_tracing, TracingConfig};
 use paradencer_plugin::PluginService;
 use tracing::{info, warn};
@@ -64,7 +66,7 @@ fn run_with_node_config(
             }
         })?
     };
-    let _plugin_manager = plugin_service.manager();
+    // Plugin manager is wired to BankForks below, after consensus is built.
 
     // Resolve the validator identity — loads from file in Live mode,
     // generates ephemeral keypair in Dev mode.
@@ -120,6 +122,17 @@ fn run_with_node_config(
         )
     };
     let consensus = replay_bundle.consensus;
+
+    // Attach bank notifier so account/transaction changes are forwarded
+    // to loaded Geyser plugins. The notifier propagates to child banks
+    // automatically via new_from_parent.
+    {
+        let plugin_manager = plugin_service.manager();
+        let notifier =
+            std::sync::Arc::new(plugin_notifier::PluginBankNotifier::new(plugin_manager));
+        let mut forks = consensus.bank_forks.write().unwrap();
+        forks.set_bank_notifier(notifier);
+    }
 
     // Wait-for-supermajority Phase 2: block until 80% of stake is online.
     // Only activates when a bank hash is configured (coordinated restart).

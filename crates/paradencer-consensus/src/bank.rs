@@ -1,4 +1,5 @@
 use super::{Clock, EpochSchedule, Inflation, LeaderSchedule, Rent};
+use crate::bank_notifier::BankNotifier;
 use crate::blockhash_queue::{BlockhashInfo, BlockhashQueue};
 use crate::clock::calculate_stake_weighted_timestamp;
 use crate::epoch_processing::{AccountDatabaseVoteReader, EpochProcessor};
@@ -131,6 +132,9 @@ pub struct Bank {
     feature_set: Option<Arc<RwLock<FeatureSet>>>,
     vote_account_cache: Option<Arc<RwLock<VoteAccountCache>>>,
     rewards_distributor: RwLock<Option<RewardsDistributor>>,
+
+    /// Optional notifier for account/transaction state changes.
+    notifier: Option<Arc<dyn BankNotifier>>,
 }
 
 impl Bank {
@@ -215,6 +219,7 @@ impl Bank {
             feature_set: None,
             vote_account_cache: None,
             rewards_distributor: RwLock::new(None),
+            notifier: None,
         }
     }
 
@@ -302,6 +307,7 @@ impl Bank {
             feature_set: None,
             vote_account_cache: None,
             rewards_distributor: RwLock::new(None),
+            notifier: None,
         }
     }
 
@@ -388,6 +394,7 @@ impl Bank {
             feature_set: parent.feature_set.clone(),
             vote_account_cache: parent.vote_account_cache.clone(),
             rewards_distributor: RwLock::new(parent.rewards_distributor.read().unwrap().clone()),
+            notifier: parent.notifier.clone(),
         }
     }
 
@@ -531,6 +538,16 @@ impl Bank {
     /// Get a reference to the vote account cache, if attached.
     pub fn vote_account_cache(&self) -> Option<&Arc<RwLock<VoteAccountCache>>> {
         self.vote_account_cache.as_ref()
+    }
+
+    /// Attach a bank notifier for account/transaction change notifications.
+    pub fn set_notifier(&mut self, notifier: Arc<dyn BankNotifier>) {
+        self.notifier = Some(notifier);
+    }
+
+    /// Get the bank notifier, if attached.
+    pub fn notifier(&self) -> Option<&Arc<dyn BankNotifier>> {
+        self.notifier.as_ref()
     }
 
     /// Estimate network timestamp using stake-weighted vote timestamps.
