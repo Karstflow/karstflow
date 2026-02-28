@@ -82,6 +82,7 @@ pub fn spawn_rpc_http_server(
                     &mut module,
                     full_api,
                     runtime_snapshot_provider.clone(),
+                    bank_access_provider.clone(),
                 ) {
                     error!(%error, "failed to register RPC subscriptions");
                     return;

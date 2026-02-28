@@ -1,7 +1,7 @@
 mod loops;
 mod params;
 
-use crate::state::{RpcRuntimeSnapshot, RuntimeSnapshotProvider};
+use crate::state::{BankAccessProvider, RpcRuntimeSnapshot, RuntimeSnapshotProvider};
 use jsonrpsee::core::server::PendingSubscriptionSink;
 use jsonrpsee::core::RegisterMethodError;
 use jsonrpsee::server::RpcModule;
@@ -80,6 +80,7 @@ pub(super) fn register_subscription_methods(
     module: &mut RpcModule<()>,
     full_api: bool,
     runtime_snapshot_provider: Option<Arc<dyn RuntimeSnapshotProvider>>,
+    bank_access: Option<Arc<dyn BankAccessProvider>>,
 ) -> Result<(), RegisterMethodError> {
     let snapshot_feed = SnapshotFeed::start(runtime_snapshot_provider);
     let slot_feed = snapshot_feed.clone();
@@ -160,12 +161,14 @@ pub(super) fn register_subscription_methods(
     )?;
 
     let account_feed = snapshot_feed.clone();
+    let account_bank = bank_access.clone();
     module.register_subscription(
         ACCOUNT_SUBSCRIBE_METHOD,
         ACCOUNT_NOTIFICATION_METHOD,
         ACCOUNT_UNSUBSCRIBE_METHOD,
         move |params, pending, _, _| {
             let mut account_updates = account_feed.subscribe();
+            let bank = account_bank.clone();
             async move {
                 if !full_api {
                     reject_subscription(
@@ -194,19 +197,27 @@ pub(super) fn register_subscription_methods(
                     }
                 };
                 let sink = pending.accept().await?;
-                run_account_subscription_loop(sink, &mut account_updates, pubkey, account_config)
-                    .await
+                run_account_subscription_loop(
+                    sink,
+                    &mut account_updates,
+                    pubkey,
+                    account_config,
+                    bank.as_deref(),
+                )
+                .await
             }
         },
     )?;
 
     let signature_feed = snapshot_feed.clone();
+    let signature_bank = bank_access.clone();
     module.register_subscription(
         SIGNATURE_SUBSCRIBE_METHOD,
         SIGNATURE_NOTIFICATION_METHOD,
         SIGNATURE_UNSUBSCRIBE_METHOD,
         move |params, pending, _, _| {
             let mut signature_updates = signature_feed.subscribe();
+            let bank = signature_bank.clone();
             async move {
                 if !full_api {
                     reject_subscription(
@@ -241,6 +252,7 @@ pub(super) fn register_subscription_methods(
                     &mut signature_updates,
                     signature,
                     signature_config,
+                    bank.as_deref(),
                 )
                 .await
             }
@@ -328,12 +340,14 @@ pub(super) fn register_subscription_methods(
     )?;
 
     let program_feed = snapshot_feed.clone();
+    let program_bank = bank_access.clone();
     module.register_subscription(
         PROGRAM_SUBSCRIBE_METHOD,
         PROGRAM_NOTIFICATION_METHOD,
         PROGRAM_UNSUBSCRIBE_METHOD,
         move |params, pending, _, _| {
             let mut program_updates = program_feed.subscribe();
+            let bank = program_bank.clone();
             async move {
                 if !full_api {
                     reject_subscription(
@@ -368,6 +382,7 @@ pub(super) fn register_subscription_methods(
                     &mut program_updates,
                     program_id,
                     program_config,
+                    bank.as_deref(),
                 )
                 .await
             }
@@ -502,8 +517,13 @@ mod tests {
     #[tokio::test]
     async fn slot_subscribe_emits_notifications() {
         let mut module = RpcModule::new(());
-        register_subscription_methods(&mut module, true, Some(Arc::new(FixedSnapshotProvider)))
-            .unwrap();
+        register_subscription_methods(
+            &mut module,
+            true,
+            Some(Arc::new(FixedSnapshotProvider)),
+            None,
+        )
+        .unwrap();
 
         let mut subscription = module
             .subscribe_unbounded(SLOT_SUBSCRIBE_METHOD, EmptyServerParams::new())
@@ -527,8 +547,13 @@ mod tests {
     #[tokio::test]
     async fn slot_subscribe_rejects_non_object_config() {
         let mut module = RpcModule::new(());
-        register_subscription_methods(&mut module, true, Some(Arc::new(FixedSnapshotProvider)))
-            .unwrap();
+        register_subscription_methods(
+            &mut module,
+            true,
+            Some(Arc::new(FixedSnapshotProvider)),
+            None,
+        )
+        .unwrap();
         let result = module
             .subscribe_unbounded(SLOT_SUBSCRIBE_METHOD, ("processed",))
             .await;
@@ -538,8 +563,13 @@ mod tests {
     #[tokio::test]
     async fn slot_subscribe_rejects_extra_params() {
         let mut module = RpcModule::new(());
-        register_subscription_methods(&mut module, true, Some(Arc::new(FixedSnapshotProvider)))
-            .unwrap();
+        register_subscription_methods(
+            &mut module,
+            true,
+            Some(Arc::new(FixedSnapshotProvider)),
+            None,
+        )
+        .unwrap();
         let result = module
             .subscribe_unbounded(
                 SLOT_SUBSCRIBE_METHOD,
@@ -555,8 +585,13 @@ mod tests {
     #[tokio::test]
     async fn slot_subscribe_rejects_unknown_config_key() {
         let mut module = RpcModule::new(());
-        register_subscription_methods(&mut module, true, Some(Arc::new(FixedSnapshotProvider)))
-            .unwrap();
+        register_subscription_methods(
+            &mut module,
+            true,
+            Some(Arc::new(FixedSnapshotProvider)),
+            None,
+        )
+        .unwrap();
         let result = module
             .subscribe_unbounded(
                 SLOT_SUBSCRIBE_METHOD,
@@ -569,8 +604,13 @@ mod tests {
     #[tokio::test]
     async fn account_subscribe_emits_notifications() {
         let mut module = RpcModule::new(());
-        register_subscription_methods(&mut module, true, Some(Arc::new(FixedSnapshotProvider)))
-            .unwrap();
+        register_subscription_methods(
+            &mut module,
+            true,
+            Some(Arc::new(FixedSnapshotProvider)),
+            None,
+        )
+        .unwrap();
 
         let mut subscription = module
             .subscribe_unbounded(
@@ -600,8 +640,13 @@ mod tests {
     #[tokio::test]
     async fn account_subscribe_applies_encoding_and_data_slice() {
         let mut module = RpcModule::new(());
-        register_subscription_methods(&mut module, true, Some(Arc::new(FixedSnapshotProvider)))
-            .unwrap();
+        register_subscription_methods(
+            &mut module,
+            true,
+            Some(Arc::new(FixedSnapshotProvider)),
+            None,
+        )
+        .unwrap();
 
         let mut subscription = module
             .subscribe_unbounded(
@@ -643,8 +688,13 @@ mod tests {
     #[tokio::test]
     async fn account_subscribe_rejects_invalid_encoding() {
         let mut module = RpcModule::new(());
-        register_subscription_methods(&mut module, true, Some(Arc::new(FixedSnapshotProvider)))
-            .unwrap();
+        register_subscription_methods(
+            &mut module,
+            true,
+            Some(Arc::new(FixedSnapshotProvider)),
+            None,
+        )
+        .unwrap();
         let result = module
             .subscribe_unbounded(
                 ACCOUNT_SUBSCRIBE_METHOD,
@@ -660,8 +710,13 @@ mod tests {
     #[tokio::test]
     async fn account_subscribe_rejects_invalid_data_slice() {
         let mut module = RpcModule::new(());
-        register_subscription_methods(&mut module, true, Some(Arc::new(FixedSnapshotProvider)))
-            .unwrap();
+        register_subscription_methods(
+            &mut module,
+            true,
+            Some(Arc::new(FixedSnapshotProvider)),
+            None,
+        )
+        .unwrap();
         let result = module
             .subscribe_unbounded(
                 ACCOUNT_SUBSCRIBE_METHOD,
@@ -677,8 +732,13 @@ mod tests {
     #[tokio::test]
     async fn account_subscribe_rejects_unknown_config_key() {
         let mut module = RpcModule::new(());
-        register_subscription_methods(&mut module, true, Some(Arc::new(FixedSnapshotProvider)))
-            .unwrap();
+        register_subscription_methods(
+            &mut module,
+            true,
+            Some(Arc::new(FixedSnapshotProvider)),
+            None,
+        )
+        .unwrap();
         let result = module
             .subscribe_unbounded(
                 ACCOUNT_SUBSCRIBE_METHOD,
@@ -694,8 +754,13 @@ mod tests {
     #[tokio::test]
     async fn account_subscribe_rejects_data_slice_unknown_key() {
         let mut module = RpcModule::new(());
-        register_subscription_methods(&mut module, true, Some(Arc::new(FixedSnapshotProvider)))
-            .unwrap();
+        register_subscription_methods(
+            &mut module,
+            true,
+            Some(Arc::new(FixedSnapshotProvider)),
+            None,
+        )
+        .unwrap();
         let result = module
             .subscribe_unbounded(
                 ACCOUNT_SUBSCRIBE_METHOD,
@@ -713,8 +778,13 @@ mod tests {
     #[tokio::test]
     async fn root_subscribe_emits_notifications() {
         let mut module = RpcModule::new(());
-        register_subscription_methods(&mut module, true, Some(Arc::new(FixedSnapshotProvider)))
-            .unwrap();
+        register_subscription_methods(
+            &mut module,
+            true,
+            Some(Arc::new(FixedSnapshotProvider)),
+            None,
+        )
+        .unwrap();
 
         let mut subscription = module
             .subscribe_unbounded(ROOT_SUBSCRIBE_METHOD, EmptyServerParams::new())
@@ -727,8 +797,13 @@ mod tests {
     #[tokio::test]
     async fn root_subscribe_rejects_unexpected_params() {
         let mut module = RpcModule::new(());
-        register_subscription_methods(&mut module, true, Some(Arc::new(FixedSnapshotProvider)))
-            .unwrap();
+        register_subscription_methods(
+            &mut module,
+            true,
+            Some(Arc::new(FixedSnapshotProvider)),
+            None,
+        )
+        .unwrap();
         let result = module
             .subscribe_unbounded(ROOT_SUBSCRIBE_METHOD, ("unexpected",))
             .await;
@@ -738,8 +813,13 @@ mod tests {
     #[tokio::test]
     async fn signature_subscribe_emits_notifications() {
         let mut module = RpcModule::new(());
-        register_subscription_methods(&mut module, true, Some(Arc::new(FixedSnapshotProvider)))
-            .unwrap();
+        register_subscription_methods(
+            &mut module,
+            true,
+            Some(Arc::new(FixedSnapshotProvider)),
+            None,
+        )
+        .unwrap();
 
         let mut subscription = module
             .subscribe_unbounded(
@@ -766,8 +846,13 @@ mod tests {
     #[tokio::test]
     async fn signature_subscribe_supports_received_notification_flag() {
         let mut module = RpcModule::new(());
-        register_subscription_methods(&mut module, true, Some(Arc::new(FixedSnapshotProvider)))
-            .unwrap();
+        register_subscription_methods(
+            &mut module,
+            true,
+            Some(Arc::new(FixedSnapshotProvider)),
+            None,
+        )
+        .unwrap();
 
         let mut subscription = module
             .subscribe_unbounded(
@@ -796,8 +881,13 @@ mod tests {
     #[tokio::test]
     async fn signature_subscribe_rejects_invalid_received_notification_flag() {
         let mut module = RpcModule::new(());
-        register_subscription_methods(&mut module, true, Some(Arc::new(FixedSnapshotProvider)))
-            .unwrap();
+        register_subscription_methods(
+            &mut module,
+            true,
+            Some(Arc::new(FixedSnapshotProvider)),
+            None,
+        )
+        .unwrap();
         let result = module
             .subscribe_unbounded(
                 SIGNATURE_SUBSCRIBE_METHOD,
@@ -813,8 +903,13 @@ mod tests {
     #[tokio::test]
     async fn signature_subscribe_rejects_unknown_config_key() {
         let mut module = RpcModule::new(());
-        register_subscription_methods(&mut module, true, Some(Arc::new(FixedSnapshotProvider)))
-            .unwrap();
+        register_subscription_methods(
+            &mut module,
+            true,
+            Some(Arc::new(FixedSnapshotProvider)),
+            None,
+        )
+        .unwrap();
         let result = module
             .subscribe_unbounded(
                 SIGNATURE_SUBSCRIBE_METHOD,
@@ -830,8 +925,13 @@ mod tests {
     #[tokio::test]
     async fn vote_subscribe_emits_notifications() {
         let mut module = RpcModule::new(());
-        register_subscription_methods(&mut module, true, Some(Arc::new(FixedSnapshotProvider)))
-            .unwrap();
+        register_subscription_methods(
+            &mut module,
+            true,
+            Some(Arc::new(FixedSnapshotProvider)),
+            None,
+        )
+        .unwrap();
 
         let mut subscription = module
             .subscribe_unbounded(
@@ -858,8 +958,13 @@ mod tests {
     #[tokio::test]
     async fn vote_subscribe_rejects_non_object_config() {
         let mut module = RpcModule::new(());
-        register_subscription_methods(&mut module, true, Some(Arc::new(FixedSnapshotProvider)))
-            .unwrap();
+        register_subscription_methods(
+            &mut module,
+            true,
+            Some(Arc::new(FixedSnapshotProvider)),
+            None,
+        )
+        .unwrap();
         let result = module
             .subscribe_unbounded(VOTE_SUBSCRIBE_METHOD, ("confirmed",))
             .await;
@@ -869,8 +974,13 @@ mod tests {
     #[tokio::test]
     async fn vote_subscribe_rejects_extra_params() {
         let mut module = RpcModule::new(());
-        register_subscription_methods(&mut module, true, Some(Arc::new(FixedSnapshotProvider)))
-            .unwrap();
+        register_subscription_methods(
+            &mut module,
+            true,
+            Some(Arc::new(FixedSnapshotProvider)),
+            None,
+        )
+        .unwrap();
         let result = module
             .subscribe_unbounded(
                 VOTE_SUBSCRIBE_METHOD,
@@ -886,8 +996,13 @@ mod tests {
     #[tokio::test]
     async fn vote_subscribe_rejects_unknown_config_key() {
         let mut module = RpcModule::new(());
-        register_subscription_methods(&mut module, true, Some(Arc::new(FixedSnapshotProvider)))
-            .unwrap();
+        register_subscription_methods(
+            &mut module,
+            true,
+            Some(Arc::new(FixedSnapshotProvider)),
+            None,
+        )
+        .unwrap();
         let result = module
             .subscribe_unbounded(
                 VOTE_SUBSCRIBE_METHOD,
@@ -900,8 +1015,13 @@ mod tests {
     #[tokio::test]
     async fn block_subscribe_emits_notifications() {
         let mut module = RpcModule::new(());
-        register_subscription_methods(&mut module, true, Some(Arc::new(FixedSnapshotProvider)))
-            .unwrap();
+        register_subscription_methods(
+            &mut module,
+            true,
+            Some(Arc::new(FixedSnapshotProvider)),
+            None,
+        )
+        .unwrap();
 
         let mut subscription = module
             .subscribe_unbounded(
@@ -939,8 +1059,13 @@ mod tests {
     #[tokio::test]
     async fn block_subscribe_applies_config_fields() {
         let mut module = RpcModule::new(());
-        register_subscription_methods(&mut module, true, Some(Arc::new(FixedSnapshotProvider)))
-            .unwrap();
+        register_subscription_methods(
+            &mut module,
+            true,
+            Some(Arc::new(FixedSnapshotProvider)),
+            None,
+        )
+        .unwrap();
 
         let mut subscription = module
             .subscribe_unbounded(
@@ -999,8 +1124,13 @@ mod tests {
     #[tokio::test]
     async fn logs_subscribe_emits_notifications() {
         let mut module = RpcModule::new(());
-        register_subscription_methods(&mut module, true, Some(Arc::new(FixedSnapshotProvider)))
-            .unwrap();
+        register_subscription_methods(
+            &mut module,
+            true,
+            Some(Arc::new(FixedSnapshotProvider)),
+            None,
+        )
+        .unwrap();
 
         let mut subscription = module
             .subscribe_unbounded(
@@ -1035,8 +1165,13 @@ mod tests {
     #[tokio::test]
     async fn program_subscribe_emits_notifications() {
         let mut module = RpcModule::new(());
-        register_subscription_methods(&mut module, true, Some(Arc::new(FixedSnapshotProvider)))
-            .unwrap();
+        register_subscription_methods(
+            &mut module,
+            true,
+            Some(Arc::new(FixedSnapshotProvider)),
+            None,
+        )
+        .unwrap();
 
         let mut subscription = module
             .subscribe_unbounded(
@@ -1077,8 +1212,13 @@ mod tests {
     #[tokio::test]
     async fn program_subscribe_applies_config_fields() {
         let mut module = RpcModule::new(());
-        register_subscription_methods(&mut module, true, Some(Arc::new(FixedSnapshotProvider)))
-            .unwrap();
+        register_subscription_methods(
+            &mut module,
+            true,
+            Some(Arc::new(FixedSnapshotProvider)),
+            None,
+        )
+        .unwrap();
 
         let mut subscription = module
             .subscribe_unbounded(
@@ -1132,8 +1272,13 @@ mod tests {
     #[tokio::test]
     async fn slots_updates_subscribe_emits_notifications() {
         let mut module = RpcModule::new(());
-        register_subscription_methods(&mut module, true, Some(Arc::new(FixedSnapshotProvider)))
-            .unwrap();
+        register_subscription_methods(
+            &mut module,
+            true,
+            Some(Arc::new(FixedSnapshotProvider)),
+            None,
+        )
+        .unwrap();
 
         let mut subscription = module
             .subscribe_unbounded(SLOTS_UPDATES_SUBSCRIBE_METHOD, EmptyServerParams::new())
@@ -1157,8 +1302,13 @@ mod tests {
     #[tokio::test]
     async fn slots_updates_subscribe_rejects_unexpected_params() {
         let mut module = RpcModule::new(());
-        register_subscription_methods(&mut module, true, Some(Arc::new(FixedSnapshotProvider)))
-            .unwrap();
+        register_subscription_methods(
+            &mut module,
+            true,
+            Some(Arc::new(FixedSnapshotProvider)),
+            None,
+        )
+        .unwrap();
         let result = module
             .subscribe_unbounded(SLOTS_UPDATES_SUBSCRIBE_METHOD, ("unexpected",))
             .await;
@@ -1168,8 +1318,13 @@ mod tests {
     #[tokio::test]
     async fn block_subscribe_rejects_invalid_filter() {
         let mut module = RpcModule::new(());
-        register_subscription_methods(&mut module, true, Some(Arc::new(FixedSnapshotProvider)))
-            .unwrap();
+        register_subscription_methods(
+            &mut module,
+            true,
+            Some(Arc::new(FixedSnapshotProvider)),
+            None,
+        )
+        .unwrap();
         let result = module
             .subscribe_unbounded(BLOCK_SUBSCRIBE_METHOD, ("invalid-filter",))
             .await;
@@ -1179,8 +1334,13 @@ mod tests {
     #[tokio::test]
     async fn block_subscribe_rejects_invalid_encoding() {
         let mut module = RpcModule::new(());
-        register_subscription_methods(&mut module, true, Some(Arc::new(FixedSnapshotProvider)))
-            .unwrap();
+        register_subscription_methods(
+            &mut module,
+            true,
+            Some(Arc::new(FixedSnapshotProvider)),
+            None,
+        )
+        .unwrap();
         let result = module
             .subscribe_unbounded(
                 BLOCK_SUBSCRIBE_METHOD,
@@ -1193,8 +1353,13 @@ mod tests {
     #[tokio::test]
     async fn block_subscribe_rejects_invalid_show_rewards_type() {
         let mut module = RpcModule::new(());
-        register_subscription_methods(&mut module, true, Some(Arc::new(FixedSnapshotProvider)))
-            .unwrap();
+        register_subscription_methods(
+            &mut module,
+            true,
+            Some(Arc::new(FixedSnapshotProvider)),
+            None,
+        )
+        .unwrap();
         let result = module
             .subscribe_unbounded(
                 BLOCK_SUBSCRIBE_METHOD,
@@ -1207,8 +1372,13 @@ mod tests {
     #[tokio::test]
     async fn block_subscribe_rejects_unknown_filter_key() {
         let mut module = RpcModule::new(());
-        register_subscription_methods(&mut module, true, Some(Arc::new(FixedSnapshotProvider)))
-            .unwrap();
+        register_subscription_methods(
+            &mut module,
+            true,
+            Some(Arc::new(FixedSnapshotProvider)),
+            None,
+        )
+        .unwrap();
         let result = module
             .subscribe_unbounded(
                 BLOCK_SUBSCRIBE_METHOD,
@@ -1221,8 +1391,13 @@ mod tests {
     #[tokio::test]
     async fn block_subscribe_rejects_unknown_config_key() {
         let mut module = RpcModule::new(());
-        register_subscription_methods(&mut module, true, Some(Arc::new(FixedSnapshotProvider)))
-            .unwrap();
+        register_subscription_methods(
+            &mut module,
+            true,
+            Some(Arc::new(FixedSnapshotProvider)),
+            None,
+        )
+        .unwrap();
         let result = module
             .subscribe_unbounded(
                 BLOCK_SUBSCRIBE_METHOD,
@@ -1238,8 +1413,13 @@ mod tests {
     #[tokio::test]
     async fn logs_subscribe_rejects_invalid_mentions_filter() {
         let mut module = RpcModule::new(());
-        register_subscription_methods(&mut module, true, Some(Arc::new(FixedSnapshotProvider)))
-            .unwrap();
+        register_subscription_methods(
+            &mut module,
+            true,
+            Some(Arc::new(FixedSnapshotProvider)),
+            None,
+        )
+        .unwrap();
         let result = module
             .subscribe_unbounded(
                 LOGS_SUBSCRIBE_METHOD,
@@ -1252,8 +1432,13 @@ mod tests {
     #[tokio::test]
     async fn logs_subscribe_rejects_unknown_filter_key() {
         let mut module = RpcModule::new(());
-        register_subscription_methods(&mut module, true, Some(Arc::new(FixedSnapshotProvider)))
-            .unwrap();
+        register_subscription_methods(
+            &mut module,
+            true,
+            Some(Arc::new(FixedSnapshotProvider)),
+            None,
+        )
+        .unwrap();
         let result = module
             .subscribe_unbounded(
                 LOGS_SUBSCRIBE_METHOD,
@@ -1266,8 +1451,13 @@ mod tests {
     #[tokio::test]
     async fn logs_subscribe_rejects_unknown_config_key() {
         let mut module = RpcModule::new(());
-        register_subscription_methods(&mut module, true, Some(Arc::new(FixedSnapshotProvider)))
-            .unwrap();
+        register_subscription_methods(
+            &mut module,
+            true,
+            Some(Arc::new(FixedSnapshotProvider)),
+            None,
+        )
+        .unwrap();
         let result = module
             .subscribe_unbounded(
                 LOGS_SUBSCRIBE_METHOD,
@@ -1283,8 +1473,13 @@ mod tests {
     #[tokio::test]
     async fn logs_subscribe_accepts_all_with_votes_filter() {
         let mut module = RpcModule::new(());
-        register_subscription_methods(&mut module, true, Some(Arc::new(FixedSnapshotProvider)))
-            .unwrap();
+        register_subscription_methods(
+            &mut module,
+            true,
+            Some(Arc::new(FixedSnapshotProvider)),
+            None,
+        )
+        .unwrap();
         let mut subscription = module
             .subscribe_unbounded(LOGS_SUBSCRIBE_METHOD, ("allWithVotes",))
             .await
@@ -1306,8 +1501,13 @@ mod tests {
     #[tokio::test]
     async fn logs_subscribe_accepts_single_mention_filter() {
         let mut module = RpcModule::new(());
-        register_subscription_methods(&mut module, true, Some(Arc::new(FixedSnapshotProvider)))
-            .unwrap();
+        register_subscription_methods(
+            &mut module,
+            true,
+            Some(Arc::new(FixedSnapshotProvider)),
+            None,
+        )
+        .unwrap();
         let mut subscription = module
             .subscribe_unbounded(
                 LOGS_SUBSCRIBE_METHOD,
@@ -1332,8 +1532,13 @@ mod tests {
     #[tokio::test]
     async fn logs_subscribe_rejects_multiple_mentions() {
         let mut module = RpcModule::new(());
-        register_subscription_methods(&mut module, true, Some(Arc::new(FixedSnapshotProvider)))
-            .unwrap();
+        register_subscription_methods(
+            &mut module,
+            true,
+            Some(Arc::new(FixedSnapshotProvider)),
+            None,
+        )
+        .unwrap();
         let result = module
             .subscribe_unbounded(
                 LOGS_SUBSCRIBE_METHOD,
@@ -1346,8 +1551,13 @@ mod tests {
     #[tokio::test]
     async fn program_subscribe_rejects_empty_program_id() {
         let mut module = RpcModule::new(());
-        register_subscription_methods(&mut module, true, Some(Arc::new(FixedSnapshotProvider)))
-            .unwrap();
+        register_subscription_methods(
+            &mut module,
+            true,
+            Some(Arc::new(FixedSnapshotProvider)),
+            None,
+        )
+        .unwrap();
         let result = module
             .subscribe_unbounded(PROGRAM_SUBSCRIBE_METHOD, ("   ",))
             .await;
@@ -1357,8 +1567,13 @@ mod tests {
     #[tokio::test]
     async fn program_subscribe_rejects_invalid_filters_shape() {
         let mut module = RpcModule::new(());
-        register_subscription_methods(&mut module, true, Some(Arc::new(FixedSnapshotProvider)))
-            .unwrap();
+        register_subscription_methods(
+            &mut module,
+            true,
+            Some(Arc::new(FixedSnapshotProvider)),
+            None,
+        )
+        .unwrap();
         let result = module
             .subscribe_unbounded(
                 PROGRAM_SUBSCRIBE_METHOD,
@@ -1374,8 +1589,13 @@ mod tests {
     #[tokio::test]
     async fn program_subscribe_rejects_unknown_config_key() {
         let mut module = RpcModule::new(());
-        register_subscription_methods(&mut module, true, Some(Arc::new(FixedSnapshotProvider)))
-            .unwrap();
+        register_subscription_methods(
+            &mut module,
+            true,
+            Some(Arc::new(FixedSnapshotProvider)),
+            None,
+        )
+        .unwrap();
         let result = module
             .subscribe_unbounded(
                 PROGRAM_SUBSCRIBE_METHOD,
@@ -1391,8 +1611,13 @@ mod tests {
     #[tokio::test]
     async fn program_subscribe_rejects_unknown_filter_keys() {
         let mut module = RpcModule::new(());
-        register_subscription_methods(&mut module, true, Some(Arc::new(FixedSnapshotProvider)))
-            .unwrap();
+        register_subscription_methods(
+            &mut module,
+            true,
+            Some(Arc::new(FixedSnapshotProvider)),
+            None,
+        )
+        .unwrap();
         let result = module
             .subscribe_unbounded(
                 PROGRAM_SUBSCRIBE_METHOD,
@@ -1412,8 +1637,13 @@ mod tests {
     #[tokio::test]
     async fn program_subscribe_rejects_unknown_memcmp_keys() {
         let mut module = RpcModule::new(());
-        register_subscription_methods(&mut module, true, Some(Arc::new(FixedSnapshotProvider)))
-            .unwrap();
+        register_subscription_methods(
+            &mut module,
+            true,
+            Some(Arc::new(FixedSnapshotProvider)),
+            None,
+        )
+        .unwrap();
         let result = module
             .subscribe_unbounded(
                 PROGRAM_SUBSCRIBE_METHOD,
@@ -1433,7 +1663,7 @@ mod tests {
     #[tokio::test]
     async fn subscriptions_are_hidden_without_full_api() {
         let mut module = RpcModule::new(());
-        register_subscription_methods(&mut module, false, None).unwrap();
+        register_subscription_methods(&mut module, false, None, None).unwrap();
         let result = module
             .subscribe_unbounded(SLOT_SUBSCRIBE_METHOD, EmptyServerParams::new())
             .await;
