@@ -17,15 +17,25 @@ use paradencer_execution::ExecutionBridge;
 use paradencer_mesh::InPort;
 use paradencer_runtime::{RuntimeError, RuntimeResult, Service, ServiceContext};
 use paradencer_types::shred::Shred;
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::Duration;
-use tracing::warn;
+use tracing::{debug, info, warn};
+
+/// Default maximum orphaned blocks across all parent slots.
+const DEFAULT_ORPHAN_MAX_TOTAL: usize = 256;
+/// Default maximum orphaned blocks per parent slot.
+const DEFAULT_ORPHAN_MAX_PER_PARENT: usize = 8;
 
 /// Configuration for the replay service.
 #[derive(Debug, Clone)]
 pub struct ReplayServiceConfig {
     /// Maximum blocks to replay per tick.
     pub max_blocks_per_tick: usize,
+    /// Maximum total orphaned blocks buffered.
+    pub orphan_max_total: usize,
+    /// Maximum orphaned blocks per parent slot.
+    pub orphan_max_per_parent: usize,
     /// Replay stage configuration.
     pub replay_config: ReplayConfig,
 }
@@ -34,8 +44,138 @@ impl Default for ReplayServiceConfig {
     fn default() -> Self {
         Self {
             max_blocks_per_tick: 4,
+            orphan_max_total: DEFAULT_ORPHAN_MAX_TOTAL,
+            orphan_max_per_parent: DEFAULT_ORPHAN_MAX_PER_PARENT,
             replay_config: ReplayConfig::default(),
         }
+    }
+}
+
+/// Bounded buffer for blocks whose parent slot hasn't been replayed yet.
+///
+/// When a block arrives but its parent is not yet in BankForks, the block is
+/// held here. Once the parent is successfully replayed, all waiting children
+/// are released and replayed in cascade.
+pub struct OrphanBuffer {
+    /// Blocks waiting on a parent, keyed by the parent_slot they depend on.
+    orphans: HashMap<u64, Vec<AssembledBlock>>,
+    /// Total number of buffered blocks across all parents.
+    total_buffered: usize,
+    /// Maximum total blocks to buffer.
+    max_total: usize,
+    /// Maximum blocks waiting on a single parent.
+    max_per_parent: usize,
+    /// Running count of blocks inserted.
+    inserts: u64,
+    /// Running count of blocks evicted due to capacity.
+    evictions: u64,
+    /// Running count of blocks released via cascade replay.
+    cascade_releases: u64,
+}
+
+impl OrphanBuffer {
+    pub fn new(max_total: usize, max_per_parent: usize) -> Self {
+        Self {
+            orphans: HashMap::new(),
+            total_buffered: 0,
+            max_total,
+            max_per_parent,
+            inserts: 0,
+            evictions: 0,
+            cascade_releases: 0,
+        }
+    }
+
+    /// Insert a block into the orphan buffer, keyed by its parent_slot.
+    ///
+    /// Returns `true` if the block was accepted, `false` if the buffer is
+    /// full or the per-parent limit is reached.
+    pub fn insert(&mut self, block: AssembledBlock) -> bool {
+        if self.total_buffered >= self.max_total {
+            self.evictions += 1;
+            return false;
+        }
+
+        let parent_slot = block.parent_slot;
+        let children = self.orphans.entry(parent_slot).or_default();
+
+        if children.len() >= self.max_per_parent {
+            self.evictions += 1;
+            return false;
+        }
+
+        // Avoid duplicate slots.
+        if children.iter().any(|b| b.slot == block.slot) {
+            return false;
+        }
+
+        children.push(block);
+        self.total_buffered += 1;
+        self.inserts += 1;
+        true
+    }
+
+    /// Remove and return all blocks waiting on `parent_slot`.
+    ///
+    /// The returned blocks are sorted by slot for deterministic replay order.
+    pub fn take_children(&mut self, parent_slot: u64) -> Vec<AssembledBlock> {
+        if let Some(mut children) = self.orphans.remove(&parent_slot) {
+            let count = children.len();
+            self.total_buffered = self.total_buffered.saturating_sub(count);
+            self.cascade_releases += count as u64;
+            children.sort_by_key(|b| b.slot);
+            children
+        } else {
+            Vec::new()
+        }
+    }
+
+    /// Remove all orphaned blocks whose parent_slot is below `root_slot`.
+    ///
+    /// These blocks can never be replayed because their parent is already
+    /// finalized and pruned from BankForks.
+    pub fn prune_below(&mut self, root_slot: u64) {
+        let mut pruned = 0_usize;
+        self.orphans.retain(|&parent, children| {
+            if parent < root_slot {
+                pruned += children.len();
+                false
+            } else {
+                true
+            }
+        });
+        self.total_buffered = self.total_buffered.saturating_sub(pruned);
+        self.evictions += pruned as u64;
+    }
+
+    /// Total number of buffered orphan blocks.
+    pub fn len(&self) -> usize {
+        self.total_buffered
+    }
+
+    /// Whether the buffer is empty.
+    pub fn is_empty(&self) -> bool {
+        self.total_buffered == 0
+    }
+
+    /// Number of distinct parent slots being waited on.
+    pub fn parent_count(&self) -> usize {
+        self.orphans.len()
+    }
+
+    /// Total inserts since creation.
+    pub fn inserts(&self) -> u64 {
+        self.inserts
+    }
+
+    /// Total evictions since creation.
+    pub fn evictions(&self) -> u64 {
+        self.evictions
+    }
+
+    /// Total cascade releases since creation.
+    pub fn cascade_releases(&self) -> u64 {
+        self.cascade_releases
     }
 }
 
@@ -52,6 +192,10 @@ pub struct ReplayService {
     pending_blocks: Vec<AssembledBlock>,
     /// Assembly statistics.
     assembly_stats: ShredAssemblyStats,
+    /// Buffer for blocks whose parent hasn't been replayed yet.
+    orphan_buffer: OrphanBuffer,
+    /// BankForks reference for root slot lookups during orphan pruning.
+    bank_forks: Arc<RwLock<BankForks>>,
 }
 
 impl ReplayService {
@@ -68,9 +212,11 @@ impl ReplayService {
         tower: Arc<RwLock<Tower>>,
         commitment_tracker: Arc<Mutex<CommitmentTracker>>,
     ) -> Self {
+        let orphan_buffer =
+            OrphanBuffer::new(config.orphan_max_total, config.orphan_max_per_parent);
         let replay_stage = ReplayStage::with_config(
             config.replay_config.clone(),
-            bank_forks,
+            bank_forks.clone(),
             fork_choice,
             execution_bridge,
             vote_processor,
@@ -86,6 +232,8 @@ impl ReplayService {
             shred_input: None,
             pending_blocks: Vec::new(),
             assembly_stats: ShredAssemblyStats::default(),
+            orphan_buffer,
+            bank_forks,
         }
     }
 
@@ -102,9 +250,11 @@ impl ReplayService {
         tower: Arc<RwLock<Tower>>,
         commitment_tracker: Arc<Mutex<CommitmentTracker>>,
     ) -> Self {
+        let orphan_buffer =
+            OrphanBuffer::new(config.orphan_max_total, config.orphan_max_per_parent);
         let replay_stage = ReplayStage::with_config(
             config.replay_config.clone(),
-            bank_forks,
+            bank_forks.clone(),
             fork_choice,
             execution_bridge,
             vote_processor,
@@ -120,6 +270,8 @@ impl ReplayService {
             shred_input: Some(shred_input),
             pending_blocks: Vec::new(),
             assembly_stats: ShredAssemblyStats::default(),
+            orphan_buffer,
+            bank_forks,
         }
     }
 
@@ -135,9 +287,11 @@ impl ReplayService {
         tower: Arc<RwLock<Tower>>,
         commitment_tracker: Arc<Mutex<CommitmentTracker>>,
     ) -> Self {
+        let orphan_buffer =
+            OrphanBuffer::new(config.orphan_max_total, config.orphan_max_per_parent);
         let replay_stage = ReplayStage::with_backend(
             config.replay_config.clone(),
-            bank_forks,
+            bank_forks.clone(),
             fork_choice,
             execution_bridge,
             backend,
@@ -154,6 +308,8 @@ impl ReplayService {
             shred_input: None,
             pending_blocks: Vec::new(),
             assembly_stats: ShredAssemblyStats::default(),
+            orphan_buffer,
+            bank_forks,
         }
     }
 
@@ -203,6 +359,16 @@ impl ReplayService {
         self.pending_blocks.len()
     }
 
+    /// Number of orphaned blocks buffered (waiting for parent).
+    pub fn orphan_count(&self) -> usize {
+        self.orphan_buffer.len()
+    }
+
+    /// Reference to the orphan buffer for inspection.
+    pub fn orphan_buffer(&self) -> &OrphanBuffer {
+        &self.orphan_buffer
+    }
+
     /// Access the signal bus for subscribing to replay signals.
     ///
     /// Returns a shared reference to the signal bus. Callers should
@@ -229,7 +395,7 @@ impl Service for ReplayService {
         Duration::from_millis(10)
     }
 
-    fn tick(&mut self, context: &ServiceContext) -> RuntimeResult<()> {
+    fn tick(&mut self, _context: &ServiceContext) -> RuntimeResult<()> {
         self.drain_inputs();
 
         let limit = self
@@ -238,10 +404,36 @@ impl Service for ReplayService {
             .min(self.pending_blocks.len());
         let blocks: Vec<AssembledBlock> = self.pending_blocks.drain(..limit).collect();
 
+        // Collect successfully replayed slots for cascade release.
+        let mut replayed_slots: Vec<u64> = Vec::new();
+
         for block in blocks {
             let slot = block.slot;
-            match self.replay_stage.replay_block(block) {
-                Ok(_outcome) => {}
+            let parent_slot = block.parent_slot;
+            match self.replay_stage.replay_block(block.clone()) {
+                Ok(_outcome) => {
+                    replayed_slots.push(slot);
+                }
+                Err(StageError::ReplayError(ref msg))
+                    if msg.contains("ParentNotFound") || msg.contains("Bank creation failed") =>
+                {
+                    // Parent not yet available — buffer as orphan instead of dropping.
+                    if self.orphan_buffer.insert(block) {
+                        debug!(
+                            slot,
+                            parent_slot,
+                            orphan_count = self.orphan_buffer.len(),
+                            "block buffered as orphan (parent not yet replayed)"
+                        );
+                    } else {
+                        warn!(
+                            slot,
+                            parent_slot,
+                            orphan_count = self.orphan_buffer.len(),
+                            "orphan buffer full, block dropped"
+                        );
+                    }
+                }
                 Err(StageError::ReplayError(msg)) => {
                     warn!(slot, error = %msg, "replay failed");
                 }
@@ -252,6 +444,56 @@ impl Service for ReplayService {
                     ));
                 }
             }
+        }
+
+        // Cascade: release orphaned children of successfully replayed slots.
+        // Use a work queue to handle multi-level cascades (child → grandchild).
+        let mut cascade_queue: Vec<u64> = replayed_slots;
+        let mut cascade_depth = 0_u32;
+        const MAX_CASCADE_DEPTH: u32 = 16;
+
+        while !cascade_queue.is_empty() && cascade_depth < MAX_CASCADE_DEPTH {
+            cascade_depth += 1;
+            let mut next_queue: Vec<u64> = Vec::new();
+
+            for parent_slot in cascade_queue.drain(..) {
+                let children = self.orphan_buffer.take_children(parent_slot);
+                if !children.is_empty() {
+                    info!(
+                        parent_slot,
+                        child_count = children.len(),
+                        cascade_depth,
+                        "releasing orphaned children for cascade replay"
+                    );
+                    for child in children {
+                        let child_slot = child.slot;
+                        match self.replay_stage.replay_block(child) {
+                            Ok(_) => {
+                                next_queue.push(child_slot);
+                            }
+                            Err(StageError::ReplayError(msg)) => {
+                                warn!(slot = child_slot, error = %msg, "cascade replay failed");
+                            }
+                            Err(e) => {
+                                return Err(RuntimeError::service_failure(
+                                    self.name(),
+                                    &format!(
+                                        "Fatal cascade replay error at slot {}: {:?}",
+                                        child_slot, e
+                                    ),
+                                ));
+                            }
+                        }
+                    }
+                }
+            }
+
+            cascade_queue = next_queue;
+        }
+
+        // Prune orphans below current root (they can never be replayed).
+        if let Ok(forks) = self.bank_forks.read() {
+            self.orphan_buffer.prune_below(forks.root_slot());
         }
 
         Ok(())
@@ -437,8 +679,153 @@ mod tests {
     fn default_config_values() {
         let config = ReplayServiceConfig::default();
         assert_eq!(config.max_blocks_per_tick, 4);
+        assert_eq!(config.orphan_max_total, DEFAULT_ORPHAN_MAX_TOTAL);
+        assert_eq!(config.orphan_max_per_parent, DEFAULT_ORPHAN_MAX_PER_PARENT);
         assert!(config.replay_config.strict_ancestry_check);
         assert!(config.replay_config.process_votes);
+    }
+
+    // --- OrphanBuffer unit tests ---
+
+    #[test]
+    fn orphan_buffer_insert_and_take() {
+        let mut buf = OrphanBuffer::new(64, 8);
+
+        // Insert blocks waiting on parent slot 10.
+        assert!(buf.insert(create_test_block(11, 10)));
+        assert!(buf.insert(create_test_block(12, 10)));
+        assert_eq!(buf.len(), 2);
+        assert_eq!(buf.parent_count(), 1);
+
+        // Insert block waiting on different parent.
+        assert!(buf.insert(create_test_block(21, 20)));
+        assert_eq!(buf.len(), 3);
+        assert_eq!(buf.parent_count(), 2);
+
+        // Take children of slot 10.
+        let children = buf.take_children(10);
+        assert_eq!(children.len(), 2);
+        assert_eq!(children[0].slot, 11); // sorted by slot
+        assert_eq!(children[1].slot, 12);
+        assert_eq!(buf.len(), 1); // only the slot 21 block remains
+        assert_eq!(buf.parent_count(), 1);
+
+        // Take non-existent parent returns empty.
+        let empty = buf.take_children(99);
+        assert!(empty.is_empty());
+    }
+
+    #[test]
+    fn orphan_buffer_rejects_duplicates() {
+        let mut buf = OrphanBuffer::new(64, 8);
+
+        assert!(buf.insert(create_test_block(11, 10)));
+        // Same slot again should be rejected.
+        assert!(!buf.insert(create_test_block(11, 10)));
+        assert_eq!(buf.len(), 1);
+    }
+
+    #[test]
+    fn orphan_buffer_max_total_capacity() {
+        let mut buf = OrphanBuffer::new(3, 8);
+
+        assert!(buf.insert(create_test_block(11, 10)));
+        assert!(buf.insert(create_test_block(12, 10)));
+        assert!(buf.insert(create_test_block(21, 20)));
+        // Buffer is full.
+        assert!(!buf.insert(create_test_block(22, 20)));
+        assert_eq!(buf.len(), 3);
+        assert_eq!(buf.evictions(), 1);
+    }
+
+    #[test]
+    fn orphan_buffer_per_parent_limit() {
+        let mut buf = OrphanBuffer::new(64, 2);
+
+        assert!(buf.insert(create_test_block(11, 10)));
+        assert!(buf.insert(create_test_block(12, 10)));
+        // Per-parent limit reached for parent 10.
+        assert!(!buf.insert(create_test_block(13, 10)));
+        assert_eq!(buf.len(), 2);
+        assert_eq!(buf.evictions(), 1);
+
+        // Different parent still works.
+        assert!(buf.insert(create_test_block(21, 20)));
+        assert_eq!(buf.len(), 3);
+    }
+
+    #[test]
+    fn orphan_buffer_prune_below_root() {
+        let mut buf = OrphanBuffer::new(64, 8);
+
+        buf.insert(create_test_block(6, 5));
+        buf.insert(create_test_block(11, 10));
+        buf.insert(create_test_block(21, 20));
+        assert_eq!(buf.len(), 3);
+
+        // Prune everything below root=15.
+        buf.prune_below(15);
+        assert_eq!(buf.len(), 1); // only parent=20 survives
+        assert_eq!(buf.parent_count(), 1);
+
+        let children = buf.take_children(20);
+        assert_eq!(children.len(), 1);
+        assert_eq!(children[0].slot, 21);
+    }
+
+    #[test]
+    fn orphan_buffer_take_returns_sorted() {
+        let mut buf = OrphanBuffer::new(64, 8);
+
+        // Insert in reverse order.
+        buf.insert(create_test_block(15, 10));
+        buf.insert(create_test_block(13, 10));
+        buf.insert(create_test_block(11, 10));
+
+        let children = buf.take_children(10);
+        assert_eq!(children.len(), 3);
+        assert_eq!(children[0].slot, 11);
+        assert_eq!(children[1].slot, 13);
+        assert_eq!(children[2].slot, 15);
+    }
+
+    #[test]
+    fn orphan_buffer_metrics() {
+        let mut buf = OrphanBuffer::new(2, 8);
+
+        buf.insert(create_test_block(11, 10));
+        buf.insert(create_test_block(12, 10));
+        assert_eq!(buf.inserts(), 2);
+
+        // Full — eviction.
+        buf.insert(create_test_block(21, 20));
+        assert_eq!(buf.evictions(), 1);
+
+        // Cascade release.
+        let children = buf.take_children(10);
+        assert_eq!(children.len(), 2);
+        assert_eq!(buf.cascade_releases(), 2);
+    }
+
+    #[test]
+    fn service_has_orphan_buffer() {
+        let (bank_forks, fork_choice, bridge, vote_proc, tower, commitment) =
+            create_test_infrastructure();
+        let (_, block_rx) = bounded_link::<AssembledBlock>(16);
+
+        let service = ReplayService::with_block_input(
+            ReplayServiceConfig::default(),
+            block_rx,
+            bank_forks,
+            fork_choice,
+            bridge,
+            vote_proc,
+            tower,
+            commitment,
+        );
+
+        assert_eq!(service.orphan_count(), 0);
+        assert!(service.orphan_buffer().is_empty());
     }
 
     #[test]

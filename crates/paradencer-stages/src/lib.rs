@@ -120,7 +120,7 @@ pub use pipeline_service::{
     PipelineHandle, PipelineService, PipelineServiceBuilder, PipelineServiceConfig,
     PipelineServiceStats, RawTransaction,
 };
-pub use replay_service::{ReplayService, ReplayServiceConfig};
+pub use replay_service::{OrphanBuffer, ReplayService, ReplayServiceConfig};
 pub use resolv_service::{ResolvService, ResolvServiceStats};
 pub use resolv_stage::{
     Blockhash, ResolvConfig, ResolvOutcome, ResolvStage, ResolvStats, ResolvStatsSnapshot,
