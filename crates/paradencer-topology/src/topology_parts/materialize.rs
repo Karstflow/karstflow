@@ -7,11 +7,11 @@ use paradencer_mesh::bounded_link;
 use paradencer_net::IngressPolicy;
 use paradencer_runtime::Service;
 use paradencer_stages::{
-    AssembledBlock, BlockAssembler, BlockAssemblyStats, CompletedFecSet, EdgeIntake, InboundPacket,
-    IngressFilterStats, LinkTelemetryStats, MetricsOutputFormat, MetricsOutputTarget,
-    MetricsReporter, RawTransaction, SanitizedTransaction, ShredArrival, ShredCollector,
-    ShredFilter, ShredFilterStats, ShredNetworkConfig, ShredNetworkService, StageTelemetryStats,
-    StorageRuntimePolicy, TxFilter,
+    shared_metrics_content, AssembledBlock, BlockAssembler, BlockAssemblyStats, CompletedFecSet,
+    EdgeIntake, InboundPacket, IngressFilterStats, LinkTelemetryStats, MetricsContent,
+    MetricsOutputFormat, MetricsOutputTarget, MetricsReporter, RawTransaction,
+    SanitizedTransaction, ShredArrival, ShredCollector, ShredFilter, ShredFilterStats,
+    ShredNetworkConfig, ShredNetworkService, StageTelemetryStats, StorageRuntimePolicy, TxFilter,
 };
 use paradencer_storage::Blockstore;
 use paradencer_types::shred::Shred;
@@ -142,6 +142,7 @@ pub fn materialize_services_with_blockstore(
     let mut services: Vec<Box<dyn Service>> = Vec::new();
     let mut shred_collector_added = false;
     let mut pipeline_inputs: Vec<paradencer_mesh::InPort<RawTransaction>> = Vec::new();
+    let mut metrics_http_content: Option<MetricsContent> = None;
 
     for stage in &topology_spec.stages {
         match stage.stage_kind {
@@ -221,7 +222,7 @@ pub fn materialize_services_with_blockstore(
                 ))
             }
             StageKind::Telemetry => {
-                services.push(Box::new(MetricsReporter::with_output_format_and_stats(
+                let mut reporter = MetricsReporter::with_output_format_and_stats(
                     LinkTelemetryStats {
                         packet_link_stats: packet_stats.clone(),
                         shred_link_stats: shred_stats.clone(),
@@ -234,7 +235,16 @@ pub fn materialize_services_with_blockstore(
                         shred_filter_stats: shred_filter_stats.clone(),
                         block_assembly_stats: block_assembly_stats.clone(),
                     },
-                )))
+                );
+                // When Http target is selected, create a shared buffer so
+                // MetricsReporter writes Prometheus text into it on each tick
+                // and MetricsHttpServer can serve it to scrapers.
+                if matches!(metrics_output_target, MetricsOutputTarget::Http) {
+                    let content = shared_metrics_content();
+                    reporter = reporter.with_http_content(content.clone());
+                    metrics_http_content = Some(content);
+                }
+                services.push(Box::new(reporter))
             }
             // Signature verification and blockhash resolution stages
             // process transactions before they reach the pack scheduler.
@@ -270,5 +280,6 @@ pub fn materialize_services_with_blockstore(
         } else {
             None
         },
+        metrics_http_content,
     })
 }

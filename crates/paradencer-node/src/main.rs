@@ -390,6 +390,7 @@ fn run_with_node_config(
         vote_sender_cluster,
     );
 
+    let metrics_http_content = runtime_topology.metrics_http_content.clone();
     let mut services = runtime_topology.services;
     services.push(replay_bundle.service);
     services.push(pipeline_bundle.service);
@@ -411,6 +412,7 @@ fn run_with_node_config(
             stage_count: runtime_topology.topology_spec.stages.len(),
             link_count: runtime_topology.topology_spec.links.len(),
             services,
+            metrics_http_content,
         },
         Some(rpc_bank_forks),
         Some(rpc_commitment_tracker),

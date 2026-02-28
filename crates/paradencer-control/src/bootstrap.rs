@@ -29,9 +29,9 @@ use paradencer_rpc::{
 };
 use paradencer_runtime::{build_pinned_affinity_plan, run_services, Service, ServiceProbeReport};
 use paradencer_stages::{
-    ExecutionErrorHandlingPolicy, MetricsOutputTarget, PipelineHandle, PipelineServiceBuilder,
-    PipelineServiceConfig, RawTransaction, ReplayService, ReplayServiceConfig,
-    SbpfExecutionAdapter, ShredArrival, ShredCollector, ShredCollectorConfig,
+    ExecutionErrorHandlingPolicy, MetricsContent, MetricsHttpServer, MetricsOutputTarget,
+    PipelineHandle, PipelineServiceBuilder, PipelineServiceConfig, RawTransaction, ReplayService,
+    ReplayServiceConfig, SbpfExecutionAdapter, ShredArrival, ShredCollector, ShredCollectorConfig,
 };
 use paradencer_storage::{
     AccountDatabase, Blockstore, MaintenanceConfig, Pubkey, SnapshotAction, SnapshotConfig,
@@ -48,6 +48,9 @@ pub struct ServiceBundle {
     pub stage_count: usize,
     pub link_count: usize,
     pub services: Vec<Box<dyn Service>>,
+    /// Shared metrics content buffer from topology materialization.
+    /// Present when metrics output target is `Http`.
+    pub metrics_http_content: Option<MetricsContent>,
 }
 
 pub struct MaterializedServicePair {
@@ -2007,16 +2010,44 @@ pub fn run_startup_checks_with_probe_report(
     Ok(startup_probe_report)
 }
 
-pub fn maybe_start_metrics_http_bridge(node_config: &NodeConfig) -> Result<()> {
+pub fn maybe_start_metrics_http_bridge(
+    node_config: &NodeConfig,
+    metrics_content: Option<MetricsContent>,
+) -> Result<()> {
     if let Some(bind_addr) = node_config.metrics_http_bind {
         match &node_config.metrics_output_target {
             MetricsOutputTarget::File(path) => {
                 spawn_metrics_http_bridge(bind_addr, path.clone())?;
             }
+            MetricsOutputTarget::Http => {
+                let content = metrics_content.ok_or(ControlPlaneError::Bootstrap {
+                    message: "Http metrics target requires shared content buffer from topology"
+                        .into(),
+                })?;
+                let server = MetricsHttpServer::bind(bind_addr, content).map_err(|e| {
+                    ControlPlaneError::Bootstrap {
+                        message: format!("failed to bind metrics HTTP server on {bind_addr}: {e}"),
+                    }
+                })?;
+                info!(addr = %bind_addr, "starting Prometheus metrics HTTP server");
+                std::thread::Builder::new()
+                    .name("metrics-http".into())
+                    .spawn(move || run_metrics_http_loop(server))
+                    .map_err(|e| ControlPlaneError::Bootstrap {
+                        message: format!("failed to spawn metrics HTTP thread: {e}"),
+                    })?;
+            }
             _ => return Err(ControlPlaneError::MetricsHttpRequiresFileTarget),
         }
     }
     Ok(())
+}
+
+fn run_metrics_http_loop(mut server: MetricsHttpServer) {
+    loop {
+        server.poll();
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
 }
 
 #[cfg(test)]
@@ -2993,7 +3024,7 @@ pub fn run_runtime_phase_with_consensus(
     blockstore: Option<Arc<Blockstore>>,
 ) -> Result<()> {
     run_startup_checks(node_config, startup_services, "startup", 0)?;
-    maybe_start_metrics_http_bridge(node_config)?;
+    maybe_start_metrics_http_bridge(node_config, runtime_bundle.metrics_http_content.clone())?;
     maybe_start_rpc_http_server_with_consensus(
         node_config,
         bank_forks,
@@ -3402,8 +3433,55 @@ mod tests {
         node_config.metrics_http_bind = Some("127.0.0.1:0".parse().unwrap());
         node_config.metrics_output_target = paradencer_stages::MetricsOutputTarget::Stdout;
 
-        let result = maybe_start_metrics_http_bridge(&node_config);
+        let result = maybe_start_metrics_http_bridge(&node_config, None);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn metrics_http_bridge_starts_with_http_target_and_content() {
+        let mut node_config = NodeConfig::from_profile(None).unwrap();
+        node_config.metrics_http_bind = Some("127.0.0.1:0".parse().unwrap());
+        node_config.metrics_output_target = paradencer_stages::MetricsOutputTarget::Http;
+
+        let content = paradencer_stages::shared_metrics_content();
+        let result = maybe_start_metrics_http_bridge(&node_config, Some(content));
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn metrics_http_bridge_fails_http_target_without_content() {
+        let mut node_config = NodeConfig::from_profile(None).unwrap();
+        node_config.metrics_http_bind = Some("127.0.0.1:0".parse().unwrap());
+        node_config.metrics_output_target = paradencer_stages::MetricsOutputTarget::Http;
+
+        let result = maybe_start_metrics_http_bridge(&node_config, None);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn materialize_with_http_target_returns_shared_content() {
+        let mut node_config = NodeConfig::from_profile(None).unwrap();
+        node_config.metrics_output_format = paradencer_stages::MetricsOutputFormat::PrometheusText;
+        node_config.metrics_output_target = paradencer_stages::MetricsOutputTarget::Http;
+
+        let materialized = materialize_services_from_config(&node_config).unwrap();
+        assert!(
+            materialized.metrics_http_content.is_some(),
+            "Http target must produce shared metrics content buffer"
+        );
+    }
+
+    #[test]
+    fn materialize_with_file_target_returns_no_content() {
+        let mut node_config = NodeConfig::from_profile(None).unwrap();
+        node_config.metrics_output_target =
+            paradencer_stages::MetricsOutputTarget::File("/tmp/test-metrics.log".into());
+
+        let materialized = materialize_services_from_config(&node_config).unwrap();
+        assert!(
+            materialized.metrics_http_content.is_none(),
+            "File target must not produce shared metrics content buffer"
+        );
     }
 
     #[test]

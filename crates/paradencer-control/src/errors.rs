@@ -18,9 +18,7 @@ pub enum ControlPlaneError {
     Observability(#[from] ObservabilityError),
     #[error("rpc failed: {0}")]
     Rpc(#[from] RpcError),
-    #[error(
-        "metrics HTTP bridge requires metrics target 'file' so it can serve a stable snapshot"
-    )]
+    #[error("metrics HTTP bridge requires metrics target 'file' or 'http' (got stdout or udp)")]
     MetricsHttpRequiresFileTarget,
     #[error("live preflight failed to bind ingress UDP socket on {bind_addr}: {source}")]
     IngressUdpBindPreflight {
