@@ -16,6 +16,7 @@ use paradencer_consensus::{
 use paradencer_core::{ExecutionMode, LinkKind, PinnedCorePolicy, StageKind};
 use paradencer_execution::{ExecutionBridge, SbpfBackend};
 use paradencer_mesh::{bounded_link, InPort, OutPort};
+use paradencer_net::tile::{BridgeConfig, BridgeHandle};
 use paradencer_net::{
     ClusterInfo, ContactInfo, GossipConfig, GossipService, InMemoryShredStore, IngressMode, NodeId,
     OutboundRepair, RepairCoordinator, RepairCoordinatorConfig, RepairRequest, RepairService,
@@ -2056,6 +2057,55 @@ fn run_metrics_http_loop(mut server: MetricsHttpServer) {
         server.poll();
         std::thread::sleep(std::time::Duration::from_millis(50));
     }
+}
+
+/// Spawn the QUIC ingress bridge and return a pipeline input channel.
+///
+/// When the node config enables QUIC ingress (`quic_enabled`), this
+/// spawns the NetworkTile + QuicTile bridge on a dedicated thread and
+/// starts a forwarder thread that converts completed QUIC transactions
+/// into `RawTransaction` pipeline inputs.
+///
+/// Returns the `InPort<RawTransaction>` that should be added to the
+/// pipeline service's inputs, plus the bridge handle (keep alive).
+pub fn maybe_spawn_quic_bridge(
+    node_config: &NodeConfig,
+) -> Result<Option<(InPort<RawTransaction>, BridgeHandle)>> {
+    if !node_config.quic_enabled {
+        return Ok(None);
+    }
+
+    let bridge_config = BridgeConfig::default();
+    let handle = paradencer_net::tile::spawn_bridge(bridge_config).map_err(|e| {
+        ControlPlaneError::Bootstrap {
+            message: format!("failed to spawn QUIC bridge: {e}"),
+        }
+    })?;
+
+    // Create a pipeline input channel for the forwarder.
+    let (pipeline_tx, pipeline_rx) = bounded_link::<RawTransaction>(2048);
+
+    // Forwarder thread: reads QuicTransaction → sends RawTransaction.
+    let tx_rx = handle.transaction_rx.clone();
+    std::thread::Builder::new()
+        .name("quic-pipeline-fwd".into())
+        .spawn(move || {
+            while let Ok(quic_tx) = tx_rx.recv() {
+                let raw_tx = RawTransaction {
+                    payload: quic_tx.payload,
+                    source: paradencer_stages::TransactionSource::Quic,
+                };
+                if pipeline_tx.try_send(raw_tx).is_err() {
+                    break;
+                }
+            }
+        })
+        .map_err(|e| ControlPlaneError::Bootstrap {
+            message: format!("failed to spawn QUIC pipeline forwarder: {e}"),
+        })?;
+
+    info!("QUIC ingress bridge started");
+    Ok(Some((pipeline_rx, handle)))
 }
 
 #[cfg(test)]

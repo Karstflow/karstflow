@@ -86,6 +86,10 @@ pub struct NodeConfig {
     pub storage_runtime_policy: StorageRuntimePolicy,
     pub mainnet_readiness_policy: MainnetReadinessPolicy,
     pub network_config: NetworkConfig,
+    /// Enable QUIC TPU ingress via the NetworkTile + QuicTile bridge.
+    /// When true, the node spawns a dedicated tile thread that receives
+    /// QUIC connections and reassembles transactions for the pipeline.
+    pub quic_enabled: bool,
     /// Base directory for persistent storage (accounts, blockstore, snapshots).
     /// When `None`, the node runs in-memory only (no persistence across restarts).
     pub data_dir: Option<PathBuf>,
@@ -237,6 +241,9 @@ impl NodeConfig {
             storage_runtime_policy: build_storage_runtime_policy(profile)?,
             mainnet_readiness_policy: build_mainnet_readiness_policy(profile)?,
             network_config: build_network_config(profile.and_then(|p| p.network.as_ref())),
+            quic_enabled: std::env::var("PARADENCER_QUIC_ENABLED")
+                .map(|v| v == "true" || v == "1")
+                .unwrap_or(false),
             data_dir,
             plugin_config_files,
             snapshot_archive_path,

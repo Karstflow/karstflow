@@ -7,16 +7,17 @@ use paradencer_control::{
     build_replay_service_with_block_input, build_replay_service_with_consensus,
     build_turbine_service, build_vote_broadcast_service, build_vote_sender_service,
     dispatch_command, ensure_mainnet_readiness, evaluate_mainnet_readiness,
-    materialize_service_pair_from_config, materialize_services_from_config, parse_command,
-    render_diagnostics_cluster_mode_line, render_diagnostics_lane_capacity_line,
-    render_diagnostics_ok_line, render_diagnostics_probe_line,
-    render_diagnostics_readiness_issue_line, render_diagnostics_readiness_line,
-    render_diagnostics_services_line, render_diagnostics_stage_mix_line,
-    render_diagnostics_topology_line, render_preflight_readiness_issue_line,
-    render_preflight_readiness_line, render_readiness_policy_line, resolve_validator_identity,
-    restore_from_snapshot_archive, run_diagnostics_phase, run_preflight_phase,
-    run_preflight_phase_with_probe_report, run_runtime_phase_with_consensus, save_tower_to_disk,
-    spawn_snapshot_thread, start_gossip_service, BlockstoreShredProvider, ServiceBundle,
+    materialize_service_pair_from_config, materialize_services_from_config,
+    maybe_spawn_quic_bridge, parse_command, render_diagnostics_cluster_mode_line,
+    render_diagnostics_lane_capacity_line, render_diagnostics_ok_line,
+    render_diagnostics_probe_line, render_diagnostics_readiness_issue_line,
+    render_diagnostics_readiness_line, render_diagnostics_services_line,
+    render_diagnostics_stage_mix_line, render_diagnostics_topology_line,
+    render_preflight_readiness_issue_line, render_preflight_readiness_line,
+    render_readiness_policy_line, resolve_validator_identity, restore_from_snapshot_archive,
+    run_diagnostics_phase, run_preflight_phase, run_preflight_phase_with_probe_report,
+    run_runtime_phase_with_consensus, save_tower_to_disk, spawn_snapshot_thread,
+    start_gossip_service, BlockstoreShredProvider, ServiceBundle,
 };
 
 fn main() -> paradencer_control::Result<()> {
@@ -273,12 +274,27 @@ fn run_with_node_config(
         plugin_service.start_slot_observer(plugin_rx);
     }
 
+    // Optionally spawn QUIC ingress bridge. When enabled, this adds
+    // a pipeline input channel that receives reassembled transactions
+    // from QUIC TPU connections processed by the NetworkTile + QuicTile.
+    let mut pipeline_inputs = runtime_topology.pipeline_inputs;
+    let _quic_bridge = match maybe_spawn_quic_bridge(&node_config) {
+        Ok(Some((quic_input, handle))) => {
+            pipeline_inputs.push(quic_input);
+            Some(handle)
+        }
+        Ok(None) => None,
+        Err(e) => {
+            warn!(error = %e, "QUIC bridge failed to start, continuing without QUIC ingress");
+            None
+        }
+    };
+
     // Build the transaction pipeline for block production.
-    // Pipeline inputs come directly from the topology — each TxFilter stage
-    // forwards accepted raw transactions into the pipeline via a dedicated channel.
+    // Pipeline inputs come from topology TxFilter stages plus optional QUIC bridge.
     let pipeline_bundle = build_pipeline_service(
         paradencer_stages::PipelineServiceConfig::default(),
-        runtime_topology.pipeline_inputs,
+        pipeline_inputs,
     );
     // Wire leader slot orchestration: subscribe to replay signals and
     // drive the pipeline handle when this validator becomes leader.
