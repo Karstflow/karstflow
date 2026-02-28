@@ -9,6 +9,7 @@ description = "High-performance networking stack for Paradencer validator"
 [dependencies]
 paradencer-constants = { workspace = true }
 paradencer-crypto = { path = "../paradencer-crypto" }
+paradencer-mesh = { path = "../paradencer-mesh" }
 paradencer-types = { path = "../paradencer-types" }
 
 # Low-level system interfaces

@@ -1,6 +1,38 @@
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
+/// Inter-tile IPC transport mode.
+///
+/// Selects the communication backend for inter-stage data links.
+/// Both modes are always compiled — selection happens at runtime.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum IpcMode {
+    /// Crossbeam bounded channels (typed, copies message).
+    Channel,
+    /// Zero-copy SPSC tile links (raw bytes via FragmentCodec).
+    SharedMemory,
+}
+
+impl IpcMode {
+    pub fn from_env(value: &str) -> Option<Self> {
+        match value.to_ascii_lowercase().as_str() {
+            "channel" | "channels" => Some(Self::Channel),
+            "shared_memory" | "shm" => Some(Self::SharedMemory),
+            _ => None,
+        }
+    }
+}
+
+impl fmt::Display for IpcMode {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Channel => write!(f, "channel"),
+            Self::SharedMemory => write!(f, "shared_memory"),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ExecutionMode {
     Tokio,

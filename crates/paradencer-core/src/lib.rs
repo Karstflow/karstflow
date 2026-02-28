@@ -4,6 +4,6 @@ mod topology_validation;
 mod types;
 
 pub use types::{
-    ExecutionMode, LinkKind, LinkSpec, PinnedCorePolicy, RuntimeSpec, StageKind, StageSpec,
-    TopologySpec,
+    ExecutionMode, IpcMode, LinkKind, LinkSpec, PinnedCorePolicy, RuntimeSpec, StageKind,
+    StageSpec, TopologySpec,
 };

@@ -19,6 +19,7 @@
 
 mod block_assembler;
 mod block_producer;
+mod codec_impls;
 mod dedup_stage;
 mod edge_intake;
 mod errors;

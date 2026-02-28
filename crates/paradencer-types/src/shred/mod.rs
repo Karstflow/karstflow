@@ -29,6 +29,7 @@
 //! // }
 //! ```
 
+mod codec;
 mod parser;
 mod types;
 

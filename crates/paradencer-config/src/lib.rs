@@ -23,7 +23,7 @@ use crate::parts::{
 };
 use crate::profile_loader::load_node_profile_from_file;
 use crate::profile_types::NodeProfileToml;
-use paradencer_core::{RuntimeSpec, TopologySpec};
+use paradencer_core::{IpcMode, RuntimeSpec, TopologySpec};
 use paradencer_net::{IngressMode, IngressPolicy};
 use paradencer_stages::{
     MetricsOutputFormat, MetricsOutputTarget, StorageRuntimePolicy, StorageStartupPolicy,
@@ -68,6 +68,12 @@ pub struct NodeConfig {
     /// cluster restarts and hardforks. Format: base58-encoded 32-byte hash.
     pub wait_for_supermajority_bank_hash: Option<String>,
     pub runtime_spec: RuntimeSpec,
+    /// Inter-stage IPC transport mode.
+    ///
+    /// `Channel` uses crossbeam bounded channels (typed, copies messages).
+    /// `SharedMemory` uses zero-copy SPSC tile links (raw bytes).
+    /// Env var: `PARADENCER_IPC_MODE=channel|shared_memory`. Default: `channel`.
+    pub ipc_mode: IpcMode,
     pub topology_spec: TopologySpec,
     pub ingress_policy: IngressPolicy,
     pub metrics_output_format: MetricsOutputFormat,
@@ -215,6 +221,10 @@ impl NodeConfig {
             .ok()
             .filter(|s| !s.is_empty()),
             runtime_spec: build_runtime_spec(profile)?,
+            ipc_mode: std::env::var("PARADENCER_IPC_MODE")
+                .ok()
+                .and_then(|v| IpcMode::from_env(&v))
+                .unwrap_or(IpcMode::Channel),
             topology_spec: build_topology_spec(profile)?,
             ingress_policy: build_ingress_policy(profile)?,
             metrics_output_format: build_metrics_output_format(profile)?,
