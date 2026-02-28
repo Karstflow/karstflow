@@ -10,8 +10,9 @@ use std::sync::Arc;
 fn materialize_services_from_config_builds_default_services() {
     let node_config = NodeConfig::from_profile(None).unwrap();
     let materialized = materialize_services_from_config(&node_config).unwrap();
-    // 5 topology stages + ShredNetworkService + ShredCollector = 7 services.
-    assert_eq!(materialized.services.len(), 7);
+    // 5 topology stages + ShredNetworkService + ShredCollector - reporter (stored separately) = 6 services.
+    assert_eq!(materialized.services.len(), 6);
+    assert!(materialized.reporter.is_some());
 }
 
 #[test]
@@ -19,7 +20,8 @@ fn materialize_service_pair_from_config_builds_startup_and_runtime_services() {
     let node_config = NodeConfig::from_profile(None).unwrap();
     let pair = materialize_service_pair_from_config(&node_config).unwrap();
     assert_eq!(pair.startup.services.len(), pair.runtime.services.len());
-    assert_eq!(pair.runtime.services.len(), 7);
+    assert_eq!(pair.runtime.services.len(), 6);
+    assert!(pair.runtime.reporter.is_some());
 }
 
 #[test]
@@ -48,9 +50,12 @@ fn pipeline_service_integrates_with_topology_services() {
     );
 
     let mut services = materialized.services;
+    if let Some(rpt) = materialized.reporter {
+        services.push(Box::new(rpt));
+    }
     services.push(bundle.service);
 
-    // Topology (7) + pipeline (1) = 8 total services.
+    // Topology (6 in services + 1 reporter) + pipeline (1) = 8 total services.
     assert_eq!(services.len(), 8);
     assert_eq!(services.last().unwrap().name(), "validator-pipeline");
 }
@@ -85,10 +90,13 @@ fn replay_and_pipeline_integrate_with_topology() {
     );
 
     let mut services = materialized.services;
+    if let Some(rpt) = materialized.reporter {
+        services.push(Box::new(rpt));
+    }
     services.push(replay_bundle.service);
     services.push(pipeline_bundle.service);
 
-    // Topology (7) + replay (1) + pipeline (1) = 9 total services.
+    // Topology (6 in services + 1 reporter) + replay (1) + pipeline (1) = 9 total services.
     assert_eq!(services.len(), 9);
 
     let names: Vec<&str> = services.iter().map(|s| s.name()).collect();
@@ -188,10 +196,13 @@ fn topology_includes_shred_collector_and_integrates_with_bootstrap_services() {
     );
 
     let mut services = materialized.services;
+    if let Some(rpt) = materialized.reporter {
+        services.push(Box::new(rpt));
+    }
     services.push(replay_bundle.service);
     services.push(pipeline_bundle.service);
 
-    // Topology (7, including shred-network + shred-collector) + replay (1) + pipeline (1) = 9.
+    // Topology (6 in services + 1 reporter + shred-network + shred-collector) + replay (1) + pipeline (1) = 9.
     assert_eq!(services.len(), 9);
 
     let names: Vec<&str> = services.iter().map(|s| s.name()).collect();

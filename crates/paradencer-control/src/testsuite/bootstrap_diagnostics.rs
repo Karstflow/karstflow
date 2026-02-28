@@ -30,6 +30,9 @@ fn run_diagnostics_phase_returns_probe_summary() {
         .filter(|link| link.link_kind == LinkKind::TransactionStream)
         .map(|link| link.capacity)
         .sum();
+    if let Some(rpt) = materialized.reporter {
+        materialized.services.push(Box::new(rpt));
+    }
     let summary = run_diagnostics_phase(
         &node_config,
         materialized.topology_spec.topology_name.clone(),
@@ -63,6 +66,9 @@ fn run_diagnostics_phase_returns_probe_summary() {
 fn mainnet_readiness_fails_for_default_profile() {
     let node_config = NodeConfig::from_profile(None).unwrap();
     let mut materialized = materialize_services_from_config(&node_config).unwrap();
+    if let Some(rpt) = materialized.reporter {
+        materialized.services.push(Box::new(rpt));
+    }
     let summary = run_diagnostics_phase(
         &node_config,
         materialized.topology_spec.topology_name.clone(),
@@ -85,6 +91,9 @@ fn diagnostics_fails_early_for_mismatched_pinned_service_core_ids_length() {
     node_config.runtime_spec.mode = paradencer_core::ExecutionMode::Pinned;
     node_config.runtime_spec.pinned_service_core_ids = Some(vec![0, 1]);
     let mut materialized = materialize_services_from_config(&node_config).unwrap();
+    if let Some(rpt) = materialized.reporter {
+        materialized.services.push(Box::new(rpt));
+    }
     let result = run_diagnostics_phase(
         &node_config,
         materialized.topology_spec.topology_name.clone(),
@@ -110,6 +119,9 @@ fn diagnostics_fails_early_for_duplicate_pinned_service_core_ids_in_strict_mode(
     node_config.runtime_spec.pinned_core_policy = paradencer_core::PinnedCorePolicy::Strict;
     node_config.runtime_spec.pinned_service_core_ids = Some(vec![0, 0, 0, 0, 0, 0, 0]);
     let mut materialized = materialize_services_from_config(&node_config).unwrap();
+    if let Some(rpt) = materialized.reporter {
+        materialized.services.push(Box::new(rpt));
+    }
     let result = run_diagnostics_phase(
         &node_config,
         materialized.topology_spec.topology_name.clone(),
@@ -137,6 +149,9 @@ fn mainnet_readiness_requires_fork_choice_runtime_when_policy_enabled() {
         .fork_choice_runtime_policy
         .enabled = false;
     let mut materialized = materialize_services_from_config(&node_config).unwrap();
+    if let Some(rpt) = materialized.reporter {
+        materialized.services.push(Box::new(rpt));
+    }
     let summary = run_diagnostics_phase(
         &node_config,
         materialized.topology_spec.topology_name.clone(),
@@ -163,6 +178,9 @@ fn mainnet_readiness_requires_fail_fast_execution_errors_when_policy_enabled() {
         .execution_error_handling_policy =
         paradencer_stages::ExecutionErrorHandlingPolicy::FailOpen;
     let mut materialized = materialize_services_from_config(&node_config).unwrap();
+    if let Some(rpt) = materialized.reporter {
+        materialized.services.push(Box::new(rpt));
+    }
     let summary = run_diagnostics_phase(
         &node_config,
         materialized.topology_spec.topology_name.clone(),
@@ -192,6 +210,9 @@ fn mainnet_readiness_requires_fail_open_circuit_breaker_when_policy_enabled() {
         .storage_runtime_policy
         .execution_error_fail_open_max_consecutive = 0;
     let mut materialized = materialize_services_from_config(&node_config).unwrap();
+    if let Some(rpt) = materialized.reporter {
+        materialized.services.push(Box::new(rpt));
+    }
     let summary = run_diagnostics_phase(
         &node_config,
         materialized.topology_spec.topology_name.clone(),

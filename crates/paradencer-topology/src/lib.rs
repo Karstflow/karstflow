@@ -50,8 +50,9 @@ mod tests {
             IpcMode::Channel,
         )
         .unwrap();
-        // 5 topology stages + ShredNetworkService + ShredCollector = 7 services.
-        assert_eq!(materialized.services.len(), 7);
+        // 5 topology stages + ShredNetworkService + ShredCollector - reporter (stored separately) = 6 services.
+        assert_eq!(materialized.services.len(), 6);
+        assert!(materialized.reporter.is_some());
     }
 
     #[test]
@@ -66,8 +67,9 @@ mod tests {
             IpcMode::Channel,
         )
         .unwrap();
-        // 8 topology stages + ShredNetworkService + ShredCollector = 10 services.
-        assert_eq!(materialized.services.len(), 10);
+        // 8 topology stages + ShredNetworkService + ShredCollector - reporter (stored separately) = 9 services.
+        assert_eq!(materialized.services.len(), 9);
+        assert!(materialized.reporter.is_some());
     }
 
     #[test]
@@ -235,6 +237,10 @@ capacity = 64
 
         let context = ServiceContext::new(ShutdownSwitch::new());
         let mut services = materialized.services;
+        // Push reporter back into services so it gets ticked.
+        if let Some(reporter) = materialized.reporter {
+            services.push(Box::new(reporter));
+        }
 
         // Start all services.
         for svc in services.iter_mut() {

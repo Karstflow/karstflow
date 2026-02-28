@@ -80,6 +80,10 @@ fn run_with_node_config(
     let node_id = gossip_handle.node_id;
 
     let mut topology_pair = materialize_service_pair_from_config(&node_config)?;
+    // Push reporter into startup services (no aggregator needed for startup checks).
+    if let Some(rpt) = topology_pair.startup.reporter.take() {
+        topology_pair.startup.services.push(Box::new(rpt));
+    }
     let runtime_topology = topology_pair.runtime;
 
     // Connect the shred collection pipeline to the replay service.
@@ -419,9 +423,36 @@ fn run_with_node_config(
         vote_sender_cluster,
     );
 
+    // Build MetricsAggregator from pipeline stage stats and attach to reporter.
+    // This enables all pipeline metrics (verify, resolv, pack, exec, shred)
+    // to appear on the Prometheus /metrics endpoint.
+    let reporter = runtime_topology.reporter.map(|rpt| {
+        let mut aggregator = paradencer_stages::MetricsAggregator::new()
+            .with_verify(std::sync::Arc::clone(
+                &pipeline_bundle.handle.stage_stats.verify,
+            ))
+            .with_resolv(std::sync::Arc::clone(
+                &pipeline_bundle.handle.stage_stats.resolv,
+            ))
+            .with_pack(std::sync::Arc::clone(
+                &pipeline_bundle.handle.stage_stats.pack,
+            ))
+            .with_exec(std::sync::Arc::clone(
+                &pipeline_bundle.handle.stage_stats.exec,
+            ));
+        if let Some(ref shred_stats) = runtime_topology.shred_network_stats {
+            aggregator = aggregator.with_shred_network(std::sync::Arc::clone(shred_stats));
+        }
+        rpt.with_aggregator(aggregator)
+    });
+
     let metrics_http_content = runtime_topology.metrics_http_content.clone();
     let health_status = runtime_topology.health_status.clone();
     let mut services = runtime_topology.services;
+    // Push reporter into services after aggregator is attached.
+    if let Some(rpt) = reporter {
+        services.push(Box::new(rpt));
+    }
     services.push(replay_bundle.service);
     services.push(pipeline_bundle.service);
     services.push(turbine_bundle.service);
@@ -479,6 +510,10 @@ fn preflight_with_node_config(
 ) -> paradencer_control::Result<()> {
     let _tracing_guard = init_tracing_from_config(&node_config)?;
     let mut materialized_topology = materialize_services_from_config(&node_config)?;
+    // Push reporter into services (no aggregator needed for preflight).
+    if let Some(rpt) = materialized_topology.reporter.take() {
+        materialized_topology.services.push(Box::new(rpt));
+    }
     if !mainnet_readiness {
         return run_preflight_phase(
             &node_config,
@@ -525,6 +560,10 @@ fn diagnostics_with_node_config(
 ) -> paradencer_control::Result<()> {
     let _tracing_guard = init_tracing_from_config(&node_config)?;
     let mut materialized_topology = materialize_services_from_config(&node_config)?;
+    // Push reporter into services (no aggregator needed for diagnostics).
+    if let Some(rpt) = materialized_topology.reporter.take() {
+        materialized_topology.services.push(Box::new(rpt));
+    }
     let diagnostics_summary = run_diagnostics_phase(
         &node_config,
         materialized_topology.topology_spec.topology_name.clone(),

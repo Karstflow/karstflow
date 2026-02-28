@@ -2,9 +2,11 @@ use paradencer_core::{IpcMode, TopologySpec};
 use paradencer_mesh::{InPort, OutPort};
 use paradencer_runtime::Service;
 use paradencer_stages::{
-    AssembledBlock, MetricsContent, RawTransaction, SharedHealthStatus, ShredArrival,
+    AssembledBlock, MetricsContent, MetricsReporter, RawTransaction, SharedHealthStatus,
+    ShredArrival, ShredNetworkStats,
 };
 use paradencer_types::shred::Shred;
+use std::sync::Arc;
 
 pub struct MaterializedTopology {
     pub topology_spec: TopologySpec,
@@ -32,4 +34,9 @@ pub struct MaterializedTopology {
     /// Shared health status for `/health`, `/ready`, `/alive` probe endpoints.
     /// Pass this to `MetricsHttpServer` via `.with_health()`.
     pub health_status: Option<SharedHealthStatus>,
+    /// Metrics reporter stored separately for aggregator injection.
+    /// Push into `services` after attaching a `MetricsAggregator`.
+    pub reporter: Option<MetricsReporter>,
+    /// Shred network stats for pipeline metrics aggregation.
+    pub shred_network_stats: Option<Arc<ShredNetworkStats>>,
 }

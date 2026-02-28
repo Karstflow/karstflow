@@ -16,12 +16,12 @@
 /// `register_blockhash()` to activate block production. Produced entries
 /// accumulate until `end_slot()` collects them for shredding.
 use crate::block_producer::{Entry, PohService};
-use crate::exec_stage::{ExecConfig, ExecStage, ExecutionEngine, MockExecutionEngine};
+use crate::exec_stage::{ExecConfig, ExecStage, ExecStats, ExecutionEngine, MockExecutionEngine};
 use crate::leader_pipeline::LeaderPipeline;
-use crate::pack_stage::{PackConfig, PackScheduler};
-use crate::resolv_stage::Blockhash;
+use crate::pack_stage::{PackConfig, PackScheduler, PackStats};
+use crate::resolv_stage::{Blockhash, ResolvStats};
 use crate::tile_pipeline::{PipelineConfig, ValidatorPipeline};
-use crate::verify_stage::TransactionSource;
+use crate::verify_stage::{TransactionSource, VerifyStats};
 use paradencer_mesh::InPort;
 use paradencer_runtime::{RuntimeResult, Service, ServiceContext};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -94,6 +94,21 @@ pub struct PipelineServiceStats {
 }
 
 // ---------------------------------------------------------------------------
+// Pipeline stage stats — references to inner stage counters
+// ---------------------------------------------------------------------------
+
+/// Shared references to the atomic stats of each pipeline stage.
+///
+/// Populated during pipeline construction and accessible through
+/// `PipelineHandle::stage_stats` for wiring into a `MetricsAggregator`.
+pub struct PipelineStageStats {
+    pub verify: Arc<VerifyStats>,
+    pub resolv: Arc<ResolvStats>,
+    pub pack: Arc<PackStats>,
+    pub exec: Arc<ExecStats>,
+}
+
+// ---------------------------------------------------------------------------
 // PipelineHandle — cross-service communication
 // ---------------------------------------------------------------------------
 
@@ -110,15 +125,18 @@ pub struct PipelineHandle {
     current_slot: AtomicU64,
     /// Pipeline statistics.
     pub stats: Arc<PipelineServiceStats>,
+    /// Inner stage stats for metrics aggregation.
+    pub stage_stats: PipelineStageStats,
 }
 
 impl PipelineHandle {
-    fn new(stats: Arc<PipelineServiceStats>) -> Self {
+    fn new(stats: Arc<PipelineServiceStats>, stage_stats: PipelineStageStats) -> Self {
         Self {
             commands: Mutex::new(Vec::new()),
             is_leading: AtomicBool::new(false),
             current_slot: AtomicU64::new(0),
             stats,
+            stage_stats,
         }
     }
 
@@ -245,12 +263,24 @@ impl PipelineServiceBuilder {
             .unwrap_or_else(|| Box::new(MockExecutionEngine::new(200_000)));
         let exec = ExecStage::with_config(engine, self.config.exec);
         let poh = PohService::new(paradencer_types::Hash::default());
-        let leader = LeaderPipeline::new(pack, exec, poh);
 
+        // Capture pack/exec stats before stages are consumed by LeaderPipeline.
+        let pack_stats = pack.stats();
+        let exec_stats = exec.stats();
+
+        let leader = LeaderPipeline::new(pack, exec, poh);
         let validator_pipeline = ValidatorPipeline::new(self.config.pipeline, leader);
 
+        // Capture verify/resolv stats from the transaction pipeline.
+        let stage_stats = PipelineStageStats {
+            verify: validator_pipeline.verify_stats(),
+            resolv: validator_pipeline.resolv_stats(),
+            pack: pack_stats,
+            exec: exec_stats,
+        };
+
         let stats = Arc::new(PipelineServiceStats::default());
-        let handle = Arc::new(PipelineHandle::new(Arc::clone(&stats)));
+        let handle = Arc::new(PipelineHandle::new(Arc::clone(&stats), stage_stats));
 
         let service = PipelineService {
             pipeline: validator_pipeline,

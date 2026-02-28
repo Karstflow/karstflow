@@ -148,6 +148,8 @@ pub fn materialize_services_with_blockstore(
     let mut pipeline_inputs: Vec<paradencer_mesh::InPort<RawTransaction>> = Vec::new();
     let mut metrics_http_content: Option<MetricsContent> = None;
     let mut health_status: Option<SharedHealthStatus> = None;
+    let mut reporter_out: Option<MetricsReporter> = None;
+    let mut shred_network_stats_out: Option<Arc<paradencer_stages::ShredNetworkStats>> = None;
 
     for stage in &topology_spec.stages {
         match stage.stage_kind {
@@ -192,11 +194,13 @@ pub fn materialize_services_with_blockstore(
                 // Add network service and collector once (after the first ShredSanitizer).
                 if !shred_collector_added {
                     // ShredNetworkService: FEC set tracking + Reed-Solomon recovery.
-                    services.push(Box::new(ShredNetworkService::new(
+                    let shred_net = ShredNetworkService::new(
                         ShredNetworkConfig::default(),
                         DualReceiver::Channel(filtered_shred_rx.clone()),
                         fec_completed_tx.clone(),
-                    )));
+                    );
+                    shred_network_stats_out = Some(shred_net.stats());
+                    services.push(Box::new(shred_net));
                     // ShredCollector: accumulates shreds by slot, emits assembled blocks.
                     // Receives completed FEC sets from the network service, plus a
                     // direct shred channel for future repair/catch-up paths.
@@ -253,7 +257,9 @@ pub fn materialize_services_with_blockstore(
                 let hs = shared_health_status();
                 reporter = reporter.with_health(hs.clone());
                 health_status = Some(hs);
-                services.push(Box::new(reporter))
+                // Store reporter separately so bootstrap can attach a
+                // MetricsAggregator before pushing into services.
+                reporter_out = Some(reporter);
             }
             // Signature verification and blockhash resolution stages
             // process transactions before they reach the pack scheduler.
@@ -292,5 +298,7 @@ pub fn materialize_services_with_blockstore(
         },
         metrics_http_content,
         health_status,
+        reporter: reporter_out,
+        shred_network_stats: shred_network_stats_out,
     })
 }

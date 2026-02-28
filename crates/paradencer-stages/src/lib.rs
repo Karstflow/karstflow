@@ -121,7 +121,7 @@ pub use pack_stage::{
 };
 pub use pipeline_service::{
     PipelineHandle, PipelineService, PipelineServiceBuilder, PipelineServiceConfig,
-    PipelineServiceStats, RawTransaction,
+    PipelineServiceStats, PipelineStageStats, RawTransaction,
 };
 pub use replay_service::{OrphanBuffer, ReplayService, ReplayServiceConfig};
 pub use resolv_service::{ResolvService, ResolvServiceStats};

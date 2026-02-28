@@ -12,12 +12,17 @@
 use paradencer_mesh::fragment::{ctl_pack, FragmentMeta};
 use paradencer_mesh::stem::{InputResult, StemInput, StemOutputConfig, TileStem};
 use paradencer_mesh::tile::Tile;
+use std::sync::Arc;
 
 use crate::dedup_stage::TransactionCache;
 use crate::exec_stage::{ExecStage, ExecutionEngine, MockExecutionEngine};
 use crate::pack_stage::{PackScheduler, PackedTransaction};
-use crate::resolv_stage::{Blockhash, ResolvOutcome, ResolvStage, ResolvedTransaction};
-use crate::verify_stage::{TransactionSource, UnverifiedTransaction, VerifyOutcome, VerifyStage};
+use crate::resolv_stage::{
+    Blockhash, ResolvOutcome, ResolvStage, ResolvStats, ResolvedTransaction,
+};
+use crate::verify_stage::{
+    TransactionSource, UnverifiedTransaction, VerifyOutcome, VerifyStage, VerifyStats,
+};
 
 // ---------------------------------------------------------------------------
 // Wire format helpers
@@ -101,6 +106,11 @@ impl VerifyTile {
     /// Access the output stem (for wiring downstream consumers).
     pub fn output_stem(&self) -> &TileStem {
         &self.output
+    }
+
+    /// Get a shared reference to the verify stage statistics.
+    pub fn stats(&self) -> Arc<VerifyStats> {
+        self.stage.stats()
     }
 }
 
@@ -329,6 +339,11 @@ impl ResolvTile {
     /// Access the output stem (for wiring downstream consumers).
     pub fn output_stem(&self) -> &TileStem {
         &self.output
+    }
+
+    /// Get a shared reference to the resolv stage statistics.
+    pub fn stats(&self) -> Arc<ResolvStats> {
+        self.stage.stats()
     }
 
     /// Register a new blockhash. Unstashed transactions that match are
@@ -710,6 +725,16 @@ impl TransactionPipeline {
 
         resolved
     }
+
+    /// Get a shared reference to the verify stage statistics.
+    pub fn verify_stats(&self) -> Arc<VerifyStats> {
+        self.verify.stats()
+    }
+
+    /// Get a shared reference to the resolv stage statistics.
+    pub fn resolv_stats(&self) -> Arc<ResolvStats> {
+        self.resolv.stats()
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -950,6 +975,16 @@ impl ValidatorPipeline {
     /// Mutable access to the LeaderPipeline.
     pub fn leader_pipeline_mut(&mut self) -> &mut crate::leader_pipeline::LeaderPipeline {
         &mut self.leader
+    }
+
+    /// Get a shared reference to the verify stage statistics.
+    pub fn verify_stats(&self) -> Arc<VerifyStats> {
+        self.txn_pipeline.verify_stats()
+    }
+
+    /// Get a shared reference to the resolv stage statistics.
+    pub fn resolv_stats(&self) -> Arc<ResolvStats> {
+        self.txn_pipeline.resolv_stats()
     }
 }
 
