@@ -27,6 +27,37 @@ pub trait LeaderLookup: Send + Sync {
     fn leader_for_slot(&self, slot: u64) -> Option<[u8; 32]>;
 }
 
+/// Late-binding leader lookup that starts empty and gets populated after
+/// consensus infrastructure is available.
+///
+/// Created during topology materialization (before BankForks exists) and
+/// populated from main.rs once consensus bootstraps. The shred network
+/// stage holds an `Arc<DeferredLeaderLookup>` and transparently delegates
+/// through the inner provider once set.
+pub struct DeferredLeaderLookup {
+    inner: std::sync::RwLock<Option<std::sync::Arc<dyn LeaderLookup>>>,
+}
+
+impl DeferredLeaderLookup {
+    pub fn new() -> Self {
+        Self {
+            inner: std::sync::RwLock::new(None),
+        }
+    }
+
+    /// Set the real leader lookup provider. Called once after consensus boot.
+    pub fn set(&self, lookup: std::sync::Arc<dyn LeaderLookup>) {
+        *self.inner.write().unwrap() = Some(lookup);
+    }
+}
+
+impl LeaderLookup for DeferredLeaderLookup {
+    fn leader_for_slot(&self, slot: u64) -> Option<[u8; 32]> {
+        let guard = self.inner.read().ok()?;
+        guard.as_ref()?.leader_for_slot(slot)
+    }
+}
+
 /// Outcome of shred signature verification.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ShredVerifyResult {

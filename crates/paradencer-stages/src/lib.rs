@@ -135,7 +135,7 @@ pub use shred_network::{
     ShredSource,
 };
 pub use shred_store_service::{ShredStoreConfig, ShredStoreService, ShredStoreStats};
-pub use shred_verifier::{LeaderLookup, ShredVerifyResult};
+pub use shred_verifier::{DeferredLeaderLookup, LeaderLookup, ShredVerifyResult};
 pub use sign_service::{SignError, SignResult, SignService, SignServiceStats, SignType};
 pub use tile_metrics::{SignalBusHealthTracker, TickTimer, TickTimerSnapshot};
 pub use tile_pipeline::{

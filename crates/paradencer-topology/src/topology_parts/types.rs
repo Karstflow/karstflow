@@ -2,8 +2,8 @@ use paradencer_core::{IpcMode, TopologySpec};
 use paradencer_mesh::{InPort, OutPort};
 use paradencer_runtime::Service;
 use paradencer_stages::{
-    AssembledBlock, AtomicFecResolverStats, MetricsContent, MetricsReporter, RawTransaction,
-    RetransmitDecision, SharedHealthStatus, ShredArrival, ShredNetworkStats,
+    AssembledBlock, AtomicFecResolverStats, DeferredLeaderLookup, MetricsContent, MetricsReporter,
+    RawTransaction, RetransmitDecision, SharedHealthStatus, ShredArrival, ShredNetworkStats,
 };
 use paradencer_types::shred::Shred;
 use std::sync::Arc;
@@ -44,4 +44,7 @@ pub struct MaterializedTopology {
     /// Receiver for retransmit decisions from the shred network service.
     /// Connect this to the turbine retransmit service for shred propagation.
     pub retransmit_receiver: Option<InPort<RetransmitDecision>>,
+    /// Handle to the deferred leader lookup for shred signature verification.
+    /// Set the inner provider after consensus boots via `handle.set(provider)`.
+    pub leader_lookup_handle: Option<Arc<DeferredLeaderLookup>>,
 }

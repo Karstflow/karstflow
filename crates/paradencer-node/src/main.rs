@@ -138,6 +138,15 @@ fn run_with_node_config(
         forks.set_bank_notifier(notifier);
     }
 
+    // Wire leader lookup for shred signature verification.
+    // The deferred handle was created empty during topology materialization;
+    // now that BankForks is available we populate it with the real provider.
+    if let Some(ref handle) = runtime_topology.leader_lookup_handle {
+        handle.set(std::sync::Arc::new(
+            paradencer_control::ConsensusLeaderLookup::new(consensus.bank_forks.clone()),
+        ));
+    }
+
     // Wait-for-supermajority Phase 2: block until 80% of stake is online.
     // Only activates when a bank hash is configured (coordinated restart).
     // Gossip is already running, so peers accumulate while we poll.

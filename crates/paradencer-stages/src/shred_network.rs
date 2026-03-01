@@ -731,6 +731,12 @@ impl ShredNetworkService {
         self
     }
 
+    /// Set the leader lookup for shred signature verification.
+    pub fn with_leader_lookup(mut self, lookup: Arc<dyn LeaderLookup>) -> Self {
+        self.stage.set_leader_lookup(lookup);
+        self
+    }
+
     /// Set the default shred source (for classifying incoming shreds).
     pub fn with_default_source(mut self, source: ShredSource) -> Self {
         self.default_source = source;

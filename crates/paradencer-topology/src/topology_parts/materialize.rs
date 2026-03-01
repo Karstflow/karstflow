@@ -8,11 +8,11 @@ use paradencer_net::IngressPolicy;
 use paradencer_runtime::Service;
 use paradencer_stages::{
     shared_health_status, shared_metrics_content, AssembledBlock, BlockAssembler,
-    BlockAssemblyStats, CompletedFecSet, EdgeIntake, InboundPacket, IngressFilterStats,
-    LinkTelemetryStats, MetricsContent, MetricsOutputFormat, MetricsOutputTarget, MetricsReporter,
-    RawTransaction, RetransmitDecision, SanitizedTransaction, SharedHealthStatus, ShredArrival,
-    ShredCollector, ShredFilter, ShredFilterStats, ShredNetworkConfig, ShredNetworkService,
-    StageTelemetryStats, StorageRuntimePolicy, TxFilter,
+    BlockAssemblyStats, CompletedFecSet, DeferredLeaderLookup, EdgeIntake, InboundPacket,
+    IngressFilterStats, LinkTelemetryStats, MetricsContent, MetricsOutputFormat,
+    MetricsOutputTarget, MetricsReporter, RawTransaction, RetransmitDecision, SanitizedTransaction,
+    SharedHealthStatus, ShredArrival, ShredCollector, ShredFilter, ShredFilterStats,
+    ShredNetworkConfig, ShredNetworkService, StageTelemetryStats, StorageRuntimePolicy, TxFilter,
 };
 use paradencer_storage::Blockstore;
 use paradencer_types::shred::Shred;
@@ -157,6 +157,7 @@ pub fn materialize_services_with_blockstore(
     let mut reporter_out: Option<MetricsReporter> = None;
     let mut shred_network_stats_out: Option<Arc<paradencer_stages::ShredNetworkStats>> = None;
     let mut fec_resolver_stats_out: Option<Arc<paradencer_stages::AtomicFecResolverStats>> = None;
+    let deferred_leader_lookup = Arc::new(DeferredLeaderLookup::new());
 
     for stage in &topology_spec.stages {
         match stage.stage_kind {
@@ -206,7 +207,9 @@ pub fn materialize_services_with_blockstore(
                         DualReceiver::Channel(filtered_shred_rx.clone()),
                         fec_completed_tx.clone(),
                     )
-                    .with_retransmit_output(retransmit_tx.clone());
+                    .with_retransmit_output(retransmit_tx.clone())
+                    .with_leader_lookup(Arc::clone(&deferred_leader_lookup)
+                        as Arc<dyn paradencer_stages::LeaderLookup>);
                     shred_network_stats_out = Some(shred_net.stats());
                     fec_resolver_stats_out = Some(shred_net.fec_resolver_stats());
                     services.push(Box::new(shred_net));
@@ -315,5 +318,6 @@ pub fn materialize_services_with_blockstore(
         } else {
             None
         },
+        leader_lookup_handle: Some(Arc::clone(&deferred_leader_lookup)),
     })
 }

@@ -2933,6 +2933,33 @@ impl BankAccessProvider for ConsensusBankAccessProvider {
     }
 }
 
+/// Provides leader pubkey lookups for shred signature verification.
+///
+/// Reads the leader schedule from the working bank in `BankForks` and
+/// resolves absolute slot numbers to the 32-byte Ed25519 pubkey of the
+/// assigned leader. Used by the shred network stage to verify incoming
+/// shreds before accepting them into FEC sets.
+pub struct ConsensusLeaderLookup {
+    bank_forks: Arc<RwLock<BankForks>>,
+}
+
+impl ConsensusLeaderLookup {
+    pub fn new(bank_forks: Arc<RwLock<BankForks>>) -> Self {
+        Self { bank_forks }
+    }
+}
+
+impl paradencer_stages::LeaderLookup for ConsensusLeaderLookup {
+    fn leader_for_slot(&self, slot: u64) -> Option<[u8; 32]> {
+        let forks = self.bank_forks.read().ok()?;
+        let bank = forks.working_bank();
+        let leader = bank
+            .leader_schedule()
+            .leader_for_absolute_slot(slot, bank.epoch_schedule())?;
+        Some(leader.to_bytes())
+    }
+}
+
 /// Forwards transactions to the current leader's TPU socket via UDP.
 ///
 /// Resolves the current slot's leader from `BankForks` and looks up
