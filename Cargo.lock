@@ -1528,6 +1528,7 @@ dependencies = [
  "paradencer-constants",
  "paradencer-crypto",
  "paradencer-ids",
+ "paradencer-mesh",
  "paradencer-storage",
  "paradencer-types",
  "parking_lot 0.12.5",

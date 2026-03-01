@@ -15,7 +15,7 @@ use paradencer_consensus::{
 };
 use paradencer_core::{ExecutionMode, LinkKind, PinnedCorePolicy, StageKind};
 use paradencer_execution::{ExecutionBridge, SbpfBackend};
-use paradencer_mesh::{bounded_link, InPort, OutPort};
+use paradencer_mesh::{bounded_link, DualReceiver, DualSender, InPort, OutPort};
 use paradencer_net::tile::{BridgeConfig, BridgeHandle};
 use paradencer_net::{
     ClusterInfo, ContactInfo, GossipConfig, GossipService, GossipServiceStats, InMemoryShredStore,
@@ -77,14 +77,14 @@ pub struct PipelineBundle {
 ///
 /// Creates the unified verify → resolv → pack → exec → PoH pipeline.
 /// Input channels are provided by the topology materializer — each
-/// `TransactionSanitizer` stage produces an `InPort<RawTransaction>`
+/// `TransactionSanitizer` stage produces a `DualReceiver<RawTransaction>`
 /// that feeds directly into the pipeline.
 ///
 /// The returned `PipelineHandle` allows other services (consensus, gossip)
 /// to signal leader slots and register blockhashes.
 pub fn build_pipeline_service(
     config: PipelineServiceConfig,
-    inputs: Vec<InPort<RawTransaction>>,
+    inputs: Vec<DualReceiver<RawTransaction>>,
 ) -> PipelineBundle {
     let mut builder = PipelineServiceBuilder::new().with_config(config);
     for input in inputs {
@@ -361,7 +361,7 @@ pub fn build_replay_service(config: ReplayServiceConfig, initial_stake: u64) -> 
     let backend = Arc::new(SbpfExecutionAdapter::with_defaults());
     let service = ReplayService::with_backend(
         config,
-        block_rx,
+        DualReceiver::Channel(block_rx),
         Arc::clone(&consensus.bank_forks),
         Arc::clone(&consensus.fork_choice),
         Arc::clone(&consensus.execution_bridge),
@@ -386,7 +386,7 @@ pub fn build_replay_service(config: ReplayServiceConfig, initial_stake: u64) -> 
 /// ShredCollector) directly to the replay service for consensus processing.
 pub fn build_replay_service_with_block_input(
     config: ReplayServiceConfig,
-    block_input: InPort<paradencer_stages::AssembledBlock>,
+    block_input: DualReceiver<paradencer_stages::AssembledBlock>,
     initial_stake: u64,
 ) -> ReplayBundleWithExternalInput {
     let consensus = build_consensus_infrastructure(initial_stake, None, None)
@@ -434,7 +434,7 @@ pub struct ReplayBundleWithExternalInput {
 /// passes it here along with the shred block input from the topology.
 pub fn build_replay_service_with_consensus(
     config: ReplayServiceConfig,
-    block_input: InPort<paradencer_stages::AssembledBlock>,
+    block_input: DualReceiver<paradencer_stages::AssembledBlock>,
     consensus: ConsensusBundle,
     validator_identity: Option<[u8; 32]>,
 ) -> ReplayBundleWithExternalInput {
@@ -1912,7 +1912,11 @@ pub fn build_shred_pipeline(
     let (block_tx, block_rx) =
         bounded_link::<paradencer_stages::AssembledBlock>(block_channel_depth);
 
-    let mut collector = ShredCollector::with_config(shred_rx, block_tx, config);
+    let mut collector = ShredCollector::with_config(
+        DualReceiver::Channel(shred_rx),
+        DualSender::Channel(block_tx),
+        config,
+    );
     if let Some(bs) = blockstore {
         collector.set_blockstore(bs);
     }
@@ -1965,7 +1969,11 @@ pub fn build_shred_pipeline_with_link(
     let (block_tx, block_rx) =
         bounded_link::<paradencer_stages::AssembledBlock>(block_channel_depth);
 
-    let mut collector = ShredCollector::with_config(shred_rx, block_tx, config);
+    let mut collector = ShredCollector::with_config(
+        DualReceiver::Channel(shred_rx),
+        DualSender::Channel(block_tx),
+        config,
+    );
     if let Some(bs) = blockstore {
         collector.set_blockstore(bs);
     }
@@ -2137,11 +2145,11 @@ fn run_metrics_http_loop(mut server: MetricsHttpServer) {
 /// starts a forwarder thread that converts completed QUIC transactions
 /// into `RawTransaction` pipeline inputs.
 ///
-/// Returns the `InPort<RawTransaction>` that should be added to the
+/// Returns the `DualReceiver<RawTransaction>` that should be added to the
 /// pipeline service's inputs, plus the bridge handle (keep alive).
 pub fn maybe_spawn_quic_bridge(
     node_config: &NodeConfig,
-) -> Result<Option<(InPort<RawTransaction>, BridgeHandle)>> {
+) -> Result<Option<(DualReceiver<RawTransaction>, BridgeHandle)>> {
     if !node_config.quic_enabled {
         return Ok(None);
     }
@@ -2176,7 +2184,7 @@ pub fn maybe_spawn_quic_bridge(
         })?;
 
     info!("QUIC ingress bridge started");
-    Ok(Some((pipeline_rx, handle)))
+    Ok(Some((DualReceiver::Channel(pipeline_rx), handle)))
 }
 
 #[cfg(test)]

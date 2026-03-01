@@ -1,5 +1,5 @@
 use super::BlockAssembler;
-use paradencer_mesh::ReceiveError;
+use paradencer_mesh::DualReceiveError;
 use paradencer_runtime::{RuntimeError, RuntimeResult, Service, ServiceContext};
 use std::time::Duration;
 
@@ -55,7 +55,7 @@ impl Service for BlockAssembler {
                 Ok(())
             }
             Ok(None) => Ok(()),
-            Err(ReceiveError::QueueClosed) => {
+            Err(AllClosed) => {
                 context.shutdown.request_stop();
                 Err(RuntimeError::service_failure(
                     self.name(),
@@ -66,12 +66,13 @@ impl Service for BlockAssembler {
     }
 }
 
+/// Sentinel error indicating all incoming transaction inputs are closed.
+struct AllClosed;
+
 impl BlockAssembler {
-    fn try_recv_transaction(
-        &mut self,
-    ) -> Result<Option<crate::SanitizedTransaction>, ReceiveError> {
+    fn try_recv_transaction(&mut self) -> Result<Option<crate::SanitizedTransaction>, AllClosed> {
         if self.incoming_transactions.is_empty() {
-            return Err(ReceiveError::QueueClosed);
+            return Err(AllClosed);
         }
         let input_count = self.incoming_transactions.len();
         for input_offset in 0..input_count {
@@ -85,15 +86,19 @@ impl BlockAssembler {
                     return Ok(Some(transaction));
                 }
                 Ok(None) => continue,
-                Err(ReceiveError::QueueClosed) => {
+                Err(DualReceiveError::Closed) => {
                     self.closed_incoming_transactions[index] = true;
                     self.closed_incoming_transaction_count =
                         self.closed_incoming_transaction_count.saturating_add(1);
                 }
+                Err(DualReceiveError::Overrun { .. }) => {
+                    // Consumer overrun — lost data. Continue to next input.
+                    continue;
+                }
             }
         }
         if self.closed_incoming_transaction_count == self.incoming_transactions.len() {
-            return Err(ReceiveError::QueueClosed);
+            return Err(AllClosed);
         }
         Ok(None)
     }

@@ -1,10 +1,11 @@
 use super::*;
+use paradencer_mesh::DualReceiver;
 
 #[test]
 fn block_assembler_persists_snapshot_catalog_when_path_is_configured() {
     let (transaction_outbound, transaction_inbound) = bounded_link::<SanitizedTransaction>(128);
     let mut block_assembler = BlockAssembler::with_storage_policy(
-        transaction_inbound.clone(),
+        DualReceiver::Channel(transaction_inbound.clone()),
         StorageRuntimePolicy {
             snapshot_interval: 1,
             startup_policy: StorageStartupPolicy::SkipRestore,
@@ -43,7 +44,7 @@ fn block_assembler_persists_snapshot_catalog_when_path_is_configured() {
 fn block_assembler_prunes_old_catalog_snapshots_when_retention_is_enabled() {
     let (transaction_outbound, transaction_inbound) = bounded_link::<SanitizedTransaction>(256);
     let mut block_assembler = BlockAssembler::with_storage_policy(
-        transaction_inbound.clone(),
+        DualReceiver::Channel(transaction_inbound.clone()),
         StorageRuntimePolicy {
             snapshot_interval: 1,
             snapshot_retention_policy: SnapshotRetentionPolicy {
@@ -96,7 +97,7 @@ fn block_assembler_restore_latest_initializes_runtime_state_from_catalog() {
     write_catalog_with_fragments(&catalog_path, &[3, 7]);
 
     let block_assembler = BlockAssembler::with_storage_policy(
-        transaction_inbound,
+        DualReceiver::Channel(transaction_inbound),
         StorageRuntimePolicy {
             snapshot_interval: 256,
             startup_policy: StorageStartupPolicy::RestoreLatestIfAvailable,
@@ -125,7 +126,7 @@ fn block_assembler_restore_specific_initializes_runtime_state_from_catalog() {
     write_catalog_with_fragments(&catalog_path, &[4, 9]);
 
     let block_assembler = BlockAssembler::with_storage_policy(
-        transaction_inbound,
+        DualReceiver::Channel(transaction_inbound),
         StorageRuntimePolicy {
             snapshot_interval: 256,
             startup_policy: StorageStartupPolicy::RestoreSpecificIfAvailable { fragment_id: 4 },
@@ -154,7 +155,7 @@ fn block_assembler_restore_latest_seeds_slot_and_leader_positions_from_checkpoin
     write_catalog_with_fragments(&catalog_path, &[3, 7]);
 
     let block_assembler = BlockAssembler::with_storage_policy(
-        transaction_inbound,
+        DualReceiver::Channel(transaction_inbound),
         StorageRuntimePolicy {
             startup_policy: StorageStartupPolicy::RestoreLatestIfAvailable,
             snapshot_catalog_path: Some(catalog_path.clone()),
@@ -175,7 +176,7 @@ fn block_assembler_restore_respects_higher_configured_initial_slot_floor() {
     write_catalog_with_fragments(&catalog_path, &[2, 4]);
 
     let block_assembler = BlockAssembler::with_storage_policy(
-        transaction_inbound,
+        DualReceiver::Channel(transaction_inbound),
         StorageRuntimePolicy {
             startup_policy: StorageStartupPolicy::RestoreLatestIfAvailable,
             snapshot_catalog_path: Some(catalog_path.clone()),
@@ -202,7 +203,7 @@ fn block_assembler_runtime_like_restore_latest_commits_next_fragment_without_dri
     let catalog_path = unique_temp_file("paradencer-runtime-like-restore-latest", "json");
     write_catalog_with_fragments(&catalog_path, &[3, 7]);
     let mut block_assembler = BlockAssembler::with_storage_policy(
-        transaction_inbound,
+        DualReceiver::Channel(transaction_inbound),
         StorageRuntimePolicy {
             execution_engine_policy: ExecutionEnginePolicy::RuntimeLike,
             startup_policy: StorageStartupPolicy::RestoreLatestIfAvailable,
@@ -248,7 +249,7 @@ fn block_assembler_runtime_like_restore_latest_commits_next_fragment_without_dri
 fn block_assembler_strict_restore_latest_fails_when_snapshot_missing() {
     let (_transaction_outbound, transaction_inbound) = bounded_link::<SanitizedTransaction>(8);
     let startup = BlockAssembler::with_storage_policy(
-        transaction_inbound,
+        DualReceiver::Channel(transaction_inbound),
         StorageRuntimePolicy {
             startup_policy: StorageStartupPolicy::RestoreLatestIfAvailable,
             startup_strict_restore_policy: crate::StorageStartupStrictRestorePolicy {
@@ -270,7 +271,7 @@ fn block_assembler_strict_restore_latest_fails_when_snapshot_missing() {
 fn block_assembler_strict_restore_specific_without_catalog_path_fails_preflight() {
     let (_transaction_outbound, transaction_inbound) = bounded_link::<SanitizedTransaction>(8);
     let startup = BlockAssembler::with_storage_policy(
-        transaction_inbound,
+        DualReceiver::Channel(transaction_inbound),
         StorageRuntimePolicy {
             startup_policy: StorageStartupPolicy::RestoreSpecificIfAvailable { fragment_id: 4 },
             startup_strict_restore_policy: crate::StorageStartupStrictRestorePolicy {
@@ -295,7 +296,7 @@ fn block_assembler_strict_restore_specific_fails_when_snapshot_missing() {
     write_catalog_with_fragments(&catalog_path, &[9]);
 
     let startup = BlockAssembler::with_storage_policy(
-        transaction_inbound,
+        DualReceiver::Channel(transaction_inbound),
         StorageRuntimePolicy {
             startup_policy: StorageStartupPolicy::RestoreSpecificIfAvailable { fragment_id: 4 },
             startup_strict_restore_policy: crate::StorageStartupStrictRestorePolicy {
@@ -322,7 +323,7 @@ fn block_assembler_rejects_malformed_snapshot_catalog_on_startup() {
     fs::write(&catalog_path, "{invalid-json").unwrap();
 
     let error = match BlockAssembler::with_storage_policy(
-        transaction_inbound,
+        DualReceiver::Channel(transaction_inbound),
         StorageRuntimePolicy {
             snapshot_catalog_path: Some(catalog_path.clone()),
             ..StorageRuntimePolicy::default()
@@ -345,7 +346,7 @@ fn block_assembler_rejects_truncated_snapshot_catalog_on_startup() {
     fs::write(&catalog_path, r#"{"schema_version":1,"snapshots":["#).unwrap();
 
     let error = match BlockAssembler::with_storage_policy(
-        transaction_inbound,
+        DualReceiver::Channel(transaction_inbound),
         StorageRuntimePolicy {
             snapshot_catalog_path: Some(catalog_path.clone()),
             ..StorageRuntimePolicy::default()
@@ -372,7 +373,7 @@ fn block_assembler_rejects_unknown_catalog_schema_on_startup() {
     .unwrap();
 
     let error = match BlockAssembler::with_storage_policy(
-        transaction_inbound,
+        DualReceiver::Channel(transaction_inbound),
         StorageRuntimePolicy {
             snapshot_catalog_path: Some(catalog_path.clone()),
             ..StorageRuntimePolicy::default()
@@ -399,7 +400,7 @@ fn block_assembler_rejects_catalog_with_invalid_field_shape_on_startup() {
     .unwrap();
 
     let error = match BlockAssembler::with_storage_policy(
-        transaction_inbound,
+        DualReceiver::Channel(transaction_inbound),
         StorageRuntimePolicy {
             snapshot_catalog_path: Some(catalog_path.clone()),
             ..StorageRuntimePolicy::default()
@@ -422,7 +423,7 @@ fn block_assembler_restores_after_catalog_is_rewritten_from_corrupt_to_valid() {
     fs::write(&catalog_path, r#"{"schema_version":1,"snapshots":["#).unwrap();
 
     let failed_startup = BlockAssembler::with_storage_policy(
-        transaction_inbound.clone(),
+        DualReceiver::Channel(transaction_inbound.clone()),
         StorageRuntimePolicy {
             startup_policy: StorageStartupPolicy::RestoreLatestIfAvailable,
             snapshot_catalog_path: Some(catalog_path.clone()),
@@ -433,7 +434,7 @@ fn block_assembler_restores_after_catalog_is_rewritten_from_corrupt_to_valid() {
 
     write_catalog_with_fragments(&catalog_path, &[5, 12]);
     let restored = BlockAssembler::with_storage_policy(
-        transaction_inbound,
+        DualReceiver::Channel(transaction_inbound),
         StorageRuntimePolicy {
             startup_policy: StorageStartupPolicy::RestoreLatestIfAvailable,
             snapshot_catalog_path: Some(catalog_path.clone()),
@@ -454,7 +455,7 @@ fn block_assembler_returns_runtime_error_when_catalog_parent_is_missing() {
     let missing_parent = unique_temp_file("paradencer-missing-catalog-parent", "dir");
     let catalog_path = missing_parent.join("catalog.json");
     let mut block_assembler = BlockAssembler::with_storage_policy(
-        transaction_inbound,
+        DualReceiver::Channel(transaction_inbound),
         StorageRuntimePolicy {
             snapshot_interval: 1,
             snapshot_catalog_path: Some(catalog_path),
@@ -501,7 +502,7 @@ fn block_assembler_returns_runtime_error_when_catalog_parent_is_not_writable() {
 
     let catalog_path = restricted_parent.join("catalog.json");
     let mut block_assembler = BlockAssembler::with_storage_policy(
-        transaction_inbound,
+        DualReceiver::Channel(transaction_inbound),
         StorageRuntimePolicy {
             snapshot_interval: 1,
             snapshot_catalog_path: Some(catalog_path),

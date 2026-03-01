@@ -1,6 +1,6 @@
 use super::*;
 use crate::ShredFilter;
-use paradencer_mesh::DualSender;
+use paradencer_mesh::{DualReceiver, DualSender};
 use paradencer_types::shred::Shred;
 
 /// Build a minimal valid legacy data shred byte vector for testing.
@@ -32,7 +32,7 @@ fn shred_filter_accepts_and_deduplicates_packets() {
     let (packet_outbound, packet_inbound) = bounded_link::<InboundPacket>(16);
     let shred_stats = std::sync::Arc::new(ShredFilterStats::default());
     let mut shred_filter = ShredFilter::with_policy_and_stats(
-        packet_inbound,
+        DualReceiver::Channel(packet_inbound),
         IngressPolicy::default(),
         shred_stats.clone(),
     );
@@ -68,7 +68,7 @@ fn shred_filter_tracks_drop_reasons() {
     let (packet_outbound, packet_inbound) = bounded_link::<InboundPacket>(16);
     let shred_stats = std::sync::Arc::new(ShredFilterStats::default());
     let mut shred_filter = ShredFilter::with_policy_and_stats(
-        packet_inbound,
+        DualReceiver::Channel(packet_inbound),
         IngressPolicy {
             max_payload_bytes: 64,
             allow_gossip_source: false,
@@ -120,7 +120,7 @@ fn shred_filter_forwards_parsed_shreds_on_output_channel() {
     let (shred_outbound, shred_inbound) = bounded_link::<Shred>(16);
     let shred_stats = std::sync::Arc::new(ShredFilterStats::default());
     let mut shred_filter = ShredFilter::with_output(
-        packet_inbound,
+        DualReceiver::Channel(packet_inbound),
         IngressPolicy::default(),
         shred_stats.clone(),
         DualSender::Channel(shred_outbound),
@@ -155,7 +155,7 @@ fn shred_filter_does_not_forward_when_no_output_configured() {
     let (packet_outbound, packet_inbound) = bounded_link::<InboundPacket>(16);
     let shred_stats = std::sync::Arc::new(ShredFilterStats::default());
     let mut shred_filter = ShredFilter::with_policy_and_stats(
-        packet_inbound,
+        DualReceiver::Channel(packet_inbound),
         IngressPolicy::default(),
         shred_stats.clone(),
     );
@@ -183,7 +183,7 @@ fn shred_filter_skips_forwarding_for_empty_data_packets() {
     let (shred_outbound, shred_inbound) = bounded_link::<Shred>(16);
     let shred_stats = std::sync::Arc::new(ShredFilterStats::default());
     let mut shred_filter = ShredFilter::with_output(
-        packet_inbound,
+        DualReceiver::Channel(packet_inbound),
         IngressPolicy::default(),
         shred_stats.clone(),
         DualSender::Channel(shred_outbound),

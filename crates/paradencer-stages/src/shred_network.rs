@@ -8,7 +8,7 @@
 use crate::fec_resolver::{EquivocationProof, FecResolverPool, FecSetKey, ResolverInsertResult};
 use crate::shred_verifier::{self, LeaderLookup, ShredVerifyResult};
 use paradencer_crypto::reed_solomon::FecReconstructor;
-use paradencer_mesh::{DualReceiveError, DualReceiver, OutPort, ReceiveError, SendError};
+use paradencer_mesh::{DualReceiveError, DualReceiver, DualSender, OutPort};
 use paradencer_runtime::{RuntimeError, RuntimeResult, Service, ServiceContext};
 use paradencer_types::shred::{
     CodingShredHeader, DataShredHeader, Shred, ShredCommonHeader, ShredVariant,
@@ -707,11 +707,11 @@ pub struct ShredNetworkService {
     /// Parsed shreds from the ingress filter via dual-mode link.
     incoming_shreds: DualReceiver<Shred>,
     /// Completed FEC sets sent to ShredCollector for block assembly.
-    completed_output: OutPort<CompletedFecSet>,
+    completed_output: DualSender<CompletedFecSet>,
     /// Completed FEC sets sent to ShredStoreService for blockstore persistence.
-    store_output: Option<OutPort<CompletedFecSet>>,
+    store_output: Option<DualSender<CompletedFecSet>>,
     /// Retransmit decisions sent to turbine broadcaster.
-    retransmit_output: Option<OutPort<RetransmitDecision>>,
+    retransmit_output: Option<DualSender<RetransmitDecision>>,
     /// Equivocation proofs sent to consensus for slashing evidence.
     equivocation_output: Option<OutPort<EquivocationProof>>,
     /// Default source for incoming shreds (typically Turbine).
@@ -723,7 +723,7 @@ impl ShredNetworkService {
     pub fn new(
         config: ShredNetworkConfig,
         incoming_shreds: DualReceiver<Shred>,
-        completed_output: OutPort<CompletedFecSet>,
+        completed_output: DualSender<CompletedFecSet>,
     ) -> Self {
         Self {
             stage: ShredNetworkStage::with_config(config),
@@ -737,13 +737,13 @@ impl ShredNetworkService {
     }
 
     /// Set the retransmit output channel for turbine broadcasting.
-    pub fn with_retransmit_output(mut self, output: OutPort<RetransmitDecision>) -> Self {
+    pub fn with_retransmit_output(mut self, output: DualSender<RetransmitDecision>) -> Self {
         self.retransmit_output = Some(output);
         self
     }
 
     /// Set the store output channel for blockstore persistence.
-    pub fn with_store_output(mut self, output: OutPort<CompletedFecSet>) -> Self {
+    pub fn with_store_output(mut self, output: DualSender<CompletedFecSet>) -> Self {
         self.store_output = Some(output);
         self
     }
@@ -787,7 +787,7 @@ impl ShredNetworkService {
         let completed = self.stage.drain_completed_sets();
         for fec_set in completed {
             // Fan out to store service if wired.
-            if let Some(ref store) = self.store_output {
+            if let Some(ref mut store) = self.store_output {
                 let _ = store.try_send(fec_set.clone());
             }
             // Best-effort send to collector — drop on backpressure.
@@ -797,7 +797,7 @@ impl ShredNetworkService {
 
     /// Push retransmit decisions to the output channel.
     fn flush_retransmits(&mut self) {
-        if let Some(ref output) = self.retransmit_output {
+        if let Some(ref mut output) = self.retransmit_output {
             let retransmits = self.stage.drain_retransmits();
             for decision in retransmits {
                 let _ = output.try_send(decision);
@@ -1473,7 +1473,11 @@ mod tests {
             turbine_neighbor_count: 0,
             ..Default::default()
         };
-        let mut service = ShredNetworkService::new(config, DualReceiver::Channel(shred_rx), fec_tx);
+        let mut service = ShredNetworkService::new(
+            config,
+            DualReceiver::Channel(shred_rx),
+            DualSender::Channel(fec_tx),
+        );
         let context = ServiceContext::new(ShutdownSwitch::new());
 
         // Create a FEC set (2 data + 2 coding).
@@ -1510,8 +1514,12 @@ mod tests {
             turbine_neighbor_count: 3,
             ..Default::default()
         };
-        let mut service = ShredNetworkService::new(config, DualReceiver::Channel(shred_rx), fec_tx)
-            .with_retransmit_output(retx_tx);
+        let mut service = ShredNetworkService::new(
+            config,
+            DualReceiver::Channel(shred_rx),
+            DualSender::Channel(fec_tx),
+        )
+        .with_retransmit_output(DualSender::Channel(retx_tx));
         let context = ServiceContext::new(ShutdownSwitch::new());
 
         // Send a turbine shred.
@@ -1569,7 +1577,11 @@ mod tests {
             turbine_neighbor_count: 0,
             ..Default::default()
         };
-        let mut service = ShredNetworkService::new(config, DualReceiver::Channel(shred_rx), fec_tx);
+        let mut service = ShredNetworkService::new(
+            config,
+            DualReceiver::Channel(shred_rx),
+            DualSender::Channel(fec_tx),
+        );
         let context = ServiceContext::new(ShutdownSwitch::new());
 
         // Send 4 data-only shreds, last one with last-in-slot flag.

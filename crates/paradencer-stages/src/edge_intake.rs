@@ -1,5 +1,5 @@
 use crate::InboundPacket;
-use paradencer_mesh::{OutPort, SendError};
+use paradencer_mesh::{DualSendError, DualSender};
 use paradencer_net::{IngressMode, IngressPolicy, IngressSource};
 use paradencer_runtime::{RuntimeError, RuntimeResult, Service, ServiceContext};
 use std::net::UdpSocket;
@@ -7,8 +7,8 @@ use std::time::Duration;
 
 pub struct EdgeIntake {
     next_packet_id: u64,
-    outgoing_tx_packets: Vec<OutPort<InboundPacket>>,
-    outgoing_shred_packets: Vec<OutPort<InboundPacket>>,
+    outgoing_tx_packets: Vec<DualSender<InboundPacket>>,
+    outgoing_shred_packets: Vec<DualSender<InboundPacket>>,
     ingress_policy: IngressPolicy,
     synthetic_source_cursor: u64,
     packets_sent_in_batch: u32,
@@ -19,20 +19,20 @@ pub struct EdgeIntake {
 }
 
 impl EdgeIntake {
-    pub fn new(outgoing_tx_packets: OutPort<InboundPacket>) -> Self {
+    pub fn new(outgoing_tx_packets: DualSender<InboundPacket>) -> Self {
         Self::with_policy(outgoing_tx_packets, IngressPolicy::default())
     }
 
     pub fn with_policy(
-        outgoing_tx_packets: OutPort<InboundPacket>,
+        outgoing_tx_packets: DualSender<InboundPacket>,
         ingress_policy: IngressPolicy,
     ) -> Self {
         Self::with_policy_and_links(vec![outgoing_tx_packets], Vec::new(), ingress_policy)
     }
 
     pub fn with_policy_and_shred(
-        outgoing_tx_packets: OutPort<InboundPacket>,
-        outgoing_shred_packets: OutPort<InboundPacket>,
+        outgoing_tx_packets: DualSender<InboundPacket>,
+        outgoing_shred_packets: DualSender<InboundPacket>,
         ingress_policy: IngressPolicy,
     ) -> Self {
         Self::with_policy_and_links(
@@ -43,8 +43,8 @@ impl EdgeIntake {
     }
 
     pub fn with_policy_and_links(
-        outgoing_tx_packets: Vec<OutPort<InboundPacket>>,
-        outgoing_shred_packets: Vec<OutPort<InboundPacket>>,
+        outgoing_tx_packets: Vec<DualSender<InboundPacket>>,
+        outgoing_shred_packets: Vec<DualSender<InboundPacket>>,
         ingress_policy: IngressPolicy,
     ) -> Self {
         Self {
@@ -69,16 +69,16 @@ impl EdgeIntake {
         !self.outgoing_shred_packets.is_empty() && source == paradencer_net::IngressSource::Gossip
     }
 
-    fn try_send_to_route_set(
-        &mut self,
+    fn try_send_to_routes(
         context: &ServiceContext,
+        name: &'static str,
         packet: InboundPacket,
-        routes: &[OutPort<InboundPacket>],
+        routes: &mut [DualSender<InboundPacket>],
         start_index: usize,
     ) -> RuntimeResult<bool> {
         if routes.is_empty() {
             return Err(RuntimeError::service_failure(
-                self.name(),
+                name,
                 "no outgoing links configured",
             ));
         }
@@ -87,8 +87,8 @@ impl EdgeIntake {
             let route_index = (start_index + route_offset) % routes.len();
             match routes[route_index].try_send(packet.clone()) {
                 Ok(()) => return Ok(true),
-                Err(SendError::QueueFull(_)) => continue,
-                Err(SendError::QueueClosed(_)) => {
+                Err(DualSendError::Full(_) | DualSendError::NoCredits(_)) => continue,
+                Err(DualSendError::Closed(_)) => {
                     closed_routes = closed_routes.saturating_add(1);
                 }
             }
@@ -96,7 +96,7 @@ impl EdgeIntake {
         if closed_routes == routes.len() {
             context.shutdown.request_stop();
             return Err(RuntimeError::service_failure(
-                self.name(),
+                name,
                 "all outgoing links are closed",
             ));
         }
@@ -112,8 +112,13 @@ impl EdgeIntake {
             let start_index = self.next_shred_route_index;
             self.next_shred_route_index =
                 (self.next_shred_route_index.saturating_add(1)) % self.outgoing_shred_packets.len();
-            let routes = self.outgoing_shred_packets.clone();
-            self.try_send_to_route_set(context, packet, &routes, start_index)
+            Self::try_send_to_routes(
+                context,
+                "edge-intake",
+                packet,
+                &mut self.outgoing_shred_packets,
+                start_index,
+            )
         } else {
             if self.outgoing_tx_packets.is_empty() {
                 return Err(RuntimeError::service_failure(
@@ -124,8 +129,13 @@ impl EdgeIntake {
             let start_index = self.next_tx_route_index;
             self.next_tx_route_index =
                 (self.next_tx_route_index.saturating_add(1)) % self.outgoing_tx_packets.len();
-            let routes = self.outgoing_tx_packets.clone();
-            self.try_send_to_route_set(context, packet, &routes, start_index)
+            Self::try_send_to_routes(
+                context,
+                "edge-intake",
+                packet,
+                &mut self.outgoing_tx_packets,
+                start_index,
+            )
         }
     }
 

@@ -1,5 +1,5 @@
 use crate::{InboundPacket, ShredFilterStats};
-use paradencer_mesh::{DualSendError, DualSender, InPort, ReceiveError};
+use paradencer_mesh::{DualReceiveError, DualReceiver, DualSendError, DualSender};
 use paradencer_net::{
     DedupDecision, IngressPolicy, ShredDecodeOutcome, ShredDecoder, SignatureDeduplicator,
 };
@@ -9,7 +9,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 pub struct ShredFilter {
-    incoming_packets: InPort<InboundPacket>,
+    incoming_packets: DualReceiver<InboundPacket>,
     shred_decoder: ShredDecoder,
     signature_deduplicator: SignatureDeduplicator,
     shred_filter_stats: Arc<ShredFilterStats>,
@@ -17,7 +17,7 @@ pub struct ShredFilter {
 }
 
 impl ShredFilter {
-    pub fn new(incoming_packets: InPort<InboundPacket>) -> Self {
+    pub fn new(incoming_packets: DualReceiver<InboundPacket>) -> Self {
         Self::with_policy_and_stats(
             incoming_packets,
             IngressPolicy::default(),
@@ -26,7 +26,7 @@ impl ShredFilter {
     }
 
     pub fn with_policy_and_stats(
-        incoming_packets: InPort<InboundPacket>,
+        incoming_packets: DualReceiver<InboundPacket>,
         ingress_policy: IngressPolicy,
         shred_filter_stats: Arc<ShredFilterStats>,
     ) -> Self {
@@ -34,7 +34,7 @@ impl ShredFilter {
     }
 
     pub fn with_output(
-        incoming_packets: InPort<InboundPacket>,
+        incoming_packets: DualReceiver<InboundPacket>,
         ingress_policy: IngressPolicy,
         shred_filter_stats: Arc<ShredFilterStats>,
         shred_output: DualSender<Shred>,
@@ -48,7 +48,7 @@ impl ShredFilter {
     }
 
     fn build(
-        incoming_packets: InPort<InboundPacket>,
+        incoming_packets: DualReceiver<InboundPacket>,
         mut ingress_policy: IngressPolicy,
         shred_filter_stats: Arc<ShredFilterStats>,
         shred_output: Option<DualSender<Shred>>,
@@ -142,12 +142,16 @@ impl Service for ShredFilter {
                 Ok(())
             }
             Ok(None) => Ok(()),
-            Err(ReceiveError::QueueClosed) => {
+            Err(DualReceiveError::Closed) => {
                 context.shutdown.request_stop();
                 Err(RuntimeError::service_failure(
                     self.name(),
                     "input shred packet link closed",
                 ))
+            }
+            Err(DualReceiveError::Overrun { .. }) => {
+                // Consumer overrun — lost data. Will recover via repair service.
+                Ok(())
             }
         }
     }

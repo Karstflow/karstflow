@@ -4,6 +4,7 @@ use super::*;
 use paradencer_execution::{
     ExecutionBridge, ExecutionEngine, ExecutionError, ExecutionOutcome, ExecutionStateController,
 };
+use paradencer_mesh::DualReceiver;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
@@ -141,7 +142,7 @@ impl ExecutionEngine for RewindCatalogReplayConflictEngine {
 #[test]
 fn block_assembler_defers_fragment_on_retry_directive() {
     let (transaction_outbound, transaction_inbound) = bounded_link::<SanitizedTransaction>(128);
-    let mut block_assembler = BlockAssembler::new(transaction_inbound);
+    let mut block_assembler = BlockAssembler::new(DualReceiver::Channel(transaction_inbound));
     block_assembler.fragment_counter = 10;
     let context = ServiceContext::new(ShutdownSwitch::new());
 
@@ -166,7 +167,7 @@ fn block_assembler_defers_fragment_on_retry_directive() {
 #[test]
 fn block_assembler_returns_runtime_error_on_fragment_counter_overflow() {
     let (transaction_outbound, transaction_inbound) = bounded_link::<SanitizedTransaction>(128);
-    let mut block_assembler = BlockAssembler::new(transaction_inbound);
+    let mut block_assembler = BlockAssembler::new(DualReceiver::Channel(transaction_inbound));
     block_assembler.fragment_counter = u64::MAX;
     let context = ServiceContext::new(ShutdownSwitch::new());
 
@@ -197,7 +198,7 @@ fn block_assembler_returns_runtime_error_on_fragment_counter_overflow() {
 fn block_assembler_accepts_runtime_like_execution_engine_policy() {
     let (_transaction_outbound, transaction_inbound) = bounded_link::<SanitizedTransaction>(64);
     let block_assembler = BlockAssembler::with_storage_policy(
-        transaction_inbound,
+        DualReceiver::Channel(transaction_inbound),
         StorageRuntimePolicy {
             execution_engine_policy: ExecutionEnginePolicy::RuntimeLike,
             ..StorageRuntimePolicy::default()
@@ -217,7 +218,7 @@ fn block_assembler_fail_open_on_execution_error_records_telemetry_and_continues(
         retry_policy,
     );
     let mut block_assembler = BlockAssembler::with_storage_policy_and_stats_and_execution_bridge(
-        transaction_inbound,
+        DualReceiver::Channel(transaction_inbound),
         policy,
         stats,
         bridge,
@@ -267,7 +268,7 @@ fn block_assembler_fail_open_replay_conflict_error_schedules_retry_and_does_not_
         retry_policy,
     );
     let mut block_assembler = BlockAssembler::with_storage_policy_and_stats_and_execution_bridge(
-        transaction_inbound,
+        DualReceiver::Channel(transaction_inbound),
         policy,
         stats,
         bridge,
@@ -307,7 +308,7 @@ fn block_assembler_fail_open_contract_violation_drops_without_retry() {
         retry_policy,
     );
     let mut block_assembler = BlockAssembler::with_storage_policy_and_stats_and_execution_bridge(
-        transaction_inbound,
+        DualReceiver::Channel(transaction_inbound),
         policy,
         stats,
         bridge,
@@ -355,7 +356,7 @@ fn block_assembler_fail_fast_on_execution_error_returns_runtime_error() {
         retry_policy,
     );
     let mut block_assembler = BlockAssembler::with_storage_policy_and_stats_and_execution_bridge(
-        transaction_inbound,
+        DualReceiver::Channel(transaction_inbound),
         policy,
         stats,
         bridge,
@@ -408,7 +409,7 @@ fn block_assembler_fail_open_circuit_breaker_halts_after_consecutive_errors() {
         retry_policy,
     );
     let mut block_assembler = BlockAssembler::with_storage_policy_and_stats_and_execution_bridge(
-        transaction_inbound,
+        DualReceiver::Channel(transaction_inbound),
         policy,
         stats,
         bridge,
@@ -465,7 +466,7 @@ fn block_assembler_resets_consecutive_execution_errors_after_successful_retry() 
         retry_policy,
     );
     let mut block_assembler = BlockAssembler::with_storage_policy_and_stats_and_execution_bridge(
-        transaction_inbound,
+        DualReceiver::Channel(transaction_inbound),
         policy,
         stats,
         bridge,
@@ -504,7 +505,7 @@ fn block_assembler_resets_consecutive_execution_errors_after_successful_retry() 
 fn block_assembler_applies_retry_budget_and_backoff_cap_from_runtime_policy() {
     let (transaction_outbound, transaction_inbound) = bounded_link::<SanitizedTransaction>(128);
     let mut block_assembler = BlockAssembler::with_storage_policy(
-        transaction_inbound,
+        DualReceiver::Channel(transaction_inbound),
         StorageRuntimePolicy {
             max_retry_attempts: 1,
             retry_backoff_cap_millis: 2,
@@ -541,7 +542,7 @@ fn block_assembler_applies_retry_budget_and_backoff_cap_from_runtime_policy() {
 fn block_assembler_honors_short_execution_replay_retry_delay_policy() {
     let (transaction_outbound, transaction_inbound) = bounded_link::<SanitizedTransaction>(128);
     let mut block_assembler = BlockAssembler::with_storage_policy(
-        transaction_inbound,
+        DualReceiver::Channel(transaction_inbound),
         StorageRuntimePolicy {
             max_retry_attempts: 1,
             retry_backoff_cap_millis: 10_000,
@@ -584,7 +585,7 @@ fn block_assembler_honors_short_execution_replay_retry_delay_policy() {
 fn block_assembler_applies_failure_class_retry_budget_for_replay_conflicts() {
     let (transaction_outbound, transaction_inbound) = bounded_link::<SanitizedTransaction>(128);
     let mut block_assembler = BlockAssembler::with_storage_policy(
-        transaction_inbound,
+        DualReceiver::Channel(transaction_inbound),
         StorageRuntimePolicy {
             max_retry_attempts: 5,
             retry_backoff_cap_millis: 10_000,
@@ -636,7 +637,7 @@ fn block_assembler_applies_failure_class_retry_budget_for_replay_conflicts() {
 fn block_assembler_applies_failure_class_retry_budget_for_resource_exhaustion() {
     let (transaction_outbound, transaction_inbound) = bounded_link::<SanitizedTransaction>(256);
     let mut block_assembler = BlockAssembler::with_storage_policy(
-        transaction_inbound,
+        DualReceiver::Channel(transaction_inbound),
         StorageRuntimePolicy {
             max_retry_attempts: 5,
             retry_backoff_cap_millis: 10_000,
@@ -692,7 +693,7 @@ fn block_assembler_applies_failure_class_retry_budget_for_resource_exhaustion() 
 fn block_assembler_honors_long_execution_replay_retry_delay_policy() {
     let (transaction_outbound, transaction_inbound) = bounded_link::<SanitizedTransaction>(128);
     let mut block_assembler = BlockAssembler::with_storage_policy(
-        transaction_inbound,
+        DualReceiver::Channel(transaction_inbound),
         StorageRuntimePolicy {
             max_retry_attempts: 1,
             retry_backoff_cap_millis: 10_000,
@@ -733,7 +734,7 @@ fn block_assembler_honors_long_execution_replay_retry_delay_policy() {
 fn block_assembler_execution_health_policy_enters_and_drains_cooldown() {
     let (transaction_outbound, transaction_inbound) = bounded_link::<SanitizedTransaction>(128);
     let mut block_assembler = BlockAssembler::with_storage_policy(
-        transaction_inbound,
+        DualReceiver::Channel(transaction_inbound),
         StorageRuntimePolicy {
             max_retry_attempts: 1,
             execution_retry_policy: RetryPolicy {
@@ -786,7 +787,7 @@ fn block_assembler_execution_health_policy_enters_and_drains_cooldown() {
 fn block_assembler_execution_health_policy_disabled_does_not_enter_cooldown() {
     let (transaction_outbound, transaction_inbound) = bounded_link::<SanitizedTransaction>(128);
     let mut block_assembler = BlockAssembler::with_storage_policy(
-        transaction_inbound,
+        DualReceiver::Channel(transaction_inbound),
         StorageRuntimePolicy {
             execution_health_policy: ExecutionHealthPolicy {
                 enabled: false,
@@ -820,7 +821,7 @@ fn block_assembler_execution_health_policy_disabled_does_not_enter_cooldown() {
 #[test]
 fn block_assembler_slot_pipeline_advances_on_commit() {
     let (transaction_outbound, transaction_inbound) = bounded_link::<SanitizedTransaction>(128);
-    let mut block_assembler = BlockAssembler::new(transaction_inbound);
+    let mut block_assembler = BlockAssembler::new(DualReceiver::Channel(transaction_inbound));
     let context = ServiceContext::new(ShutdownSwitch::new());
 
     for transaction_id in 1..=64_u64 {
@@ -845,7 +846,7 @@ fn block_assembler_slot_pipeline_advances_on_commit() {
 fn block_assembler_slot_pipeline_advances_on_drop_after_retries() {
     let (transaction_outbound, transaction_inbound) = bounded_link::<SanitizedTransaction>(128);
     let mut block_assembler = BlockAssembler::with_storage_policy(
-        transaction_inbound,
+        DualReceiver::Channel(transaction_inbound),
         StorageRuntimePolicy {
             max_retry_attempts: 1,
             retry_backoff_cap_millis: 2,
@@ -887,7 +888,7 @@ fn block_assembler_slot_pipeline_advances_on_drop_after_retries() {
 fn block_assembler_replay_controller_tracks_reorg_candidate_for_replay_conflict() {
     let (transaction_outbound, transaction_inbound) = bounded_link::<SanitizedTransaction>(128);
     let mut block_assembler = BlockAssembler::with_storage_policy(
-        transaction_inbound,
+        DualReceiver::Channel(transaction_inbound),
         StorageRuntimePolicy {
             max_retry_attempts: 1,
             execution_retry_policy: RetryPolicy {
@@ -926,7 +927,7 @@ fn block_assembler_replay_controller_tracks_reorg_candidate_for_replay_conflict(
 fn block_assembler_replay_window_rewinds_to_checkpoint_on_confirmed_reorg_when_enabled() {
     let (transaction_outbound, transaction_inbound) = bounded_link::<SanitizedTransaction>(256);
     let mut block_assembler = BlockAssembler::with_storage_policy(
-        transaction_inbound,
+        DualReceiver::Channel(transaction_inbound),
         StorageRuntimePolicy {
             fork_choice_runtime_policy: ForkChoiceRuntimePolicy {
                 enabled: true,
@@ -998,7 +999,7 @@ fn block_assembler_replay_window_rewinds_to_checkpoint_on_confirmed_reorg_when_e
 fn block_assembler_replay_window_does_not_rewind_when_disabled() {
     let (transaction_outbound, transaction_inbound) = bounded_link::<SanitizedTransaction>(256);
     let mut block_assembler = BlockAssembler::with_storage_policy(
-        transaction_inbound,
+        DualReceiver::Channel(transaction_inbound),
         StorageRuntimePolicy {
             fork_choice_runtime_policy: ForkChoiceRuntimePolicy {
                 enabled: true,
@@ -1080,7 +1081,7 @@ fn block_assembler_confirmed_reorg_rewind_failure_bubbles_runtime_error() {
         Some(Arc::new(AlwaysFailStateController)),
     );
     let mut block_assembler = BlockAssembler::with_storage_policy_and_stats_and_execution_bridge(
-        transaction_inbound,
+        DualReceiver::Channel(transaction_inbound),
         policy,
         Arc::new(BlockAssemblyStats::default()),
         bridge,
@@ -1160,7 +1161,7 @@ fn block_assembler_confirmed_reorg_rewind_persists_pruned_snapshot_catalog() {
         policy.execution_retry_policy,
     );
     let mut block_assembler = BlockAssembler::with_storage_policy_and_stats_and_execution_bridge(
-        transaction_inbound,
+        DualReceiver::Channel(transaction_inbound),
         policy,
         Arc::new(BlockAssemblyStats::default()),
         bridge,
@@ -1253,7 +1254,7 @@ fn block_assembler_confirmed_reorg_rewind_respects_leader_initial_slot_floor() {
         policy.execution_retry_policy,
     );
     let mut block_assembler = BlockAssembler::with_storage_policy_and_stats_and_execution_bridge(
-        transaction_inbound,
+        DualReceiver::Channel(transaction_inbound),
         policy,
         Arc::new(BlockAssemblyStats::default()),
         bridge,
@@ -1299,7 +1300,7 @@ fn block_assembler_confirmed_reorg_rewind_respects_leader_initial_slot_floor() {
 fn block_assembler_replay_safety_policy_enters_and_drains_hold() {
     let (transaction_outbound, transaction_inbound) = bounded_link::<SanitizedTransaction>(128);
     let mut block_assembler = BlockAssembler::with_storage_policy(
-        transaction_inbound,
+        DualReceiver::Channel(transaction_inbound),
         StorageRuntimePolicy {
             max_retry_attempts: 1,
             execution_retry_policy: RetryPolicy {
@@ -1346,7 +1347,7 @@ fn block_assembler_replay_safety_policy_enters_and_drains_hold() {
 fn block_assembler_replay_safety_policy_disabled_does_not_enter_hold() {
     let (transaction_outbound, transaction_inbound) = bounded_link::<SanitizedTransaction>(128);
     let mut block_assembler = BlockAssembler::with_storage_policy(
-        transaction_inbound,
+        DualReceiver::Channel(transaction_inbound),
         StorageRuntimePolicy {
             replay_safety_policy: ReplaySafetyPolicy {
                 enabled: false,
@@ -1381,7 +1382,7 @@ fn block_assembler_replay_safety_policy_disabled_does_not_enter_hold() {
 fn block_assembler_fork_choice_quarantine_enters_and_drains() {
     let (transaction_outbound, transaction_inbound) = bounded_link::<SanitizedTransaction>(128);
     let mut block_assembler = BlockAssembler::with_storage_policy(
-        transaction_inbound,
+        DualReceiver::Channel(transaction_inbound),
         StorageRuntimePolicy {
             fork_choice_quarantine_policy: ForkChoiceQuarantinePolicy {
                 enabled: true,
@@ -1422,7 +1423,7 @@ fn block_assembler_fork_choice_quarantine_enters_and_drains() {
 fn block_assembler_fork_choice_quarantine_disabled_does_not_enter() {
     let (transaction_outbound, transaction_inbound) = bounded_link::<SanitizedTransaction>(128);
     let mut block_assembler = BlockAssembler::with_storage_policy(
-        transaction_inbound,
+        DualReceiver::Channel(transaction_inbound),
         StorageRuntimePolicy {
             fork_choice_quarantine_policy: ForkChoiceQuarantinePolicy {
                 enabled: false,
@@ -1457,7 +1458,7 @@ fn block_assembler_fork_choice_quarantine_disabled_does_not_enter() {
 fn block_assembler_holds_fragment_while_not_leader_and_commits_after_rotation() {
     let (transaction_outbound, transaction_inbound) = bounded_link::<SanitizedTransaction>(128);
     let mut block_assembler = BlockAssembler::with_storage_policy(
-        transaction_inbound,
+        DualReceiver::Channel(transaction_inbound),
         StorageRuntimePolicy {
             leader_schedule_policy: LeaderSchedulePolicy {
                 enabled: true,
@@ -1503,7 +1504,7 @@ fn block_assembler_holds_fragment_while_not_leader_and_commits_after_rotation() 
 fn block_assembler_scheduler_policy_increases_retry_wait_for_priority_class_two() {
     let (transaction_outbound, transaction_inbound) = bounded_link::<SanitizedTransaction>(128);
     let mut block_assembler = BlockAssembler::with_storage_policy(
-        transaction_inbound,
+        DualReceiver::Channel(transaction_inbound),
         StorageRuntimePolicy {
             max_retry_attempts: 1,
             retry_backoff_cap_millis: 5_000,
@@ -1546,7 +1547,7 @@ fn block_assembler_scheduler_policy_increases_retry_wait_for_priority_class_two(
 fn block_assembler_fork_choice_policy_retries_reorg_then_drops() {
     let (transaction_outbound, transaction_inbound) = bounded_link::<SanitizedTransaction>(128);
     let mut block_assembler = BlockAssembler::with_storage_policy(
-        transaction_inbound,
+        DualReceiver::Channel(transaction_inbound),
         StorageRuntimePolicy {
             fork_choice_runtime_policy: ForkChoiceRuntimePolicy {
                 enabled: true,
@@ -1594,7 +1595,7 @@ fn block_assembler_fork_choice_policy_retries_reorg_then_drops() {
 fn block_assembler_assembles_fragment_when_cost_budget_is_reached_before_tx_count() {
     let (transaction_outbound, transaction_inbound) = bounded_link::<SanitizedTransaction>(128);
     let mut block_assembler = BlockAssembler::with_storage_policy(
-        transaction_inbound,
+        DualReceiver::Channel(transaction_inbound),
         StorageRuntimePolicy {
             assembly_policy: AssemblyPolicy {
                 max_fragment_transactions: 64,
@@ -1627,7 +1628,7 @@ fn block_assembler_assembles_fragment_when_cost_budget_is_reached_before_tx_coun
 fn block_assembler_assembles_fragment_when_wait_ticks_budget_is_reached() {
     let (transaction_outbound, transaction_inbound) = bounded_link::<SanitizedTransaction>(128);
     let mut block_assembler = BlockAssembler::with_storage_policy(
-        transaction_inbound,
+        DualReceiver::Channel(transaction_inbound),
         StorageRuntimePolicy {
             assembly_policy: AssemblyPolicy {
                 max_fragment_transactions: 64,
@@ -1659,7 +1660,7 @@ fn block_assembler_assembles_fragment_when_wait_ticks_budget_is_reached() {
 #[test]
 fn block_assembler_drops_fragment_after_retry_budget_exhaustion() {
     let (transaction_outbound, transaction_inbound) = bounded_link::<SanitizedTransaction>(128);
-    let mut block_assembler = BlockAssembler::new(transaction_inbound);
+    let mut block_assembler = BlockAssembler::new(DualReceiver::Channel(transaction_inbound));
     block_assembler.fragment_counter = 10;
     let context = ServiceContext::new(ShutdownSwitch::new());
 
@@ -1690,7 +1691,7 @@ fn block_assembler_drops_fragment_after_retry_budget_exhaustion() {
 #[test]
 fn block_assembler_drops_deterministic_failure_without_retry() {
     let (transaction_outbound, transaction_inbound) = bounded_link::<SanitizedTransaction>(128);
-    let mut block_assembler = BlockAssembler::new(transaction_inbound);
+    let mut block_assembler = BlockAssembler::new(DualReceiver::Channel(transaction_inbound));
     block_assembler.fragment_counter = 28;
     let context = ServiceContext::new(ShutdownSwitch::new());
 

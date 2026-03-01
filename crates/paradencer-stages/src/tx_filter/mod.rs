@@ -2,7 +2,7 @@ mod egress;
 mod service;
 
 use crate::{InboundPacket, IngressFilterStats, RawTransaction, SanitizedTransaction};
-use paradencer_mesh::{InPort, OutPort};
+use paradencer_mesh::{DualReceiver, DualSender};
 use paradencer_net::{
     IngressPolicy, PacketDecoder, SignatureDeduplicator, SourceCostBudgetLimiter, SourceRateLimiter,
 };
@@ -16,11 +16,11 @@ struct PendingEgressTransaction {
 }
 
 pub struct TxFilter {
-    incoming_packets: InPort<InboundPacket>,
-    outgoing_transactions: OutPort<SanitizedTransaction>,
+    incoming_packets: DualReceiver<InboundPacket>,
+    outgoing_transactions: DualSender<SanitizedTransaction>,
     /// Optional output to the validator pipeline for real execution.
     /// When present, accepted transactions are forwarded with raw bytes.
-    outgoing_pipeline: Option<OutPort<RawTransaction>>,
+    outgoing_pipeline: Option<DualSender<RawTransaction>>,
     packet_decoder: PacketDecoder,
     ingress_policy: IngressPolicy,
     signature_deduplicator: SignatureDeduplicator,
@@ -35,8 +35,8 @@ pub struct TxFilter {
 
 impl TxFilter {
     pub fn new(
-        incoming_packets: InPort<InboundPacket>,
-        outgoing_transactions: OutPort<SanitizedTransaction>,
+        incoming_packets: DualReceiver<InboundPacket>,
+        outgoing_transactions: DualSender<SanitizedTransaction>,
     ) -> Self {
         Self::with_policy(
             incoming_packets,
@@ -46,8 +46,8 @@ impl TxFilter {
     }
 
     pub fn with_policy(
-        incoming_packets: InPort<InboundPacket>,
-        outgoing_transactions: OutPort<SanitizedTransaction>,
+        incoming_packets: DualReceiver<InboundPacket>,
+        outgoing_transactions: DualSender<SanitizedTransaction>,
         ingress_policy: IngressPolicy,
     ) -> Self {
         Self::with_policy_and_stats(
@@ -59,8 +59,8 @@ impl TxFilter {
     }
 
     pub fn with_policy_and_stats(
-        incoming_packets: InPort<InboundPacket>,
-        outgoing_transactions: OutPort<SanitizedTransaction>,
+        incoming_packets: DualReceiver<InboundPacket>,
+        outgoing_transactions: DualSender<SanitizedTransaction>,
         mut ingress_policy: IngressPolicy,
         ingress_filter_stats: Arc<IngressFilterStats>,
     ) -> Self {
@@ -79,9 +79,9 @@ impl TxFilter {
     /// - `outgoing_transactions` as `SanitizedTransaction` (metadata for BlockAssembler)
     /// - `outgoing_pipeline` as `RawTransaction` (raw bytes for ValidatorPipeline)
     pub fn with_policy_pipeline_and_stats(
-        incoming_packets: InPort<InboundPacket>,
-        outgoing_transactions: OutPort<SanitizedTransaction>,
-        outgoing_pipeline: OutPort<RawTransaction>,
+        incoming_packets: DualReceiver<InboundPacket>,
+        outgoing_transactions: DualSender<SanitizedTransaction>,
+        outgoing_pipeline: DualSender<RawTransaction>,
         ingress_policy: IngressPolicy,
         ingress_filter_stats: Arc<IngressFilterStats>,
     ) -> Self {
@@ -95,9 +95,9 @@ impl TxFilter {
     }
 
     fn build(
-        incoming_packets: InPort<InboundPacket>,
-        outgoing_transactions: OutPort<SanitizedTransaction>,
-        outgoing_pipeline: Option<OutPort<RawTransaction>>,
+        incoming_packets: DualReceiver<InboundPacket>,
+        outgoing_transactions: DualSender<SanitizedTransaction>,
+        outgoing_pipeline: Option<DualSender<RawTransaction>>,
         mut ingress_policy: IngressPolicy,
         ingress_filter_stats: Arc<IngressFilterStats>,
     ) -> Self {

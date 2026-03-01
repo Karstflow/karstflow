@@ -7,7 +7,7 @@
 ///
 /// Invalid transactions are dropped and counted in statistics.
 use crate::verify_stage::{UnverifiedTransaction, VerifiedTransaction, VerifyOutcome, VerifyStage};
-use paradencer_mesh::{InPort, OutPort, ReceiveError};
+use paradencer_mesh::{DualReceiveError, DualReceiver, DualSender};
 use paradencer_runtime::{RuntimeError, RuntimeResult, Service, ServiceContext};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -27,8 +27,8 @@ pub struct VerifyServiceStats {
 /// Service that drives the signature verification pipeline.
 pub struct VerifyService {
     stage: VerifyStage,
-    input: InPort<UnverifiedTransaction>,
-    output: OutPort<VerifiedTransaction>,
+    input: DualReceiver<UnverifiedTransaction>,
+    output: DualSender<VerifiedTransaction>,
     stats: Arc<VerifyServiceStats>,
     /// Maximum transactions to process per tick.
     batch_size: usize,
@@ -38,8 +38,8 @@ impl VerifyService {
     /// Create a new verification service.
     pub fn new(
         stage: VerifyStage,
-        input: InPort<UnverifiedTransaction>,
-        output: OutPort<VerifiedTransaction>,
+        input: DualReceiver<UnverifiedTransaction>,
+        output: DualSender<VerifiedTransaction>,
     ) -> Self {
         Self {
             stage,
@@ -105,12 +105,16 @@ impl Service for VerifyService {
                     }
                 }
                 Ok(None) => break,
-                Err(ReceiveError::QueueClosed) => {
+                Err(DualReceiveError::Closed) => {
                     context.shutdown.request_stop();
                     return Err(RuntimeError::service_failure(
                         self.name(),
                         "input channel closed",
                     ));
+                }
+                Err(DualReceiveError::Overrun { .. }) => {
+                    // Consumer overrun — lost data. Continue next tick.
+                    break;
                 }
             }
         }
@@ -142,7 +146,7 @@ mod tests {
         let (_in_tx, rx) = bounded_link::<UnverifiedTransaction>(16);
         let (tx, _out_rx) = bounded_link::<VerifiedTransaction>(16);
 
-        let service = VerifyService::new(stage, rx, tx);
+        let service = VerifyService::new(stage, DualReceiver::Channel(rx), DualSender::Channel(tx));
         assert_eq!(service.name(), "verify-service");
     }
 
@@ -157,7 +161,11 @@ mod tests {
         let (in_tx, in_rx) = bounded_link::<UnverifiedTransaction>(16);
         let (out_tx, out_rx) = bounded_link::<VerifiedTransaction>(16);
 
-        let mut service = VerifyService::new(stage, in_rx, out_tx);
+        let mut service = VerifyService::new(
+            stage,
+            DualReceiver::Channel(in_rx),
+            DualSender::Channel(out_tx),
+        );
 
         // Submit a transaction.
         in_tx.try_send(make_unverified(1)).unwrap();
@@ -181,7 +189,8 @@ mod tests {
         let (in_tx, rx) = bounded_link::<UnverifiedTransaction>(16);
         let (tx, _out_rx) = bounded_link::<VerifiedTransaction>(16);
 
-        let mut service = VerifyService::new(stage, rx, tx);
+        let mut service =
+            VerifyService::new(stage, DualReceiver::Channel(rx), DualSender::Channel(tx));
         let ctx = ServiceContext::new(paradencer_runtime::ShutdownSwitch::new());
         service.tick(&ctx).unwrap();
 
@@ -189,7 +198,7 @@ mod tests {
             + service.stats.malformed.load(Ordering::Relaxed);
         assert_eq!(total, 0);
 
-        // Keep sender alive to prevent QueueClosed.
+        // Keep sender alive to prevent Closed error.
         drop(in_tx);
     }
 }

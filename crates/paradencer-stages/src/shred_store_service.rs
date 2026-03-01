@@ -11,7 +11,7 @@
 use crate::replay_stage::{ReplaySignal, SignalBus};
 use crate::shred_network::CompletedFecSet;
 use crossbeam_channel::Receiver;
-use paradencer_mesh::InPort;
+use paradencer_mesh::{DualReceiveError, DualReceiver};
 use paradencer_runtime::{RuntimeResult, Service, ServiceContext};
 use paradencer_storage::Blockstore;
 use std::sync::{Arc, Mutex};
@@ -59,7 +59,7 @@ pub struct ShredStoreStats {
 /// Thread safety: all shared state is behind `Arc` with internal locking.
 /// - `blockstore`: `Arc<Blockstore>` uses `RwLock` internally for column families.
 /// - `signal_rx`: `crossbeam_channel::Receiver` is `Send + Sync`.
-/// - `fec_input`: `InPort` wraps a `crossbeam_channel::Receiver`.
+/// - `fec_input`: `DualReceiver` wraps either a channel or tile link.
 ///
 /// The service itself runs on a single thread (poll-driven `tick()` loop),
 /// so its mutable fields (`stats`, `current_root`) require no synchronization.
@@ -67,7 +67,7 @@ pub struct ShredStoreService {
     config: ShredStoreConfig,
     blockstore: Arc<Blockstore>,
     /// Receives completed FEC sets from ShredNetworkStage.
-    fec_input: InPort<CompletedFecSet>,
+    fec_input: DualReceiver<CompletedFecSet>,
     /// Receives replay signals for root advancement.
     signal_rx: Option<Receiver<ReplaySignal>>,
     /// Current confirmed root slot for cleanup threshold.
@@ -80,7 +80,7 @@ impl ShredStoreService {
     pub fn new(
         config: ShredStoreConfig,
         blockstore: Arc<Blockstore>,
-        fec_input: InPort<CompletedFecSet>,
+        fec_input: DualReceiver<CompletedFecSet>,
     ) -> Self {
         Self {
             config,
@@ -211,7 +211,7 @@ impl Service for ShredStoreService {
 mod tests {
     use super::*;
     use crate::replay_stage::RootAdvancedInfo;
-    use paradencer_mesh::bounded_link;
+    use paradencer_mesh::{bounded_link, DualReceiver};
     use paradencer_runtime::ShutdownSwitch;
     use paradencer_types::shred::{
         DataShredHeader, Shred, ShredCommonHeader, ShredVariant, DATA_SHRED_PAYLOAD_SIZE,
@@ -260,7 +260,11 @@ mod tests {
         let blockstore = Arc::new(Blockstore::in_memory());
         let (_, fec_rx) = bounded_link::<CompletedFecSet>(16);
 
-        let service = ShredStoreService::new(ShredStoreConfig::default(), blockstore, fec_rx);
+        let service = ShredStoreService::new(
+            ShredStoreConfig::default(),
+            blockstore,
+            DualReceiver::Channel(fec_rx),
+        );
 
         assert_eq!(service.name(), "shred-store");
         assert_eq!(service.current_root(), 0);
@@ -272,8 +276,11 @@ mod tests {
         let blockstore = Arc::new(Blockstore::in_memory());
         let (fec_tx, fec_rx) = bounded_link::<CompletedFecSet>(16);
 
-        let mut service =
-            ShredStoreService::new(ShredStoreConfig::default(), blockstore.clone(), fec_rx);
+        let mut service = ShredStoreService::new(
+            ShredStoreConfig::default(),
+            blockstore.clone(),
+            DualReceiver::Channel(fec_rx),
+        );
 
         // Send a FEC set.
         fec_tx.try_send(create_test_fec_set(1, 0)).unwrap();
@@ -296,7 +303,7 @@ mod tests {
             max_writes_per_tick: 3,
             ..Default::default()
         };
-        let mut service = ShredStoreService::new(config, blockstore, fec_rx);
+        let mut service = ShredStoreService::new(config, blockstore, DualReceiver::Channel(fec_rx));
 
         // Send 5 FEC sets.
         for i in 0..5 {
@@ -326,7 +333,7 @@ mod tests {
                 ..Default::default()
             },
             blockstore,
-            fec_rx,
+            DualReceiver::Channel(fec_rx),
         )
         .with_signal_bus(Arc::clone(&signal_bus));
 
@@ -374,7 +381,11 @@ mod tests {
         let blockstore = Arc::new(Blockstore::in_memory());
         let (fec_tx, fec_rx) = bounded_link::<CompletedFecSet>(16);
 
-        let mut service = ShredStoreService::new(ShredStoreConfig::default(), blockstore, fec_rx);
+        let mut service = ShredStoreService::new(
+            ShredStoreConfig::default(),
+            blockstore,
+            DualReceiver::Channel(fec_rx),
+        );
 
         let context = create_context();
 
@@ -398,7 +409,11 @@ mod tests {
         let blockstore = Arc::new(Blockstore::in_memory());
         let (_, fec_rx) = bounded_link::<CompletedFecSet>(16);
 
-        let mut service = ShredStoreService::new(ShredStoreConfig::default(), blockstore, fec_rx);
+        let mut service = ShredStoreService::new(
+            ShredStoreConfig::default(),
+            blockstore,
+            DualReceiver::Channel(fec_rx),
+        );
 
         let context = create_context();
 

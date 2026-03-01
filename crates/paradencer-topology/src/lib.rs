@@ -231,7 +231,7 @@ capacity = 64
         )
         .unwrap();
 
-        let block_receiver = materialized
+        let mut block_receiver = materialized
             .shred_block_receiver
             .expect("shred pipeline must produce a block receiver");
 

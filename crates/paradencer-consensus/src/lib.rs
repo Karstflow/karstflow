@@ -4,6 +4,7 @@ mod bank_forks;
 mod bank_notifier;
 mod blockhash_queue;
 mod clock;
+mod codec_impls;
 mod commitment;
 mod compute_budget;
 mod consensus_coordinator;

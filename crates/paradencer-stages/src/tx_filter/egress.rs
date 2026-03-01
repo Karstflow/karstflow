@@ -1,5 +1,5 @@
 use super::{PendingEgressTransaction, TxFilter};
-use paradencer_mesh::SendError;
+use paradencer_mesh::DualSendError;
 use paradencer_runtime::{RuntimeError, RuntimeResult, Service, ServiceContext};
 
 impl TxFilter {
@@ -9,7 +9,7 @@ impl TxFilter {
     ) -> RuntimeResult<()> {
         match self.outgoing_transactions.try_send(transaction.clone()) {
             Ok(()) => Ok(()),
-            Err(SendError::QueueFull(_)) => {
+            Err(DualSendError::Full(_) | DualSendError::NoCredits(_)) => {
                 if self.pending_egress_transactions.len() >= self.egress_retry_buffer_capacity {
                     self.ingress_filter_stats.increment_drop_reason(
                         paradencer_net::DropReason::DownstreamBackpressure,
@@ -24,7 +24,7 @@ impl TxFilter {
                     });
                 Ok(())
             }
-            Err(SendError::QueueClosed(_)) => Err(RuntimeError::service_failure(
+            Err(DualSendError::Closed(_)) => Err(RuntimeError::service_failure(
                 self.name(),
                 "transaction link closed",
             )),
@@ -42,7 +42,7 @@ impl TxFilter {
                 .try_send(pending.transaction.clone())
             {
                 Ok(()) => {}
-                Err(SendError::QueueFull(_)) => {
+                Err(DualSendError::Full(_) | DualSendError::NoCredits(_)) => {
                     pending.wait_ticks = pending.wait_ticks.saturating_add(1);
                     if pending.wait_ticks >= self.egress_retry_max_wait_ticks {
                         self.ingress_filter_stats.increment_drop_reason(
@@ -54,7 +54,7 @@ impl TxFilter {
                     }
                     break;
                 }
-                Err(SendError::QueueClosed(_)) => {
+                Err(DualSendError::Closed(_)) => {
                     context.shutdown.request_stop();
                     return Err(RuntimeError::service_failure(
                         self.name(),

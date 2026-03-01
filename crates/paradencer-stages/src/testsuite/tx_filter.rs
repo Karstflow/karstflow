@@ -1,10 +1,14 @@
 use super::*;
+use paradencer_mesh::{DualReceiver, DualSender};
 
 #[test]
 fn tx_filter_drops_duplicate_transactions() {
     let (packet_outbound, packet_inbound) = bounded_link::<InboundPacket>(8);
     let (transaction_outbound, transaction_inbound) = bounded_link::<SanitizedTransaction>(8);
-    let mut tx_filter = TxFilter::new(packet_inbound, transaction_outbound);
+    let mut tx_filter = TxFilter::new(
+        DualReceiver::Channel(packet_inbound),
+        DualSender::Channel(transaction_outbound),
+    );
     let context = ServiceContext::new(ShutdownSwitch::new());
 
     packet_outbound
@@ -42,7 +46,11 @@ fn tx_filter_applies_source_policy_rules() {
         allow_bundle_source: false,
         ..IngressPolicy::default()
     };
-    let mut tx_filter = TxFilter::with_policy(packet_inbound, transaction_outbound, policy);
+    let mut tx_filter = TxFilter::with_policy(
+        DualReceiver::Channel(packet_inbound),
+        DualSender::Channel(transaction_outbound),
+        policy,
+    );
     let context = ServiceContext::new(ShutdownSwitch::new());
 
     packet_outbound
@@ -67,7 +75,11 @@ fn tx_filter_applies_per_source_min_gap_rate_limit() {
         quic_min_gap_ticks: 2,
         ..IngressPolicy::default()
     };
-    let mut tx_filter = TxFilter::with_policy(packet_inbound, transaction_outbound, policy);
+    let mut tx_filter = TxFilter::with_policy(
+        DualReceiver::Channel(packet_inbound),
+        DualSender::Channel(transaction_outbound),
+        policy,
+    );
     let context = ServiceContext::new(ShutdownSwitch::new());
 
     packet_outbound
@@ -119,7 +131,11 @@ fn tx_filter_applies_per_source_burst_rate_limit_and_refill() {
         quic_burst_refill_ticks: 3,
         ..IngressPolicy::default()
     };
-    let mut tx_filter = TxFilter::with_policy(packet_inbound, transaction_outbound, policy);
+    let mut tx_filter = TxFilter::with_policy(
+        DualReceiver::Channel(packet_inbound),
+        DualSender::Channel(transaction_outbound),
+        policy,
+    );
     let context = ServiceContext::new(ShutdownSwitch::new());
 
     for packet_id in 301..=303_u64 {
@@ -169,7 +185,11 @@ fn tx_filter_applies_per_source_cost_budget_window_limit() {
         quic_cost_budget_window_ticks: 4,
         ..IngressPolicy::default()
     };
-    let mut tx_filter = TxFilter::with_policy(packet_inbound, transaction_outbound, policy);
+    let mut tx_filter = TxFilter::with_policy(
+        DualReceiver::Channel(packet_inbound),
+        DualSender::Channel(transaction_outbound),
+        policy,
+    );
     let context = ServiceContext::new(ShutdownSwitch::new());
 
     for packet_id in 401..=403_u64 {
@@ -219,7 +239,11 @@ fn tx_filter_buffers_and_retries_when_downstream_recovers_from_backpressure() {
         egress_retry_max_wait_ticks: 6,
         ..IngressPolicy::default()
     };
-    let mut tx_filter = TxFilter::with_policy(packet_inbound, transaction_outbound, policy);
+    let mut tx_filter = TxFilter::with_policy(
+        DualReceiver::Channel(packet_inbound),
+        DualSender::Channel(transaction_outbound),
+        policy,
+    );
     let context = ServiceContext::new(ShutdownSwitch::new());
 
     packet_outbound
@@ -259,7 +283,11 @@ fn tx_filter_drops_buffered_tx_after_backpressure_wait_budget_is_exceeded() {
         egress_retry_max_wait_ticks: 2,
         ..IngressPolicy::default()
     };
-    let mut tx_filter = TxFilter::with_policy(packet_inbound, transaction_outbound, policy);
+    let mut tx_filter = TxFilter::with_policy(
+        DualReceiver::Channel(packet_inbound),
+        DualSender::Channel(transaction_outbound),
+        policy,
+    );
     let context = ServiceContext::new(ShutdownSwitch::new());
 
     packet_outbound

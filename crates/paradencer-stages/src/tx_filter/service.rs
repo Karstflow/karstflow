@@ -1,6 +1,6 @@
 use super::TxFilter;
 use crate::RawTransaction;
-use paradencer_mesh::ReceiveError;
+use paradencer_mesh::DualReceiveError;
 use paradencer_net::{DecodeOutcome, DedupDecision, IngressSource};
 use paradencer_runtime::{RuntimeError, RuntimeResult, Service, ServiceContext};
 use std::time::Duration;
@@ -91,7 +91,7 @@ impl Service for TxFilter {
                 self.ingress_filter_stats
                     .increment_accepted(transaction.source);
                 // Forward raw bytes to the validator pipeline if connected.
-                if let Some(ref pipeline_out) = self.outgoing_pipeline {
+                if let Some(ref mut pipeline_out) = self.outgoing_pipeline {
                     if !transaction.raw_payload.is_empty() {
                         let _ = pipeline_out.try_send(RawTransaction {
                             payload: transaction.raw_payload.clone(),
@@ -102,12 +102,16 @@ impl Service for TxFilter {
                 self.try_send_or_buffer(transaction)
             }
             Ok(None) => Ok(()),
-            Err(ReceiveError::QueueClosed) => {
+            Err(DualReceiveError::Closed) => {
                 context.shutdown.request_stop();
                 Err(RuntimeError::service_failure(
                     self.name(),
                     "input packet link closed",
                 ))
+            }
+            Err(DualReceiveError::Overrun { .. }) => {
+                // Consumer overrun — lost data. Will recover via repair/retransmit.
+                Ok(())
             }
         }
     }

@@ -1,4 +1,5 @@
 use super::*;
+use paradencer_mesh::{DualReceiver, DualSender};
 
 #[test]
 fn three_stage_pipeline_moves_messages_end_to_end() {
@@ -8,9 +9,12 @@ fn three_stage_pipeline_moves_messages_end_to_end() {
     let packet_stats = packet_outbound.stats();
     let transaction_stats = transaction_outbound.stats();
 
-    let mut edge_intake = EdgeIntake::new(packet_outbound);
-    let mut tx_filter = TxFilter::new(packet_inbound, transaction_outbound);
-    let mut block_assembler = BlockAssembler::new(transaction_inbound);
+    let mut edge_intake = EdgeIntake::new(DualSender::Channel(packet_outbound));
+    let mut tx_filter = TxFilter::new(
+        DualReceiver::Channel(packet_inbound),
+        DualSender::Channel(transaction_outbound),
+    );
+    let mut block_assembler = BlockAssembler::new(DualReceiver::Channel(transaction_inbound));
 
     let context = ServiceContext::new(ShutdownSwitch::new());
 
@@ -34,7 +38,7 @@ fn intake_stage_records_backpressure_when_downstream_is_stalled() {
     let (packet_outbound, _packet_inbound) = bounded_link::<InboundPacket>(1);
     let packet_stats = packet_outbound.stats();
 
-    let mut edge_intake = EdgeIntake::new(packet_outbound);
+    let mut edge_intake = EdgeIntake::new(DualSender::Channel(packet_outbound));
     let context = ServiceContext::new(ShutdownSwitch::new());
 
     edge_intake.tick(&context).unwrap();
@@ -54,7 +58,7 @@ fn edge_intake_applies_weighted_source_schedule() {
         synthetic_source_weight_rpc: 0,
         ..IngressPolicy::default()
     };
-    let mut edge_intake = EdgeIntake::with_policy(packet_outbound, policy);
+    let mut edge_intake = EdgeIntake::with_policy(DualSender::Channel(packet_outbound), policy);
     let context = ServiceContext::new(ShutdownSwitch::new());
 
     for _ in 0..4 {
@@ -80,7 +84,7 @@ fn edge_intake_respects_idle_ticks_between_batches() {
         synthetic_idle_ticks_between_batches: 1,
         ..IngressPolicy::default()
     };
-    let mut edge_intake = EdgeIntake::with_policy(packet_outbound, policy);
+    let mut edge_intake = EdgeIntake::with_policy(DualSender::Channel(packet_outbound), policy);
     let context = ServiceContext::new(ShutdownSwitch::new());
 
     for _ in 0..5 {
@@ -110,7 +114,7 @@ fn edge_intake_udp_mode_receives_datagrams_and_classifies_source_port() {
         udp_max_packets_per_tick: 4,
         ..IngressPolicy::default()
     };
-    let mut edge_intake = EdgeIntake::with_policy(packet_outbound, policy);
+    let mut edge_intake = EdgeIntake::with_policy(DualSender::Channel(packet_outbound), policy);
     let context = ServiceContext::new(ShutdownSwitch::new());
     match edge_intake.on_start(&context) {
         Ok(()) => {}
@@ -163,8 +167,11 @@ fn edge_intake_routes_gossip_packets_to_shred_link_when_configured() {
         synthetic_source_weight_rpc: 0,
         ..IngressPolicy::default()
     };
-    let mut edge_intake =
-        EdgeIntake::with_policy_and_shred(packet_outbound, shred_outbound, policy);
+    let mut edge_intake = EdgeIntake::with_policy_and_shred(
+        DualSender::Channel(packet_outbound),
+        DualSender::Channel(shred_outbound),
+        policy,
+    );
     let context = ServiceContext::new(ShutdownSwitch::new());
 
     edge_intake.tick(&context).unwrap();

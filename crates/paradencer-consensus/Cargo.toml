@@ -11,6 +11,7 @@ paradencer-crypto = { path = "../paradencer-crypto" }
 paradencer-storage = { path = "../paradencer-storage" }
 paradencer-types = { path = "../paradencer-types" }
 paradencer-ids = { path = "../paradencer-ids" }
+paradencer-mesh = { path = "../paradencer-mesh" }
 bincode = { workspace = true }
 ed25519-dalek = { workspace = true }
 serde = { workspace = true }

@@ -10,7 +10,7 @@
 /// provide already-resolved data shreds (possibly recovered via Reed-Solomon).
 use crate::shred_assembler::{AssembledBlock, ShredAssembler};
 use crate::shred_network::CompletedFecSet;
-use paradencer_mesh::{InPort, OutPort, ReceiveError, SendError};
+use paradencer_mesh::{DualReceiveError, DualReceiver, DualSendError, DualSender};
 use paradencer_runtime::{RuntimeError, RuntimeResult, Service, ServiceContext};
 use paradencer_storage::Blockstore;
 use paradencer_types::shred::Shred;
@@ -77,10 +77,10 @@ pub struct ShredArrival {
 
 pub struct ShredCollector {
     config: ShredCollectorConfig,
-    incoming_shreds: InPort<Shred>,
+    incoming_shreds: DualReceiver<Shred>,
     /// Channel for completed FEC sets from the shred network stage.
-    incoming_fec_sets: Option<InPort<CompletedFecSet>>,
-    block_output: OutPort<AssembledBlock>,
+    incoming_fec_sets: Option<DualReceiver<CompletedFecSet>>,
+    block_output: DualSender<AssembledBlock>,
     /// Optional persistent storage for write-through shred persistence.
     blockstore: Option<Arc<Blockstore>>,
     /// Optional channel to notify the repair coordinator about received data shreds.
@@ -91,7 +91,10 @@ pub struct ShredCollector {
 }
 
 impl ShredCollector {
-    pub fn new(incoming_shreds: InPort<Shred>, block_output: OutPort<AssembledBlock>) -> Self {
+    pub fn new(
+        incoming_shreds: DualReceiver<Shred>,
+        block_output: DualSender<AssembledBlock>,
+    ) -> Self {
         Self::with_config(
             incoming_shreds,
             block_output,
@@ -101,9 +104,9 @@ impl ShredCollector {
 
     /// Create with an additional channel for FEC-resolved shred sets.
     pub fn with_fec_input(
-        incoming_shreds: InPort<Shred>,
-        incoming_fec_sets: InPort<CompletedFecSet>,
-        block_output: OutPort<AssembledBlock>,
+        incoming_shreds: DualReceiver<Shred>,
+        incoming_fec_sets: DualReceiver<CompletedFecSet>,
+        block_output: DualSender<AssembledBlock>,
     ) -> Self {
         Self {
             config: ShredCollectorConfig::default(),
@@ -119,8 +122,8 @@ impl ShredCollector {
     }
 
     pub fn with_config(
-        incoming_shreds: InPort<Shred>,
-        block_output: OutPort<AssembledBlock>,
+        incoming_shreds: DualReceiver<Shred>,
+        block_output: DualSender<AssembledBlock>,
         config: ShredCollectorConfig,
     ) -> Self {
         Self {
@@ -227,12 +230,12 @@ impl ShredCollector {
     fn drain_incoming_fec_sets(&mut self) {
         // Collect FEC sets first to avoid borrow conflict.
         let mut fec_sets = Vec::new();
-        if let Some(ref fec_port) = self.incoming_fec_sets {
+        if let Some(ref mut fec_port) = self.incoming_fec_sets {
             loop {
                 match fec_port.try_recv() {
                     Ok(Some(fec_set)) => fec_sets.push(fec_set),
                     Ok(None) => break,
-                    Err(ReceiveError::QueueClosed) => break,
+                    Err(_) => break,
                 }
             }
         }
@@ -242,7 +245,7 @@ impl ShredCollector {
     }
 
     /// Drain all available shreds from the input channel into slot buffers.
-    fn drain_incoming(&mut self) -> Result<bool, ReceiveError> {
+    fn drain_incoming(&mut self) -> Result<bool, DualReceiveError> {
         // Collect shreds from the channel first, then process them.
         // This avoids borrow conflicts between the channel, persist, and buffer.
         let mut batch = Vec::new();
@@ -250,9 +253,17 @@ impl ShredCollector {
             match self.incoming_shreds.try_recv() {
                 Ok(Some(shred)) => batch.push(shred),
                 Ok(None) => break,
-                Err(ReceiveError::QueueClosed) => {
+                Err(DualReceiveError::Closed) => {
                     if batch.is_empty() {
-                        return Err(ReceiveError::QueueClosed);
+                        return Err(DualReceiveError::Closed);
+                    }
+                    break;
+                }
+                Err(DualReceiveError::Overrun { recover_seq }) => {
+                    // Consumer overrun — skip to recover position.
+                    // Process whatever we have so far.
+                    if batch.is_empty() {
+                        return Err(DualReceiveError::Overrun { recover_seq });
                     }
                     break;
                 }
@@ -334,11 +345,11 @@ impl ShredCollector {
                     self.stats.blocks_emitted += 1;
                     Ok(())
                 }
-                Err(SendError::QueueFull(_)) => {
+                Err(DualSendError::Full(_)) | Err(DualSendError::NoCredits(_)) => {
                     self.stats.downstream_backpressure += 1;
                     Ok(())
                 }
-                Err(SendError::QueueClosed(_)) => {
+                Err(DualSendError::Closed(_)) => {
                     context.shutdown.request_stop();
                     Err(RuntimeError::service_failure(
                         self.name(),
@@ -366,12 +377,16 @@ impl Service for ShredCollector {
     fn tick(&mut self, context: &ServiceContext) -> RuntimeResult<()> {
         match self.drain_incoming() {
             Ok(_) => {}
-            Err(ReceiveError::QueueClosed) => {
+            Err(DualReceiveError::Closed) => {
                 context.shutdown.request_stop();
                 return Err(RuntimeError::service_failure(
                     self.name(),
                     "shred input link closed",
                 ));
+            }
+            Err(DualReceiveError::Overrun { .. }) => {
+                // Consumer overrun — data was lost. The repair service
+                // will recover missing shreds.
             }
         }
 
@@ -389,6 +404,7 @@ impl Service for ShredCollector {
 mod tests {
     use super::*;
     use paradencer_mesh::bounded_link;
+    use paradencer_mesh::{DualReceiver, DualSender};
     use paradencer_types::shred::{
         DataShredHeader, ShredCommonHeader, ShredVariant, SIGNATURE_SIZE,
     };
@@ -419,10 +435,12 @@ mod tests {
     fn collector_persists_shreds_to_blockstore_on_drain() {
         let blockstore = Arc::new(Blockstore::in_memory());
         let (shred_tx, shred_rx) = bounded_link::<Shred>(64);
-        let (_block_tx, block_rx) = bounded_link::<AssembledBlock>(8);
+        let (block_tx, block_rx) = bounded_link::<AssembledBlock>(8);
 
-        // Swap tx/rx: collector reads from shred_rx, we write to shred_tx.
-        let mut collector = ShredCollector::new(shred_rx, _block_tx);
+        let mut collector = ShredCollector::new(
+            DualReceiver::Channel(shred_rx),
+            DualSender::Channel(block_tx),
+        );
         collector.set_blockstore(Arc::clone(&blockstore));
 
         // Send two shreds.
@@ -450,7 +468,10 @@ mod tests {
         let (shred_tx, shred_rx) = bounded_link::<Shred>(64);
         let (block_tx, _block_rx) = bounded_link::<AssembledBlock>(8);
 
-        let mut collector = ShredCollector::new(shred_rx, block_tx);
+        let mut collector = ShredCollector::new(
+            DualReceiver::Channel(shred_rx),
+            DualSender::Channel(block_tx),
+        );
         collector.set_blockstore(Arc::clone(&blockstore));
 
         let fec_set = CompletedFecSet {
@@ -483,7 +504,10 @@ mod tests {
         let (shred_tx, shred_rx) = bounded_link::<Shred>(64);
         let (block_tx, _block_rx) = bounded_link::<AssembledBlock>(8);
 
-        let mut collector = ShredCollector::new(shred_rx, block_tx);
+        let mut collector = ShredCollector::new(
+            DualReceiver::Channel(shred_rx),
+            DualSender::Channel(block_tx),
+        );
         // No blockstore set — should still function normally.
 
         shred_tx.try_send(make_data_shred(5, 0, false)).unwrap();
@@ -502,7 +526,10 @@ mod tests {
         let (shred_tx, shred_rx) = bounded_link::<Shred>(64);
         let (block_tx, _block_rx) = bounded_link::<AssembledBlock>(8);
 
-        let mut collector = ShredCollector::new(shred_rx, block_tx);
+        let mut collector = ShredCollector::new(
+            DualReceiver::Channel(shred_rx),
+            DualSender::Channel(block_tx),
+        );
         collector.set_blockstore(Arc::clone(&blockstore));
 
         shred_tx.try_send(make_data_shred(7, 0, false)).unwrap();
@@ -521,7 +548,10 @@ mod tests {
 
         let (repair_tx, repair_rx) = crossbeam_channel::bounded::<ShredArrival>(64);
 
-        let mut collector = ShredCollector::new(shred_rx, block_tx);
+        let mut collector = ShredCollector::new(
+            DualReceiver::Channel(shred_rx),
+            DualSender::Channel(block_tx),
+        );
         collector.set_repair_notifier(repair_tx);
 
         // Send two shreds: one normal, one last-in-slot.
@@ -555,7 +585,10 @@ mod tests {
 
         let (repair_tx, repair_rx) = crossbeam_channel::bounded::<ShredArrival>(64);
 
-        let mut collector = ShredCollector::new(shred_rx, block_tx);
+        let mut collector = ShredCollector::new(
+            DualReceiver::Channel(shred_rx),
+            DualSender::Channel(block_tx),
+        );
         collector.set_repair_notifier(repair_tx);
 
         let fec_set = CompletedFecSet {
@@ -587,7 +620,10 @@ mod tests {
         let (block_tx, _block_rx) = bounded_link::<AssembledBlock>(8);
 
         // No repair notifier — should not panic.
-        let mut collector = ShredCollector::new(shred_rx, block_tx);
+        let mut collector = ShredCollector::new(
+            DualReceiver::Channel(shred_rx),
+            DualSender::Channel(block_tx),
+        );
 
         shred_tx.try_send(make_data_shred(5, 0, false)).unwrap();
         collector.drain_incoming().unwrap();

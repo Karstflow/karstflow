@@ -10,7 +10,7 @@
 use crate::pack_stage::{PackScheduler, PackedTransaction};
 use crate::resolv_stage::{ResolvOutcome, ResolvStage, ResolvedTransaction};
 use crate::verify_stage::VerifiedTransaction;
-use paradencer_mesh::{InPort, ReceiveError};
+use paradencer_mesh::{DualReceiveError, DualReceiver};
 use paradencer_runtime::{RuntimeError, RuntimeResult, Service, ServiceContext};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -33,7 +33,7 @@ pub struct ResolvServiceStats {
 /// ones to the pack scheduler.
 pub struct ResolvService {
     stage: ResolvStage,
-    input: InPort<VerifiedTransaction>,
+    input: DualReceiver<VerifiedTransaction>,
     pack: PackScheduler,
     stats: Arc<ResolvServiceStats>,
     /// Maximum transactions to process per tick.
@@ -44,7 +44,7 @@ impl ResolvService {
     /// Create a new resolution service.
     pub fn new(
         stage: ResolvStage,
-        input: InPort<VerifiedTransaction>,
+        input: DualReceiver<VerifiedTransaction>,
         pack: PackScheduler,
     ) -> Self {
         Self {
@@ -172,12 +172,16 @@ impl Service for ResolvService {
                     }
                 }
                 Ok(None) => break,
-                Err(ReceiveError::QueueClosed) => {
+                Err(DualReceiveError::Closed) => {
                     context.shutdown.request_stop();
                     return Err(RuntimeError::service_failure(
                         self.name(),
                         "input channel closed",
                     ));
+                }
+                Err(DualReceiveError::Overrun { .. }) => {
+                    // Consumer overrun — lost data. Continue next tick.
+                    break;
                 }
             }
         }
@@ -207,7 +211,7 @@ mod tests {
         let (_tx, rx) = bounded_link::<VerifiedTransaction>(16);
         let pack = PackScheduler::new();
 
-        let service = ResolvService::new(stage, rx, pack);
+        let service = ResolvService::new(stage, DualReceiver::Channel(rx), pack);
         assert_eq!(service.name(), "resolv-service");
     }
 
@@ -221,7 +225,7 @@ mod tests {
         let (in_tx, in_rx) = bounded_link::<VerifiedTransaction>(16);
         let pack = PackScheduler::new();
 
-        let mut service = ResolvService::new(stage, in_rx, pack);
+        let mut service = ResolvService::new(stage, DualReceiver::Channel(in_rx), pack);
 
         // Submit a verified transaction.
         in_tx.try_send(make_verified(1)).unwrap();
@@ -243,7 +247,7 @@ mod tests {
         let (_tx, rx) = bounded_link::<VerifiedTransaction>(16);
         let pack = PackScheduler::new();
 
-        let mut service = ResolvService::new(stage, rx, pack);
+        let mut service = ResolvService::new(stage, DualReceiver::Channel(rx), pack);
         let ctx = ServiceContext::new(paradencer_runtime::ShutdownSwitch::new());
         service.tick(&ctx).unwrap();
 

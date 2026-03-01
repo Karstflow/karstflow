@@ -176,13 +176,17 @@ fn restore_from_snapshot_archive_returns_error_for_missing_file() {
 #[test]
 fn build_replay_service_with_consensus_creates_service() {
     use crate::bootstrap::build_replay_service_with_consensus;
-    use paradencer_mesh::bounded_link;
+    use paradencer_mesh::{bounded_link, DualReceiver};
     use paradencer_stages::ReplayServiceConfig;
 
     let consensus = build_consensus_infrastructure(1_000_000, None, None).unwrap();
     let (_tx, rx) = bounded_link::<paradencer_stages::AssembledBlock>(16);
 
-    let bundle =
-        build_replay_service_with_consensus(ReplayServiceConfig::default(), rx, consensus, None);
+    let bundle = build_replay_service_with_consensus(
+        ReplayServiceConfig::default(),
+        DualReceiver::Channel(rx),
+        consensus,
+        None,
+    );
     assert_eq!(bundle.service.name(), "replay-service");
 }

@@ -16,7 +16,7 @@ use paradencer_execution::{
     ExecutionBridge, ExecutionEngine, ExecutionStateController, HeuristicExecutionEngine,
     LeaderGateState, ReplayBoundaryState, RuntimeLikeExecutionEngine, StorageBackedRuntimeAdapter,
 };
-use paradencer_mesh::InPort;
+use paradencer_mesh::DualReceiver;
 use paradencer_runtime::{RuntimeError, RuntimeResult, Service};
 use paradencer_storage::{CommittedFragmentRecord, HotStateStore, SnapshotCatalog};
 use publication_gate::PublicationGate;
@@ -34,7 +34,7 @@ struct PendingRetryFragment {
 }
 
 pub struct BlockAssembler {
-    incoming_transactions: Vec<InPort<SanitizedTransaction>>,
+    incoming_transactions: Vec<DualReceiver<SanitizedTransaction>>,
     next_incoming_transaction_index: usize,
     closed_incoming_transactions: Vec<bool>,
     closed_incoming_transaction_count: usize,
@@ -65,20 +65,20 @@ pub struct BlockAssembler {
 }
 
 impl BlockAssembler {
-    pub fn new(incoming_transactions: InPort<SanitizedTransaction>) -> Self {
+    pub fn new(incoming_transactions: DualReceiver<SanitizedTransaction>) -> Self {
         Self::with_storage_policy(incoming_transactions, StorageRuntimePolicy::default())
             .unwrap_or_else(|error| panic!("default storage policy must be valid: {error}"))
     }
 
     pub fn with_storage_policy(
-        incoming_transactions: InPort<SanitizedTransaction>,
+        incoming_transactions: DualReceiver<SanitizedTransaction>,
         storage_runtime_policy: StorageRuntimePolicy,
     ) -> std::result::Result<Self, StageError> {
         Self::with_storage_policy_inputs(vec![incoming_transactions], storage_runtime_policy)
     }
 
     pub fn with_storage_policy_inputs(
-        incoming_transactions: Vec<InPort<SanitizedTransaction>>,
+        incoming_transactions: Vec<DualReceiver<SanitizedTransaction>>,
         storage_runtime_policy: StorageRuntimePolicy,
     ) -> std::result::Result<Self, StageError> {
         Self::with_storage_policy_and_stats_and_inputs(
@@ -89,7 +89,7 @@ impl BlockAssembler {
     }
 
     pub fn with_storage_policy_and_input(
-        incoming_transactions: InPort<SanitizedTransaction>,
+        incoming_transactions: DualReceiver<SanitizedTransaction>,
         storage_runtime_policy: StorageRuntimePolicy,
         block_assembly_stats: Arc<BlockAssemblyStats>,
     ) -> std::result::Result<Self, StageError> {
@@ -101,7 +101,7 @@ impl BlockAssembler {
     }
 
     pub fn with_storage_policy_and_stats(
-        incoming_transactions: InPort<SanitizedTransaction>,
+        incoming_transactions: DualReceiver<SanitizedTransaction>,
         storage_runtime_policy: StorageRuntimePolicy,
         block_assembly_stats: Arc<BlockAssemblyStats>,
     ) -> std::result::Result<Self, StageError> {
@@ -113,7 +113,7 @@ impl BlockAssembler {
     }
 
     pub fn with_storage_policy_and_stats_and_inputs(
-        incoming_transactions: Vec<InPort<SanitizedTransaction>>,
+        incoming_transactions: Vec<DualReceiver<SanitizedTransaction>>,
         storage_runtime_policy: StorageRuntimePolicy,
         block_assembly_stats: Arc<BlockAssemblyStats>,
     ) -> std::result::Result<Self, StageError> {
@@ -127,7 +127,7 @@ impl BlockAssembler {
 
     #[cfg(test)]
     pub(crate) fn with_storage_policy_and_stats_and_execution_bridge(
-        incoming_transactions: InPort<SanitizedTransaction>,
+        incoming_transactions: DualReceiver<SanitizedTransaction>,
         storage_runtime_policy: StorageRuntimePolicy,
         block_assembly_stats: Arc<BlockAssemblyStats>,
         execution_bridge: ExecutionBridge,
@@ -141,7 +141,7 @@ impl BlockAssembler {
     }
 
     fn with_storage_policy_and_stats_and_inputs_with_execution_bridge_override(
-        incoming_transactions: Vec<InPort<SanitizedTransaction>>,
+        incoming_transactions: Vec<DualReceiver<SanitizedTransaction>>,
         storage_runtime_policy: StorageRuntimePolicy,
         block_assembly_stats: Arc<BlockAssemblyStats>,
         execution_bridge_override: Option<ExecutionBridge>,

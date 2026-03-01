@@ -691,14 +691,20 @@ fn run_with_node_config(
     // Bridge retransmit decisions from the shred pipeline to the turbine
     // retransmit service. Each decision carries raw shred bytes that get
     // forwarded to turbine tree children via UDP.
-    let _retransmit_bridge = if let Some(retransmit_rx) = runtime_topology.retransmit_receiver {
+    let _retransmit_bridge = if let Some(mut retransmit_rx) = runtime_topology.retransmit_receiver {
         let retransmit = std::sync::Arc::clone(&retransmit_service);
         Some(
             std::thread::Builder::new()
                 .name("retransmit-fwd".into())
-                .spawn(move || {
-                    while let Ok(decision) = retransmit_rx.recv() {
-                        retransmit.forward_raw(&decision.shred_data);
+                .spawn(move || loop {
+                    match retransmit_rx.try_recv() {
+                        Ok(Some(decision)) => {
+                            retransmit.forward_raw(&decision.shred_data);
+                        }
+                        Ok(None) => {
+                            std::thread::sleep(std::time::Duration::from_micros(100));
+                        }
+                        Err(_) => break,
                     }
                 })
                 .expect("failed to spawn retransmit forwarder thread"),

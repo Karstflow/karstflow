@@ -22,7 +22,7 @@ use crate::pack_stage::{PackConfig, PackScheduler, PackStats};
 use crate::resolv_stage::{Blockhash, ResolvStats};
 use crate::tile_pipeline::{PipelineConfig, ValidatorPipeline};
 use crate::verify_stage::{TransactionSource, VerifyStats};
-use paradencer_mesh::InPort;
+use paradencer_mesh::DualReceiver;
 use paradencer_runtime::{RuntimeResult, Service, ServiceContext};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -202,7 +202,7 @@ enum PipelineCommand {
 pub struct PipelineService {
     pipeline: ValidatorPipeline,
     /// Input channels receiving raw transaction payloads.
-    inputs: Vec<InPort<RawTransaction>>,
+    inputs: Vec<DualReceiver<RawTransaction>>,
     /// Shared handle for cross-service communication.
     handle: Arc<PipelineHandle>,
     /// Entries from completed slots.
@@ -218,7 +218,7 @@ pub struct PipelineService {
 /// Builder for constructing a PipelineService with its handle.
 pub struct PipelineServiceBuilder {
     config: PipelineServiceConfig,
-    inputs: Vec<InPort<RawTransaction>>,
+    inputs: Vec<DualReceiver<RawTransaction>>,
     engine: Option<Box<dyn ExecutionEngine>>,
 }
 
@@ -239,7 +239,7 @@ impl PipelineServiceBuilder {
     }
 
     /// Add an input channel for raw transaction payloads.
-    pub fn add_input(mut self, input: InPort<RawTransaction>) -> Self {
+    pub fn add_input(mut self, input: DualReceiver<RawTransaction>) -> Self {
         self.inputs.push(input);
         self
     }
@@ -342,7 +342,7 @@ impl Service for PipelineService {
 
         // Drain raw transactions from input channels.
         let mut drained = 0usize;
-        for input in &self.inputs {
+        for input in &mut self.inputs {
             while drained < self.max_drain_per_tick {
                 match input.try_recv() {
                     Ok(Some(raw_tx)) => {
@@ -397,7 +397,9 @@ mod tests {
     #[test]
     fn builder_constructs_service() {
         let (_tx, rx) = bounded_link::<RawTransaction>(16);
-        let (service, handle) = PipelineServiceBuilder::new().add_input(rx).build();
+        let (service, handle) = PipelineServiceBuilder::new()
+            .add_input(DualReceiver::Channel(rx))
+            .build();
 
         assert_eq!(service.name(), "validator-pipeline");
         assert!(!handle.is_leading());
@@ -406,7 +408,9 @@ mod tests {
     #[test]
     fn service_drains_input_channel() {
         let (tx, rx) = bounded_link::<RawTransaction>(16);
-        let (mut service, handle) = PipelineServiceBuilder::new().add_input(rx).build();
+        let (mut service, handle) = PipelineServiceBuilder::new()
+            .add_input(DualReceiver::Channel(rx))
+            .build();
 
         // Submit transactions.
         tx.try_send(make_raw_tx(vec![0xAA; 128])).unwrap();
@@ -466,7 +470,7 @@ mod tests {
         let (tx, rx) = bounded_link::<RawTransaction>(32);
         let (mut service, handle) = PipelineServiceBuilder::new()
             .with_config(config)
-            .add_input(rx)
+            .add_input(DualReceiver::Channel(rx))
             .build();
 
         // Send 10 transactions.
@@ -496,7 +500,9 @@ mod tests {
         use ed25519_dalek::{Signer, SigningKey};
 
         let (tx, rx) = bounded_link::<RawTransaction>(64);
-        let (mut service, handle) = PipelineServiceBuilder::new().add_input(rx).build();
+        let (mut service, handle) = PipelineServiceBuilder::new()
+            .add_input(DualReceiver::Channel(rx))
+            .build();
 
         let ctx = ServiceContext::new(ShutdownSwitch::new());
 

@@ -3,7 +3,7 @@ use crate::block_producer::PohEntry;
 use crate::shred_assembler::AssembledBlock;
 use crate::shred_network::{CompletedFecSet, ShredNetworkConfig, ShredNetworkService};
 use crate::{ShredCollector, ShredCollectorConfig};
-use paradencer_mesh::DualReceiver;
+use paradencer_mesh::{DualReceiver, DualSender};
 use paradencer_types::shred::{
     DataShredHeader, Shred, ShredCommonHeader, ShredVariant, SHRED_LAST_IN_SLOT,
     SHRED_LEGACY_DATA_NIBBLE, SHRED_TYPE_LEGACY_DATA, SIGNATURE_SIZE,
@@ -49,7 +49,10 @@ fn create_test_shred(slot: u64, index: u32, last_in_slot: bool) -> Shred {
 fn collector_emits_block_when_last_in_slot_received() {
     let (shred_tx, shred_rx) = bounded_link::<Shred>(16);
     let (block_tx, block_rx) = bounded_link::<AssembledBlock>(16);
-    let mut collector = ShredCollector::new(shred_rx, block_tx);
+    let mut collector = ShredCollector::new(
+        DualReceiver::Channel(shred_rx),
+        DualSender::Channel(block_tx),
+    );
     let context = ServiceContext::new(ShutdownSwitch::new());
 
     // Split one entry batch across two shreds for slot 10.
@@ -79,7 +82,10 @@ fn collector_emits_block_when_last_in_slot_received() {
 fn collector_buffers_incomplete_slot() {
     let (shred_tx, shred_rx) = bounded_link::<Shred>(16);
     let (block_tx, block_rx) = bounded_link::<AssembledBlock>(16);
-    let mut collector = ShredCollector::new(shred_rx, block_tx);
+    let mut collector = ShredCollector::new(
+        DualReceiver::Channel(shred_rx),
+        DualSender::Channel(block_tx),
+    );
     let context = ServiceContext::new(ShutdownSwitch::new());
 
     // Send shred without last-in-slot flag.
@@ -100,7 +106,10 @@ fn collector_buffers_incomplete_slot() {
 fn collector_handles_multiple_slots_independently() {
     let (shred_tx, shred_rx) = bounded_link::<Shred>(32);
     let (block_tx, block_rx) = bounded_link::<AssembledBlock>(16);
-    let mut collector = ShredCollector::new(shred_rx, block_tx);
+    let mut collector = ShredCollector::new(
+        DualReceiver::Channel(shred_rx),
+        DualSender::Channel(block_tx),
+    );
     let context = ServiceContext::new(ShutdownSwitch::new());
 
     // Slot 30: complete (last-in-slot).
@@ -136,7 +145,11 @@ fn collector_evicts_old_slots() {
         max_slot_age_ticks: 3,
         ..ShredCollectorConfig::default()
     };
-    let mut collector = ShredCollector::with_config(shred_rx, block_tx, config);
+    let mut collector = ShredCollector::with_config(
+        DualReceiver::Channel(shred_rx),
+        DualSender::Channel(block_tx),
+        config,
+    );
     let context = ServiceContext::new(ShutdownSwitch::new());
 
     // Send an incomplete slot.
@@ -161,7 +174,11 @@ fn collector_evicts_overflow_slots() {
         max_slot_age_ticks: 1000,
         ..ShredCollectorConfig::default()
     };
-    let mut collector = ShredCollector::with_config(shred_rx, block_tx, config);
+    let mut collector = ShredCollector::with_config(
+        DualReceiver::Channel(shred_rx),
+        DualSender::Channel(block_tx),
+        config,
+    );
     let context = ServiceContext::new(ShutdownSwitch::new());
 
     // Send 4 different incomplete slots.
@@ -184,7 +201,11 @@ fn collector_receives_fec_sets_from_channel() {
     let (fec_tx, fec_rx) = bounded_link::<CompletedFecSet>(16);
     let (block_tx, block_rx) = bounded_link::<AssembledBlock>(16);
 
-    let mut collector = ShredCollector::with_fec_input(shred_rx, fec_rx, block_tx);
+    let mut collector = ShredCollector::with_fec_input(
+        DualReceiver::Channel(shred_rx),
+        DualReceiver::Channel(fec_rx),
+        DualSender::Channel(block_tx),
+    );
     let context = ServiceContext::new(ShutdownSwitch::new());
 
     // Send a CompletedFecSet with a last-in-slot shred.
@@ -222,9 +243,16 @@ fn full_pipeline_filter_to_fec_to_collector_to_block() {
         turbine_neighbor_count: 0,
         ..Default::default()
     };
-    let mut network_svc =
-        ShredNetworkService::new(config, DualReceiver::Channel(filter_rx), fec_tx);
-    let mut collector = ShredCollector::with_fec_input(shred_direct_rx, fec_rx, block_tx);
+    let mut network_svc = ShredNetworkService::new(
+        config,
+        DualReceiver::Channel(filter_rx),
+        DualSender::Channel(fec_tx),
+    );
+    let mut collector = ShredCollector::with_fec_input(
+        DualReceiver::Channel(shred_direct_rx),
+        DualReceiver::Channel(fec_rx),
+        DualSender::Channel(block_tx),
+    );
     let context = ServiceContext::new(ShutdownSwitch::new());
 
     // Create a simple FEC set: 2 data + 2 coding.

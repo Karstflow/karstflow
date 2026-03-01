@@ -14,7 +14,7 @@ use paradencer_consensus::{
     BankForks, CommitmentTracker, ExecutionBackend, ForkChoice, Tower, VoteProcessor,
 };
 use paradencer_execution::ExecutionBridge;
-use paradencer_mesh::InPort;
+use paradencer_mesh::{DualReceiver, InPort};
 use paradencer_runtime::{RuntimeError, RuntimeResult, Service, ServiceContext};
 use paradencer_types::shred::Shred;
 use std::collections::HashMap;
@@ -185,7 +185,7 @@ pub struct ReplayService {
     replay_stage: ReplayStage,
     assembler: ShredAssembler,
     /// Channel receiving assembled blocks from external producers.
-    block_input: Option<InPort<AssembledBlock>>,
+    block_input: Option<DualReceiver<AssembledBlock>>,
     /// Channel receiving raw shred batches for inline assembly.
     shred_input: Option<InPort<Vec<Shred>>>,
     /// Blocks waiting to be replayed (buffered across ticks).
@@ -204,7 +204,7 @@ impl ReplayService {
     /// Blocks arrive pre-assembled from an upstream shred assembler.
     pub fn with_block_input(
         config: ReplayServiceConfig,
-        block_input: InPort<AssembledBlock>,
+        block_input: DualReceiver<AssembledBlock>,
         bank_forks: Arc<RwLock<BankForks>>,
         fork_choice: Arc<Mutex<ForkChoice>>,
         execution_bridge: Arc<ExecutionBridge>,
@@ -278,7 +278,7 @@ impl ReplayService {
     /// Create a replay service with a custom execution backend.
     pub fn with_backend(
         config: ReplayServiceConfig,
-        block_input: InPort<AssembledBlock>,
+        block_input: DualReceiver<AssembledBlock>,
         bank_forks: Arc<RwLock<BankForks>>,
         fork_choice: Arc<Mutex<ForkChoice>>,
         execution_bridge: Arc<ExecutionBridge>,
@@ -316,7 +316,7 @@ impl ReplayService {
     /// Drain blocks from input channels into the pending buffer.
     fn drain_inputs(&mut self) {
         // Drain assembled blocks.
-        if let Some(ref block_input) = self.block_input {
+        if let Some(ref mut block_input) = self.block_input {
             while let Ok(Some(block)) = block_input.try_recv() {
                 self.pending_blocks.push(block);
             }
@@ -507,7 +507,7 @@ mod tests {
     use paradencer_consensus::{
         Bank, EpochSchedule, LeaderSchedule, StakeTracker, VoteProcessorConfig,
     };
-    use paradencer_mesh::bounded_link;
+    use paradencer_mesh::{bounded_link, DualReceiver};
     use paradencer_storage::{AccountDatabase, Pubkey};
 
     type TestInfra = (
@@ -568,7 +568,7 @@ mod tests {
 
         let service = ReplayService::with_block_input(
             ReplayServiceConfig::default(),
-            block_rx,
+            DualReceiver::Channel(block_rx),
             bank_forks,
             fork_choice,
             bridge,
@@ -589,7 +589,7 @@ mod tests {
 
         let mut service = ReplayService::with_block_input(
             ReplayServiceConfig::default(),
-            block_rx,
+            DualReceiver::Channel(block_rx),
             bank_forks,
             fork_choice,
             bridge,
@@ -614,7 +614,7 @@ mod tests {
 
         let mut service = ReplayService::with_block_input(
             ReplayServiceConfig::default(),
-            block_rx,
+            DualReceiver::Channel(block_rx),
             bank_forks,
             fork_choice,
             bridge,
@@ -647,7 +647,7 @@ mod tests {
 
         let mut service = ReplayService::with_block_input(
             config,
-            block_rx,
+            DualReceiver::Channel(block_rx),
             bank_forks,
             fork_choice,
             bridge,
@@ -815,7 +815,7 @@ mod tests {
 
         let service = ReplayService::with_block_input(
             ReplayServiceConfig::default(),
-            block_rx,
+            DualReceiver::Channel(block_rx),
             bank_forks,
             fork_choice,
             bridge,
@@ -836,7 +836,7 @@ mod tests {
 
         let service = ReplayService::with_block_input(
             ReplayServiceConfig::default(),
-            block_rx,
+            DualReceiver::Channel(block_rx),
             bank_forks,
             fork_choice,
             bridge,
@@ -860,7 +860,7 @@ mod tests {
 
         let service = ReplayService::with_block_input(
             ReplayServiceConfig::default(),
-            block_rx,
+            DualReceiver::Channel(block_rx),
             bank_forks,
             fork_choice,
             bridge,
@@ -908,7 +908,7 @@ mod tests {
 
         let service = ReplayService::with_block_input(
             ReplayServiceConfig::default(),
-            block_rx,
+            DualReceiver::Channel(block_rx),
             bank_forks,
             fork_choice,
             bridge,

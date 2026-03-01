@@ -16,7 +16,7 @@ use crate::verify_service::VerifyService;
 use crate::verify_stage::{
     TransactionSource, UnverifiedTransaction, VerifiedTransaction, VerifyConfig, VerifyStage,
 };
-use paradencer_mesh::bounded_link;
+use paradencer_mesh::{bounded_link, DualReceiver, DualSender};
 use paradencer_runtime::{Service, ServiceContext, ShutdownSwitch};
 use paradencer_types::Hash;
 use std::sync::atomic::Ordering;
@@ -50,7 +50,11 @@ fn verify_service_processes_and_forwards() {
         ..VerifyConfig::default()
     };
     let stage = VerifyStage::with_config(config);
-    let mut service = VerifyService::new(stage, in_rx, out_tx);
+    let mut service = VerifyService::new(
+        stage,
+        DualReceiver::Channel(in_rx),
+        DualSender::Channel(out_tx),
+    );
     let ctx = ServiceContext::new(ShutdownSwitch::new());
 
     for i in 0..5 {
@@ -78,7 +82,7 @@ fn resolv_service_processes_verified_transactions() {
     let test_hash = [0xAA_u8; 32];
     stage.register_blockhash(test_hash, 100);
 
-    let mut service = ResolvService::new(stage, in_rx, pack);
+    let mut service = ResolvService::new(stage, DualReceiver::Channel(in_rx), pack);
     let ctx = ServiceContext::new(ShutdownSwitch::new());
 
     for i in 0..3 {
@@ -171,14 +175,18 @@ fn full_pipeline_verify_resolv_pack_exec_poh() {
         ..VerifyConfig::default()
     };
     let verify_stage = VerifyStage::with_config(verify_config);
-    let mut verify_svc = VerifyService::new(verify_stage, unverified_rx, verified_tx);
+    let mut verify_svc = VerifyService::new(
+        verify_stage,
+        DualReceiver::Channel(unverified_rx),
+        DualSender::Channel(verified_tx),
+    );
 
     // === Stage 2: Resolv ===
     let mut resolv_stage = ResolvStage::new();
     let test_blockhash = [0xBB_u8; 32];
     resolv_stage.register_blockhash(test_blockhash, 200);
     let pack = PackScheduler::with_config(PackConfig::default());
-    let mut resolv_svc = ResolvService::new(resolv_stage, verified_rx, pack);
+    let mut resolv_svc = ResolvService::new(resolv_stage, DualReceiver::Channel(verified_rx), pack);
 
     // === Stage 3: Leader Pipeline (exec + PoH) ===
     let leader_pack = PackScheduler::with_config(PackConfig::default());
