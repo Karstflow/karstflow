@@ -5,7 +5,7 @@
 /// Manages FEC set completion via a pre-allocated resolver pool, triggers
 /// Reed-Solomon reconstruction when enough coding shreds arrive, and
 /// makes retransmit decisions based on the turbine tree structure.
-use crate::fec_resolver::{FecResolverPool, FecSetKey, ResolverInsertResult};
+use crate::fec_resolver::{EquivocationProof, FecResolverPool, FecSetKey, ResolverInsertResult};
 use crate::shred_verifier::{self, LeaderLookup, ShredVerifyResult};
 use paradencer_crypto::reed_solomon::FecReconstructor;
 use paradencer_mesh::{DualReceiveError, DualReceiver, OutPort, ReceiveError, SendError};
@@ -448,6 +448,11 @@ impl ShredNetworkStage {
         std::mem::take(&mut self.pending_completed)
     }
 
+    /// Drain equivocation proofs from the FEC resolver pool.
+    pub fn drain_equivocations(&mut self) -> Vec<EquivocationProof> {
+        self.resolver_pool.drain_equivocation_proofs()
+    }
+
     /// Check if a slot has received its last shred.
     pub fn is_slot_complete(&self, slot: u64) -> bool {
         self.slots
@@ -707,6 +712,8 @@ pub struct ShredNetworkService {
     store_output: Option<OutPort<CompletedFecSet>>,
     /// Retransmit decisions sent to turbine broadcaster.
     retransmit_output: Option<OutPort<RetransmitDecision>>,
+    /// Equivocation proofs sent to consensus for slashing evidence.
+    equivocation_output: Option<OutPort<EquivocationProof>>,
     /// Default source for incoming shreds (typically Turbine).
     default_source: ShredSource,
 }
@@ -724,6 +731,7 @@ impl ShredNetworkService {
             completed_output,
             store_output: None,
             retransmit_output: None,
+            equivocation_output: None,
             default_source: ShredSource::Turbine,
         }
     }
@@ -737,6 +745,12 @@ impl ShredNetworkService {
     /// Set the store output channel for blockstore persistence.
     pub fn with_store_output(mut self, output: OutPort<CompletedFecSet>) -> Self {
         self.store_output = Some(output);
+        self
+    }
+
+    /// Set the equivocation output channel for reporting shred conflicts.
+    pub fn with_equivocation_output(mut self, output: OutPort<EquivocationProof>) -> Self {
+        self.equivocation_output = Some(output);
         self
     }
 
@@ -791,6 +805,19 @@ impl ShredNetworkService {
         } else {
             // Discard retransmits if no output channel configured.
             self.stage.drain_retransmits();
+        }
+    }
+
+    /// Push equivocation proofs to the output channel.
+    fn flush_equivocations(&mut self) {
+        let proofs = self.stage.drain_equivocations();
+        if proofs.is_empty() {
+            return;
+        }
+        if let Some(ref output) = self.equivocation_output {
+            for proof in proofs {
+                let _ = output.try_send(proof);
+            }
         }
     }
 }
@@ -853,6 +880,7 @@ impl Service for ShredNetworkService {
 
         self.flush_completed();
         self.flush_retransmits();
+        self.flush_equivocations();
 
         Ok(())
     }
