@@ -947,6 +947,11 @@ impl ValidatorPipeline {
         self.leader.finish_slot()
     }
 
+    /// Take the accumulated PohEntries for shredding.
+    pub fn take_shred_entries(&mut self) -> Vec<crate::block_producer::PohEntry> {
+        self.leader.take_shred_entries()
+    }
+
     /// Number of queued transactions in the pack scheduler.
     pub fn queue_depth(&self) -> usize {
         self.leader.queue_depth()

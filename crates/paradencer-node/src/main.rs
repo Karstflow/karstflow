@@ -22,6 +22,100 @@ use paradencer_control::{
     start_gossip_service, BlockstoreShredProvider, ServiceBundle,
 };
 
+/// Shred produced entries, store in blockstore, and feed to self-replay.
+///
+/// Called by the leader orchestrator after a slot completes. Converts
+/// PohEntries into data + coding shreds, persists them in the blockstore
+/// for repair serving, and sends data shreds to the ShredCollector for
+/// self-replay of the produced block.
+fn shred_produced_entries(
+    slot: u64,
+    entry_batches: &[Vec<paradencer_stages::PohEntry>],
+    leader_pubkey: paradencer_storage::Pubkey,
+    signing_key: &ed25519_dalek::SigningKey,
+    shred_version: u16,
+    blockstore: Option<&std::sync::Arc<paradencer_storage::Blockstore>>,
+    direct_shred_sender: &mut Option<paradencer_mesh::DualSender<paradencer_types::shred::Shred>>,
+) {
+    let config = paradencer_stages::ShredderConfig {
+        shred_version,
+        ..Default::default()
+    };
+    let mut shredder = match paradencer_stages::EntryShredder::new(
+        leader_pubkey,
+        Some(signing_key.clone()),
+        slot,
+        config,
+    ) {
+        Ok(s) => s,
+        Err(e) => {
+            warn!(slot, error = %e, "failed to create shredder for produced block");
+            return;
+        }
+    };
+
+    let mut total_data = 0u64;
+    let mut total_coding = 0u64;
+
+    for batch in entry_batches {
+        if batch.is_empty() {
+            continue;
+        }
+
+        let data_shreds = match shredder.create_data_shreds(batch) {
+            Ok(shreds) => shreds,
+            Err(e) => {
+                warn!(slot, error = %e, "failed to create data shreds");
+                continue;
+            }
+        };
+        let coding_shreds = match shredder.create_coding_shreds(&data_shreds) {
+            Ok(shreds) => shreds,
+            Err(e) => {
+                warn!(slot, error = %e, "failed to create coding shreds");
+                // Still process data shreds even if coding fails.
+                for shred in &data_shreds {
+                    if let Some(bs) = blockstore {
+                        let _ = bs.insert_shred(shred);
+                    }
+                    if let Some(ref mut sender) = direct_shred_sender {
+                        let _ = sender.try_send(shred.clone());
+                    }
+                }
+                total_data += data_shreds.len() as u64;
+                continue;
+            }
+        };
+
+        total_data += data_shreds.len() as u64;
+        total_coding += coding_shreds.len() as u64;
+
+        // Store all shreds in blockstore for repair serving.
+        if let Some(bs) = blockstore {
+            for shred in data_shreds.iter().chain(coding_shreds.iter()) {
+                let _ = bs.insert_shred(shred);
+            }
+        }
+
+        // Feed data shreds to ShredCollector for self-replay.
+        // This closes the loop: leader produces → shreds → block assembled → replay.
+        if let Some(ref mut sender) = direct_shred_sender {
+            for shred in &data_shreds {
+                let _ = sender.try_send(shred.clone());
+            }
+        }
+    }
+
+    if total_data > 0 || total_coding > 0 {
+        info!(
+            slot,
+            data_shreds = total_data,
+            coding_shreds = total_coding,
+            "produced and broadcast block shreds",
+        );
+    }
+}
+
 fn main() -> paradencer_control::Result<()> {
     let parsed_command = parse_command(std::env::args())?;
     dispatch_command(
@@ -103,8 +197,9 @@ fn run_with_node_config(
     let shred_block_input = runtime_topology
         .shred_block_receiver
         .expect("topology must provide shred block receiver");
-    // Keep the direct shred sender alive so ShredCollector's input doesn't close.
-    let _direct_shred_sender = runtime_topology.direct_shred_sender;
+    // Direct shred sender feeds produced shreds into ShredCollector for
+    // self-replay. Used by the leader orchestrator during block production.
+    let direct_shred_sender = runtime_topology.direct_shred_sender;
     // Shred arrival receiver feeds the repair coordinator with turbine
     // progress information so it avoids requesting shreds already received.
     let shred_arrival_rx = runtime_topology
@@ -380,6 +475,20 @@ fn run_with_node_config(
         }
     };
 
+    // Open the blockstore early so it is available for both block production
+    // (leader orchestrator shred storage) and the repair/RPC services below.
+    let storage_engine_for_maintenance = consensus.storage_engine.clone();
+    let shared_blockstore: Option<std::sync::Arc<paradencer_storage::Blockstore>> = consensus
+        .storage_engine
+        .as_ref()
+        .and_then(|engine| match engine.open_blockstore() {
+            Ok(bs) => Some(std::sync::Arc::new(bs)),
+            Err(e) => {
+                warn!(error = %e, "failed to open blockstore, using in-memory fallback");
+                None
+            }
+        });
+
     // Build the transaction pipeline for block production.
     // Pipeline inputs come from topology TxFilter stages plus optional QUIC bridge.
     let pipeline_bundle = build_pipeline_service(
@@ -388,6 +497,9 @@ fn run_with_node_config(
     );
     // Wire leader slot orchestration: subscribe to replay signals and
     // drive the pipeline handle when this validator becomes leader.
+    // After each leader slot completes, entries are shredded and broadcast
+    // to the turbine tree, stored in the blockstore, and fed back to the
+    // shred collector for self-replay.
     {
         let leader_signal_rx = replay_bundle
             .signal_bus
@@ -396,6 +508,16 @@ fn run_with_node_config(
             .subscribe()
             .expect("signal bus subscriber limit not reached");
         let handle = pipeline_bundle.handle.clone();
+
+        // Identity for shred signing.
+        let leader_pubkey = paradencer_storage::Pubkey::from(*identity.pubkey());
+        let leader_signing_key =
+            ed25519_dalek::SigningKey::from_bytes(identity.secret_key());
+        let shred_version = node_config.expected_shred_version.unwrap_or(1);
+
+        // Clone shared resources for the orchestrator thread.
+        let orchestrator_blockstore = shared_blockstore.clone();
+        let mut orchestrator_shred_sender = direct_shred_sender;
 
         std::thread::Builder::new()
             .name("leader-orchestrator".into())
@@ -413,10 +535,27 @@ fn run_with_node_config(
                         }
                         paradencer_stages::ReplaySignal::SlotCompleted(info) => {
                             if handle.is_leading() && info.slot == handle.current_slot() {
+                                let slot = info.slot;
                                 handle.end_slot();
                                 // Register the new blockhash so the resolv
                                 // stage can validate transactions referencing it.
-                                handle.register_blockhash(info.bank_hash, info.slot);
+                                handle.register_blockhash(info.bank_hash, slot);
+
+                                // Extract produced entries and shred them.
+                                // The take_entries() call blocks briefly until
+                                // the pipeline service processes the request.
+                                let entry_batches = handle.take_entries();
+                                if !entry_batches.is_empty() {
+                                    shred_produced_entries(
+                                        slot,
+                                        &entry_batches,
+                                        leader_pubkey,
+                                        &leader_signing_key,
+                                        shred_version,
+                                        orchestrator_blockstore.as_ref(),
+                                        &mut orchestrator_shred_sender,
+                                    );
+                                }
                             }
                         }
                         paradencer_stages::ReplaySignal::RootAdvanced(info) => {
@@ -445,19 +584,6 @@ fn run_with_node_config(
     // Build the repair service for slot recovery from peers.
     // The coordinator runs poll-driven in the node runtime; background I/O
     // handles actual UDP request/response on a dedicated thread.
-    // When persistent storage is available, open the blockstore once and share
-    // the same Arc between the repair service and the RPC server.
-    let storage_engine_for_maintenance = consensus.storage_engine.clone();
-    let shared_blockstore: Option<std::sync::Arc<paradencer_storage::Blockstore>> = consensus
-        .storage_engine
-        .as_ref()
-        .and_then(|engine| match engine.open_blockstore() {
-            Ok(bs) => Some(std::sync::Arc::new(bs)),
-            Err(e) => {
-                warn!(error = %e, "failed to open blockstore, using in-memory fallback");
-                None
-            }
-        });
     let shred_provider: Option<std::sync::Arc<dyn paradencer_net::ShredProvider>> =
         shared_blockstore.as_ref().map(|bs| {
             std::sync::Arc::new(BlockstoreShredProvider::new(std::sync::Arc::clone(bs)))

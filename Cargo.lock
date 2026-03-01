@@ -1670,15 +1670,18 @@ name = "paradencer-node"
 version = "0.1.0"
 dependencies = [
  "crossbeam-channel",
+ "ed25519-dalek",
  "paradencer-config",
  "paradencer-consensus",
  "paradencer-control",
+ "paradencer-mesh",
  "paradencer-net",
  "paradencer-observability",
  "paradencer-plugin",
  "paradencer-stages",
  "paradencer-storage",
  "paradencer-topology",
+ "paradencer-types",
  "tracing",
 ]
 

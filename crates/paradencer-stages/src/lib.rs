@@ -113,6 +113,7 @@ pub use fec_resolver::{
     AtomicFecResolverStats, EquivocationProof, FecBufferHandle, FecResolverPool, FecResolverStats,
     FecSetKey, FecSetView, FecSetViewMut, ResolverInsertResult, SpilledFecSet,
 };
+pub use block_producer::{EntryShredder, PohEntry, ShredderConfig, ShredderError};
 pub use leader_pipeline::{
     LeaderPipeline, LeaderPipelineStats, PipelineStepResult, SbpfExecutionEngine,
 };

@@ -10,7 +10,7 @@
 ///
 /// The pipeline also manages the tick cadence: between microblock executions,
 /// the PoH service advances the hash chain to produce tick entries.
-use crate::block_producer::{Entry, MicroblockEntry, PohService, PohState};
+use crate::block_producer::{Entry, MicroblockEntry, PohEntry, PohService, PohState};
 use crate::exec_stage::{ExecStage, ExecutionEngine, MicroblockExecResult, TransactionExecResult};
 use crate::pack_stage::{MicroblockRebate, PackPacer, PackScheduler, PackedTransaction};
 use paradencer_sbpf::TransactionProcessor;
@@ -216,6 +216,9 @@ pub struct LeaderPipeline {
     pacer: Option<PackPacer>,
     /// Accumulated entries for the current slot.
     entries: Vec<Entry>,
+    /// Accumulated PohEntries with full transaction data for shredding.
+    /// Mirrors `entries` but includes serialized transaction payloads.
+    shred_entries: Vec<PohEntry>,
     /// Count of microblocks executed in this slot.
     microblocks_executed: u64,
     /// Per-slot statistics.
@@ -231,6 +234,7 @@ impl LeaderPipeline {
             poh,
             pacer: None,
             entries: Vec::new(),
+            shred_entries: Vec::new(),
             microblocks_executed: 0,
             stats: LeaderPipelineStats::default(),
         }
@@ -252,6 +256,7 @@ impl LeaderPipeline {
             poh,
             pacer: Some(pacer),
             entries: Vec::new(),
+            shred_entries: Vec::new(),
             microblocks_executed: 0,
             stats: LeaderPipelineStats::default(),
         }
@@ -261,6 +266,7 @@ impl LeaderPipeline {
     pub fn begin_slot(&mut self, slot: u64) {
         self.pack.new_block(slot);
         self.entries.clear();
+        self.shred_entries.clear();
         self.microblocks_executed = 0;
         self.stats = LeaderPipelineStats::default();
         if let Some(ref mut pacer) = self.pacer {
@@ -311,6 +317,17 @@ impl LeaderPipeline {
         // If PoH accepted the mixin, record the entry.
         if let Some(ref entry) = poh_entry {
             self.entries.push(Entry::Microblock(entry.clone()));
+            // Build a PohEntry with the full transaction payloads for shredding.
+            let transactions: Vec<Vec<u8>> = exec_result
+                .transaction_results
+                .iter()
+                .map(|r| r.payload.clone())
+                .collect();
+            self.shred_entries.push(PohEntry::new(
+                entry.num_hashes,
+                entry.hash,
+                transactions,
+            ));
         }
 
         // 5. Compute CU rebate and release pack locks
@@ -353,6 +370,16 @@ impl LeaderPipeline {
     /// Advance PoH by the given number of hashes, collecting tick entries.
     pub fn advance_poh(&mut self, target_hashes: u64) {
         let new_entries = self.poh.advance(target_hashes);
+        // Build PohEntries for ticks (no transactions).
+        for entry in &new_entries {
+            if let Entry::Tick(ref tick) = entry {
+                self.shred_entries.push(PohEntry::new(
+                    tick.num_hashes,
+                    tick.hash,
+                    Vec::new(),
+                ));
+            }
+        }
         self.entries.extend(new_entries);
     }
 
@@ -360,8 +387,26 @@ impl LeaderPipeline {
     /// slot completion signal.
     pub fn finish_slot(&mut self) -> Vec<Entry> {
         let (final_entries, _slot_complete) = self.poh.finish_slot();
+        // Build PohEntries for final tick entries.
+        for entry in &final_entries {
+            if let Entry::Tick(ref tick) = entry {
+                self.shred_entries.push(PohEntry::new(
+                    tick.num_hashes,
+                    tick.hash,
+                    Vec::new(),
+                ));
+            }
+        }
         self.entries.extend(final_entries);
         std::mem::take(&mut self.entries)
+    }
+
+    /// Take the accumulated PohEntries for shredding.
+    ///
+    /// These entries include full transaction payloads needed by the
+    /// EntryShredder. Call after `finish_slot()`.
+    pub fn take_shred_entries(&mut self) -> Vec<PohEntry> {
+        std::mem::take(&mut self.shred_entries)
     }
 
     /// Number of queued transactions.

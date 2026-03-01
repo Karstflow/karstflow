@@ -15,7 +15,7 @@
 /// During leader slots, use the `PipelineHandle` to call `begin_slot()` and
 /// `register_blockhash()` to activate block production. Produced entries
 /// accumulate until `end_slot()` collects them for shredding.
-use crate::block_producer::{Entry, PohService};
+use crate::block_producer::{Entry, PohEntry, PohService};
 use crate::exec_stage::{ExecConfig, ExecStage, ExecStats, ExecutionEngine, MockExecutionEngine};
 use crate::leader_pipeline::LeaderPipeline;
 use crate::pack_stage::{PackConfig, PackScheduler, PackStats};
@@ -181,6 +181,22 @@ impl PipelineHandle {
     pub fn current_slot(&self) -> u64 {
         self.current_slot.load(Ordering::Relaxed)
     }
+
+    /// Request PohEntries for shredding from completed leader slots.
+    ///
+    /// Blocks until the pipeline service processes the request on its next
+    /// tick (up to ~2ms). Returns all PohEntries from completed slots since
+    /// the last call.
+    pub fn take_entries(&self) -> Vec<Vec<PohEntry>> {
+        let (tx, rx) = std::sync::mpsc::sync_channel(1);
+        self.commands
+            .lock()
+            .unwrap()
+            .push(PipelineCommand::TakeEntries(tx));
+        // Block until the service processes the command. The service ticks
+        // every 2ms so this should return quickly.
+        rx.recv().unwrap_or_default()
+    }
 }
 
 /// Internal command enum for cross-service communication.
@@ -189,6 +205,9 @@ enum PipelineCommand {
     RegisterBlockhash(Blockhash, u64),
     AdvanceSlot(u64),
     EndSlot,
+    /// Request accumulated PohEntries for shredding. The oneshot sender
+    /// receives all PohEntries from completed leader slots.
+    TakeEntries(std::sync::mpsc::SyncSender<Vec<Vec<PohEntry>>>),
 }
 
 // ---------------------------------------------------------------------------
@@ -207,6 +226,8 @@ pub struct PipelineService {
     handle: Arc<PipelineHandle>,
     /// Entries from completed slots.
     completed_entries: Vec<Vec<Entry>>,
+    /// PohEntries from completed slots (with transaction data for shredding).
+    completed_shred_entries: Vec<Vec<PohEntry>>,
     /// Maximum transactions to drain per tick.
     max_drain_per_tick: usize,
 }
@@ -287,6 +308,7 @@ impl PipelineServiceBuilder {
             inputs: self.inputs,
             handle: Arc::clone(&handle),
             completed_entries: Vec::new(),
+            completed_shred_entries: Vec::new(),
             max_drain_per_tick: self.config.max_drain_per_tick,
         };
 
@@ -332,9 +354,17 @@ impl Service for PipelineService {
                     }
                     PipelineCommand::EndSlot => {
                         let entries = self.pipeline.finish_slot();
+                        let shred_entries = self.pipeline.take_shred_entries();
                         if !entries.is_empty() {
                             self.completed_entries.push(entries);
                         }
+                        if !shred_entries.is_empty() {
+                            self.completed_shred_entries.push(shred_entries);
+                        }
+                    }
+                    PipelineCommand::TakeEntries(sender) => {
+                        let entries = std::mem::take(&mut self.completed_shred_entries);
+                        let _ = sender.send(entries);
                     }
                 }
             }
