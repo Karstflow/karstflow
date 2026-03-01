@@ -973,6 +973,8 @@ pub struct RepairBundle {
     pub service: Box<dyn Service>,
     /// Background I/O handle — must be kept alive.
     pub io_handle: RepairHandle,
+    /// Atomic repair coordinator stats for cross-thread metrics access.
+    pub repair_stats: Arc<paradencer_stages::AtomicRepairStats>,
 }
 
 /// Service adapter that wraps the poll-driven RepairCoordinator.
@@ -994,6 +996,8 @@ struct RepairServiceAdapter {
     outbound_tx: crossbeam_channel::Sender<OutboundRepair>,
     /// Channel for receiving shred arrival notifications from the collector.
     shred_arrival_rx: crossbeam_channel::Receiver<ShredArrival>,
+    /// Atomic stats shared with the metrics aggregator.
+    atomic_stats: Arc<paradencer_stages::AtomicRepairStats>,
     ticks_since_peer_sync: u32,
     last_root: u64,
 }
@@ -1052,6 +1056,20 @@ impl Service for RepairServiceAdapter {
         if self.ticks_since_peer_sync >= 200 {
             self.ticks_since_peer_sync = 0;
             self.sync_peers_from_gossip();
+
+            // Flush coordinator stats to shared atomics for metrics access.
+            let s = self.coordinator.stats();
+            self.atomic_stats.flush_from(
+                s.requests_generated,
+                s.requests_deduped,
+                s.requests_sent,
+                s.responses_accepted,
+                s.responses_duplicate,
+                s.responses_unknown,
+                s.requests_timed_out,
+                s.slots_completed,
+                s.orphan_requests,
+            );
         }
 
         Ok(())
@@ -1206,6 +1224,8 @@ pub fn build_repair_service(
     // Channel for forwarding outbound repair requests to the I/O thread.
     let (outbound_tx, outbound_rx) = crossbeam_channel::bounded::<OutboundRepair>(256);
 
+    let atomic_stats = Arc::new(paradencer_stages::AtomicRepairStats::default());
+
     let adapter = RepairServiceAdapter {
         coordinator,
         cluster_info: Arc::clone(&cluster_info),
@@ -1213,6 +1233,7 @@ pub fn build_repair_service(
         bank_forks,
         outbound_tx,
         shred_arrival_rx,
+        atomic_stats: Arc::clone(&atomic_stats),
         ticks_since_peer_sync: 0,
         last_root: root_slot,
     };
@@ -1297,6 +1318,7 @@ pub fn build_repair_service(
             shutdown_tx: Some(shutdown_tx),
             _thread_handle: thread_handle,
         },
+        repair_stats: atomic_stats,
     })
 }
 

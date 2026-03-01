@@ -37,6 +37,7 @@ pub struct MetricsAggregator {
     gossip: Option<GossipSnapshot>,
     gossip_live: Option<GossipStatsRef>,
     replay: Option<ReplaySnapshot>,
+    repair: Option<Arc<AtomicRepairStats>>,
 }
 
 /// Builder and snapshot methods for MetricsAggregator.
@@ -56,6 +57,7 @@ impl MetricsAggregator {
             gossip: None,
             gossip_live: None,
             replay: None,
+            repair: None,
         }
     }
 
@@ -131,6 +133,12 @@ impl MetricsAggregator {
         self
     }
 
+    /// Register repair coordinator atomic stats (snapshotted on demand).
+    pub fn with_repair_live(mut self, stats: Arc<AtomicRepairStats>) -> Self {
+        self.repair = Some(stats);
+        self
+    }
+
     /// Update dedup stats snapshot (call before `snapshot()` for fresh data).
     pub fn update_dedup(&mut self, snapshot: DedupSnapshot) {
         self.dedup = Some(snapshot);
@@ -180,6 +188,7 @@ impl MetricsAggregator {
                 .map(|s| s.snapshot())
                 .or_else(|| self.gossip.clone()),
             replay: self.replay.clone(),
+            repair: self.repair.as_ref().map(|s| s.snapshot()),
         }
     }
 }
@@ -247,6 +256,104 @@ pub struct ReplaySnapshot {
     pub root_slot: u64,
 }
 
+/// Snapshot of repair coordinator counters.
+#[derive(Debug, Clone, Default)]
+pub struct RepairSnapshot {
+    pub requests_generated: u64,
+    pub requests_deduped: u64,
+    pub requests_sent: u64,
+    pub responses_accepted: u64,
+    pub responses_duplicate: u64,
+    pub responses_unknown: u64,
+    pub requests_timed_out: u64,
+    pub slots_completed: u64,
+    pub orphan_requests: u64,
+}
+
+/// Atomic repair coordinator statistics for lock-free cross-service access.
+///
+/// The repair coordinator runs on a single service thread with plain u64 stats.
+/// This struct is shared via `Arc` so the metrics aggregator can snapshot
+/// counters from a different thread. The adapter flushes coordinator stats
+/// to these atomics on each tick.
+#[derive(Debug)]
+pub struct AtomicRepairStats {
+    pub requests_generated: AtomicU64,
+    pub requests_deduped: AtomicU64,
+    pub requests_sent: AtomicU64,
+    pub responses_accepted: AtomicU64,
+    pub responses_duplicate: AtomicU64,
+    pub responses_unknown: AtomicU64,
+    pub requests_timed_out: AtomicU64,
+    pub slots_completed: AtomicU64,
+    pub orphan_requests: AtomicU64,
+}
+
+impl Default for AtomicRepairStats {
+    fn default() -> Self {
+        Self {
+            requests_generated: AtomicU64::new(0),
+            requests_deduped: AtomicU64::new(0),
+            requests_sent: AtomicU64::new(0),
+            responses_accepted: AtomicU64::new(0),
+            responses_duplicate: AtomicU64::new(0),
+            responses_unknown: AtomicU64::new(0),
+            requests_timed_out: AtomicU64::new(0),
+            slots_completed: AtomicU64::new(0),
+            orphan_requests: AtomicU64::new(0),
+        }
+    }
+}
+
+impl AtomicRepairStats {
+    /// Take a point-in-time snapshot of all counters.
+    pub fn snapshot(&self) -> RepairSnapshot {
+        RepairSnapshot {
+            requests_generated: self.requests_generated.load(Ordering::Relaxed),
+            requests_deduped: self.requests_deduped.load(Ordering::Relaxed),
+            requests_sent: self.requests_sent.load(Ordering::Relaxed),
+            responses_accepted: self.responses_accepted.load(Ordering::Relaxed),
+            responses_duplicate: self.responses_duplicate.load(Ordering::Relaxed),
+            responses_unknown: self.responses_unknown.load(Ordering::Relaxed),
+            requests_timed_out: self.requests_timed_out.load(Ordering::Relaxed),
+            slots_completed: self.slots_completed.load(Ordering::Relaxed),
+            orphan_requests: self.orphan_requests.load(Ordering::Relaxed),
+        }
+    }
+
+    /// Flush plain u64 stats from the repair coordinator into atomics.
+    pub fn flush_from(
+        &self,
+        requests_generated: u64,
+        requests_deduped: u64,
+        requests_sent: u64,
+        responses_accepted: u64,
+        responses_duplicate: u64,
+        responses_unknown: u64,
+        requests_timed_out: u64,
+        slots_completed: u64,
+        orphan_requests: u64,
+    ) {
+        self.requests_generated
+            .store(requests_generated, Ordering::Relaxed);
+        self.requests_deduped
+            .store(requests_deduped, Ordering::Relaxed);
+        self.requests_sent.store(requests_sent, Ordering::Relaxed);
+        self.responses_accepted
+            .store(responses_accepted, Ordering::Relaxed);
+        self.responses_duplicate
+            .store(responses_duplicate, Ordering::Relaxed);
+        self.responses_unknown
+            .store(responses_unknown, Ordering::Relaxed);
+        self.requests_timed_out
+            .store(requests_timed_out, Ordering::Relaxed);
+        self.slots_completed
+            .store(slots_completed, Ordering::Relaxed);
+        self.orphan_requests
+            .store(orphan_requests, Ordering::Relaxed);
+    }
+}
+
 /// Holds cloned `Arc<AtomicU64>` references from gossip service stats.
 ///
 /// This struct allows the metrics aggregator to snapshot gossip counters
@@ -305,6 +412,7 @@ pub struct AggregatedSnapshot {
     pub fec_cache: Option<FecCacheSnapshot>,
     pub gossip: Option<GossipSnapshot>,
     pub replay: Option<ReplaySnapshot>,
+    pub repair: Option<RepairSnapshot>,
 }
 
 impl AggregatedSnapshot {
@@ -587,6 +695,45 @@ impl AggregatedSnapshot {
                 r.transactions_failed
             ));
             lines.push(format!("paradencer_replay_root_slot {}", r.root_slot));
+        }
+
+        if let Some(ref rp) = self.repair {
+            lines.push(format!(
+                "paradencer_repair_requests_generated {}",
+                rp.requests_generated
+            ));
+            lines.push(format!(
+                "paradencer_repair_requests_deduped {}",
+                rp.requests_deduped
+            ));
+            lines.push(format!(
+                "paradencer_repair_requests_sent {}",
+                rp.requests_sent
+            ));
+            lines.push(format!(
+                "paradencer_repair_responses_accepted {}",
+                rp.responses_accepted
+            ));
+            lines.push(format!(
+                "paradencer_repair_responses_duplicate {}",
+                rp.responses_duplicate
+            ));
+            lines.push(format!(
+                "paradencer_repair_responses_unknown {}",
+                rp.responses_unknown
+            ));
+            lines.push(format!(
+                "paradencer_repair_requests_timed_out {}",
+                rp.requests_timed_out
+            ));
+            lines.push(format!(
+                "paradencer_repair_slots_completed {}",
+                rp.slots_completed
+            ));
+            lines.push(format!(
+                "paradencer_repair_orphan_requests {}",
+                rp.orphan_requests
+            ));
         }
 
         lines

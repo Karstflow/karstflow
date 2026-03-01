@@ -474,6 +474,7 @@ fn run_with_node_config(
     // Keep repair I/O handle alive — its JoinHandle keeps the background
     // UDP requester/server thread running for the repair service lifetime.
     let _repair_io = repair_bundle.io_handle;
+    let repair_stats = repair_bundle.repair_stats;
 
     // Keep handles to consensus state for the live RPC provider and gossip vote handler.
     let rpc_bank_forks = consensus.bank_forks.clone();
@@ -604,6 +605,7 @@ fn run_with_node_config(
         if let Some(ref fec_stats) = runtime_topology.fec_resolver_stats {
             aggregator = aggregator.with_fec_resolver_live(std::sync::Arc::clone(fec_stats));
         }
+        aggregator = aggregator.with_repair_live(std::sync::Arc::clone(&repair_stats));
         rpt.with_aggregator(aggregator)
     });
 
