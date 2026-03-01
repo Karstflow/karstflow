@@ -447,6 +447,57 @@ impl VoteProcessor {
         result
     }
 
+    /// Look up the vote account pubkey for a given node identity.
+    ///
+    /// This is the reverse mapping of `VoteState.node_pubkey`. Returns
+    /// `None` if no registered vote account has that node identity.
+    pub fn vote_account_for_node_identity(&self, node_identity: &Pubkey) -> Option<Pubkey> {
+        for (vote_account, vote_state) in &self.vote_states {
+            if vote_state.node_pubkey == *node_identity {
+                return Some(*vote_account);
+            }
+        }
+        None
+    }
+
+    /// Process a vote received via gossip.
+    ///
+    /// Gossip votes use relaxed validation (no tower lockout enforcement)
+    /// since we only observe other validators' votes, not our own.
+    /// Feeds results into both fork choice and commitment tracker.
+    ///
+    /// Returns confirmation events for any newly crossed thresholds.
+    pub fn process_gossip_vote(
+        &mut self,
+        vote_account: Pubkey,
+        slot: u64,
+        fork_choice: Option<&mut ForkChoice>,
+        commitment_tracker: &mut CommitmentTracker,
+    ) -> Vec<ConfirmationEvent> {
+        let stake = self.get_vote_stake(&vote_account);
+        if stake == 0 {
+            return Vec::new();
+        }
+
+        // Update slot vote aggregation (deduplicated by add_vote)
+        let vote_info = self
+            .slot_votes
+            .entry(slot)
+            .or_insert_with(|| SlotVoteInfo::new(slot));
+        vote_info.add_vote(vote_account, stake);
+        vote_info.update_thresholds(self.total_stake);
+
+        let total_stake_for_slot = vote_info.total_stake;
+
+        // Update fork choice
+        if let Some(fc) = fork_choice {
+            fc.record_validator_vote(vote_account, slot, stake);
+        }
+
+        // Feed into commitment tracker
+        commitment_tracker.update_stake(slot, total_stake_for_slot, self.total_stake)
+    }
+
     /// Get a list of vote accounts that have voted on a slot.
     pub fn voters_for_slot(&self, slot: u64) -> Vec<Pubkey> {
         self.slot_votes
@@ -874,7 +925,7 @@ mod tests {
         let (vote2, _) = setup_vote_account(&mut processor, 400);
         processor.total_stake = 1000;
 
-        let mut commitment = CommitmentTracker::new(CommitmentConfig::default());
+        let mut commitment = CommitmentTracker::default();
         commitment.mark_processed(100, 0, 1000);
 
         // First vote: 400/1000 = 40% — crosses propagated (1/3)
@@ -908,7 +959,7 @@ mod tests {
         let (vote2, _) = setup_vote_account(&mut processor, 500);
         processor.total_stake = 1000;
 
-        let mut commitment = CommitmentTracker::new(CommitmentConfig::default());
+        let mut commitment = CommitmentTracker::default();
         commitment.mark_processed(100, 0, 1000);
 
         let votes = vec![(vote1, 100, 1000), (vote2, 100, 1001)];
@@ -993,5 +1044,85 @@ mod tests {
         assert_eq!(by_node.len(), 1);
         assert!(by_node.contains_key(&node));
         assert!(!by_node.contains_key(&zero_node));
+    }
+
+    #[test]
+    fn vote_account_for_node_identity_resolves() {
+        let mut processor = create_test_vote_processor();
+        let (vote_account, node_identity) = setup_vote_account(&mut processor, 500);
+
+        // Forward lookup works.
+        assert_eq!(
+            processor.vote_account_for_node_identity(&node_identity),
+            Some(vote_account)
+        );
+
+        // Unknown identity returns None.
+        assert_eq!(
+            processor.vote_account_for_node_identity(&Pubkey::new_unique()),
+            None
+        );
+    }
+
+    #[test]
+    fn process_gossip_vote_updates_commitment() {
+        let mut processor = create_test_vote_processor();
+        let (vote1, _) = setup_vote_account(&mut processor, 500);
+        let (vote2, _) = setup_vote_account(&mut processor, 500);
+        processor.total_stake = 1000;
+
+        let mut fc = ForkChoice::new(0);
+        let mut commitment = CommitmentTracker::default();
+        commitment.mark_processed(100, 0, 1000);
+
+        // First gossip vote: 500/1000 = 50% → crosses DuplicateConfirmed (52%? no, 50%)
+        let events1 = processor.process_gossip_vote(vote1, 100, Some(&mut fc), &mut commitment);
+        // 50% → Propagated only (1/3 threshold)
+        assert!(!events1.is_empty());
+
+        // Second gossip vote: 1000/1000 = 100% → crosses remaining thresholds
+        let events2 = processor.process_gossip_vote(vote2, 100, Some(&mut fc), &mut commitment);
+        assert!(!events2.is_empty());
+        assert!(commitment.is_optimistically_confirmed(100));
+    }
+
+    #[test]
+    fn process_gossip_vote_deduplicates() {
+        let mut processor = create_test_vote_processor();
+        let (vote1, _) = setup_vote_account(&mut processor, 500);
+        processor.total_stake = 1000;
+
+        let mut commitment = CommitmentTracker::default();
+        commitment.mark_processed(100, 0, 1000);
+
+        // Process the same vote twice — should only count once.
+        let _events1 = processor.process_gossip_vote(vote1, 100, None, &mut commitment);
+        let events2 = processor.process_gossip_vote(vote1, 100, None, &mut commitment);
+
+        // Second call should produce no new events (stake didn't change).
+        assert!(events2.is_empty());
+
+        // Stake should be 500, not 1000.
+        let vote_info = processor.slot_votes.get(&100).unwrap();
+        assert_eq!(vote_info.total_stake, 500);
+    }
+
+    #[test]
+    fn process_gossip_vote_ignores_zero_stake() {
+        let mut processor = create_test_vote_processor();
+        // Register vote account but with no delegated stake.
+        let vote_account = Pubkey::new_unique();
+        let node = Pubkey::new_unique();
+        processor.register_vote_account(
+            vote_account,
+            VoteState::new(node, Pubkey::new_unique(), Pubkey::new_unique(), 5),
+        );
+        processor.total_stake = 1000;
+
+        let mut commitment = CommitmentTracker::default();
+
+        let events = processor.process_gossip_vote(vote_account, 100, None, &mut commitment);
+        assert!(events.is_empty());
+        assert!(!processor.slot_votes.contains_key(&100));
     }
 }

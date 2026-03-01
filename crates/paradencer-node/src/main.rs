@@ -461,10 +461,13 @@ fn run_with_node_config(
     // UDP requester/server thread running for the repair service lifetime.
     let _repair_io = repair_bundle.io_handle;
 
-    // Keep handles to consensus state for the live RPC provider.
+    // Keep handles to consensus state for the live RPC provider and gossip vote handler.
     let rpc_bank_forks = consensus.bank_forks.clone();
     let rpc_commitment_tracker = consensus.commitment_tracker.clone();
     let rpc_cluster_info = cluster_info.clone();
+    let gossip_vote_processor = consensus.vote_processor.clone();
+    let gossip_fork_choice = consensus.fork_choice.clone();
+    let gossip_commitment = consensus.commitment_tracker.clone();
 
     // Build the vote broadcast service. Monitors the shared Tower for
     // new consensus decisions and pushes them to gossip as CrdsValue
@@ -488,6 +491,66 @@ fn run_with_node_config(
         vote_sender_forks,
         vote_sender_cluster,
     );
+
+    // Gossip vote handler: poll CRDS for vote values from other validators
+    // and feed them into VoteProcessor + CommitmentTracker for faster
+    // optimistic confirmation and fork choice updates.
+    {
+        let gv_cluster_info = rpc_cluster_info.clone();
+        let gv_vote_processor = gossip_vote_processor;
+        let gv_fork_choice = gossip_fork_choice;
+        let gv_commitment = gossip_commitment;
+
+        std::thread::Builder::new()
+            .name("gossip-votes".into())
+            .spawn(move || {
+                let mut cursor: u64 = gv_cluster_info.cursor();
+
+                loop {
+                    // Poll every 200ms for new CRDS entries.
+                    std::thread::sleep(std::time::Duration::from_millis(200));
+
+                    let (values, new_cursor) = gv_cluster_info.values_since_cursor(cursor);
+                    if new_cursor == cursor {
+                        continue;
+                    }
+                    cursor = new_cursor;
+
+                    // Filter for vote CRDS values from other validators.
+                    let votes: Vec<_> = values
+                        .iter()
+                        .filter_map(|v| {
+                            if let paradencer_net::gossip::crds::CrdsValueData::Vote(vote) = &v.data
+                            {
+                                Some((v.origin, vote.slot))
+                            } else {
+                                None
+                            }
+                        })
+                        .collect();
+
+                    if votes.is_empty() {
+                        continue;
+                    }
+
+                    // Lock vote processor to resolve identity → vote account
+                    // and process each gossip vote.
+                    let mut vp = gv_vote_processor.lock().unwrap();
+                    let mut fc = gv_fork_choice.lock().unwrap();
+                    let mut ct = gv_commitment.lock().unwrap();
+
+                    for (node_identity, slot) in votes {
+                        let node_pubkey = paradencer_storage::Pubkey::from(node_identity);
+                        if let Some(vote_account) = vp.vote_account_for_node_identity(&node_pubkey)
+                        {
+                            let _events =
+                                vp.process_gossip_vote(vote_account, slot, Some(&mut fc), &mut ct);
+                        }
+                    }
+                }
+            })
+            .expect("failed to spawn gossip-votes thread");
+    }
 
     // Build MetricsAggregator from pipeline stage stats and attach to reporter.
     // This enables all pipeline metrics (verify, resolv, pack, exec, shred)
