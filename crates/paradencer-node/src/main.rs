@@ -510,11 +510,13 @@ fn run_with_node_config(
     // Gossip vote handler: poll CRDS for vote values from other validators
     // and feed them into VoteProcessor + CommitmentTracker for faster
     // optimistic confirmation and fork choice updates.
+    let consensus_stats = std::sync::Arc::new(paradencer_stages::AtomicConsensusStats::default());
     {
         let gv_cluster_info = rpc_cluster_info.clone();
         let gv_vote_processor = gossip_vote_processor;
         let gv_fork_choice = gossip_fork_choice;
         let gv_commitment = gossip_commitment;
+        let gv_consensus_stats = std::sync::Arc::clone(&consensus_stats);
 
         std::thread::Builder::new()
             .name("gossip-votes".into())
@@ -527,6 +529,42 @@ fn run_with_node_config(
 
                     let (values, new_cursor) = gv_cluster_info.values_since_cursor(cursor);
                     if new_cursor == cursor {
+                        // Even without new votes, flush VP stats on each poll
+                        // so Prometheus always has fresh consensus data.
+                        if let Ok(vp) = gv_vote_processor.lock() {
+                            let s = vp.get_stats();
+                            gv_consensus_stats.total_slots_with_votes.store(
+                                s.total_slots_with_votes as u64,
+                                std::sync::atomic::Ordering::Relaxed,
+                            );
+                            gv_consensus_stats.slots_with_supermajority.store(
+                                s.slots_with_supermajority as u64,
+                                std::sync::atomic::Ordering::Relaxed,
+                            );
+                            gv_consensus_stats.slots_propagated.store(
+                                s.slots_propagated as u64,
+                                std::sync::atomic::Ordering::Relaxed,
+                            );
+                            gv_consensus_stats.slots_duplicate_confirmed.store(
+                                s.slots_duplicate_confirmed as u64,
+                                std::sync::atomic::Ordering::Relaxed,
+                            );
+                            gv_consensus_stats.slots_super_confirmed.store(
+                                s.slots_super_confirmed as u64,
+                                std::sync::atomic::Ordering::Relaxed,
+                            );
+                            gv_consensus_stats.total_validators.store(
+                                s.total_validators as u64,
+                                std::sync::atomic::Ordering::Relaxed,
+                            );
+                            gv_consensus_stats.active_validators.store(
+                                s.active_validators as u64,
+                                std::sync::atomic::Ordering::Relaxed,
+                            );
+                            gv_consensus_stats
+                                .total_stake
+                                .store(s.total_stake, std::sync::atomic::Ordering::Relaxed);
+                        }
                         continue;
                     }
                     cursor = new_cursor;
@@ -606,6 +644,7 @@ fn run_with_node_config(
             aggregator = aggregator.with_fec_resolver_live(std::sync::Arc::clone(fec_stats));
         }
         aggregator = aggregator.with_repair_live(std::sync::Arc::clone(&repair_stats));
+        aggregator = aggregator.with_consensus_live(std::sync::Arc::clone(&consensus_stats));
         rpt.with_aggregator(aggregator)
     });
 

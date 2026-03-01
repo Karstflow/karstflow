@@ -38,6 +38,7 @@ pub struct MetricsAggregator {
     gossip_live: Option<GossipStatsRef>,
     replay: Option<ReplaySnapshot>,
     repair: Option<Arc<AtomicRepairStats>>,
+    consensus: Option<Arc<AtomicConsensusStats>>,
 }
 
 /// Builder and snapshot methods for MetricsAggregator.
@@ -58,6 +59,7 @@ impl MetricsAggregator {
             gossip_live: None,
             replay: None,
             repair: None,
+            consensus: None,
         }
     }
 
@@ -139,6 +141,12 @@ impl MetricsAggregator {
         self
     }
 
+    /// Register consensus vote processor atomic stats (snapshotted on demand).
+    pub fn with_consensus_live(mut self, stats: Arc<AtomicConsensusStats>) -> Self {
+        self.consensus = Some(stats);
+        self
+    }
+
     /// Update dedup stats snapshot (call before `snapshot()` for fresh data).
     pub fn update_dedup(&mut self, snapshot: DedupSnapshot) {
         self.dedup = Some(snapshot);
@@ -189,6 +197,7 @@ impl MetricsAggregator {
                 .or_else(|| self.gossip.clone()),
             replay: self.replay.clone(),
             repair: self.repair.as_ref().map(|s| s.snapshot()),
+            consensus: self.consensus.as_ref().map(|s| s.snapshot()),
         }
     }
 }
@@ -354,6 +363,66 @@ impl AtomicRepairStats {
     }
 }
 
+/// Snapshot of consensus vote processor counters.
+#[derive(Debug, Clone, Default)]
+pub struct ConsensusSnapshot {
+    pub total_slots_with_votes: u64,
+    pub slots_with_supermajority: u64,
+    pub slots_propagated: u64,
+    pub slots_duplicate_confirmed: u64,
+    pub slots_super_confirmed: u64,
+    pub total_validators: u64,
+    pub active_validators: u64,
+    pub total_stake: u64,
+}
+
+/// Atomic consensus statistics for lock-free cross-service access.
+///
+/// The gossip-votes thread locks VoteProcessor every 200ms and flushes
+/// stats to these atomics. The metrics aggregator snapshots them on demand.
+#[derive(Debug)]
+pub struct AtomicConsensusStats {
+    pub total_slots_with_votes: AtomicU64,
+    pub slots_with_supermajority: AtomicU64,
+    pub slots_propagated: AtomicU64,
+    pub slots_duplicate_confirmed: AtomicU64,
+    pub slots_super_confirmed: AtomicU64,
+    pub total_validators: AtomicU64,
+    pub active_validators: AtomicU64,
+    pub total_stake: AtomicU64,
+}
+
+impl Default for AtomicConsensusStats {
+    fn default() -> Self {
+        Self {
+            total_slots_with_votes: AtomicU64::new(0),
+            slots_with_supermajority: AtomicU64::new(0),
+            slots_propagated: AtomicU64::new(0),
+            slots_duplicate_confirmed: AtomicU64::new(0),
+            slots_super_confirmed: AtomicU64::new(0),
+            total_validators: AtomicU64::new(0),
+            active_validators: AtomicU64::new(0),
+            total_stake: AtomicU64::new(0),
+        }
+    }
+}
+
+impl AtomicConsensusStats {
+    /// Take a point-in-time snapshot of all counters.
+    pub fn snapshot(&self) -> ConsensusSnapshot {
+        ConsensusSnapshot {
+            total_slots_with_votes: self.total_slots_with_votes.load(Ordering::Relaxed),
+            slots_with_supermajority: self.slots_with_supermajority.load(Ordering::Relaxed),
+            slots_propagated: self.slots_propagated.load(Ordering::Relaxed),
+            slots_duplicate_confirmed: self.slots_duplicate_confirmed.load(Ordering::Relaxed),
+            slots_super_confirmed: self.slots_super_confirmed.load(Ordering::Relaxed),
+            total_validators: self.total_validators.load(Ordering::Relaxed),
+            active_validators: self.active_validators.load(Ordering::Relaxed),
+            total_stake: self.total_stake.load(Ordering::Relaxed),
+        }
+    }
+}
+
 /// Holds cloned `Arc<AtomicU64>` references from gossip service stats.
 ///
 /// This struct allows the metrics aggregator to snapshot gossip counters
@@ -413,6 +482,7 @@ pub struct AggregatedSnapshot {
     pub gossip: Option<GossipSnapshot>,
     pub replay: Option<ReplaySnapshot>,
     pub repair: Option<RepairSnapshot>,
+    pub consensus: Option<ConsensusSnapshot>,
 }
 
 impl AggregatedSnapshot {
@@ -733,6 +803,41 @@ impl AggregatedSnapshot {
             lines.push(format!(
                 "paradencer_repair_orphan_requests {}",
                 rp.orphan_requests
+            ));
+        }
+
+        if let Some(ref c) = self.consensus {
+            lines.push(format!(
+                "paradencer_consensus_slots_with_votes {}",
+                c.total_slots_with_votes
+            ));
+            lines.push(format!(
+                "paradencer_consensus_slots_supermajority {}",
+                c.slots_with_supermajority
+            ));
+            lines.push(format!(
+                "paradencer_consensus_slots_propagated {}",
+                c.slots_propagated
+            ));
+            lines.push(format!(
+                "paradencer_consensus_slots_duplicate_confirmed {}",
+                c.slots_duplicate_confirmed
+            ));
+            lines.push(format!(
+                "paradencer_consensus_slots_super_confirmed {}",
+                c.slots_super_confirmed
+            ));
+            lines.push(format!(
+                "paradencer_consensus_total_validators {}",
+                c.total_validators
+            ));
+            lines.push(format!(
+                "paradencer_consensus_active_validators {}",
+                c.active_validators
+            ));
+            lines.push(format!(
+                "paradencer_consensus_total_stake {}",
+                c.total_stake
             ));
         }
 

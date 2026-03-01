@@ -65,8 +65,9 @@ pub use errors::StageError;
 pub use execution_adapter::SbpfExecutionAdapter;
 pub use health::{shared_health_status, SharedHealthStatus};
 pub use metrics_aggregator::{
-    AggregatedSnapshot, AtomicRepairStats, DedupSnapshot, FecCacheSnapshot, FecResolverSnapshot,
-    GossipSnapshot, GossipStatsRef, MetricsAggregator, RepairSnapshot, ReplaySnapshot,
+    AggregatedSnapshot, AtomicConsensusStats, AtomicRepairStats, ConsensusSnapshot, DedupSnapshot,
+    FecCacheSnapshot, FecResolverSnapshot, GossipSnapshot, GossipStatsRef, MetricsAggregator,
+    RepairSnapshot, ReplaySnapshot,
 };
 pub use metrics_http::{
     shared_metrics_content, MetricsContent, MetricsHttpServer, MetricsHttpStats,
