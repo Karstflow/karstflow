@@ -289,10 +289,18 @@ impl ShredNetworkStage {
         self.ensure_slot_tracked(slot);
 
         // Schedule retransmit for turbine shreds BEFORE borrowing slot state.
+        // Use the original wire-format bytes (raw) when available so the
+        // retransmitted packet is a valid shred. Fall back to payload if raw
+        // is absent (e.g. locally constructed shreds).
         let should_retransmit =
             net_shred.source == ShredSource::Turbine && self.config.turbine_neighbor_count > 0;
         if should_retransmit {
-            self.schedule_retransmit(slot, &net_shred.shred.payload);
+            let wire_bytes = net_shred
+                .shred
+                .raw
+                .as_deref()
+                .unwrap_or(&net_shred.shred.payload);
+            self.schedule_retransmit(slot, wire_bytes);
         }
 
         let slot_state = self.slots.get_mut(&slot).unwrap();
