@@ -1572,6 +1572,17 @@ pub fn spawn_snapshot_thread(
     snapshot_dir: std::path::PathBuf,
     config: SnapshotConfig,
 ) -> Option<std::thread::JoinHandle<()>> {
+    spawn_snapshot_thread_with_gossip(signal_bus, accounts, bank_forks, snapshot_dir, config, None)
+}
+
+pub fn spawn_snapshot_thread_with_gossip(
+    signal_bus: &Arc<Mutex<paradencer_stages::SignalBus>>,
+    accounts: Option<Arc<AccountDatabase>>,
+    bank_forks: Arc<RwLock<BankForks>>,
+    snapshot_dir: std::path::PathBuf,
+    config: SnapshotConfig,
+    cluster_info: Option<Arc<ClusterInfo>>,
+) -> Option<std::thread::JoinHandle<()>> {
     let accounts = accounts?;
 
     let signal_rx = signal_bus
@@ -1585,6 +1596,9 @@ pub fn spawn_snapshot_thread(
         .spawn(move || {
             let mut scheduler = SnapshotScheduler::new(config.clone());
             let creator = SnapshotCreator::new(config);
+            // Track the latest full and incremental snapshot hashes for gossip.
+            let mut latest_full: Option<(u64, [u8; 32])> = None;
+            let mut latest_incrementals: Vec<(u64, [u8; 32])> = Vec::new();
 
             // Ensure snapshot directory exists.
             if let Err(e) = std::fs::create_dir_all(&snapshot_dir) {
@@ -1612,6 +1626,7 @@ pub fn spawn_snapshot_thread(
                             bank_state.as_ref(),
                         ) {
                             Ok(stats) => {
+                                let (accounts_hash, _) = accounts.compute_accounts_hash();
                                 info!(
                                     slot,
                                     accounts = stats.total_accounts,
@@ -1621,6 +1636,14 @@ pub fn spawn_snapshot_thread(
                                     "full snapshot created",
                                 );
                                 scheduler.record_full(slot, stats.archive_path);
+                                latest_full = Some((slot, accounts_hash));
+                                latest_incrementals.clear();
+                                if let Some(ref ci) = cluster_info {
+                                    ci.publish_snapshot_hashes(
+                                        (slot, accounts_hash),
+                                        Vec::new(),
+                                    );
+                                }
                             }
                             Err(e) => {
                                 error!(slot, error = %e, "full snapshot creation failed");
@@ -1639,6 +1662,7 @@ pub fn spawn_snapshot_thread(
                             bank_state.as_ref(),
                         ) {
                             Ok((stats, incr_stats)) => {
+                                let (accounts_hash, _) = accounts.compute_accounts_hash();
                                 info!(
                                     slot,
                                     base_slot,
@@ -1649,6 +1673,15 @@ pub fn spawn_snapshot_thread(
                                     "incremental snapshot created",
                                 );
                                 scheduler.record_incremental(slot, stats.archive_path);
+                                latest_incrementals.push((slot, accounts_hash));
+                                if let (Some(ref ci), Some(base)) =
+                                    (&cluster_info, latest_full)
+                                {
+                                    ci.publish_snapshot_hashes(
+                                        base,
+                                        latest_incrementals.clone(),
+                                    );
+                                }
                             }
                             Err(e) => {
                                 error!(
