@@ -590,7 +590,7 @@ pub enum VoteProcessorError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{CommitmentConfig, Delegation, VoteState};
+    use crate::{Delegation, VoteState};
 
     fn create_test_vote_processor() -> VoteProcessor {
         let config = VoteProcessorConfig::default();

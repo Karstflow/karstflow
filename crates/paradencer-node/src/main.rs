@@ -425,7 +425,11 @@ fn run_with_node_config(
     // Build the turbine retransmit service for shred propagation.
     // Uses the gossip-derived identity and cluster state to route shreds
     // through the turbine tree.
-    let turbine_bundle = build_turbine_service(node_id, cluster_info.clone())?;
+    let turbine_bundle = build_turbine_service(
+        node_id,
+        cluster_info.clone(),
+        consensus.vote_processor.clone(),
+    )?;
     let retransmit_service = turbine_bundle.retransmit;
 
     // Build the repair service for slot recovery from peers.

@@ -812,6 +812,7 @@ struct TurbineServiceAdapter {
     node_id: NodeId,
     turbine_config: TurbineConfig,
     ticks_since_tree_rebuild: u32,
+    vote_processor: Arc<Mutex<VoteProcessor>>,
 }
 
 impl Service for TurbineServiceAdapter {
@@ -864,9 +865,17 @@ impl TurbineServiceAdapter {
             return;
         }
 
+        // Use real stake weights from the vote processor for
+        // stake-weighted turbine tree construction.
+        let node_stakes = self.vote_processor.lock().unwrap().stake_by_node_identity();
+
         let validators: Vec<ValidatorInfo> = peers
             .into_iter()
-            .map(|ci| ValidatorInfo::new(ci, 1))
+            .map(|ci| {
+                let node_pubkey = Pubkey::from(ci.node_id.0);
+                let stake = node_stakes.get(&node_pubkey).copied().unwrap_or(1);
+                ValidatorInfo::new(ci, stake)
+            })
             .collect();
 
         let self_contact_info = self.cluster_info.self_contact_info();
@@ -888,6 +897,7 @@ impl TurbineServiceAdapter {
 pub fn build_turbine_service(
     node_id: NodeId,
     cluster_info: Arc<ClusterInfo>,
+    vote_processor: Arc<Mutex<VoteProcessor>>,
 ) -> Result<TurbineBundle> {
     let transport = Arc::new(
         UdpShredTransport::new("0.0.0.0:0".parse().unwrap()).map_err(|e| {
@@ -914,6 +924,7 @@ pub fn build_turbine_service(
         node_id,
         turbine_config,
         ticks_since_tree_rebuild: 0,
+        vote_processor,
     };
 
     Ok(TurbineBundle {
