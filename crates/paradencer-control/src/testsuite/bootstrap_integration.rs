@@ -127,7 +127,7 @@ fn build_shred_pipeline_with_blockstore_persists_shreds() {
     };
 
     let blockstore = Arc::new(Blockstore::in_memory());
-    let bundle = build_shred_pipeline(
+    let mut bundle = build_shred_pipeline(
         ShredCollectorConfig::default(),
         Some(Arc::clone(&blockstore)),
         None,

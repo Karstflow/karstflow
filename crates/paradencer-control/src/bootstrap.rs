@@ -15,7 +15,7 @@ use paradencer_consensus::{
 };
 use paradencer_core::{ExecutionMode, LinkKind, PinnedCorePolicy, StageKind};
 use paradencer_execution::{ExecutionBridge, SbpfBackend};
-use paradencer_mesh::{bounded_link, DualReceiver, DualSender, InPort, OutPort};
+use paradencer_mesh::{bounded_link, DualReceiver, DualSender};
 use paradencer_net::tile::{BridgeConfig, BridgeHandle};
 use paradencer_net::{
     ClusterInfo, ContactInfo, GossipConfig, GossipService, GossipServiceStats, InMemoryShredStore,
@@ -126,8 +126,8 @@ pub struct ReplayBundle {
     pub service: Box<dyn Service>,
     /// Shared consensus infrastructure for other services to use.
     pub consensus: ConsensusBundle,
-    /// Input channel sender for assembled blocks.
-    pub block_input: OutPort<paradencer_stages::AssembledBlock>,
+    /// Input sender for assembled blocks.
+    pub block_input: DualSender<paradencer_stages::AssembledBlock>,
 }
 
 /// Attempt to load tower state from disk for crash recovery.
@@ -374,13 +374,13 @@ pub fn build_replay_service(config: ReplayServiceConfig, initial_stake: u64) -> 
     ReplayBundle {
         service: Box::new(service),
         consensus,
-        block_input: block_tx,
+        block_input: DualSender::Channel(block_tx),
     }
 }
 
 /// Build a replay service connected to an external block source.
 ///
-/// Uses an existing `InPort<AssembledBlock>` from the topology's shred
+/// Uses an existing `DualReceiver<AssembledBlock>` from the topology's shred
 /// pipeline instead of creating a new internal channel. This connects the
 /// TVU receive path (EdgeIntake → ShredFilter → ShredNetworkService →
 /// ShredCollector) directly to the replay service for consensus processing.
@@ -1889,10 +1889,10 @@ pub fn build_blockstore(data_dir: Option<&Path>) -> Result<Option<Arc<Blockstore
 pub struct ShredPipelineBundle {
     /// The collector service to add to the node runtime.
     pub service: Box<dyn Service>,
-    /// Input channel sender for individual parsed shreds (from ShredFilter).
-    pub shred_input: OutPort<paradencer_types::shred::Shred>,
+    /// Input sender for individual parsed shreds (from ShredFilter).
+    pub shred_input: DualSender<paradencer_types::shred::Shred>,
     /// Receiver for assembled blocks (connect to ReplayService).
-    pub block_receiver: InPort<paradencer_stages::AssembledBlock>,
+    pub block_receiver: DualReceiver<paradencer_stages::AssembledBlock>,
 }
 
 /// Build a shred collection pipeline.
@@ -1926,8 +1926,8 @@ pub fn build_shred_pipeline(
 
     ShredPipelineBundle {
         service: Box::new(collector),
-        shred_input: shred_tx,
-        block_receiver: block_rx,
+        shred_input: DualSender::Channel(shred_tx),
+        block_receiver: DualReceiver::Channel(block_rx),
     }
 }
 
@@ -1943,7 +1943,7 @@ pub struct ShredPipelineLinkBundle {
     /// for the entire duration of the pipeline (LinkProducer/LinkConsumer reference it).
     pub shred_link: Box<paradencer_mesh::tile_link::TileLink>,
     /// Receiver for assembled blocks (connect to ReplayService).
-    pub block_receiver: InPort<paradencer_stages::AssembledBlock>,
+    pub block_receiver: DualReceiver<paradencer_stages::AssembledBlock>,
 }
 
 /// Build a zero-copy shred collection pipeline using TileLink.
@@ -1987,7 +1987,7 @@ pub fn build_shred_pipeline_with_link(
     ShredPipelineLinkBundle {
         service: Box::new(collector),
         shred_link,
-        block_receiver: block_rx,
+        block_receiver: DualReceiver::Channel(block_rx),
     }
 }
 

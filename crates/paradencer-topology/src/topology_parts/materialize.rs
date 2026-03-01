@@ -135,9 +135,9 @@ pub fn materialize_services_with_blockstore(
     let fec_completed_capacity = 256;
     let block_pipeline_capacity = 64;
 
-    let (filtered_shred_tx, filtered_shred_rx, own) =
-        dual_link::<Shred>(backend, shred_pipeline_capacity);
-    link_ownership.extend(own);
+    // Filtered shred link is many-to-one (multiple ShredFilters → one ShredNetworkService),
+    // so it stays as a bounded channel (OutPort is clonable for fan-in).
+    let (filtered_shred_tx, filtered_shred_rx) = bounded_link::<Shred>(shred_pipeline_capacity);
     let (fec_completed_tx, fec_completed_rx, own) =
         dual_link::<CompletedFecSet>(backend, fec_completed_capacity);
     link_ownership.extend(own);
@@ -163,8 +163,7 @@ pub fn materialize_services_with_blockstore(
 
     // Wrap SPSC endpoints in Option — consumed once inside the stage loop
     // via .take(). Endpoints returned in MaterializedTopology stay non-mut.
-    let mut filtered_shred_tx = Some(filtered_shred_tx);
-    let mut filtered_shred_rx = Some(filtered_shred_rx);
+    // filtered_shred endpoints stay as raw OutPort/InPort (cloneable for fan-in).
     let mut fec_completed_tx = Some(fec_completed_tx);
     let mut fec_completed_rx = Some(fec_completed_rx);
     let mut fec_store_tx = Some(fec_store_tx);
@@ -237,18 +236,14 @@ pub fn materialize_services_with_blockstore(
                     DualReceiver::Channel(shred_inbound),
                     ingress_policy.clone(),
                     shred_filter_stats.clone(),
-                    filtered_shred_tx
-                        .take()
-                        .expect("filtered_shred_tx consumed once"),
+                    DualSender::Channel(filtered_shred_tx.clone()),
                 )));
                 // Add network service and collector once (after the first ShredSanitizer).
                 if !shred_collector_added {
                     // ShredNetworkService: FEC set tracking + Reed-Solomon recovery.
                     let shred_net = ShredNetworkService::new(
                         ShredNetworkConfig::default(),
-                        filtered_shred_rx
-                            .take()
-                            .expect("filtered_shred_rx consumed once"),
+                        DualReceiver::Channel(filtered_shred_rx.clone()),
                         fec_completed_tx
                             .take()
                             .expect("fec_completed_tx consumed once"),
