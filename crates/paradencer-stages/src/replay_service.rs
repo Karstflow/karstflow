@@ -7,6 +7,7 @@
 ///
 /// The service also owns a `ShredAssembler` so that raw shred batches can be
 /// assembled into blocks inline before replay, eliminating an extra hop.
+use crate::codec_impls::ShredBatch;
 use crate::replay_stage::{ReplayConfig, ReplayStage, ReplayStats, SignalBus};
 use crate::shred_assembler::{AssembledBlock, ShredAssembler, ShredAssemblyStats};
 use crate::StageError;
@@ -14,7 +15,7 @@ use paradencer_consensus::{
     BankForks, CommitmentTracker, ExecutionBackend, ForkChoice, Tower, VoteProcessor,
 };
 use paradencer_execution::ExecutionBridge;
-use paradencer_mesh::{DualReceiver, InPort};
+use paradencer_mesh::DualReceiver;
 use paradencer_runtime::{RuntimeError, RuntimeResult, Service, ServiceContext};
 use paradencer_types::shred::Shred;
 use std::collections::HashMap;
@@ -187,7 +188,7 @@ pub struct ReplayService {
     /// Channel receiving assembled blocks from external producers.
     block_input: Option<DualReceiver<AssembledBlock>>,
     /// Channel receiving raw shred batches for inline assembly.
-    shred_input: Option<InPort<Vec<Shred>>>,
+    shred_input: Option<DualReceiver<ShredBatch>>,
     /// Blocks waiting to be replayed (buffered across ticks).
     pending_blocks: Vec<AssembledBlock>,
     /// Assembly statistics.
@@ -242,7 +243,7 @@ impl ReplayService {
     /// Raw shred batches are assembled into blocks inline before replay.
     pub fn with_shred_input(
         config: ReplayServiceConfig,
-        shred_input: InPort<Vec<Shred>>,
+        shred_input: DualReceiver<ShredBatch>,
         bank_forks: Arc<RwLock<BankForks>>,
         fork_choice: Arc<Mutex<ForkChoice>>,
         execution_bridge: Arc<ExecutionBridge>,
@@ -323,9 +324,9 @@ impl ReplayService {
         }
 
         // Drain shred batches and assemble into blocks.
-        if let Some(ref shred_input) = self.shred_input {
-            while let Ok(Some(shreds)) = shred_input.try_recv() {
-                match self.assembler.assemble_block(shreds) {
+        if let Some(ref mut shred_input) = self.shred_input {
+            while let Ok(Some(batch)) = shred_input.try_recv() {
+                match self.assembler.assemble_block(batch.0) {
                     Ok(block) => {
                         self.assembly_stats.blocks_assembled += 1;
                         self.assembly_stats.entries_extracted += block.entries.len() as u64;

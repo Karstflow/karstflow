@@ -8,7 +8,7 @@
 use crate::fec_resolver::{EquivocationProof, FecResolverPool, FecSetKey, ResolverInsertResult};
 use crate::shred_verifier::{self, LeaderLookup, ShredVerifyResult};
 use paradencer_crypto::reed_solomon::FecReconstructor;
-use paradencer_mesh::{DualReceiveError, DualReceiver, DualSender, OutPort};
+use paradencer_mesh::{DualReceiveError, DualReceiver, DualSender};
 use paradencer_runtime::{RuntimeError, RuntimeResult, Service, ServiceContext};
 use paradencer_types::shred::{
     CodingShredHeader, DataShredHeader, Shred, ShredCommonHeader, ShredVariant,
@@ -713,7 +713,7 @@ pub struct ShredNetworkService {
     /// Retransmit decisions sent to turbine broadcaster.
     retransmit_output: Option<DualSender<RetransmitDecision>>,
     /// Equivocation proofs sent to consensus for slashing evidence.
-    equivocation_output: Option<OutPort<EquivocationProof>>,
+    equivocation_output: Option<DualSender<EquivocationProof>>,
     /// Default source for incoming shreds (typically Turbine).
     default_source: ShredSource,
 }
@@ -749,7 +749,7 @@ impl ShredNetworkService {
     }
 
     /// Set the equivocation output channel for reporting shred conflicts.
-    pub fn with_equivocation_output(mut self, output: OutPort<EquivocationProof>) -> Self {
+    pub fn with_equivocation_output(mut self, output: DualSender<EquivocationProof>) -> Self {
         self.equivocation_output = Some(output);
         self
     }
@@ -814,7 +814,7 @@ impl ShredNetworkService {
         if proofs.is_empty() {
             return;
         }
-        if let Some(ref output) = self.equivocation_output {
+        if let Some(ref mut output) = self.equivocation_output {
             for proof in proofs {
                 let _ = output.try_send(proof);
             }

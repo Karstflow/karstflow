@@ -4,6 +4,7 @@
 use paradencer_mesh::FragmentCodec;
 use paradencer_types::shred::Shred;
 
+use crate::fec_resolver::EquivocationProof;
 use crate::pipeline_service::RawTransaction;
 use crate::shred_assembler::{AssembledBlock, Entry};
 use crate::shred_network::{CompletedFecSet, RetransmitDecision};
@@ -414,6 +415,95 @@ impl FragmentCodec for AssembledBlock {
     }
 }
 
+// ---------------------------------------------------------------------------
+// EquivocationProof codec
+// ---------------------------------------------------------------------------
+// Fixed layout: [slot:8][fec_set_index:4][position:4]
+//               [existing_signature:64][conflicting_signature:64]
+
+const EQUIVOCATION_PROOF_SIZE: usize = 8 + 4 + 4 + 64 + 64;
+
+impl FragmentCodec for EquivocationProof {
+    fn encode(&self, buf: &mut [u8]) -> usize {
+        buf[0..8].copy_from_slice(&self.slot.to_le_bytes());
+        buf[8..12].copy_from_slice(&self.fec_set_index.to_le_bytes());
+        buf[12..16].copy_from_slice(&self.position.to_le_bytes());
+        buf[16..80].copy_from_slice(&self.existing_signature);
+        buf[80..144].copy_from_slice(&self.conflicting_signature);
+        EQUIVOCATION_PROOF_SIZE
+    }
+
+    fn decode(bytes: &[u8]) -> Self {
+        let slot = u64::from_le_bytes(bytes[0..8].try_into().unwrap());
+        let fec_set_index = u32::from_le_bytes(bytes[8..12].try_into().unwrap());
+        let position = u32::from_le_bytes(bytes[12..16].try_into().unwrap());
+        let mut existing_signature = [0u8; 64];
+        existing_signature.copy_from_slice(&bytes[16..80]);
+        let mut conflicting_signature = [0u8; 64];
+        conflicting_signature.copy_from_slice(&bytes[80..144]);
+        Self {
+            slot,
+            fec_set_index,
+            position,
+            existing_signature,
+            conflicting_signature,
+        }
+    }
+
+    fn max_encoded_size() -> usize {
+        EQUIVOCATION_PROOF_SIZE
+    }
+
+    fn signature(&self) -> u64 {
+        self.slot
+    }
+}
+
+// ---------------------------------------------------------------------------
+// ShredBatch codec — newtype for shred batch transfer to replay service
+// ---------------------------------------------------------------------------
+// Encoding: [count:4][shred_0_len:4][shred_0_encoded:N]...
+
+/// Newtype wrapper for a batch of shreds, enabling FragmentCodec implementation.
+pub struct ShredBatch(pub Vec<Shred>);
+
+const SHRED_BATCH_MAX_COUNT: usize = 128;
+const SHRED_BATCH_MAX_ENCODED: usize = 4 + SHRED_BATCH_MAX_COUNT * (4 + SHRED_CODEC_MAX);
+
+impl FragmentCodec for ShredBatch {
+    fn encode(&self, buf: &mut [u8]) -> usize {
+        let mut pos = 0;
+        let count = self.0.len().min(SHRED_BATCH_MAX_COUNT);
+        buf[pos..pos + 4].copy_from_slice(&(count as u32).to_le_bytes());
+        pos += 4;
+        for shred in &self.0[..count] {
+            let shred_len = shred.encode(&mut buf[pos + 4..]);
+            buf[pos..pos + 4].copy_from_slice(&(shred_len as u32).to_le_bytes());
+            pos += 4 + shred_len;
+        }
+        pos
+    }
+
+    fn decode(bytes: &[u8]) -> Self {
+        let mut pos = 0;
+        let count = u32::from_le_bytes(bytes[pos..pos + 4].try_into().unwrap()) as usize;
+        pos += 4;
+        let mut shreds = Vec::with_capacity(count);
+        for _ in 0..count {
+            let shred_len = u32::from_le_bytes(bytes[pos..pos + 4].try_into().unwrap()) as usize;
+            pos += 4;
+            let shred = Shred::decode(&bytes[pos..pos + shred_len]);
+            pos += shred_len;
+            shreds.push(shred);
+        }
+        ShredBatch(shreds)
+    }
+
+    fn max_encoded_size() -> usize {
+        SHRED_BATCH_MAX_ENCODED
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -592,5 +682,52 @@ mod tests {
         assert_eq!(len, BLOCK_HEADER);
         let decoded = AssembledBlock::decode(&buf[..len]);
         assert_eq!(decoded.entries.len(), 0);
+    }
+
+    #[test]
+    fn equivocation_proof_codec_roundtrip() {
+        let proof = EquivocationProof {
+            slot: 42_000,
+            fec_set_index: 7,
+            position: 3,
+            existing_signature: [0xAA; 64],
+            conflicting_signature: [0xBB; 64],
+        };
+        let mut buf = vec![0u8; EquivocationProof::max_encoded_size()];
+        let len = proof.encode(&mut buf);
+        assert_eq!(len, EQUIVOCATION_PROOF_SIZE);
+        let decoded = EquivocationProof::decode(&buf[..len]);
+        assert_eq!(decoded.slot, 42_000);
+        assert_eq!(decoded.fec_set_index, 7);
+        assert_eq!(decoded.position, 3);
+        assert_eq!(decoded.existing_signature, [0xAA; 64]);
+        assert_eq!(decoded.conflicting_signature, [0xBB; 64]);
+    }
+
+    #[test]
+    fn shred_batch_codec_roundtrip() {
+        let batch = ShredBatch(vec![
+            make_test_shred(100, 0),
+            make_test_shred(100, 1),
+            make_test_shred(101, 0),
+        ]);
+        let mut buf = vec![0u8; ShredBatch::max_encoded_size()];
+        let len = batch.encode(&mut buf);
+        let decoded = ShredBatch::decode(&buf[..len]);
+        assert_eq!(decoded.0.len(), 3);
+        assert_eq!(decoded.0[0].common_header.slot, 100);
+        assert_eq!(decoded.0[0].common_header.index, 0);
+        assert_eq!(decoded.0[1].common_header.index, 1);
+        assert_eq!(decoded.0[2].common_header.slot, 101);
+    }
+
+    #[test]
+    fn shred_batch_empty_roundtrip() {
+        let batch = ShredBatch(vec![]);
+        let mut buf = vec![0u8; ShredBatch::max_encoded_size()];
+        let len = batch.encode(&mut buf);
+        assert_eq!(len, 4); // just the count
+        let decoded = ShredBatch::decode(&buf[..len]);
+        assert!(decoded.0.is_empty());
     }
 }
