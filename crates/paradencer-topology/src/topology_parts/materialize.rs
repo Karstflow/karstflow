@@ -130,6 +130,7 @@ pub fn materialize_services_with_blockstore(
     let (filtered_shred_tx, filtered_shred_rx) = bounded_link::<Shred>(shred_pipeline_capacity);
     let (fec_completed_tx, fec_completed_rx) =
         bounded_link::<CompletedFecSet>(fec_completed_capacity);
+    let (fec_store_tx, fec_store_rx) = bounded_link::<CompletedFecSet>(fec_completed_capacity);
     let (direct_shred_tx, direct_shred_rx) = bounded_link::<Shred>(shred_pipeline_capacity);
     let (assembled_block_tx, assembled_block_rx) =
         bounded_link::<AssembledBlock>(block_pipeline_capacity);
@@ -208,6 +209,7 @@ pub fn materialize_services_with_blockstore(
                         fec_completed_tx.clone(),
                     )
                     .with_retransmit_output(retransmit_tx.clone())
+                    .with_store_output(fec_store_tx.clone())
                     .with_leader_lookup(Arc::clone(&deferred_leader_lookup)
                         as Arc<dyn paradencer_stages::LeaderLookup>);
                     shred_network_stats_out = Some(shred_net.stats());
@@ -319,5 +321,10 @@ pub fn materialize_services_with_blockstore(
             None
         },
         leader_lookup_handle: Some(Arc::clone(&deferred_leader_lookup)),
+        fec_store_receiver: if shred_collector_added {
+            Some(fec_store_rx)
+        } else {
+            None
+        },
     })
 }

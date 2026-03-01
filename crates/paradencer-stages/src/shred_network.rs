@@ -701,8 +701,10 @@ pub struct ShredNetworkService {
     stage: ShredNetworkStage,
     /// Parsed shreds from the ingress filter via dual-mode link.
     incoming_shreds: DualReceiver<Shred>,
-    /// Completed FEC sets sent to ShredCollector.
+    /// Completed FEC sets sent to ShredCollector for block assembly.
     completed_output: OutPort<CompletedFecSet>,
+    /// Completed FEC sets sent to ShredStoreService for blockstore persistence.
+    store_output: Option<OutPort<CompletedFecSet>>,
     /// Retransmit decisions sent to turbine broadcaster.
     retransmit_output: Option<OutPort<RetransmitDecision>>,
     /// Default source for incoming shreds (typically Turbine).
@@ -720,6 +722,7 @@ impl ShredNetworkService {
             stage: ShredNetworkStage::with_config(config),
             incoming_shreds,
             completed_output,
+            store_output: None,
             retransmit_output: None,
             default_source: ShredSource::Turbine,
         }
@@ -728,6 +731,12 @@ impl ShredNetworkService {
     /// Set the retransmit output channel for turbine broadcasting.
     pub fn with_retransmit_output(mut self, output: OutPort<RetransmitDecision>) -> Self {
         self.retransmit_output = Some(output);
+        self
+    }
+
+    /// Set the store output channel for blockstore persistence.
+    pub fn with_store_output(mut self, output: OutPort<CompletedFecSet>) -> Self {
+        self.store_output = Some(output);
         self
     }
 
@@ -759,11 +768,15 @@ impl ShredNetworkService {
         drain_shred_input(&mut self.incoming_shreds, &mut self.stage, default_source)
     }
 
-    /// Push completed FEC sets to the output channel.
+    /// Push completed FEC sets to the output channels.
     fn flush_completed(&mut self) {
         let completed = self.stage.drain_completed_sets();
         for fec_set in completed {
-            // Best-effort send — drop on backpressure.
+            // Fan out to store service if wired.
+            if let Some(ref store) = self.store_output {
+                let _ = store.try_send(fec_set.clone());
+            }
+            // Best-effort send to collector — drop on backpressure.
             let _ = self.completed_output.try_send(fec_set);
         }
     }

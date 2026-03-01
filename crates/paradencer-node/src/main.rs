@@ -486,6 +486,21 @@ fn run_with_node_config(
         services.push(maintenance.service);
     }
 
+    // Shred store: persist completed FEC sets to the blockstore for repair
+    // serving, restart recovery, and historical queries.
+    if let (Some(blockstore), Some(fec_store_rx)) = (
+        shared_blockstore.as_ref().cloned(),
+        runtime_topology.fec_store_receiver,
+    ) {
+        let shred_store = paradencer_stages::ShredStoreService::new(
+            paradencer_stages::ShredStoreConfig::default(),
+            blockstore,
+            fec_store_rx,
+        )
+        .with_signal_bus(std::sync::Arc::clone(&replay_bundle.signal_bus));
+        services.push(Box::new(shred_store));
+    }
+
     // Bridge retransmit decisions from the shred pipeline to the turbine
     // retransmit service. Each decision carries raw shred bytes that get
     // forwarded to turbine tree children via UDP.
