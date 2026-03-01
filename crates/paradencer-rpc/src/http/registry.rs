@@ -61,6 +61,7 @@ pub enum RpcMethod {
     GetConfirmedTransaction,
     SendTransaction,
     SimulateTransaction,
+    RequestAirdrop,
 }
 
 pub const REGISTERED_RPC_METHODS: &[RpcMethod] = &[
@@ -123,6 +124,7 @@ pub const REGISTERED_RPC_METHODS: &[RpcMethod] = &[
     RpcMethod::GetConfirmedTransaction,
     RpcMethod::SendTransaction,
     RpcMethod::SimulateTransaction,
+    RpcMethod::RequestAirdrop,
 ];
 
 impl RpcMethod {
@@ -187,7 +189,12 @@ impl RpcMethod {
             Self::GetConfirmedTransaction => "getConfirmedTransaction",
             Self::SendTransaction => "sendTransaction",
             Self::SimulateTransaction => "simulateTransaction",
+            Self::RequestAirdrop => "requestAirdrop",
         }
+    }
+
+    pub fn requires_dev_mode(self) -> bool {
+        matches!(self, Self::RequestAirdrop)
     }
 
     pub fn requires_full_api(self) -> bool {
@@ -230,7 +237,16 @@ impl RpcMethod {
     }
 }
 
+#[cfg(test)]
 pub fn resolve_method(method_name: &str, full_api: bool) -> Result<RpcMethod, RpcMethodError> {
+    resolve_method_with_dev_mode(method_name, full_api, false)
+}
+
+pub fn resolve_method_with_dev_mode(
+    method_name: &str,
+    full_api: bool,
+    dev_mode: bool,
+) -> Result<RpcMethod, RpcMethodError> {
     let method = match method_name {
         "getHealth" => RpcMethod::GetHealth,
         "getVersion" => RpcMethod::GetVersion,
@@ -291,10 +307,15 @@ pub fn resolve_method(method_name: &str, full_api: bool) -> Result<RpcMethod, Rp
         "getConfirmedTransaction" => RpcMethod::GetConfirmedTransaction,
         "sendTransaction" => RpcMethod::SendTransaction,
         "simulateTransaction" => RpcMethod::SimulateTransaction,
+        "requestAirdrop" => RpcMethod::RequestAirdrop,
         _ => return Err(RpcMethodError::MethodNotFound),
     };
 
     if method.requires_full_api() && !full_api {
+        return Err(RpcMethodError::MethodNotFound);
+    }
+
+    if method.requires_dev_mode() && !dev_mode {
         return Err(RpcMethodError::MethodNotFound);
     }
 
@@ -303,13 +324,13 @@ pub fn resolve_method(method_name: &str, full_api: bool) -> Result<RpcMethod, Rp
 
 #[cfg(test)]
 mod tests {
-    use super::{resolve_method, RpcMethod, REGISTERED_RPC_METHODS};
+    use super::{resolve_method, resolve_method_with_dev_mode, RpcMethod, REGISTERED_RPC_METHODS};
 
     #[test]
-    fn registered_methods_are_resolvable_with_full_api() {
+    fn registered_methods_are_resolvable_with_full_api_and_dev_mode() {
         for method in REGISTERED_RPC_METHODS {
-            let resolved =
-                resolve_method(method.as_str(), true).expect("registered method resolves");
+            let resolved = resolve_method_with_dev_mode(method.as_str(), true, true)
+                .expect("registered method resolves");
             assert_eq!(resolved, *method);
         }
     }
@@ -317,6 +338,9 @@ mod tests {
     #[test]
     fn full_api_gate_blocks_only_full_api_methods() {
         for method in REGISTERED_RPC_METHODS {
+            if method.requires_dev_mode() {
+                continue;
+            }
             let resolved = resolve_method(method.as_str(), false);
             if method.requires_full_api() {
                 assert!(resolved.is_err(), "{} should be gated", method.as_str());
@@ -324,6 +348,14 @@ mod tests {
                 assert_eq!(resolved.ok(), Some(*method));
             }
         }
+    }
+
+    #[test]
+    fn dev_mode_gate_blocks_dev_only_methods() {
+        let resolved = resolve_method_with_dev_mode("requestAirdrop", true, false);
+        assert!(resolved.is_err(), "requestAirdrop should be blocked without dev_mode");
+        let resolved = resolve_method_with_dev_mode("requestAirdrop", true, true);
+        assert_eq!(resolved.ok(), Some(RpcMethod::RequestAirdrop));
     }
 
     #[test]

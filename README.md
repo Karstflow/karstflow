@@ -154,14 +154,26 @@ cargo test --workspace --all-targets
 ### Development Commands
 
 ```bash
-just check       # cargo check
-just fmt          # Format all code
-just lint         # Clippy with strict settings
-just test         # Run all tests
-just ci           # fmt-check + lint + test
-just run          # Run node (tokio mode)
-just run-pinned   # Run node (pinned cores mode)
-just smoke        # Quick 2-second smoke run
+# Build & Quality
+just check         # cargo check
+just fmt            # Format all code
+just lint           # Clippy with strict settings
+just test           # Run all tests
+just ci             # fmt-check + lint + test
+
+# Run
+just run            # Run node (tokio mode)
+just run-pinned     # Run node (pinned cores mode)
+just smoke          # Quick 2-second smoke run
+
+# Test-Validator Mode
+just dev            # Run in dev mode with auto-genesis and airdrop
+just dev-tile       # Dev mode with tile executor
+just run-profile p  # Run with named profile (devnet, testnet, mainnet, local)
+
+# Genesis
+just genesis-init   # Interactive genesis builder
+just run-genesis p  # Run from existing genesis.bin file
 ```
 
 ### Runtime Modes
@@ -196,17 +208,110 @@ PARADENCER_IPC_MODE=shared_memory PARADENCER_EXEC_MODE=tile cargo run -p paraden
 
 Fan-in links (multiple producers to one consumer, e.g., shred filter fan-in) stay on channels. All point-to-point SPSC links use `dual_link()` which selects the IPC backend based on `IpcMode` config. Shared memory ownership handles are kept alive for the full pipeline lifetime via `link_ownership` in `MaterializedTopology`.
 
+## Test-Validator Mode
+
+Paradencer includes a built-in test-validator mode for local development — no separate binary required. When the cluster mode is set to `dev` (or its alias `test-validator`), the node automatically:
+
+- **Generates a development genesis** with a pre-funded validator identity (500 SOL) and faucet account (500M SOL)
+- **Enables `requestAirdrop` RPC** — transfers up to 10,000 SOL per request directly via bank credit
+- **Starts with permissive defaults** — private addresses allowed, full RPC API enabled, no identity keypair required
+
+### Quick Start (Dev Mode)
+
+```bash
+# Fastest way — auto-genesis, all defaults
+just dev
+
+# With tile executor (production runtime, dev config)
+just dev-tile
+```
+
+### `requestAirdrop` RPC
+
+Available only in test-validator mode. Mirrors the Solana `requestAirdrop` JSON-RPC method:
+
+```bash
+curl -X POST http://localhost:8899 -H "Content-Type: application/json" \
+  -d '{"jsonrpc":"2.0","id":1,"method":"requestAirdrop","params":["<BASE58_PUBKEY>", 1000000000]}'
+```
+
+Returns a transaction signature (base58). The airdrop is applied immediately via direct bank credit — no faucet TCP service or separate airdrop binary needed.
+
+### Safety Guards
+
+Test-validator mode is **blocked for production clusters**. The validator will refuse to start if dev mode is combined with:
+
+- Known genesis hashes (devnet, testnet, mainnet-beta)
+- Known cluster entrypoint hostnames (*.devnet.solana.com, *.testnet.solana.com, *.mainnet-beta.solana.com)
+
+This prevents accidental use of dev-only features (airdrop, auto-funded genesis) against real networks.
+
+### Genesis CLI
+
+For custom genesis configurations, use the interactive genesis builder:
+
+```bash
+just genesis-init
+# or directly:
+cargo run -p paradencer-node -- genesis init
+```
+
+The CLI prompts for each parameter with sensible defaults — press Enter to accept:
+
+- Output path (`genesis.bin`)
+- Cluster type (Development / Devnet / Testnet / Mainnet)
+- Ticks per slot (64)
+- Identity lamports, faucet lamports
+- Hashes per tick (12500)
+
+Then boot with the generated genesis:
+
+```bash
+just run-genesis path/to/genesis.bin
+```
+
+## Cluster Profiles
+
+Pre-built TOML profiles for different environments:
+
+| Profile | File | Cluster | Mode |
+|---------|------|---------|------|
+| `local` | `config/local.toml` | Local dev | `dev` (test-validator) |
+| `devnet` | `config/devnet.toml` | Solana Devnet | `live` |
+| `testnet` | `config/testnet.toml` | Solana Testnet | `live` |
+| `mainnet` | `config/mainnet.toml` | Solana Mainnet-Beta | `live` |
+
+Usage:
+
+```bash
+# Run with a profile
+just run-profile devnet
+# or directly:
+cargo run -p paradencer-node -- run --profile devnet
+
+# Env vars override any profile setting
+PARADENCER_RPC_BIND=0.0.0.0:9999 just run-profile devnet
+```
+
+Each live profile includes the cluster's genesis hash, shred version, gossip entrypoints, and tuned runtime settings. Environment variables always take priority over TOML values.
+
 ## Configuration
+
+Configuration follows a layered model: **TOML profile → environment variable override → defaults**.
 
 Configuration files in `config/`:
 
 | File | Purpose |
 |------|---------|
+| `local.toml` | Local development / test-validator mode |
+| `devnet.toml` | Solana Devnet cluster |
+| `testnet.toml` | Solana Testnet cluster |
+| `mainnet.toml` | Solana Mainnet-Beta cluster |
 | `node.default.toml` | Node identity, cluster, paths |
 | `ingress.default.toml` | Network ingress settings |
 | `topology.default.toml` | Service topology |
 
-Environment variables override TOML values. Live mode includes preflight safety checks (identity keypair, entrypoint routability, storage catalog validation).
+Live mode includes preflight safety checks (identity keypair, entrypoint routability, genesis hash validation, storage catalog verification).
 
 ## Project Structure
 

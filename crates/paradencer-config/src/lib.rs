@@ -43,7 +43,7 @@ pub enum ClusterMode {
 pub fn parse_cluster_mode(value: Option<String>) -> Result<ClusterMode> {
     match value {
         Some(raw) => match raw.to_ascii_lowercase().as_str() {
-            "dev" => Ok(ClusterMode::Dev),
+            "dev" | "test-validator" | "test_validator" => Ok(ClusterMode::Dev),
             "live" => Ok(ClusterMode::Live),
             _ => Err(ConfigError::InvalidClusterMode { value: raw }),
         },
@@ -105,6 +105,11 @@ pub struct NodeConfig {
     /// and downloads the latest snapshot before starting consensus.
     /// Ignored when `snapshot_archive_path` is set (local archive takes priority).
     pub snapshot_download_enabled: bool,
+    /// Path to a genesis.bin file for bootstrap from genesis.
+    /// When set and no snapshot archive is provided, the validator loads
+    /// accounts and economic parameters from this genesis configuration
+    /// to initialize a fresh cluster at slot 0.
+    pub genesis_path: Option<PathBuf>,
     /// Minimum log level for stderr output. Defaults to "info".
     /// Can be overridden by `RUST_LOG` environment variable.
     pub log_stderr_level: String,
@@ -179,33 +184,157 @@ impl NodeConfig {
     }
 
     fn build(profile: Option<&NodeProfileToml>) -> Result<Self> {
-        let cluster_mode = parse_cluster_mode(std::env::var("PARADENCER_CLUSTER_MODE").ok())?;
+        let cluster_profile = profile.and_then(|p| p.cluster.as_ref());
+        let logging_profile = profile.and_then(|p| p.logging.as_ref());
+
+        // Cluster mode: TOML → env override → default (dev).
+        let cluster_mode = match std::env::var("PARADENCER_CLUSTER_MODE").ok() {
+            Some(env_val) => parse_cluster_mode(Some(env_val))?,
+            None => match cluster_profile.and_then(|c| c.mode.as_deref()) {
+                Some(toml_val) => parse_cluster_mode(Some(toml_val.to_string()))?,
+                None => ClusterMode::Dev,
+            },
+        };
+
+        // Identity keypair path: env → TOML → None.
         let identity_keypair_path = std::env::var("PARADENCER_IDENTITY_KEYPAIR_PATH")
             .ok()
+            .or_else(|| cluster_profile.and_then(|c| c.identity_keypair_path.clone()))
             .map(PathBuf::from);
-        let expected_genesis_hash = std::env::var("PARADENCER_EXPECTED_GENESIS_HASH").ok();
-        let expected_shred_version = parse_expected_shred_version_from_env()?;
-        let live_entrypoints =
-            parse_live_entrypoints(std::env::var("PARADENCER_LIVE_ENTRYPOINTS").ok())?;
-        let gossip_bind_addr = parse_gossip_bind_addr_from_env()?;
-        let data_dir = std::env::var("PARADENCER_DATA_DIR").ok().map(PathBuf::from);
+
+        // Expected genesis hash: env → TOML → None.
+        let expected_genesis_hash = std::env::var("PARADENCER_EXPECTED_GENESIS_HASH")
+            .ok()
+            .or_else(|| cluster_profile.and_then(|c| c.expected_genesis_hash.clone()));
+
+        // Expected shred version: env → TOML → None.
+        let expected_shred_version = match parse_expected_shred_version_from_env()? {
+            Some(v) => Some(v),
+            None => cluster_profile.and_then(|c| c.expected_shred_version),
+        };
+
+        // Raw entrypoint strings (before DNS/SocketAddr parsing) for validation.
+        let raw_entrypoints: Vec<String> = match std::env::var("PARADENCER_LIVE_ENTRYPOINTS").ok()
+        {
+            Some(env_val) => env_val
+                .split(',')
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(String::from)
+                .collect(),
+            None => cluster_profile
+                .and_then(|c| c.entrypoints.clone())
+                .unwrap_or_default(),
+        };
+
+        // Guard: test-validator mode must not target production clusters.
+        if cluster_mode == ClusterMode::Dev {
+            validate_dev_mode_rejects_production_cluster(
+                expected_genesis_hash.as_deref(),
+                &raw_entrypoints,
+            )?;
+        }
+
+        // Live entrypoints: parse raw strings into SocketAddr.
+        let live_entrypoints = {
+            let joined = raw_entrypoints.join(",");
+            if joined.is_empty() {
+                Vec::new()
+            } else {
+                parse_live_entrypoints(Some(joined))?
+            }
+        };
+
+        // Gossip bind address: env → TOML → default.
+        let gossip_bind_addr = match std::env::var("PARADENCER_GOSSIP_BIND_ADDR").ok() {
+            Some(raw) => raw
+                .parse::<SocketAddr>()
+                .map_err(|source| ConfigError::InvalidGossipBindAddr { value: raw, source })?,
+            None => match cluster_profile.and_then(|c| c.gossip_bind_addr.as_deref()) {
+                Some(toml_val) => toml_val.parse::<SocketAddr>().map_err(|source| {
+                    ConfigError::InvalidGossipBindAddr {
+                        value: toml_val.to_string(),
+                        source,
+                    }
+                })?,
+                None => "0.0.0.0:8001".parse().unwrap(),
+            },
+        };
+
+        // Gossip allow private addresses: env → TOML → false.
+        let gossip_allow_private_addresses =
+            match std::env::var("PARADENCER_GOSSIP_ALLOW_PRIVATE_ADDRESSES").ok() {
+                Some(v) => v == "true" || v == "1",
+                None => cluster_profile
+                    .and_then(|c| c.gossip_allow_private_addresses)
+                    .unwrap_or(false),
+            };
+
+        // Data dir: env → TOML → None.
+        let data_dir = std::env::var("PARADENCER_DATA_DIR")
+            .ok()
+            .or_else(|| cluster_profile.and_then(|c| c.data_dir.clone()))
+            .map(PathBuf::from);
+
         let plugin_config_files =
             parse_plugin_config_paths(std::env::var("PARADENCER_PLUGIN_CONFIG").ok());
         let snapshot_archive_path = std::env::var("PARADENCER_SNAPSHOT_ARCHIVE")
             .ok()
             .map(PathBuf::from);
 
-        let log_stderr_level =
-            std::env::var("PARADENCER_LOG_STDERR_LEVEL").unwrap_or_else(|_| "info".to_string());
-        let log_file_path = std::env::var("PARADENCER_LOG_FILE").ok().map(PathBuf::from);
-        let log_file_level =
-            std::env::var("PARADENCER_LOG_FILE_LEVEL").unwrap_or_else(|_| "info".to_string());
-        let log_colorize = std::env::var("PARADENCER_LOG_COLORIZE")
-            .map(|v| v != "false" && v != "0")
-            .unwrap_or(true);
-        let log_json_file = std::env::var("PARADENCER_LOG_JSON_FILE")
-            .map(|v| v == "true" || v == "1")
-            .unwrap_or(false);
+        // Snapshot download: env → TOML → false.
+        let snapshot_download_enabled =
+            match std::env::var("PARADENCER_SNAPSHOT_DOWNLOAD").ok() {
+                Some(v) => v == "true" || v == "1",
+                None => cluster_profile
+                    .and_then(|c| c.snapshot_download)
+                    .unwrap_or(false),
+            };
+
+        // Genesis path: env → TOML → None.
+        let genesis_path = std::env::var("PARADENCER_GENESIS_PATH")
+            .ok()
+            .or_else(|| cluster_profile.and_then(|c| c.genesis_path.clone()))
+            .map(PathBuf::from);
+
+        // IPC mode: env → TOML → Channel.
+        let ipc_mode = match std::env::var("PARADENCER_IPC_MODE").ok() {
+            Some(v) => IpcMode::from_env(&v).unwrap_or(IpcMode::Channel),
+            None => match cluster_profile.and_then(|c| c.ipc_mode.as_deref()) {
+                Some(v) => IpcMode::from_env(v).unwrap_or(IpcMode::Channel),
+                None => IpcMode::Channel,
+            },
+        };
+
+        // QUIC enabled: env → TOML → false.
+        let quic_enabled = match std::env::var("PARADENCER_QUIC_ENABLED").ok() {
+            Some(v) => v == "true" || v == "1",
+            None => cluster_profile
+                .and_then(|c| c.quic_enabled)
+                .unwrap_or(false),
+        };
+
+        // Logging: TOML → env override → defaults.
+        let log_stderr_level = std::env::var("PARADENCER_LOG_STDERR_LEVEL")
+            .ok()
+            .or_else(|| logging_profile.and_then(|l| l.stderr_level.clone()))
+            .unwrap_or_else(|| "info".to_string());
+        let log_file_path = std::env::var("PARADENCER_LOG_FILE")
+            .ok()
+            .or_else(|| logging_profile.and_then(|l| l.file_path.clone()))
+            .map(PathBuf::from);
+        let log_file_level = std::env::var("PARADENCER_LOG_FILE_LEVEL")
+            .ok()
+            .or_else(|| logging_profile.and_then(|l| l.file_level.clone()))
+            .unwrap_or_else(|| "info".to_string());
+        let log_colorize = match std::env::var("PARADENCER_LOG_COLORIZE").ok() {
+            Some(v) => v != "false" && v != "0",
+            None => logging_profile.and_then(|l| l.colorize).unwrap_or(true),
+        };
+        let log_json_file = match std::env::var("PARADENCER_LOG_JSON_FILE").ok() {
+            Some(v) => v == "true" || v == "1",
+            None => logging_profile.and_then(|l| l.json_file).unwrap_or(false),
+        };
 
         Ok(Self {
             cluster_mode,
@@ -214,21 +343,14 @@ impl NodeConfig {
             expected_shred_version,
             live_entrypoints,
             gossip_bind_addr,
-            gossip_allow_private_addresses: std::env::var(
-                "PARADENCER_GOSSIP_ALLOW_PRIVATE_ADDRESSES",
-            )
-            .map(|v| v == "true" || v == "1")
-            .unwrap_or(false),
+            gossip_allow_private_addresses,
             wait_for_supermajority_bank_hash: std::env::var(
                 "PARADENCER_WAIT_FOR_SUPERMAJORITY_BANK_HASH",
             )
             .ok()
             .filter(|s| !s.is_empty()),
             runtime_spec: build_runtime_spec(profile)?,
-            ipc_mode: std::env::var("PARADENCER_IPC_MODE")
-                .ok()
-                .and_then(|v| IpcMode::from_env(&v))
-                .unwrap_or(IpcMode::Channel),
+            ipc_mode,
             topology_spec: build_topology_spec(profile)?,
             ingress_policy: build_ingress_policy(profile)?,
             metrics_output_format: build_metrics_output_format(profile)?,
@@ -241,15 +363,12 @@ impl NodeConfig {
             storage_runtime_policy: build_storage_runtime_policy(profile)?,
             mainnet_readiness_policy: build_mainnet_readiness_policy(profile)?,
             network_config: build_network_config(profile.and_then(|p| p.network.as_ref())),
-            quic_enabled: std::env::var("PARADENCER_QUIC_ENABLED")
-                .map(|v| v == "true" || v == "1")
-                .unwrap_or(false),
+            quic_enabled,
             data_dir,
             plugin_config_files,
             snapshot_archive_path,
-            snapshot_download_enabled: std::env::var("PARADENCER_SNAPSHOT_DOWNLOAD")
-                .map(|v| v == "true" || v == "1")
-                .unwrap_or(false),
+            snapshot_download_enabled,
+            genesis_path,
             log_stderr_level,
             log_file_path,
             log_file_level,
@@ -360,15 +479,6 @@ impl NodeConfig {
     }
 }
 
-fn parse_gossip_bind_addr_from_env() -> Result<SocketAddr> {
-    match std::env::var("PARADENCER_GOSSIP_BIND_ADDR").ok() {
-        Some(raw) => raw
-            .parse::<SocketAddr>()
-            .map_err(|source| ConfigError::InvalidGossipBindAddr { value: raw, source }),
-        None => Ok("0.0.0.0:8001".parse().unwrap()),
-    }
-}
-
 fn parse_expected_shred_version_from_env() -> Result<Option<u16>> {
     match std::env::var("PARADENCER_EXPECTED_SHRED_VERSION").ok() {
         Some(raw) => raw
@@ -405,10 +515,22 @@ pub fn parse_live_entrypoints(value: Option<String>) -> Result<Vec<SocketAddr>> 
 }
 
 pub fn is_valid_genesis_hash(value: &str) -> bool {
-    value.len() == 64
-        && value.chars().all(|character| {
-            character.is_ascii_digit() || matches!(character, 'a' | 'b' | 'c' | 'd' | 'e' | 'f')
-        })
+    // Accept 64-character lowercase hex (raw hash encoding).
+    let is_hex_64 = value.len() == 64
+        && value.chars().all(|c| {
+            c.is_ascii_digit() || matches!(c, 'a' | 'b' | 'c' | 'd' | 'e' | 'f')
+        });
+    if is_hex_64 {
+        return true;
+    }
+    // Accept base58-encoded 32-byte hash (32-44 characters, alphanumeric
+    // excluding 0, O, I, l per base58 alphabet).
+    if value.len() >= 32 && value.len() <= 44 {
+        return value
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() && !matches!(c, '0' | 'O' | 'I' | 'l'));
+    }
+    false
 }
 
 pub fn is_routable_socket_addr(addr: &SocketAddr) -> bool {
@@ -611,6 +733,53 @@ pub fn validate_metrics_target_preflight(
         }
         MetricsOutputTarget::Http => Ok(()),
     }
+}
+
+/// Reject test-validator mode when config targets a known production cluster.
+///
+/// This prevents accidentally launching dev features (airdrop, funded genesis)
+/// against devnet, testnet, or mainnet by checking both the expected genesis hash
+/// and the gossip entrypoint hostnames (raw strings from TOML/env).
+pub fn validate_dev_mode_rejects_production_cluster(
+    expected_genesis_hash: Option<&str>,
+    raw_entrypoints: &[String],
+) -> Result<()> {
+    use paradencer_constants::genesis::{
+        DEVNET_GENESIS_HASH, MAINNET_GENESIS_HASH, TESTNET_GENESIS_HASH,
+    };
+
+    // Check genesis hash against known production clusters.
+    if let Some(hash) = expected_genesis_hash {
+        let hash = hash.trim();
+        if hash == DEVNET_GENESIS_HASH {
+            return Err(ConfigError::DevModeRejectsProductionGenesisHash { cluster: "devnet" });
+        }
+        if hash == TESTNET_GENESIS_HASH {
+            return Err(ConfigError::DevModeRejectsProductionGenesisHash { cluster: "testnet" });
+        }
+        if hash == MAINNET_GENESIS_HASH {
+            return Err(ConfigError::DevModeRejectsProductionGenesisHash {
+                cluster: "mainnet-beta",
+            });
+        }
+    }
+
+    // Check entrypoint hostnames against known production clusters.
+    for ep_str in raw_entrypoints {
+        if ep_str.contains("devnet.solana.com") {
+            return Err(ConfigError::DevModeRejectsProductionEntrypoints { cluster: "devnet" });
+        }
+        if ep_str.contains("testnet.solana.com") {
+            return Err(ConfigError::DevModeRejectsProductionEntrypoints { cluster: "testnet" });
+        }
+        if ep_str.contains("mainnet-beta.solana.com") {
+            return Err(ConfigError::DevModeRejectsProductionEntrypoints {
+                cluster: "mainnet-beta",
+            });
+        }
+    }
+
+    Ok(())
 }
 
 /// Parse plugin config file paths from a comma-separated environment variable.

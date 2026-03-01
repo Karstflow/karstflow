@@ -9,13 +9,14 @@ use std::thread;
 use tracing::{error, info};
 
 use super::registry::REGISTERED_RPC_METHODS;
-use super::renderer::render_json_rpc_response;
+use super::renderer::render_json_rpc_response_with_dev_mode;
 use super::subscriptions::register_subscription_methods;
 
 pub fn spawn_rpc_http_server(
     bind_addr: SocketAddr,
     full_api: bool,
     private: bool,
+    dev_mode: bool,
     runtime_snapshot_provider: Option<Arc<dyn RuntimeSnapshotProvider>>,
     bank_access_provider: Option<Arc<dyn BankAccessProvider>>,
     tx_submitter: Option<Arc<dyn TransactionSubmitter>>,
@@ -57,6 +58,10 @@ pub fn spawn_rpc_http_server(
 
                 let mut module = RpcModule::new(());
                 for method in REGISTERED_RPC_METHODS {
+                    // Dev-mode methods are only registered when dev_mode is active.
+                    if method.requires_dev_mode() && !dev_mode {
+                        continue;
+                    }
                     let method_name = method.as_str();
                     let provider = runtime_snapshot_provider.clone();
                     let bank_access = bank_access_provider.clone();
@@ -67,6 +72,7 @@ pub fn spawn_rpc_http_server(
                                 method_name,
                                 params,
                                 full_api,
+                                dev_mode,
                                 provider.as_ref(),
                                 bank_access.as_ref(),
                                 submitter.as_ref(),
@@ -101,6 +107,7 @@ fn dispatch_via_legacy_renderer(
     method_name: &str,
     params: Params<'_>,
     full_api: bool,
+    dev_mode: bool,
     runtime_snapshot_provider: Option<&Arc<dyn RuntimeSnapshotProvider>>,
     bank_access: Option<&Arc<dyn BankAccessProvider>>,
     tx_submitter: Option<&Arc<dyn TransactionSubmitter>>,
@@ -133,9 +140,10 @@ fn dispatch_via_legacy_renderer(
     let runtime_snapshot =
         runtime_snapshot_provider.and_then(|provider| provider.latest_snapshot());
 
-    let response = render_json_rpc_response(
+    let response = render_json_rpc_response_with_dev_mode(
         &request_body.to_string(),
         full_api,
+        dev_mode,
         runtime_snapshot,
         bank_access,
         tx_submitter,

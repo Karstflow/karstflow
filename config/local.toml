@@ -1,0 +1,35 @@
+schema_version = 1
+
+[cluster]
+mode = "dev"
+gossip_bind_addr = "0.0.0.0:8001"
+gossip_allow_private_addresses = true
+
+[runtime]
+mode = "tokio"
+workers = 4
+
+[ingress_policy]
+ingress_mode = "udp"
+udp_bind_address = "0.0.0.0:8001"
+max_payload_bytes = 1232
+allow_quic_source = true
+allow_gossip_source = true
+
+[storage]
+startup_policy = "restore_latest_if_available"
+snapshot_interval = 432
+
+[rpc]
+enabled = true
+bind = "0.0.0.0:8899"
+private = false
+full_api = true
+
+[metrics]
+output_format = "prometheus"
+output_target = "http"
+http_bind = "0.0.0.0:9090"
+
+[logging]
+stderr_level = "info"

@@ -11,6 +11,7 @@ toml.workspace = true
 serde.workspace = true
 tracing.workspace = true
 serde_json.workspace = true
+paradencer-constants = { path = "../paradencer-constants" }
 paradencer-core = { path = "../paradencer-core" }
 paradencer-execution = { path = "../paradencer-execution" }
 paradencer-net = { path = "../paradencer-net" }

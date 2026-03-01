@@ -346,6 +346,137 @@ pub fn build_consensus_from_bank_forks(
     }
 }
 
+/// Bootstrap consensus from a genesis.bin file on disk.
+///
+/// Loads the genesis configuration using `parse_genesis`, runs the full
+/// `bootstrap_from_genesis` initialization (accounts, stake tracker, vote cache,
+/// sysvar cache, feature set), and wraps the result in a `ConsensusBundle`.
+///
+/// This is the third bootstrap path alongside snapshot restore and empty
+/// in-memory genesis. Use this to start a fresh cluster from a genesis file.
+pub fn bootstrap_from_genesis_file(
+    genesis_path: &Path,
+    data_dir: Option<&Path>,
+    validator_pubkey: Option<&Pubkey>,
+) -> Result<ConsensusBundle> {
+    info!(path = %genesis_path.display(), "bootstrapping from genesis file");
+
+    let genesis = paradencer_storage::genesis::parse_genesis(genesis_path).map_err(|e| {
+        ControlPlaneError::Bootstrap {
+            message: format!("failed to parse genesis file {}: {e}", genesis_path.display()),
+        }
+    })?;
+
+    info!(
+        accounts = genesis.accounts.len(),
+        cluster_type = genesis.cluster_type as u32,
+        ticks_per_slot = genesis.ticks_per_slot,
+        "parsed genesis configuration",
+    );
+
+    let validators = match validator_pubkey {
+        Some(pk) => vec![(*pk, 500_000_000)],
+        None => vec![(Pubkey::new_unique(), 500_000_000)],
+    };
+    let leader_schedule = Arc::new(LeaderSchedule::new(0, &validators).unwrap());
+
+    let result = paradencer_consensus::bootstrap_from_genesis(&genesis, leader_schedule);
+
+    info!(
+        accounts_loaded = result.accounts_loaded,
+        total_lamports = result.total_lamports,
+        stake_delegations = result.stake_init.delegations_loaded,
+        vote_accounts = result.vote_init.vote_accounts_loaded,
+        features = result.feature_init.features_activated,
+        "genesis bootstrap complete",
+    );
+
+    Ok(build_consensus_from_bank_forks(
+        result.bank_forks,
+        None,
+        data_dir,
+        validator_pubkey,
+        None,
+    ))
+}
+
+/// Bootstrap from an auto-generated development genesis.
+///
+/// Creates a development genesis with pre-funded accounts:
+/// - Validator identity: 500 SOL
+/// - Faucet account: 500,000,000 SOL (for `requestAirdrop` RPC)
+///
+/// This is the default bootstrap path when no snapshot or genesis file
+/// is provided and the cluster mode is `Dev`. Produces a fully functional
+/// single-node cluster with airdrop support.
+pub fn bootstrap_from_development_genesis(
+    data_dir: Option<&Path>,
+    validator_pubkey: Option<&Pubkey>,
+) -> Result<ConsensusBundle> {
+    use paradencer_constants::economics::LAMPORTS_PER_SOL;
+
+    info!("bootstrapping from auto-generated development genesis");
+
+    let mut genesis = paradencer_storage::GenesisConfig::default_development();
+
+    let identity = validator_pubkey.copied().unwrap_or_else(Pubkey::new_unique);
+    genesis.accounts.push((
+        identity,
+        paradencer_storage::GenesisAccount {
+            lamports: 500 * LAMPORTS_PER_SOL,
+            data: Vec::new(),
+            owner: paradencer_ids::SYSTEM_PROGRAM_ID,
+            executable: false,
+            rent_epoch: u64::MAX,
+        },
+    ));
+
+    let faucet = development_faucet_pubkey();
+    genesis.accounts.push((
+        faucet,
+        paradencer_storage::GenesisAccount {
+            lamports: 500_000_000 * LAMPORTS_PER_SOL,
+            data: Vec::new(),
+            owner: paradencer_ids::SYSTEM_PROGRAM_ID,
+            executable: false,
+            rent_epoch: u64::MAX,
+        },
+    ));
+
+    let validators = vec![(identity, 500_000_000)];
+    let leader_schedule = Arc::new(LeaderSchedule::new(0, &validators).unwrap());
+
+    let result = paradencer_consensus::bootstrap_from_genesis(&genesis, leader_schedule);
+
+    info!(
+        accounts_loaded = result.accounts_loaded,
+        total_lamports = result.total_lamports,
+        faucet = %faucet,
+        "development genesis bootstrap complete",
+    );
+
+    Ok(build_consensus_from_bank_forks(
+        result.bank_forks,
+        None,
+        data_dir,
+        validator_pubkey,
+        None,
+    ))
+}
+
+/// Well-known development faucet pubkey.
+///
+/// Deterministic address derived from a fixed seed so that clients can
+/// query the faucet balance without extra configuration.
+pub fn development_faucet_pubkey() -> Pubkey {
+    // SHA-256("paradencer-dev-faucet")[..32] — deterministic, reproducible.
+    Pubkey::new([
+        0xd4, 0x35, 0xb0, 0x9a, 0x6c, 0x07, 0x3c, 0x49, 0x14, 0x89, 0x81, 0x06, 0xd9, 0xe8,
+        0xfe, 0x20, 0xc6, 0x83, 0x2b, 0x5a, 0x55, 0xf3, 0x2e, 0x77, 0x1c, 0x48, 0x3a, 0xf6,
+        0xe1, 0x13, 0x5b, 0x7d,
+    ])
+}
+
 /// Build the replay service for processing assembled blocks through consensus.
 ///
 /// Creates the replay pipeline with an input channel for assembled blocks
@@ -2246,10 +2377,12 @@ pub fn maybe_start_rpc_http_server_with_consensus(
             (snapshot_provider, None, None)
         };
 
+    let dev_mode = node_config.cluster_mode == paradencer_config::ClusterMode::Dev;
     spawn_rpc_http_server(
         bind_addr,
         node_config.rpc_full_api,
         node_config.rpc_private,
+        dev_mode,
         runtime_snapshot_provider,
         bank_access_provider,
         tx_submitter,
@@ -3009,6 +3142,24 @@ impl BankAccessProvider for ConsensusBankAccessProvider {
             block_height,
             transactions,
         })
+    }
+
+    fn request_airdrop(
+        &self,
+        pubkey: &paradencer_types::Pubkey,
+        lamports: u64,
+    ) -> std::result::Result<[u8; 64], String> {
+        let forks = self.bank_forks.read().map_err(|e| e.to_string())?;
+        let bank = forks.working_bank();
+        bank.credit_lamports(pubkey, lamports);
+
+        // Generate a deterministic synthetic signature from the airdrop params.
+        let slot = bank.slot();
+        let mut sig = [0u8; 64];
+        sig[..32].copy_from_slice(pubkey.as_ref());
+        sig[32..40].copy_from_slice(&lamports.to_le_bytes());
+        sig[40..48].copy_from_slice(&slot.to_le_bytes());
+        Ok(sig)
     }
 }
 

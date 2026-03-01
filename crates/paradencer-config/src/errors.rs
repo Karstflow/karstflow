@@ -129,4 +129,14 @@ pub enum ConfigError {
         value: String,
         source: std::net::AddrParseError,
     },
+    #[error(
+        "test-validator mode cannot be used with {cluster} genesis hash — \
+         use cluster.mode = \"live\" for production networks"
+    )]
+    DevModeRejectsProductionGenesisHash { cluster: &'static str },
+    #[error(
+        "test-validator mode cannot be used with {cluster} entrypoints — \
+         use cluster.mode = \"live\" for production networks"
+    )]
+    DevModeRejectsProductionEntrypoints { cluster: &'static str },
 }

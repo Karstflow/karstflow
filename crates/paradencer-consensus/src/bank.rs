@@ -1444,6 +1444,22 @@ impl Bank {
         post_lamports >= min_balance
     }
 
+    /// Credit lamports to an account directly.
+    ///
+    /// Used for development mode airdrops. Creates the account as a
+    /// system-owned account if it does not exist. Updates the lattice
+    /// hash to maintain consistency.
+    pub fn credit_lamports(&self, pubkey: &Pubkey, amount: u64) {
+        let old_account = self.accounts.get_published_account(pubkey);
+        let mut account = old_account.clone().unwrap_or_default();
+        account.meta.lamports = account.meta.lamports.saturating_add(amount);
+        if account.meta.owner == Pubkey::default() {
+            account.meta.owner = SYSTEM_PROGRAM_ID;
+        }
+        self.update_account_hash(pubkey, old_account.as_ref(), &account);
+        self.accounts.store_published_account(*pubkey, account);
+    }
+
     /// Credit fee income to the leader's account.
     fn credit_leader_fees(&self, leader: &Pubkey, amount: u64) {
         let old_account = self.accounts.get_published_account(leader);

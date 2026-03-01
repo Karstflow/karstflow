@@ -9,6 +9,19 @@ pub struct ControlCommandWithConfig {
     pub mainnet_readiness: bool,
 }
 
+/// Resolve a `--profile` name to a config file path.
+///
+/// Built-in profiles: `devnet`, `testnet`, `mainnet`.
+/// Looks for `config/<profile>.toml` relative to the current directory,
+/// then falls back to `<profile>` as a literal file path.
+pub fn resolve_profile_path(profile: &str) -> PathBuf {
+    let candidate = PathBuf::from(format!("config/{profile}.toml"));
+    if candidate.exists() {
+        return candidate;
+    }
+    PathBuf::from(profile)
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ControlCommand {
     Run,
@@ -17,6 +30,7 @@ pub enum ControlCommand {
     Config,
     Keys,
     Version,
+    GenesisInit,
 }
 
 pub fn parse_command(args: impl IntoIterator<Item = String>) -> Result<ControlCommandWithConfig> {
@@ -37,6 +51,15 @@ pub fn parse_command(args: impl IntoIterator<Item = String>) -> Result<ControlCo
                         command: "--config requires a path value".to_string(),
                     })?;
                 config_path = Some(PathBuf::from(path));
+            }
+            "--profile" => {
+                let profile_name = argv
+                    .next()
+                    .ok_or_else(|| ControlPlaneError::InvalidCommand {
+                        command: "--profile requires a name (devnet, testnet, mainnet, or path)"
+                            .to_string(),
+                    })?;
+                config_path = Some(resolve_profile_path(&profile_name));
             }
             "--with-tick" => {
                 probe_ticks = probe_ticks.max(1);
@@ -69,13 +92,34 @@ pub fn parse_command(args: impl IntoIterator<Item = String>) -> Result<ControlCo
             "config" => command = ControlCommand::Config,
             "keys" => command = ControlCommand::Keys,
             "version" | "--version" | "-V" => command = ControlCommand::Version,
+            "genesis" => {
+                // Sub-command: `genesis init`
+                if let Some(sub) = argv.next() {
+                    match sub.as_str() {
+                        "init" => command = ControlCommand::GenesisInit,
+                        _ => {
+                            return Err(ControlPlaneError::InvalidCommand {
+                                command: format!("unknown genesis sub-command: {sub}"),
+                            });
+                        }
+                    }
+                } else {
+                    return Err(ControlPlaneError::InvalidCommand {
+                        command: "genesis requires a sub-command: init".to_string(),
+                    });
+                }
+            }
             _ => {
                 return Err(ControlPlaneError::InvalidCommand { command: token });
             }
         }
     }
 
-    if matches!(command, ControlCommand::Keys | ControlCommand::Version) && config_path.is_some() {
+    if matches!(
+        command,
+        ControlCommand::Keys | ControlCommand::Version | ControlCommand::GenesisInit
+    ) && config_path.is_some()
+    {
         return Err(ControlPlaneError::InvalidCommand {
             command: "--config is not supported for this command".to_string(),
         });

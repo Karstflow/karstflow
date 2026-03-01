@@ -1,6 +1,7 @@
 mod accounts;
 mod basic;
 mod cluster;
+mod faucet;
 mod history;
 mod inflation;
 mod ledger;
@@ -108,5 +109,9 @@ pub(super) fn dispatch_method(
             bank_access,
             tx_submitter,
         ),
+
+        RpcMethod::RequestAirdrop => {
+            faucet::handle(method, request, snapshot, commitment, bank_access)
+        }
     }
 }

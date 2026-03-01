@@ -4,11 +4,12 @@ use std::sync::Arc;
 
 use super::method_error::RpcMethodError;
 use super::methods::dispatch_method;
-use super::registry::resolve_method;
+use super::registry::resolve_method_with_dev_mode;
 
-pub(super) fn render_json_rpc_response(
+pub(super) fn render_json_rpc_response_with_dev_mode(
     body: &str,
     full_api: bool,
+    dev_mode: bool,
     runtime_snapshot: Option<RpcRuntimeSnapshot>,
     bank_access: Option<&Arc<dyn BankAccessProvider>>,
     tx_submitter: Option<&Arc<dyn TransactionSubmitter>>,
@@ -40,9 +41,14 @@ pub(super) fn render_json_rpc_response(
             }
             let mut responses = Vec::new();
             for request in requests {
-                if let Some(response) =
-                    render_single_request(request, full_api, snapshot, bank_access, tx_submitter)
-                {
+                if let Some(response) = render_single_request(
+                    request,
+                    full_api,
+                    dev_mode,
+                    snapshot,
+                    bank_access,
+                    tx_submitter,
+                ) {
                     responses.push(response);
                 }
             }
@@ -52,7 +58,14 @@ pub(super) fn render_json_rpc_response(
                 serde_json::Value::Array(responses).to_string()
             }
         }
-        _ => match render_single_request(&parsed, full_api, snapshot, bank_access, tx_submitter) {
+        _ => match render_single_request(
+            &parsed,
+            full_api,
+            dev_mode,
+            snapshot,
+            bank_access,
+            tx_submitter,
+        ) {
             Some(response) => response.to_string(),
             None => String::new(),
         },
@@ -62,6 +75,7 @@ pub(super) fn render_json_rpc_response(
 fn render_single_request(
     parsed: &serde_json::Value,
     full_api: bool,
+    dev_mode: bool,
     snapshot: RpcRuntimeSnapshot,
     bank_access: Option<&Arc<dyn BankAccessProvider>>,
     tx_submitter: Option<&Arc<dyn TransactionSubmitter>>,
@@ -110,7 +124,7 @@ fn render_single_request(
         };
     }
 
-    let rpc_method = match resolve_method(method, full_api) {
+    let rpc_method = match resolve_method_with_dev_mode(method, full_api, dev_mode) {
         Ok(method) => method,
         Err(_) => {
             return if is_notification {
@@ -214,7 +228,9 @@ fn validate_params_shape(request: &serde_json::Value) -> Result<(), RpcMethodErr
 
 #[cfg(test)]
 mod tests {
-    use super::{render_json_rpc_response as render_json_rpc_response_full, RpcRuntimeSnapshot};
+    use super::{
+        render_json_rpc_response_with_dev_mode as render_json_rpc_response_full, RpcRuntimeSnapshot,
+    };
     use crate::http::methods::shared::format_blockhash_from_seed;
     use crate::http::registry::resolve_method;
     use crate::state::read_metrics_snapshot_for_test;
@@ -230,7 +246,7 @@ mod tests {
         snapshot: Option<RpcRuntimeSnapshot>,
         bank_access: Option<&Arc<dyn BankAccessProvider>>,
     ) -> String {
-        render_json_rpc_response_full(body, full_api, snapshot, bank_access, None)
+        render_json_rpc_response_full(body, full_api, false, snapshot, bank_access, None)
     }
 
     fn unique_temp_file(prefix: &str, extension: &str) -> std::path::PathBuf {

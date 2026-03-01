@@ -279,6 +279,19 @@ pub trait BankAccessProvider: Send + Sync {
     ) -> Vec<RpcPerformanceSample> {
         Vec::new()
     }
+
+    /// Request an airdrop of lamports to the given pubkey.
+    ///
+    /// Only available in development mode. Credits the target account
+    /// directly on the working bank and returns a synthetic signature.
+    /// Returns `Err` when airdrops are not supported (production mode).
+    fn request_airdrop(
+        &self,
+        _pubkey: &paradencer_types::Pubkey,
+        _lamports: u64,
+    ) -> std::result::Result<[u8; 64], String> {
+        Err("airdrop not available in this mode".to_string())
+    }
 }
 
 /// Parsed block data returned by `get_block_data`.

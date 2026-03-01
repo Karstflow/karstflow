@@ -5,21 +5,23 @@ use paradencer_plugin::PluginService;
 use tracing::{info, warn};
 
 use paradencer_control::{
-    build_diagnostics_summary_from_probe, build_pipeline_service, build_repair_service,
-    build_replay_service_with_block_input, build_replay_service_with_consensus,
-    build_storage_maintenance_service, build_turbine_service, build_vote_broadcast_service,
-    build_vote_sender_service, dispatch_command, ensure_mainnet_readiness,
-    evaluate_mainnet_readiness, materialize_service_pair_from_config,
-    materialize_services_from_config, maybe_spawn_quic_bridge, parse_command,
-    render_diagnostics_cluster_mode_line, render_diagnostics_lane_capacity_line,
-    render_diagnostics_ok_line, render_diagnostics_probe_line,
-    render_diagnostics_readiness_issue_line, render_diagnostics_readiness_line,
-    render_diagnostics_services_line, render_diagnostics_stage_mix_line,
-    render_diagnostics_topology_line, render_preflight_readiness_issue_line,
-    render_preflight_readiness_line, render_readiness_policy_line, resolve_validator_identity,
-    restore_from_snapshot_archive, run_diagnostics_phase, run_preflight_phase,
-    run_preflight_phase_with_probe_report, run_runtime_phase_with_consensus, save_tower_to_disk,
-    start_gossip_service, BlockstoreShredProvider, ServiceBundle,
+    bootstrap_from_development_genesis, bootstrap_from_genesis_file,
+    build_diagnostics_summary_from_probe, build_pipeline_service,
+    build_repair_service,
+    build_replay_service_with_consensus, build_storage_maintenance_service,
+    build_turbine_service, build_vote_broadcast_service, build_vote_sender_service,
+    dispatch_command, ensure_mainnet_readiness, evaluate_mainnet_readiness,
+    materialize_service_pair_from_config, materialize_services_from_config,
+    maybe_spawn_quic_bridge, parse_command, render_diagnostics_cluster_mode_line,
+    render_diagnostics_lane_capacity_line, render_diagnostics_ok_line,
+    render_diagnostics_probe_line, render_diagnostics_readiness_issue_line,
+    render_diagnostics_readiness_line, render_diagnostics_services_line,
+    render_diagnostics_stage_mix_line, render_diagnostics_topology_line,
+    render_preflight_readiness_issue_line, render_preflight_readiness_line,
+    render_readiness_policy_line, resolve_validator_identity, restore_from_snapshot_archive,
+    run_diagnostics_phase, run_preflight_phase, run_preflight_phase_with_probe_report,
+    run_runtime_phase_with_consensus, save_tower_to_disk, start_gossip_service,
+    BlockstoreShredProvider, ServiceBundle,
 };
 
 /// Shred produced entries, store in blockstore, and feed to self-replay.
@@ -206,10 +208,9 @@ fn run_with_node_config(
         .shred_arrival_receiver
         .unwrap_or_else(|| crossbeam_channel::bounded(1).1);
 
-    // Choose bootstrap path: snapshot archive or genesis.
-    // When PARADENCER_SNAPSHOT_ARCHIVE is set, restore from a Solana snapshot
-    // to join an existing network. Otherwise bootstrap from genesis state.
+    // Choose bootstrap path: snapshot archive → genesis file → empty genesis.
     let replay_bundle = if let Some(ref archive_path) = node_config.snapshot_archive_path {
+        // Path 1: Restore from a Solana snapshot archive to join an existing network.
         let identity_pubkey = paradencer_storage::Pubkey::from(*identity.pubkey());
         let consensus = restore_from_snapshot_archive(
             archive_path,
@@ -223,11 +224,34 @@ fn run_with_node_config(
             consensus,
             Some(*identity.pubkey()),
         )
-    } else {
-        build_replay_service_with_block_input(
+    } else if let Some(ref genesis_path) = node_config.genesis_path {
+        // Path 2: Bootstrap from a genesis.bin file (fresh cluster or dev mode).
+        let identity_pubkey = paradencer_storage::Pubkey::from(*identity.pubkey());
+        let consensus = bootstrap_from_genesis_file(
+            genesis_path,
+            node_config.data_dir.as_deref(),
+            Some(&identity_pubkey),
+        )?;
+        build_replay_service_with_consensus(
             paradencer_stages::ReplayServiceConfig::default(),
             shred_block_input,
-            1_000_000, // initial stake for fork choice
+            consensus,
+            Some(*identity.pubkey()),
+        )
+    } else {
+        // Path 3: Development mode — auto-generate genesis with funded accounts.
+        // Creates a single-node cluster with 500 SOL identity and 500M SOL
+        // faucet for requestAirdrop. Only available in Dev cluster mode.
+        let identity_pubkey = paradencer_storage::Pubkey::from(*identity.pubkey());
+        let consensus = bootstrap_from_development_genesis(
+            node_config.data_dir.as_deref(),
+            Some(&identity_pubkey),
+        )?;
+        build_replay_service_with_consensus(
+            paradencer_stages::ReplayServiceConfig::default(),
+            shred_block_input,
+            consensus,
+            Some(*identity.pubkey()),
         )
     };
     let consensus = replay_bundle.consensus;
