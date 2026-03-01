@@ -10,6 +10,7 @@
 /// For stages with plain counters (dedup, FEC resolver, FEC cache), the
 /// aggregator stores snapshot copies that are updated externally via
 /// `update_*` methods before each aggregation cycle.
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use crate::exec_stage::{ExecStats, ExecStatsSnapshot};
@@ -33,6 +34,9 @@ pub struct MetricsAggregator {
     fec_resolver: Option<FecResolverSnapshot>,
     fec_resolver_atomic: Option<Arc<AtomicFecResolverStats>>,
     fec_cache: Option<FecCacheSnapshot>,
+    gossip: Option<GossipSnapshot>,
+    gossip_live: Option<GossipStatsRef>,
+    replay: Option<ReplaySnapshot>,
 }
 
 /// Builder and snapshot methods for MetricsAggregator.
@@ -49,6 +53,9 @@ impl MetricsAggregator {
             fec_resolver: None,
             fec_resolver_atomic: None,
             fec_cache: None,
+            gossip: None,
+            gossip_live: None,
+            replay: None,
         }
     }
 
@@ -106,6 +113,24 @@ impl MetricsAggregator {
         self
     }
 
+    /// Set initial gossip snapshot.
+    pub fn with_gossip(mut self, snapshot: GossipSnapshot) -> Self {
+        self.gossip = Some(snapshot);
+        self
+    }
+
+    /// Register gossip atomic stats (snapshotted on demand, like verify/resolv/etc.).
+    pub fn with_gossip_live(mut self, stats: GossipStatsRef) -> Self {
+        self.gossip_live = Some(stats);
+        self
+    }
+
+    /// Set initial replay snapshot.
+    pub fn with_replay(mut self, snapshot: ReplaySnapshot) -> Self {
+        self.replay = Some(snapshot);
+        self
+    }
+
     /// Update dedup stats snapshot (call before `snapshot()` for fresh data).
     pub fn update_dedup(&mut self, snapshot: DedupSnapshot) {
         self.dedup = Some(snapshot);
@@ -119,6 +144,16 @@ impl MetricsAggregator {
     /// Update FEC cache stats snapshot (call before `snapshot()` for fresh data).
     pub fn update_fec_cache(&mut self, snapshot: FecCacheSnapshot) {
         self.fec_cache = Some(snapshot);
+    }
+
+    /// Update gossip stats snapshot (call before `snapshot()` for fresh data).
+    pub fn update_gossip(&mut self, snapshot: GossipSnapshot) {
+        self.gossip = Some(snapshot);
+    }
+
+    /// Update replay stats snapshot (call before `snapshot()` for fresh data).
+    pub fn update_replay(&mut self, snapshot: ReplaySnapshot) {
+        self.replay = Some(snapshot);
     }
 
     /// Collect a point-in-time snapshot from all registered stats sources.
@@ -139,6 +174,12 @@ impl MetricsAggregator {
                 .map(|s| FecResolverSnapshot::from(&s.snapshot()))
                 .or_else(|| self.fec_resolver.clone()),
             fec_cache: self.fec_cache.clone(),
+            gossip: self
+                .gossip_live
+                .as_ref()
+                .map(|s| s.snapshot())
+                .or_else(|| self.gossip.clone()),
+            replay: self.replay.clone(),
         }
     }
 }
@@ -175,6 +216,82 @@ pub struct FecCacheSnapshot {
     pub slot_count: u64,
 }
 
+/// Snapshot of gossip protocol counters.
+#[derive(Debug, Clone, Default)]
+pub struct GossipSnapshot {
+    pub push_messages_sent: u64,
+    pub push_messages_received: u64,
+    pub pull_requests_sent: u64,
+    pub pull_requests_received: u64,
+    pub pull_responses_sent: u64,
+    pub pull_responses_received: u64,
+    pub pings_sent: u64,
+    pub pongs_received: u64,
+    pub prune_messages_received: u64,
+    pub nodes_discovered: u64,
+    pub nodes_pruned: u64,
+    pub bytes_sent: u64,
+    pub bytes_received: u64,
+    pub send_errors: u64,
+    pub receive_errors: u64,
+}
+
+/// Snapshot of replay stage counters.
+#[derive(Debug, Clone, Default)]
+pub struct ReplaySnapshot {
+    pub slots_replayed: u64,
+    pub slots_dead: u64,
+    pub transactions_processed: u64,
+    pub transactions_succeeded: u64,
+    pub transactions_failed: u64,
+    pub root_slot: u64,
+}
+
+/// Holds cloned `Arc<AtomicU64>` references from gossip service stats.
+///
+/// This struct allows the metrics aggregator to snapshot gossip counters
+/// on demand without depending on the `paradencer-net` crate directly.
+/// Each field shares the same underlying `AtomicU64` as the gossip service.
+#[derive(Clone)]
+pub struct GossipStatsRef {
+    pub push_messages_sent: Arc<AtomicU64>,
+    pub push_messages_received: Arc<AtomicU64>,
+    pub pull_requests_sent: Arc<AtomicU64>,
+    pub pull_responses_received: Arc<AtomicU64>,
+    pub pings_sent: Arc<AtomicU64>,
+    pub pongs_received: Arc<AtomicU64>,
+    pub prune_messages_received: Arc<AtomicU64>,
+    pub nodes_discovered: Arc<AtomicU64>,
+    pub nodes_pruned: Arc<AtomicU64>,
+    pub bytes_sent: Arc<AtomicU64>,
+    pub bytes_received: Arc<AtomicU64>,
+    pub send_errors: Arc<AtomicU64>,
+    pub receive_errors: Arc<AtomicU64>,
+}
+
+impl GossipStatsRef {
+    /// Snapshot all counters into a plain data struct.
+    pub fn snapshot(&self) -> GossipSnapshot {
+        GossipSnapshot {
+            push_messages_sent: self.push_messages_sent.load(Ordering::Relaxed),
+            push_messages_received: self.push_messages_received.load(Ordering::Relaxed),
+            pull_requests_sent: self.pull_requests_sent.load(Ordering::Relaxed),
+            pull_requests_received: 0,
+            pull_responses_sent: 0,
+            pull_responses_received: self.pull_responses_received.load(Ordering::Relaxed),
+            pings_sent: self.pings_sent.load(Ordering::Relaxed),
+            pongs_received: self.pongs_received.load(Ordering::Relaxed),
+            prune_messages_received: self.prune_messages_received.load(Ordering::Relaxed),
+            nodes_discovered: self.nodes_discovered.load(Ordering::Relaxed),
+            nodes_pruned: self.nodes_pruned.load(Ordering::Relaxed),
+            bytes_sent: self.bytes_sent.load(Ordering::Relaxed),
+            bytes_received: self.bytes_received.load(Ordering::Relaxed),
+            send_errors: self.send_errors.load(Ordering::Relaxed),
+            receive_errors: self.receive_errors.load(Ordering::Relaxed),
+        }
+    }
+}
+
 /// Combined point-in-time snapshot of all pipeline stage metrics.
 #[derive(Debug, Clone, Default)]
 pub struct AggregatedSnapshot {
@@ -186,6 +303,8 @@ pub struct AggregatedSnapshot {
     pub shred_network: Option<ShredNetworkStatsSnapshot>,
     pub fec_resolver: Option<FecResolverSnapshot>,
     pub fec_cache: Option<FecCacheSnapshot>,
+    pub gossip: Option<GossipSnapshot>,
+    pub replay: Option<ReplaySnapshot>,
 }
 
 impl AggregatedSnapshot {
@@ -409,6 +528,65 @@ impl AggregatedSnapshot {
                 c.cached_count
             ));
             lines.push(format!("paradencer_fec_cache_slot_count {}", c.slot_count));
+        }
+
+        if let Some(ref g) = self.gossip {
+            lines.push(format!(
+                "paradencer_gossip_push_messages_sent {}",
+                g.push_messages_sent
+            ));
+            lines.push(format!(
+                "paradencer_gossip_push_messages_received {}",
+                g.push_messages_received
+            ));
+            lines.push(format!(
+                "paradencer_gossip_pull_requests_sent {}",
+                g.pull_requests_sent
+            ));
+            lines.push(format!(
+                "paradencer_gossip_pull_responses_received {}",
+                g.pull_responses_received
+            ));
+            lines.push(format!("paradencer_gossip_pings_sent {}", g.pings_sent));
+            lines.push(format!(
+                "paradencer_gossip_pongs_received {}",
+                g.pongs_received
+            ));
+            lines.push(format!(
+                "paradencer_gossip_nodes_discovered {}",
+                g.nodes_discovered
+            ));
+            lines.push(format!("paradencer_gossip_bytes_sent {}", g.bytes_sent));
+            lines.push(format!(
+                "paradencer_gossip_bytes_received {}",
+                g.bytes_received
+            ));
+            lines.push(format!("paradencer_gossip_send_errors {}", g.send_errors));
+            lines.push(format!(
+                "paradencer_gossip_receive_errors {}",
+                g.receive_errors
+            ));
+        }
+
+        if let Some(ref r) = self.replay {
+            lines.push(format!(
+                "paradencer_replay_slots_replayed {}",
+                r.slots_replayed
+            ));
+            lines.push(format!("paradencer_replay_slots_dead {}", r.slots_dead));
+            lines.push(format!(
+                "paradencer_replay_transactions_processed {}",
+                r.transactions_processed
+            ));
+            lines.push(format!(
+                "paradencer_replay_transactions_succeeded {}",
+                r.transactions_succeeded
+            ));
+            lines.push(format!(
+                "paradencer_replay_transactions_failed {}",
+                r.transactions_failed
+            ));
+            lines.push(format!("paradencer_replay_root_slot {}", r.root_slot));
         }
 
         lines

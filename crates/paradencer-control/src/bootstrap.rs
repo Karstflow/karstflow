@@ -18,11 +18,11 @@ use paradencer_execution::{ExecutionBridge, SbpfBackend};
 use paradencer_mesh::{bounded_link, InPort, OutPort};
 use paradencer_net::tile::{BridgeConfig, BridgeHandle};
 use paradencer_net::{
-    ClusterInfo, ContactInfo, GossipConfig, GossipService, InMemoryShredStore, IngressMode, NodeId,
-    OutboundRepair, RepairCoordinator, RepairCoordinatorConfig, RepairRequest, RepairService,
-    RepairServiceConfig, RepairTarget, RetransmitService, RetransmitStats, ShredData, ShredIndex,
-    ShredProvider, Slot, TurbineConfig, TurbineStats, TurbineTreeBuilder, UdpShredTransport,
-    ValidatorInfo,
+    ClusterInfo, ContactInfo, GossipConfig, GossipService, GossipServiceStats, InMemoryShredStore,
+    IngressMode, NodeId, OutboundRepair, RepairCoordinator, RepairCoordinatorConfig, RepairRequest,
+    RepairService, RepairServiceConfig, RepairTarget, RetransmitService, RetransmitStats,
+    ShredData, ShredIndex, ShredProvider, Slot, TurbineConfig, TurbineStats, TurbineTreeBuilder,
+    UdpShredTransport, ValidatorInfo,
 };
 use paradencer_observability::spawn_metrics_http_bridge;
 use paradencer_rpc::{
@@ -640,6 +640,8 @@ pub struct GossipHandle {
     pub node_id: NodeId,
     /// Shared cluster state — provides other subsystems with peer data.
     pub cluster_info: Arc<ClusterInfo>,
+    /// Gossip protocol statistics (atomic counters — safe to read from any thread).
+    pub gossip_stats: GossipServiceStats,
     /// Sends shutdown signal to the gossip background thread.
     shutdown_tx: Option<tokio::sync::oneshot::Sender<()>>,
     /// Background thread running the gossip tokio runtime.
@@ -722,8 +724,9 @@ pub fn start_gossip_service(
 
     let entrypoint_addrs: Vec<std::net::SocketAddr> = node_config.live_entrypoints.to_vec();
 
-    let (cluster_tx, cluster_rx) =
-        std::sync::mpsc::sync_channel::<std::result::Result<Arc<ClusterInfo>, String>>(1);
+    let (cluster_tx, cluster_rx) = std::sync::mpsc::sync_channel::<
+        std::result::Result<(Arc<ClusterInfo>, GossipServiceStats), String>,
+    >(1);
     let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
 
     let thread_handle = std::thread::Builder::new()
@@ -745,6 +748,7 @@ pub fn start_gossip_service(
                     };
 
                 let cluster_info = service.cluster_info();
+                let gossip_stats = service.stats().clone();
 
                 // Seed entrypoints for bootstrap peer discovery.
                 cluster_info.add_entrypoints(&entrypoint_addrs);
@@ -754,7 +758,7 @@ pub fn start_gossip_service(
                     return;
                 }
 
-                let _ = cluster_tx.send(Ok(cluster_info));
+                let _ = cluster_tx.send(Ok((cluster_info, gossip_stats)));
 
                 // Park until shutdown signal arrives. The spawned gossip
                 // tasks (push/pull/receive/prune) run cooperatively on
@@ -767,7 +771,7 @@ pub fn start_gossip_service(
             detail: format!("thread spawn failed: {e}"),
         })?;
 
-    let cluster_info = cluster_rx
+    let (cluster_info, gossip_stats) = cluster_rx
         .recv()
         .map_err(|_| ControlPlaneError::GossipServiceStartFailed {
             detail: "gossip thread exited before reporting ready".to_string(),
@@ -777,6 +781,7 @@ pub fn start_gossip_service(
     Ok(GossipHandle {
         node_id,
         cluster_info,
+        gossip_stats,
         shutdown_tx: Some(shutdown_tx),
         _thread_handle: thread_handle,
     })

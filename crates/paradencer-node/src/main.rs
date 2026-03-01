@@ -557,8 +557,8 @@ fn run_with_node_config(
     }
 
     // Build MetricsAggregator from pipeline stage stats and attach to reporter.
-    // This enables all pipeline metrics (verify, resolv, pack, exec, shred)
-    // to appear on the Prometheus /metrics endpoint.
+    // This enables all pipeline metrics (verify, resolv, pack, exec, shred,
+    // gossip) to appear on the Prometheus /metrics endpoint.
     let reporter = runtime_topology.reporter.map(|rpt| {
         let mut aggregator = paradencer_stages::MetricsAggregator::new()
             .with_verify(std::sync::Arc::clone(
@@ -572,7 +572,22 @@ fn run_with_node_config(
             ))
             .with_exec(std::sync::Arc::clone(
                 &pipeline_bundle.handle.stage_stats.exec,
-            ));
+            ))
+            .with_gossip_live(paradencer_stages::GossipStatsRef {
+                push_messages_sent: gossip_handle.gossip_stats.push_messages_sent.clone(),
+                push_messages_received: gossip_handle.gossip_stats.push_messages_received.clone(),
+                pull_requests_sent: gossip_handle.gossip_stats.pull_requests_sent.clone(),
+                pull_responses_received: gossip_handle.gossip_stats.pull_responses_received.clone(),
+                pings_sent: gossip_handle.gossip_stats.pings_sent.clone(),
+                pongs_received: gossip_handle.gossip_stats.pongs_received.clone(),
+                prune_messages_received: gossip_handle.gossip_stats.prune_messages_received.clone(),
+                nodes_discovered: gossip_handle.gossip_stats.nodes_discovered.clone(),
+                nodes_pruned: gossip_handle.gossip_stats.nodes_pruned.clone(),
+                bytes_sent: gossip_handle.gossip_stats.bytes_sent.clone(),
+                bytes_received: gossip_handle.gossip_stats.bytes_received.clone(),
+                send_errors: gossip_handle.gossip_stats.send_errors.clone(),
+                receive_errors: gossip_handle.gossip_stats.receive_errors.clone(),
+            });
         if let Some(ref shred_stats) = runtime_topology.shred_network_stats {
             aggregator = aggregator.with_shred_network(std::sync::Arc::clone(shred_stats));
         }
