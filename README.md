@@ -4,7 +4,7 @@
 
 Paradencer is a ground-up Solana validator built for maximum throughput and minimal latency. It features a custom network stack, pre-allocated data structures, zero-copy I/O patterns, and a modular tile-based architecture designed for predictable performance at scale.
 
-**231K+ lines of Rust | 4,900+ tests | 20 crates**
+**246K+ lines of Rust | 5,100+ tests | 20 crates**
 
 ## Design Principles
 
@@ -55,11 +55,11 @@ paradencer-types          (core types: Pubkey, Account, Hash, Shred)
 | `paradencer-control` | 4,606 | 62 | Control plane: bootstrap, preflight validation, diagnostics, service materialization |
 | `paradencer-types` | 3,512 | 82 | Core types: Account, Pubkey, Hash, Transaction, Shred, compact-u16 codec |
 | `paradencer-crypto` | 3,329 | 111 | Ed25519 batch verification, Blake3/SHA-256/Keccak, secp256k1/r1, BN254, Reed-Solomon FEC, LtHash |
-| `paradencer-mesh` | 3,153 | 74 | Typed bounded channels for inter-tile communication with stats tracking |
+| `paradencer-mesh` | 3,153 | 134 | Dual-mode IPC (channels + shared memory), typed SPSC tile links, bounded channels, stats tracking |
 | `paradencer-constants` | 2,885 | -- | Protocol constants: fees, timing, compute limits, program parameters (23 modules) |
 | `paradencer-plugin` | 1,191 | 16 | Dynamic plugin system: load/unload, RPC control, C FFI |
 | `paradencer-topology` | 1,016 | 10 | Service topology planning and materialization |
-| `paradencer-runtime` | 797 | 14 | Execution substrate: tokio/pinned modes, CPU affinity, lifecycle |
+| `paradencer-runtime` | 797 | 14 | Execution substrate: tokio/pinned/tile modes, CnC supervisor, CPU affinity, lifecycle |
 | `paradencer-node` | 507 | -- | Validator orchestration and entry point |
 | `paradencer-ids` | 452 | 4 | Well-known program and sysvar addresses |
 | `paradencer-core` | 357 | 14 | Shared vocabulary types (RuntimeSpec, TopologySpec, ExecutionMode) |
@@ -112,10 +112,12 @@ paradencer-types          (core types: Pubkey, Account, Hash, Shred)
 - **Resolv stage**: Blockhash resolution and expiry tracking
 - **Pack stage**: Transaction scheduling with conflict detection, vote prioritization, CU-based pacing
 - **Exec stage**: Microblock execution with compute unit tracking
-- **Shred network**: FEC resolver pool, set cache, turbine retransmit
+- **Shred network**: FEC resolver pool, set cache, turbine retransmit, equivocation detection
 - **Leader pipeline**: Integrated block production with sign service and pacing
-- **Replay service**: Fork-aware slot processing with GHOST fork choice
+- **Replay service**: Fork-aware slot processing with GHOST fork choice, orphan buffering, cascade replay
 - **Metrics aggregation**: Cross-tile Prometheus metrics with HTTP scraping endpoint
+
+All pipeline stages communicate through dual-mode IPC (`DualSender`/`DualReceiver`). Eight `FragmentCodec` implementations cover the full message type set: `RawTransaction`, `UnverifiedTransaction`, `VerifiedTransaction`, `RetransmitDecision`, `CompletedFecSet`, `AssembledBlock`, `EquivocationProof`, `ShredBatch`, plus `Shred` (in paradencer-types).
 
 ### RPC
 
@@ -164,14 +166,35 @@ just smoke        # Quick 2-second smoke run
 
 ### Runtime Modes
 
-Paradencer supports two execution modes:
+Paradencer supports three execution modes:
 
 - **`tokio`** -- Cooperative async tasks (default, development)
 - **`pinned`** -- One service per dedicated core/thread (production)
+- **`tile`** -- Pinned cores with CnC supervisor, heartbeat monitoring, and stuck detection (production, recommended)
 
 ```bash
+# Development mode
 PARADENCER_EXEC_MODE=tokio PARADENCER_RUN_SECONDS=10 cargo run -p paradencer-node
+
+# Production mode with tile executor
+PARADENCER_EXEC_MODE=tile PARADENCER_RUN_SECONDS=10 cargo run -p paradencer-node
 ```
+
+### IPC Modes
+
+All inter-tile communication uses a dual-mode IPC system. Every point-to-point link in the pipeline supports both modes transparently:
+
+- **`channel`** -- Crossbeam bounded MPMC channels (default, compatible everywhere)
+- **`shared_memory`** -- Lock-free SPSC queues in shared memory regions (zero-copy, zero-syscall)
+
+```bash
+# Full zero-copy pipeline
+PARADENCER_IPC_MODE=shared_memory PARADENCER_EXEC_MODE=tile cargo run -p paradencer-node
+```
+
+**Architecture**: The `DualSender<T>` / `DualReceiver<T>` enum selects at construction time between `Channel(OutPort<T>)` for crossbeam and `Link(TileSender<T>)` / `Link(LinkConsumer<'static>)` for shared memory. Messages are encoded/decoded via the `FragmentCodec` trait — each pipeline type (transactions, shreds, FEC sets, blocks, retransmit decisions, equivocation proofs) has a zero-allocation binary codec. The two paths are completely independent: no fallback, no cross-contamination.
+
+Fan-in links (multiple producers to one consumer, e.g., shred filter fan-in) stay on channels. All point-to-point SPSC links use `dual_link()` which selects the IPC backend based on `IpcMode` config. Shared memory ownership handles are kept alive for the full pipeline lifetime via `link_ownership` in `MaterializedTopology`.
 
 ## Configuration
 
@@ -204,7 +227,7 @@ paradencer/
 |   +-- paradencer-constants/      # Protocol constants
 |   +-- paradencer-config/         # Configuration management
 |   +-- paradencer-control/        # Control plane
-|   +-- paradencer-mesh/           # IPC channels
+|   +-- paradencer-mesh/           # Dual-mode IPC (channels + shared memory tile links)
 |   +-- paradencer-node/           # Node entry point
 |   +-- paradencer-observability/  # Metrics
 |   +-- paradencer-topology/       # Service topology
