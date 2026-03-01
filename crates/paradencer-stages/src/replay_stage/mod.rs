@@ -191,9 +191,10 @@ impl ReplayStage {
         commitment_tracker: Arc<Mutex<CommitmentTracker>>,
     ) -> Self {
         let bank_transition = BankTransition::new(bank_forks.clone(), fork_choice.clone());
-        let mut block_processor = BlockProcessor::new(execution_bridge, commitment_tracker);
+        let mut block_processor = BlockProcessor::new(execution_bridge, commitment_tracker.clone());
         block_processor.verify_poh = config.verify_poh;
-        let vote_integration = VoteIntegration::new(vote_processor, tower, fork_choice);
+        let vote_integration =
+            VoteIntegration::new(vote_processor, tower, fork_choice, commitment_tracker);
 
         Self {
             config,
@@ -229,9 +230,10 @@ impl ReplayStage {
     ) -> Self {
         let bank_transition = BankTransition::new(bank_forks.clone(), fork_choice.clone());
         let mut block_processor =
-            BlockProcessor::with_backend(execution_bridge, commitment_tracker, backend);
+            BlockProcessor::with_backend(execution_bridge, commitment_tracker.clone(), backend);
         block_processor.verify_poh = config.verify_poh;
-        let vote_integration = VoteIntegration::new(vote_processor, tower, fork_choice);
+        let vote_integration =
+            VoteIntegration::new(vote_processor, tower, fork_choice, commitment_tracker);
 
         Self {
             config,
@@ -327,6 +329,7 @@ impl ReplayStage {
         };
 
         // Step 4b: Feed vote updates from executed transactions into ForkChoice
+        // and CommitmentTracker for threshold-based confirmation events.
         if self.config.process_votes && !outcome.vote_updates.is_empty() {
             if let Err(e) = self
                 .vote_integration
@@ -338,6 +341,20 @@ impl ReplayStage {
                     error = ?e,
                     "failed to incorporate vote updates into fork choice"
                 );
+            }
+
+            // Emit OptimisticConfirmation signals for slots that crossed
+            // the 2/3+ stake threshold during vote processing.
+            for event in self.vote_integration.drain_confirmation_events() {
+                if event.status >= paradencer_consensus::ConfirmationStatus::OptimisticallyConfirmed
+                {
+                    self.emit_signal(ReplaySignal::OptimisticConfirmation(
+                        OptimisticConfirmationInfo {
+                            slot: event.slot,
+                            stake_percentage: event.stake_ratio * 100.0,
+                        },
+                    ));
+                }
             }
         }
 

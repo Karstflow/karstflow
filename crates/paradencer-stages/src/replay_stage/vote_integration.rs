@@ -1,7 +1,7 @@
 use crate::AssembledBlock;
 use paradencer_consensus::{
-    ConsensusDecision, DecisionReason, ForkChoice, Tower, VoteProcessor, VoteProcessorError,
-    VoteUpdate,
+    CommitmentTracker, ConfirmationEvent, ConsensusDecision, DecisionReason, ForkChoice, Tower,
+    VoteProcessor, VoteProcessorError, VoteUpdate,
 };
 use std::sync::{Arc, Mutex, RwLock};
 use tracing::warn;
@@ -42,6 +42,11 @@ pub struct VoteIntegration {
     pub tower: Arc<RwLock<Tower>>,
     /// Fork choice engine that receives vote stake
     pub fork_choice: Arc<Mutex<ForkChoice>>,
+    /// Commitment tracker for threshold-based confirmation events
+    pub commitment_tracker: Arc<Mutex<CommitmentTracker>>,
+    /// Buffered confirmation events from vote processing.
+    /// Drained by the replay stage to emit OptimisticConfirmation signals.
+    pending_confirmation_events: Vec<ConfirmationEvent>,
 }
 
 impl VoteIntegration {
@@ -49,11 +54,14 @@ impl VoteIntegration {
         vote_processor: Arc<Mutex<VoteProcessor>>,
         tower: Arc<RwLock<Tower>>,
         fork_choice: Arc<Mutex<ForkChoice>>,
+        commitment_tracker: Arc<Mutex<CommitmentTracker>>,
     ) -> Self {
         Self {
             vote_processor,
             tower,
             fork_choice,
+            commitment_tracker,
+            pending_confirmation_events: Vec::new(),
         }
     }
 
@@ -127,18 +135,27 @@ impl VoteIntegration {
             .fork_choice
             .lock()
             .map_err(|_| VoteIntegrationError::LockFailed)?;
+        let mut commitment_tracker = self
+            .commitment_tracker
+            .lock()
+            .map_err(|_| VoteIntegrationError::LockFailed)?;
 
         let mut processed = 0;
+        let mut all_events = Vec::new();
         for update in vote_updates {
             if let Some(voted_slot) = update.voted_slot {
-                match vote_processor.process_vote(
+                match vote_processor.process_vote_with_commitment(
                     update.vote_account,
                     voted_slot,
                     0, // timestamp not available from VoteUpdate
                     None,
                     Some(&mut fork_choice),
+                    &mut commitment_tracker,
                 ) {
-                    Ok(_) => processed += 1,
+                    Ok(events) => {
+                        processed += 1;
+                        all_events.extend(events);
+                    }
                     Err(e) => {
                         warn!(
                             vote_account = ?update.vote_account,
@@ -151,7 +168,18 @@ impl VoteIntegration {
             }
         }
 
+        // Store confirmation events for the replay stage to emit as signals.
+        self.pending_confirmation_events.extend(all_events);
+
         Ok(processed)
+    }
+
+    /// Drain pending confirmation events for signal emission.
+    ///
+    /// The replay stage calls this after processing a block to emit
+    /// OptimisticConfirmation signals for slots that crossed the 2/3+ threshold.
+    pub fn drain_confirmation_events(&mut self) -> Vec<ConfirmationEvent> {
+        std::mem::take(&mut self.pending_confirmation_events)
     }
 
     /// Extract vote transactions from block entries.
@@ -458,11 +486,18 @@ mod tests {
         Arc::new(Mutex::new(ForkChoice::new(TEST_TOTAL_STAKE)))
     }
 
+    fn create_test_commitment() -> Arc<Mutex<paradencer_consensus::CommitmentTracker>> {
+        Arc::new(Mutex::new(
+            paradencer_consensus::CommitmentTracker::default(),
+        ))
+    }
+
     fn create_test_integration() -> VoteIntegration {
         VoteIntegration::new(
             create_test_vote_processor(),
             create_test_tower(),
             create_test_fork_choice(),
+            create_test_commitment(),
         )
     }
 
@@ -643,7 +678,12 @@ mod tests {
         // Register the slot in fork choice so add_stake has somewhere to land
         fork_choice.lock().unwrap().add_fork(100, None);
 
-        let mut integration = VoteIntegration::new(vote_processor, tower, fork_choice.clone());
+        let mut integration = VoteIntegration::new(
+            vote_processor,
+            tower,
+            fork_choice.clone(),
+            create_test_commitment(),
+        );
 
         // Create a VoteUpdate like bank_executor would produce
         let updates = vec![VoteUpdate {
@@ -708,7 +748,12 @@ mod tests {
         let fork_choice = create_test_fork_choice();
         fork_choice.lock().unwrap().add_fork(50, None);
 
-        let mut integration = VoteIntegration::new(vote_processor, tower, fork_choice.clone());
+        let mut integration = VoteIntegration::new(
+            vote_processor,
+            tower,
+            fork_choice.clone(),
+            create_test_commitment(),
+        );
 
         let updates = vec![
             VoteUpdate {
