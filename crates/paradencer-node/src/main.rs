@@ -232,6 +232,58 @@ fn run_with_node_config(
         None
     };
 
+    // Gossip status publisher: advertise lowest slot and epoch slots so
+    // peers know what data this node can serve for repair and catch-up.
+    {
+        let gossip_status_rx = replay_bundle
+            .signal_bus
+            .lock()
+            .unwrap()
+            .subscribe()
+            .expect("signal bus subscriber limit not reached");
+        let gossip_ci = cluster_info.clone();
+        let gossip_forks = consensus.bank_forks.clone();
+
+        std::thread::Builder::new()
+            .name("gossip-status".into())
+            .spawn(move || {
+                // Track the last published lowest slot to avoid redundant updates.
+                let mut last_lowest_slot: u64 = 0;
+
+                while let Ok(signal) = gossip_status_rx.recv() {
+                    match signal {
+                        paradencer_stages::ReplaySignal::RootAdvanced(info) => {
+                            // Publish lowest slot on root advancement so repair
+                            // peers know the oldest slot we can serve.
+                            if info.new_root > last_lowest_slot {
+                                gossip_ci.publish_lowest_slot(info.new_root);
+                                last_lowest_slot = info.new_root;
+                            }
+                        }
+                        paradencer_stages::ReplaySignal::SlotCompleted(info) => {
+                            // Publish epoch slots when a slot completes so peers
+                            // know which slots we have available. Use epoch_index 0
+                            // with a simple slot range encoding.
+                            let forks = gossip_forks.read().ok();
+                            let root = forks
+                                .as_ref()
+                                .map(|f| f.root_slot())
+                                .unwrap_or(info.parent_slot);
+
+                            // Encode a minimal epoch slots payload: the root slot
+                            // followed by the completed slot, encoded as little-endian u64.
+                            let mut payload = Vec::with_capacity(16);
+                            payload.extend_from_slice(&root.to_le_bytes());
+                            payload.extend_from_slice(&info.slot.to_le_bytes());
+                            gossip_ci.publish_epoch_slots(0, payload);
+                        }
+                        _ => {}
+                    }
+                }
+            })
+            .expect("failed to spawn gossip-status thread");
+    }
+
     // Wire replay signals to the plugin service.
     // Subscribe to the SignalBus, then start the plugin observer that
     // translates ReplaySignal → PluginEvent for all loaded plugins.

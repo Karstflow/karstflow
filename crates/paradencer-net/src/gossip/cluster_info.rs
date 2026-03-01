@@ -747,6 +747,23 @@ impl ClusterInfo {
         table.insert(value, 0, now_nanos, EntryOrigin::Push);
     }
 
+    /// Publish the lowest available slot to the gossip network.
+    ///
+    /// Advertises the lowest slot this node can serve for repair requests.
+    /// Peers use this to decide which nodes to ask for which slot ranges.
+    pub fn publish_lowest_slot(&self, slot: u64) {
+        let now_nanos = current_timestamp_nanos();
+        let mut value = CrdsValue {
+            origin: self.node_id.0,
+            wallclock_nanos: now_nanos,
+            signature: [0u8; 64],
+            data: CrdsValueData::LowestSlot(super::crds::LowestSlot { slot }),
+        };
+        self.sign_value(&mut value);
+        let mut table = self.table.write();
+        table.insert(value, 0, now_nanos, EntryOrigin::Push);
+    }
+
     /// Publish epoch slots to the gossip network.
     ///
     /// Advertises which slots this node has available in the current epoch.
@@ -1332,6 +1349,32 @@ mod tests {
             .filter(|v| matches!(v.data, CrdsValueData::EpochSlots(_)))
             .count();
         assert_eq!(epoch_count, 1);
+    }
+
+    #[test]
+    fn publish_lowest_slot_inserts_into_table() {
+        let (secret, pubkey) = paradencer_crypto::generate_keypair();
+        let node_id = NodeId(pubkey);
+        let info = create_test_contact_info(node_id, 8000);
+        let cluster = ClusterInfo::with_signing_key(
+            node_id,
+            info,
+            Duration::from_secs(30),
+            MAX_CLUSTER_SIZE,
+            secret,
+        );
+
+        cluster.publish_lowest_slot(42);
+
+        let (values, _cursor) = cluster.values_since_cursor(0);
+        let lowest = values
+            .iter()
+            .filter_map(|v| match &v.data {
+                CrdsValueData::LowestSlot(ls) => Some(ls.slot),
+                _ => None,
+            })
+            .next();
+        assert_eq!(lowest, Some(42));
     }
 
     #[test]
