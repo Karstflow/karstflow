@@ -50,6 +50,16 @@ fn run_with_node_config(
 ) -> paradencer_control::Result<()> {
     let _tracing_guard = init_tracing_from_config(&node_config)?;
 
+    // Install a panic hook that aborts the process on any thread panic.
+    // For a validator, crashing fast and restarting via supervisor is safer
+    // than running with silently degraded worker threads.
+    let default_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        default_hook(info);
+        tracing::error!("fatal panic detected, aborting process");
+        std::process::abort();
+    }));
+
     // Initialize the plugin service. Loads external plugins from JSON config files
     // specified via PARADENCER_PLUGIN_CONFIG env var (comma-separated paths).
     let mut plugin_service = if node_config.plugin_config_files.is_empty() {
