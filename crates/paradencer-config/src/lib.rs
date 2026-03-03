@@ -214,8 +214,7 @@ impl NodeConfig {
         };
 
         // Raw entrypoint strings (before DNS/SocketAddr parsing) for validation.
-        let raw_entrypoints: Vec<String> = match std::env::var("PARADENCER_LIVE_ENTRYPOINTS").ok()
-        {
+        let raw_entrypoints: Vec<String> = match std::env::var("PARADENCER_LIVE_ENTRYPOINTS").ok() {
             Some(env_val) => env_val
                 .split(',')
                 .map(str::trim)
@@ -283,13 +282,12 @@ impl NodeConfig {
             .map(PathBuf::from);
 
         // Snapshot download: env → TOML → false.
-        let snapshot_download_enabled =
-            match std::env::var("PARADENCER_SNAPSHOT_DOWNLOAD").ok() {
-                Some(v) => v == "true" || v == "1",
-                None => cluster_profile
-                    .and_then(|c| c.snapshot_download)
-                    .unwrap_or(false),
-            };
+        let snapshot_download_enabled = match std::env::var("PARADENCER_SNAPSHOT_DOWNLOAD").ok() {
+            Some(v) => v == "true" || v == "1",
+            None => cluster_profile
+                .and_then(|c| c.snapshot_download)
+                .unwrap_or(false),
+        };
 
         // Genesis path: env → TOML → None.
         let genesis_path = std::env::var("PARADENCER_GENESIS_PATH")
@@ -503,23 +501,53 @@ pub fn parse_live_entrypoints(value: Option<String>) -> Result<Vec<SocketAddr>> 
     raw.split(',')
         .map(str::trim)
         .filter(|entry| !entry.is_empty())
-        .map(|entry| {
-            entry
-                .parse::<SocketAddr>()
-                .map_err(|source| ConfigError::InvalidEntryPointAddr {
-                    value: entry.to_string(),
-                    source,
-                })
-        })
+        .map(resolve_entrypoint)
         .collect()
+}
+
+/// Resolve a single entrypoint string to a `SocketAddr`.
+///
+/// Accepts both `IP:port` and `hostname:port` formats. For hostnames, falls back
+/// to DNS resolution via the system resolver. Takes the first resolved address,
+/// preferring IPv4 when multiple addresses are returned.
+fn resolve_entrypoint(entry: &str) -> Result<SocketAddr> {
+    // Fast path: try direct SocketAddr parse (IP:port format).
+    if let Ok(addr) = entry.parse::<SocketAddr>() {
+        return Ok(addr);
+    }
+
+    // Slow path: DNS resolution for hostname:port strings.
+    use std::net::ToSocketAddrs;
+    let addrs =
+        entry
+            .to_socket_addrs()
+            .map_err(|source| ConfigError::EntryPointDnsResolutionFailed {
+                value: entry.to_string(),
+                message: source.to_string(),
+            })?;
+
+    // Prefer IPv4. If no IPv4 found, fall back to the first address.
+    let all: Vec<SocketAddr> = addrs.collect();
+    if all.is_empty() {
+        return Err(ConfigError::EntryPointDnsNoAddresses {
+            value: entry.to_string(),
+        });
+    }
+    let preferred = all
+        .iter()
+        .find(|a| a.is_ipv4())
+        .or_else(|| all.first())
+        .copied()
+        .unwrap();
+    Ok(preferred)
 }
 
 pub fn is_valid_genesis_hash(value: &str) -> bool {
     // Accept 64-character lowercase hex (raw hash encoding).
     let is_hex_64 = value.len() == 64
-        && value.chars().all(|c| {
-            c.is_ascii_digit() || matches!(c, 'a' | 'b' | 'c' | 'd' | 'e' | 'f')
-        });
+        && value
+            .chars()
+            .all(|c| c.is_ascii_digit() || matches!(c, 'a' | 'b' | 'c' | 'd' | 'e' | 'f'));
     if is_hex_64 {
         return true;
     }

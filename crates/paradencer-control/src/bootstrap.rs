@@ -363,7 +363,10 @@ pub fn bootstrap_from_genesis_file(
 
     let genesis = paradencer_storage::genesis::parse_genesis(genesis_path).map_err(|e| {
         ControlPlaneError::Bootstrap {
-            message: format!("failed to parse genesis file {}: {e}", genesis_path.display()),
+            message: format!(
+                "failed to parse genesis file {}: {e}",
+                genesis_path.display()
+            ),
         }
     })?;
 
@@ -471,9 +474,9 @@ pub fn bootstrap_from_development_genesis(
 pub fn development_faucet_pubkey() -> Pubkey {
     // SHA-256("paradencer-dev-faucet")[..32] — deterministic, reproducible.
     Pubkey::new([
-        0xd4, 0x35, 0xb0, 0x9a, 0x6c, 0x07, 0x3c, 0x49, 0x14, 0x89, 0x81, 0x06, 0xd9, 0xe8,
-        0xfe, 0x20, 0xc6, 0x83, 0x2b, 0x5a, 0x55, 0xf3, 0x2e, 0x77, 0x1c, 0x48, 0x3a, 0xf6,
-        0xe1, 0x13, 0x5b, 0x7d,
+        0xd4, 0x35, 0xb0, 0x9a, 0x6c, 0x07, 0x3c, 0x49, 0x14, 0x89, 0x81, 0x06, 0xd9, 0xe8, 0xfe,
+        0x20, 0xc6, 0x83, 0x2b, 0x5a, 0x55, 0xf3, 0x2e, 0x77, 0x1c, 0x48, 0x3a, 0xf6, 0xe1, 0x13,
+        0x5b, 0x7d,
     ])
 }
 
@@ -3295,6 +3298,64 @@ impl TransactionSubmitter for ConsensusTransactionSubmitter {
             return Err(last_err.unwrap_or_else(|| "all TPU sends failed".to_string()));
         }
 
+        Ok(sig)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Local transaction submitter (dev mode)
+// ---------------------------------------------------------------------------
+
+/// Injects raw transactions directly into the local pack pipeline.
+///
+/// Used in dev mode (`cluster_mode = "dev"`) so that `sendTransaction` RPC
+/// calls reach the local block producer without going through UDP or gossip.
+/// The receiver end (`DualReceiver<RawTransaction>`) must be added to the
+/// pipeline inputs when building the pipeline service.
+pub struct LocalTransactionSubmitter {
+    sender: paradencer_mesh::OutPort<paradencer_stages::RawTransaction>,
+}
+
+/// Create a `LocalTransactionSubmitter` and its matching pipeline input receiver.
+///
+/// Add the returned `DualReceiver` to `pipeline_inputs` before calling
+/// `build_pipeline_service()`. Pass the submitter to the RPC server so that
+/// `sendTransaction` calls in dev mode route directly into the pack stage.
+pub fn build_local_transaction_submitter() -> (
+    Arc<LocalTransactionSubmitter>,
+    DualReceiver<paradencer_stages::RawTransaction>,
+) {
+    let (tx, rx) = bounded_link::<paradencer_stages::RawTransaction>(256);
+    let submitter = Arc::new(LocalTransactionSubmitter { sender: tx });
+    (submitter, DualReceiver::Channel(rx))
+}
+
+impl TransactionSubmitter for LocalTransactionSubmitter {
+    fn submit_transaction(
+        &self,
+        tx_bytes: &[u8],
+    ) -> std::result::Result<[u8; 64], String> {
+        // Wire format: [num_signatures: compact-u16] [sig0: 64 bytes] ...
+        if tx_bytes.is_empty() {
+            return Err("empty transaction".to_string());
+        }
+        let num_sigs = tx_bytes[0] as usize;
+        if num_sigs == 0 {
+            return Err("transaction has no signatures".to_string());
+        }
+        if tx_bytes.len() < 1 + 64 {
+            return Err("transaction too short to contain a signature".to_string());
+        }
+        let mut sig = [0u8; 64];
+        sig.copy_from_slice(&tx_bytes[1..65]);
+
+        let raw_tx = paradencer_stages::RawTransaction {
+            payload: tx_bytes.to_vec(),
+            source: paradencer_stages::TransactionSource::Quic,
+        };
+        self.sender
+            .try_send(raw_tx)
+            .map_err(|_| "pipeline input channel full or closed".to_string())?;
         Ok(sig)
     }
 }

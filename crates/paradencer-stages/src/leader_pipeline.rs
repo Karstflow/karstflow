@@ -323,11 +323,8 @@ impl LeaderPipeline {
                 .iter()
                 .map(|r| r.payload.clone())
                 .collect();
-            self.shred_entries.push(PohEntry::new(
-                entry.num_hashes,
-                entry.hash,
-                transactions,
-            ));
+            self.shred_entries
+                .push(PohEntry::new(entry.num_hashes, entry.hash, transactions));
         }
 
         // 5. Compute CU rebate and release pack locks
@@ -373,11 +370,8 @@ impl LeaderPipeline {
         // Build PohEntries for ticks (no transactions).
         for entry in &new_entries {
             if let Entry::Tick(ref tick) = entry {
-                self.shred_entries.push(PohEntry::new(
-                    tick.num_hashes,
-                    tick.hash,
-                    Vec::new(),
-                ));
+                self.shred_entries
+                    .push(PohEntry::new(tick.num_hashes, tick.hash, Vec::new()));
             }
         }
         self.entries.extend(new_entries);
@@ -390,11 +384,8 @@ impl LeaderPipeline {
         // Build PohEntries for final tick entries.
         for entry in &final_entries {
             if let Entry::Tick(ref tick) = entry {
-                self.shred_entries.push(PohEntry::new(
-                    tick.num_hashes,
-                    tick.hash,
-                    Vec::new(),
-                ));
+                self.shred_entries
+                    .push(PohEntry::new(tick.num_hashes, tick.hash, Vec::new()));
             }
         }
         self.entries.extend(final_entries);

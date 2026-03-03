@@ -353,7 +353,10 @@ mod tests {
     #[test]
     fn dev_mode_gate_blocks_dev_only_methods() {
         let resolved = resolve_method_with_dev_mode("requestAirdrop", true, false);
-        assert!(resolved.is_err(), "requestAirdrop should be blocked without dev_mode");
+        assert!(
+            resolved.is_err(),
+            "requestAirdrop should be blocked without dev_mode"
+        );
         let resolved = resolve_method_with_dev_mode("requestAirdrop", true, true);
         assert_eq!(resolved.ok(), Some(RpcMethod::RequestAirdrop));
     }

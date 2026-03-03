@@ -94,11 +94,15 @@ pub enum ConfigError {
     LiveModeInvalidExpectedGenesisHash,
     #[error("live mode requires PARADENCER_LIVE_ENTRYPOINTS")]
     LiveModeRequiresEntryPoints,
-    #[error("failed to parse PARADENCER_LIVE_ENTRYPOINTS entry '{value}': {source}")]
+    #[error("failed to parse entrypoint '{value}': {source}")]
     InvalidEntryPointAddr {
         value: String,
         source: std::net::AddrParseError,
     },
+    #[error("failed to resolve entrypoint hostname '{value}': {message}")]
+    EntryPointDnsResolutionFailed { value: String, message: String },
+    #[error("entrypoint hostname '{value}' resolved to no addresses")]
+    EntryPointDnsNoAddresses { value: String },
     #[error("live mode entrypoint is not routable: {entrypoint}")]
     LiveModeUnroutableEntryPoint { entrypoint: std::net::SocketAddr },
     #[error("live mode ingress UDP bind address is not routable: {bind_addr}")]

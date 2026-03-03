@@ -55,8 +55,29 @@ fn parse_live_entrypoints_accepts_comma_separated_addrs() {
 
 #[test]
 fn parse_live_entrypoints_rejects_invalid_addr() {
-    let parsed = parse_live_entrypoints(Some("bad-entrypoint".to_string()));
+    // A string with no port and no resolvable hostname
+    let parsed = parse_live_entrypoints(Some("not-a-valid-entrypoint-at-all".to_string()));
     assert!(parsed.is_err());
+}
+
+#[test]
+fn parse_live_entrypoints_accepts_localhost_hostname() {
+    // "localhost:8001" should resolve via DNS on any platform.
+    let parsed = parse_live_entrypoints(Some("localhost:8001".to_string()));
+    assert!(
+        parsed.is_ok(),
+        "localhost:8001 should resolve: {:?}",
+        parsed
+    );
+    assert_eq!(parsed.unwrap().len(), 1);
+}
+
+#[test]
+fn parse_live_entrypoints_accepts_mixed_ip_and_hostname() {
+    // Mix of IP:port and hostname:port in one list.
+    let parsed =
+        parse_live_entrypoints(Some("192.0.2.10:8001,localhost:8002".to_string())).unwrap();
+    assert_eq!(parsed.len(), 2);
 }
 
 #[test]

@@ -1,9 +1,11 @@
 use crate::bootstrap::{
-    build_blockstore, build_pipeline_service, build_replay_service, build_shred_pipeline,
-    build_storage_maintenance_service, materialize_service_pair_from_config,
-    materialize_services_from_config, BlockstoreShredProvider,
+    build_blockstore, build_local_transaction_submitter, build_pipeline_service,
+    build_replay_service, build_shred_pipeline, build_storage_maintenance_service,
+    materialize_service_pair_from_config, materialize_services_from_config,
+    BlockstoreShredProvider,
 };
 use paradencer_config::NodeConfig;
+use paradencer_rpc::TransactionSubmitter;
 use std::sync::Arc;
 
 #[test]
@@ -316,4 +318,71 @@ fn convert_repair_target_to_request_all_variants() {
         }
         _ => panic!("expected Orphan variant"),
     }
+}
+
+// ---------------------------------------------------------------------------
+// W003: LocalTransactionSubmitter tests
+// ---------------------------------------------------------------------------
+
+/// Build a minimal fake transaction: [1 sig count byte] [64-byte sig] [32-byte message].
+fn fake_transaction(sig: [u8; 64]) -> Vec<u8> {
+    let mut tx = vec![1u8]; // compact-u16: 1 signature
+    tx.extend_from_slice(&sig);
+    tx.extend_from_slice(&[0u8; 32]); // placeholder message
+    tx
+}
+
+#[test]
+fn local_transaction_submitter_injects_to_pipeline() {
+    let (submitter, mut rx) = build_local_transaction_submitter();
+
+    let sig = [0x42u8; 64];
+    let tx_bytes = fake_transaction(sig);
+
+    let returned_sig = submitter.submit_transaction(&tx_bytes).unwrap();
+    assert_eq!(returned_sig, sig, "returned signature must match first tx signature");
+
+    let raw_tx = rx.try_recv().unwrap().expect("transaction must be in the channel");
+    assert_eq!(raw_tx.payload, tx_bytes, "injected payload must match submitted bytes");
+}
+
+#[test]
+fn local_transaction_submitter_returns_error_for_empty_tx() {
+    let (submitter, _rx) = build_local_transaction_submitter();
+    let err = submitter.submit_transaction(&[]).unwrap_err();
+    assert!(err.contains("empty"), "error should mention empty tx: {err}");
+}
+
+#[test]
+fn local_transaction_submitter_returns_error_for_zero_signatures() {
+    let (submitter, _rx) = build_local_transaction_submitter();
+    let tx = vec![0u8; 70]; // num_sigs = 0
+    let err = submitter.submit_transaction(&tx).unwrap_err();
+    assert!(err.contains("no signatures"), "error should mention no signatures: {err}");
+}
+
+#[test]
+fn local_transaction_submitter_returns_error_for_truncated_tx() {
+    let (submitter, _rx) = build_local_transaction_submitter();
+    let tx = vec![1u8, 0u8, 1u8]; // num_sigs=1 but only 3 bytes total, need 65
+    let err = submitter.submit_transaction(&tx).unwrap_err();
+    assert!(err.contains("too short"), "error should mention too short: {err}");
+}
+
+#[test]
+fn local_transaction_submitter_multiple_injects_preserve_order() {
+    let (submitter, mut rx) = build_local_transaction_submitter();
+
+    let sig_a = [0xAAu8; 64];
+    let sig_b = [0xBBu8; 64];
+    let tx_a = fake_transaction(sig_a);
+    let tx_b = fake_transaction(sig_b);
+
+    submitter.submit_transaction(&tx_a).unwrap();
+    submitter.submit_transaction(&tx_b).unwrap();
+
+    let first = rx.try_recv().unwrap().expect("first tx");
+    let second = rx.try_recv().unwrap().expect("second tx");
+    assert_eq!(first.payload, tx_a);
+    assert_eq!(second.payload, tx_b);
 }

@@ -53,9 +53,7 @@ where
             );
             Ok(())
         }
-        ControlCommand::GenesisInit => {
-            run_genesis_init()
-        }
+        ControlCommand::GenesisInit => run_genesis_init(),
     }
 }
 
@@ -83,7 +81,10 @@ fn run_genesis_init() -> Result<()> {
     println!("=== Paradencer Genesis Generator ===\n");
 
     let output_path = prompt("Output path", "genesis.bin");
-    let cluster_type = prompt("Cluster type (development/devnet/testnet/mainnet)", "development");
+    let cluster_type = prompt(
+        "Cluster type (development/devnet/testnet/mainnet)",
+        "development",
+    );
     let ticks_per_slot = prompt("Ticks per slot", "64");
     let identity_lamports = prompt("Identity account lamports", "500000000000");
     let faucet_lamports = prompt("Faucet account lamports", "500000000000000000");
@@ -101,11 +102,12 @@ fn run_genesis_init() -> Result<()> {
         }
     };
 
-    let ticks: u64 = ticks_per_slot.parse().map_err(|_| {
-        crate::errors::ControlPlaneError::InvalidCommand {
-            command: format!("invalid ticks_per_slot: {ticks_per_slot}"),
-        }
-    })?;
+    let ticks: u64 =
+        ticks_per_slot
+            .parse()
+            .map_err(|_| crate::errors::ControlPlaneError::InvalidCommand {
+                command: format!("invalid ticks_per_slot: {ticks_per_slot}"),
+            })?;
 
     let id_lamports: u64 = identity_lamports.parse().map_err(|_| {
         crate::errors::ControlPlaneError::InvalidCommand {
@@ -113,11 +115,12 @@ fn run_genesis_init() -> Result<()> {
         }
     })?;
 
-    let faucet_lamps: u64 = faucet_lamports.parse().map_err(|_| {
-        crate::errors::ControlPlaneError::InvalidCommand {
-            command: format!("invalid faucet lamports: {faucet_lamports}"),
-        }
-    })?;
+    let faucet_lamps: u64 =
+        faucet_lamports
+            .parse()
+            .map_err(|_| crate::errors::ControlPlaneError::InvalidCommand {
+                command: format!("invalid faucet lamports: {faucet_lamports}"),
+            })?;
 
     let hashes: Option<u64> = if hashes_per_tick.is_empty() {
         None
@@ -179,10 +182,7 @@ fn run_genesis_init() -> Result<()> {
     println!("  Identity:        {identity}");
     println!("  Faucet:          {faucet}");
     println!("  Total supply:    {} lamports", genesis.total_supply());
-    println!(
-        "  File size:       {} bytes",
-        data.len()
-    );
+    println!("  File size:       {} bytes", data.len());
 
     Ok(())
 }

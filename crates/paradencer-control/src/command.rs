@@ -53,12 +53,13 @@ pub fn parse_command(args: impl IntoIterator<Item = String>) -> Result<ControlCo
                 config_path = Some(PathBuf::from(path));
             }
             "--profile" => {
-                let profile_name = argv
-                    .next()
-                    .ok_or_else(|| ControlPlaneError::InvalidCommand {
-                        command: "--profile requires a name (devnet, testnet, mainnet, or path)"
-                            .to_string(),
-                    })?;
+                let profile_name =
+                    argv.next()
+                        .ok_or_else(|| ControlPlaneError::InvalidCommand {
+                            command:
+                                "--profile requires a name (devnet, testnet, mainnet, or path)"
+                                    .to_string(),
+                        })?;
                 config_path = Some(resolve_profile_path(&profile_name));
             }
             "--with-tick" => {

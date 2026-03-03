@@ -6,22 +6,20 @@ use tracing::{info, warn};
 
 use paradencer_control::{
     bootstrap_from_development_genesis, bootstrap_from_genesis_file,
-    build_diagnostics_summary_from_probe, build_pipeline_service,
-    build_repair_service,
-    build_replay_service_with_consensus, build_storage_maintenance_service,
-    build_turbine_service, build_vote_broadcast_service, build_vote_sender_service,
-    dispatch_command, ensure_mainnet_readiness, evaluate_mainnet_readiness,
-    materialize_service_pair_from_config, materialize_services_from_config,
-    maybe_spawn_quic_bridge, parse_command, render_diagnostics_cluster_mode_line,
-    render_diagnostics_lane_capacity_line, render_diagnostics_ok_line,
-    render_diagnostics_probe_line, render_diagnostics_readiness_issue_line,
-    render_diagnostics_readiness_line, render_diagnostics_services_line,
-    render_diagnostics_stage_mix_line, render_diagnostics_topology_line,
-    render_preflight_readiness_issue_line, render_preflight_readiness_line,
-    render_readiness_policy_line, resolve_validator_identity, restore_from_snapshot_archive,
-    run_diagnostics_phase, run_preflight_phase, run_preflight_phase_with_probe_report,
-    run_runtime_phase_with_consensus, save_tower_to_disk, start_gossip_service,
-    BlockstoreShredProvider, ServiceBundle,
+    build_diagnostics_summary_from_probe, build_pipeline_service, build_repair_service,
+    build_replay_service_with_consensus, build_storage_maintenance_service, build_turbine_service,
+    build_vote_broadcast_service, build_vote_sender_service, dispatch_command,
+    ensure_mainnet_readiness, evaluate_mainnet_readiness, materialize_service_pair_from_config,
+    materialize_services_from_config, maybe_spawn_quic_bridge, parse_command,
+    render_diagnostics_cluster_mode_line, render_diagnostics_lane_capacity_line,
+    render_diagnostics_ok_line, render_diagnostics_probe_line,
+    render_diagnostics_readiness_issue_line, render_diagnostics_readiness_line,
+    render_diagnostics_services_line, render_diagnostics_stage_mix_line,
+    render_diagnostics_topology_line, render_preflight_readiness_issue_line,
+    render_preflight_readiness_line, render_readiness_policy_line, resolve_validator_identity,
+    restore_from_snapshot_archive, run_diagnostics_phase, run_preflight_phase,
+    run_preflight_phase_with_probe_report, run_runtime_phase_with_consensus, save_tower_to_disk,
+    start_gossip_service, BlockstoreShredProvider, ServiceBundle,
 };
 
 /// Shred produced entries, store in blockstore, and feed to self-replay.
@@ -535,8 +533,7 @@ fn run_with_node_config(
 
         // Identity for shred signing.
         let leader_pubkey = paradencer_storage::Pubkey::from(*identity.pubkey());
-        let leader_signing_key =
-            ed25519_dalek::SigningKey::from_bytes(identity.secret_key());
+        let leader_signing_key = ed25519_dalek::SigningKey::from_bytes(identity.secret_key());
         let shred_version = node_config.expected_shred_version.unwrap_or(1);
 
         // Clone shared resources for the orchestrator thread.
