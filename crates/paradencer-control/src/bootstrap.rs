@@ -2896,6 +2896,20 @@ impl BankAccessProvider for ConsensusBankAccessProvider {
         epoch
     }
 
+    fn get_epoch_schedule(&self) -> Option<(u64, u64, bool, u64, u64)> {
+        let forks = self.bank_forks.read().ok()?;
+        let bank = forks.working_bank();
+        let cfg = bank.epoch_schedule().config();
+        // leader_schedule_slot_offset matches slots_per_epoch (Solana default).
+        Some((
+            cfg.slots_per_epoch,
+            cfg.slots_per_epoch,
+            cfg.warmup,
+            cfg.first_normal_epoch,
+            cfg.first_normal_slot,
+        ))
+    }
+
     fn get_inflation_rate(&self, epoch: u64) -> Option<(f64, f64, f64)> {
         let forks = self.bank_forks.read().ok()?;
         let bank = forks.working_bank();

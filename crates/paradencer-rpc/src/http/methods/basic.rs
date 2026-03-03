@@ -46,12 +46,16 @@ pub(super) fn handle(
             Ok(types::to_value(&response))
         }
         RpcMethod::GetEpochSchedule => {
+            let (slots_per_epoch, leader_schedule_slot_offset, warmup, first_normal_epoch, first_normal_slot) =
+                bank_access
+                    .and_then(|bank| bank.get_epoch_schedule())
+                    .unwrap_or((SLOTS_PER_EPOCH, SLOTS_PER_EPOCH, false, 0, 0));
             let response = EpochSchedule {
-                slots_per_epoch: SLOTS_PER_EPOCH,
-                leader_schedule_slot_offset: SLOTS_PER_EPOCH,
-                warmup: false,
-                first_normal_epoch: 0,
-                first_normal_slot: 0,
+                slots_per_epoch,
+                leader_schedule_slot_offset,
+                warmup,
+                first_normal_epoch,
+                first_normal_slot,
             };
             Ok(types::to_value(&response))
         }

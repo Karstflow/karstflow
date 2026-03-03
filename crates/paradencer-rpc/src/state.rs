@@ -219,6 +219,15 @@ pub trait BankAccessProvider: Send + Sync {
         0
     }
 
+    /// Get the epoch schedule configuration.
+    ///
+    /// Returns `(slots_per_epoch, leader_schedule_slot_offset, warmup,
+    /// first_normal_epoch, first_normal_slot)`.
+    /// Returns `None` when epoch schedule is unavailable.
+    fn get_epoch_schedule(&self) -> Option<(u64, u64, bool, u64, u64)> {
+        None
+    }
+
     /// Get the inflation rate components for the given epoch.
     ///
     /// Returns (total, validator, foundation) inflation rates.
