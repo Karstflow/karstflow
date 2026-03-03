@@ -3345,10 +3345,7 @@ pub fn build_local_transaction_submitter() -> (
 }
 
 impl TransactionSubmitter for LocalTransactionSubmitter {
-    fn submit_transaction(
-        &self,
-        tx_bytes: &[u8],
-    ) -> std::result::Result<[u8; 64], String> {
+    fn submit_transaction(&self, tx_bytes: &[u8]) -> std::result::Result<[u8; 64], String> {
         // Wire format: [num_signatures: compact-u16] [sig0: 64 bytes] ...
         if tx_bytes.is_empty() {
             return Err("empty transaction".to_string());

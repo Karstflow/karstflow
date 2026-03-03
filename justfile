@@ -54,3 +54,11 @@ genesis-init:
 # Run with an existing genesis file
 run-genesis path:
   PARADENCER_GENESIS_PATH={{path}} cargo run -p paradencer-node
+
+# Initialize a local multi-validator cluster (default: 3 nodes, output: cluster-data/)
+cluster-init n="3" dir="cluster-data":
+  cargo run -p paradencer-node -- genesis cluster {{n}} --output-dir {{dir}}
+
+# Start all nodes in a previously initialized cluster
+cluster-start dir="cluster-data":
+  bash {{dir}}/start.sh

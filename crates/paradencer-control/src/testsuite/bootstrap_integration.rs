@@ -340,17 +340,29 @@ fn local_transaction_submitter_injects_to_pipeline() {
     let tx_bytes = fake_transaction(sig);
 
     let returned_sig = submitter.submit_transaction(&tx_bytes).unwrap();
-    assert_eq!(returned_sig, sig, "returned signature must match first tx signature");
+    assert_eq!(
+        returned_sig, sig,
+        "returned signature must match first tx signature"
+    );
 
-    let raw_tx = rx.try_recv().unwrap().expect("transaction must be in the channel");
-    assert_eq!(raw_tx.payload, tx_bytes, "injected payload must match submitted bytes");
+    let raw_tx = rx
+        .try_recv()
+        .unwrap()
+        .expect("transaction must be in the channel");
+    assert_eq!(
+        raw_tx.payload, tx_bytes,
+        "injected payload must match submitted bytes"
+    );
 }
 
 #[test]
 fn local_transaction_submitter_returns_error_for_empty_tx() {
     let (submitter, _rx) = build_local_transaction_submitter();
     let err = submitter.submit_transaction(&[]).unwrap_err();
-    assert!(err.contains("empty"), "error should mention empty tx: {err}");
+    assert!(
+        err.contains("empty"),
+        "error should mention empty tx: {err}"
+    );
 }
 
 #[test]
@@ -358,7 +370,10 @@ fn local_transaction_submitter_returns_error_for_zero_signatures() {
     let (submitter, _rx) = build_local_transaction_submitter();
     let tx = vec![0u8; 70]; // num_sigs = 0
     let err = submitter.submit_transaction(&tx).unwrap_err();
-    assert!(err.contains("no signatures"), "error should mention no signatures: {err}");
+    assert!(
+        err.contains("no signatures"),
+        "error should mention no signatures: {err}"
+    );
 }
 
 #[test]
@@ -366,7 +381,10 @@ fn local_transaction_submitter_returns_error_for_truncated_tx() {
     let (submitter, _rx) = build_local_transaction_submitter();
     let tx = vec![1u8, 0u8, 1u8]; // num_sigs=1 but only 3 bytes total, need 65
     let err = submitter.submit_transaction(&tx).unwrap_err();
-    assert!(err.contains("too short"), "error should mention too short: {err}");
+    assert!(
+        err.contains("too short"),
+        "error should mention too short: {err}"
+    );
 }
 
 #[test]

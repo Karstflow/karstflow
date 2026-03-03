@@ -9,6 +9,15 @@ pub struct ControlCommandWithConfig {
     pub mainnet_readiness: bool,
 }
 
+/// Parameters for `genesis cluster N` command.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GenesisClusterParams {
+    /// Number of validators in the cluster.
+    pub node_count: usize,
+    /// Output directory for keypairs, genesis, and configs.
+    pub output_dir: PathBuf,
+}
+
 /// Resolve a `--profile` name to a config file path.
 ///
 /// Built-in profiles: `devnet`, `testnet`, `mainnet`.
@@ -22,7 +31,7 @@ pub fn resolve_profile_path(profile: &str) -> PathBuf {
     PathBuf::from(profile)
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ControlCommand {
     Run,
     Preflight,
@@ -31,6 +40,7 @@ pub enum ControlCommand {
     Keys,
     Version,
     GenesisInit,
+    GenesisCluster(GenesisClusterParams),
 }
 
 pub fn parse_command(args: impl IntoIterator<Item = String>) -> Result<ControlCommandWithConfig> {
@@ -94,10 +104,58 @@ pub fn parse_command(args: impl IntoIterator<Item = String>) -> Result<ControlCo
             "keys" => command = ControlCommand::Keys,
             "version" | "--version" | "-V" => command = ControlCommand::Version,
             "genesis" => {
-                // Sub-command: `genesis init`
+                // Sub-command: `genesis init` | `genesis cluster N [--output-dir DIR]`
                 if let Some(sub) = argv.next() {
                     match sub.as_str() {
                         "init" => command = ControlCommand::GenesisInit,
+                        "cluster" => {
+                            let count_str =
+                                argv.next()
+                                    .ok_or_else(|| ControlPlaneError::InvalidCommand {
+                                        command: "genesis cluster requires a node count"
+                                            .to_string(),
+                                    })?;
+                            let node_count: usize =
+                                count_str.parse().map_err(|_| {
+                                    ControlPlaneError::InvalidCommand {
+                                        command: format!(
+                                            "invalid node count '{count_str}': expected positive integer"
+                                        ),
+                                    }
+                                })?;
+                            if node_count == 0 || node_count > 100 {
+                                return Err(ControlPlaneError::InvalidCommand {
+                                    command: format!(
+                                        "node count must be between 1 and 100, got {node_count}"
+                                    ),
+                                });
+                            }
+                            // Optional --output-dir DIR
+                            let mut output_dir = PathBuf::from("cluster-data");
+                            while let Some(opt) = argv.next() {
+                                match opt.as_str() {
+                                    "--output-dir" => {
+                                        let dir = argv.next().ok_or_else(|| {
+                                            ControlPlaneError::InvalidCommand {
+                                                command: "--output-dir requires a path".to_string(),
+                                            }
+                                        })?;
+                                        output_dir = PathBuf::from(dir);
+                                    }
+                                    _ => {
+                                        return Err(ControlPlaneError::InvalidCommand {
+                                            command: format!(
+                                                "unknown option '{opt}' for genesis cluster"
+                                            ),
+                                        });
+                                    }
+                                }
+                            }
+                            command = ControlCommand::GenesisCluster(GenesisClusterParams {
+                                node_count,
+                                output_dir,
+                            });
+                        }
                         _ => {
                             return Err(ControlPlaneError::InvalidCommand {
                                 command: format!("unknown genesis sub-command: {sub}"),
@@ -106,7 +164,7 @@ pub fn parse_command(args: impl IntoIterator<Item = String>) -> Result<ControlCo
                     }
                 } else {
                     return Err(ControlPlaneError::InvalidCommand {
-                        command: "genesis requires a sub-command: init".to_string(),
+                        command: "genesis requires a sub-command: init | cluster N".to_string(),
                     });
                 }
             }
@@ -116,11 +174,14 @@ pub fn parse_command(args: impl IntoIterator<Item = String>) -> Result<ControlCo
         }
     }
 
-    if matches!(
+    let is_standalone_command = matches!(
         command,
-        ControlCommand::Keys | ControlCommand::Version | ControlCommand::GenesisInit
-    ) && config_path.is_some()
-    {
+        ControlCommand::Keys
+            | ControlCommand::Version
+            | ControlCommand::GenesisInit
+            | ControlCommand::GenesisCluster(_)
+    );
+    if is_standalone_command && config_path.is_some() {
         return Err(ControlPlaneError::InvalidCommand {
             command: "--config is not supported for this command".to_string(),
         });
@@ -339,6 +400,63 @@ mod tests {
     #[test]
     fn parse_command_rejects_mainnet_readiness_for_non_diagnostics_command() {
         let result = parse_command(args(&["paradencer-node", "run", "--mainnet-readiness"]));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn parse_command_accepts_genesis_cluster_with_node_count() {
+        let parsed = parse_command(args(&["paradencer-node", "genesis", "cluster", "3"])).unwrap();
+        match parsed.command {
+            ControlCommand::GenesisCluster(p) => {
+                assert_eq!(p.node_count, 3);
+                assert_eq!(p.output_dir, std::path::PathBuf::from("cluster-data"));
+            }
+            _ => panic!("expected GenesisCluster"),
+        }
+    }
+
+    #[test]
+    fn parse_command_accepts_genesis_cluster_with_output_dir() {
+        let parsed = parse_command(args(&[
+            "paradencer-node",
+            "genesis",
+            "cluster",
+            "5",
+            "--output-dir",
+            "/tmp/my-cluster",
+        ]))
+        .unwrap();
+        match parsed.command {
+            ControlCommand::GenesisCluster(p) => {
+                assert_eq!(p.node_count, 5);
+                assert_eq!(p.output_dir, std::path::PathBuf::from("/tmp/my-cluster"));
+            }
+            _ => panic!("expected GenesisCluster"),
+        }
+    }
+
+    #[test]
+    fn parse_command_rejects_genesis_cluster_zero_nodes() {
+        let result = parse_command(args(&["paradencer-node", "genesis", "cluster", "0"]));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn parse_command_rejects_genesis_cluster_over_limit() {
+        let result = parse_command(args(&["paradencer-node", "genesis", "cluster", "101"]));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn parse_command_rejects_genesis_cluster_with_config_flag() {
+        let result = parse_command(args(&[
+            "paradencer-node",
+            "genesis",
+            "cluster",
+            "3",
+            "--config",
+            "/tmp/x.toml",
+        ]));
         assert!(result.is_err());
     }
 }

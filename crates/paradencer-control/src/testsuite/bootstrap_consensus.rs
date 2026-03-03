@@ -133,7 +133,10 @@ fn save_tower_to_disk_roundtrip() {
 
 #[test]
 fn start_gossip_service_creates_handle_with_cluster_info() {
+    // Use port 0 so the OS assigns a free ephemeral port — avoids conflicts under parallel tests.
+    std::env::set_var("PARADENCER_GOSSIP_BIND_ADDR", "127.0.0.1:0");
     let node_config = NodeConfig::from_profile(None).unwrap();
+    std::env::remove_var("PARADENCER_GOSSIP_BIND_ADDR");
     let identity = resolve_validator_identity(&node_config).unwrap();
     let handle = start_gossip_service(&node_config, &identity).unwrap();
     assert_eq!(handle.cluster_info.size(), 0);
@@ -142,7 +145,10 @@ fn start_gossip_service_creates_handle_with_cluster_info() {
 
 #[test]
 fn gossip_node_id_matches_identity_pubkey() {
+    // Use port 0 so the OS assigns a free ephemeral port — avoids conflicts under parallel tests.
+    std::env::set_var("PARADENCER_GOSSIP_BIND_ADDR", "127.0.0.1:0");
     let node_config = NodeConfig::from_profile(None).unwrap();
+    std::env::remove_var("PARADENCER_GOSSIP_BIND_ADDR");
     let identity = resolve_validator_identity(&node_config).unwrap();
     let handle = start_gossip_service(&node_config, &identity).unwrap();
     assert_eq!(&handle.node_id.0, identity.pubkey());
