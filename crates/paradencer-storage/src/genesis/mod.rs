@@ -157,6 +157,16 @@ pub struct GenesisConfig {
     pub poh_config_hashes_per_tick: Option<u64>,
     /// Target tick duration (nanoseconds).
     pub poh_config_target_tick_duration_ns: u64,
+    /// Initial validator set for multi-validator clusters.
+    ///
+    /// Each entry is `(node_identity_pubkey, stake_lamports)`. When this list
+    /// is non-empty the node bootstraps the leader schedule from it rather than
+    /// from a single hardcoded identity, enabling multi-validator local clusters.
+    ///
+    /// Used only when no Solana-compatible stake/vote accounts are present in
+    /// `accounts` (i.e. in development clusters created by `genesis cluster N`).
+    #[serde(default)]
+    pub initial_validators: Vec<(Pubkey, u64)>,
 }
 
 impl GenesisConfig {
@@ -175,6 +185,7 @@ impl GenesisConfig {
             ticks_per_slot: paradencer_constants::ledger::TICKS_PER_SLOT,
             poh_config_hashes_per_tick: None,
             poh_config_target_tick_duration_ns: 6_250_000, // 6.25ms
+            initial_validators: Vec::new(),
         }
     }
 

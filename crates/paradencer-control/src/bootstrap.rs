@@ -377,9 +377,21 @@ pub fn bootstrap_from_genesis_file(
         "parsed genesis configuration",
     );
 
-    let validators = match validator_pubkey {
-        Some(pk) => vec![(*pk, 500_000_000)],
-        None => vec![(Pubkey::new_unique(), 500_000_000)],
+    // Build the initial leader schedule.
+    // For multi-validator cluster genesis, `initial_validators` lists all nodes
+    // with their stake weights.  For single-node or legacy genesis files fall
+    // back to only the local identity so the node can still produce blocks.
+    let validators: Vec<(Pubkey, u64)> = if !genesis.initial_validators.is_empty() {
+        info!(
+            count = genesis.initial_validators.len(),
+            "using genesis initial_validators for leader schedule",
+        );
+        genesis.initial_validators.clone()
+    } else {
+        match validator_pubkey {
+            Some(pk) => vec![(*pk, 500_000_000)],
+            None => vec![(Pubkey::new_unique(), 500_000_000)],
+        }
     };
     let leader_schedule = Arc::new(LeaderSchedule::new(0, &validators).unwrap());
 

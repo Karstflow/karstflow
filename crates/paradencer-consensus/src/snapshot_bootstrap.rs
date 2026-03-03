@@ -15,7 +15,7 @@ use crate::features::known_features;
 use crate::features::FeatureSet;
 use crate::inflation::Inflation;
 use crate::rent::Rent;
-use crate::stake::{deserialize_stake_state, StakeState};
+use crate::stake::{deserialize_stake_state, Delegation, StakeState};
 use crate::stake_history::{StakeHistory, StakeHistoryEntry};
 use crate::sysvars::SysvarCache;
 use crate::transaction_cache::SeedEntry;
@@ -332,8 +332,22 @@ pub fn bootstrap_from_genesis(
     // Step 3: Compute cumulative lattice hash from all loaded accounts.
     let lthash_accounts = bank.initialize_lthash_from_accounts();
 
-    // Step 4: Initialize stake tracker from genesis stake accounts.
-    let (tracker, stake_init) = initialize_stakes(&accounts, 0);
+    // Step 4: Initialize stake tracker.
+    // Primary: scan for Solana-compatible stake program accounts (production genesis).
+    // Fallback: if no delegated stakes found but genesis carries `initial_validators`,
+    //           seed the tracker directly from that list (dev cluster genesis).
+    let (mut tracker, stake_init) = initialize_stakes(&accounts, 0);
+    if tracker.total_stake() == 0 && !genesis.initial_validators.is_empty() {
+        for (node_identity, stake_lamports) in &genesis.initial_validators {
+            // In dev cluster genesis there are no separate vote accounts, so we use
+            // the node identity as a synthetic voter pubkey.  This gives correct
+            // total_stake() and total_stake_for_voter() semantics for fork choice.
+            // Use activation_epoch=MAX so the stake is immediately effective
+            // (bootstrap delegation, no warmup period required).
+            let delegation = Delegation::new(*node_identity, *stake_lamports, u64::MAX);
+            tracker.add_delegation(*node_identity, delegation);
+        }
+    }
     bank.set_stake_tracker(Arc::new(RwLock::new(tracker)));
 
     // Step 4b: Initialize vote account cache from genesis vote accounts.

@@ -244,6 +244,12 @@ fn run_genesis_cluster(params: GenesisClusterParams) -> Result<()> {
     // Build genesis with all validators.
     let mut genesis = paradencer_storage::GenesisConfig::default_development();
 
+    // Record initial validator set so every node sees the full leader schedule.
+    genesis.initial_validators = keypairs
+        .iter()
+        .map(|(_, pubkey_bytes)| (Pubkey::new(*pubkey_bytes), 1_000_000_000_u64))
+        .collect();
+
     // Add each validator identity account.
     for (_, pubkey_bytes) in &keypairs {
         let pubkey = Pubkey::new(*pubkey_bytes);

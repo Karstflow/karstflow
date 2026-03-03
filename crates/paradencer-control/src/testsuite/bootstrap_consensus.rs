@@ -180,6 +180,61 @@ fn restore_from_snapshot_archive_returns_error_for_missing_file() {
 }
 
 #[test]
+fn bootstrap_from_genesis_file_multi_validator_builds_leader_schedule() {
+    use crate::bootstrap::bootstrap_from_genesis_file;
+    use paradencer_crypto::ed25519_batch::generate_keypair;
+    use paradencer_ids::SYSTEM_PROGRAM_ID;
+    use paradencer_storage::{
+        genesis::{serialize_genesis, GenesisAccount, GenesisConfig},
+        Pubkey,
+    };
+
+    let dir = tempfile::tempdir().expect("tmpdir");
+    let genesis_path = dir.path().join("genesis.bin");
+
+    // Create a 3-validator genesis.
+    let mut genesis = GenesisConfig::default_development();
+    let mut pubkeys = Vec::new();
+    for _ in 0..3 {
+        let (_, pubkey_bytes) = generate_keypair();
+        let pk = Pubkey::new(pubkey_bytes);
+        pubkeys.push(pk);
+        genesis.accounts.push((
+            pk,
+            GenesisAccount {
+                lamports: 500_000_000_000,
+                data: Vec::new(),
+                owner: SYSTEM_PROGRAM_ID,
+                executable: false,
+                rent_epoch: u64::MAX,
+            },
+        ));
+    }
+    genesis.initial_validators = pubkeys.iter().map(|pk| (*pk, 1_000_000_000)).collect();
+
+    let bytes = serialize_genesis(&genesis).expect("serialize");
+    std::fs::write(&genesis_path, &bytes).expect("write");
+
+    // Each node bootstraps with its own identity but should see all 3 validators.
+    let bundle = bootstrap_from_genesis_file(&genesis_path, None, Some(&pubkeys[0])).unwrap();
+    let forks = bundle.bank_forks.read().unwrap();
+    let bank = forks.working_bank();
+
+    // Stake tracker should have all 3 validators.
+    if let Some(tracker_arc) = bank.stake_tracker() {
+        let tracker = tracker_arc.read().unwrap();
+        assert_eq!(tracker.delegation_count(), 3, "should have 3 stake entries");
+        assert_eq!(
+            tracker.total_stake(),
+            3 * 1_000_000_000,
+            "total stake should be 3B lamports"
+        );
+    } else {
+        panic!("stake tracker not set after multi-validator genesis bootstrap");
+    }
+}
+
+#[test]
 fn build_replay_service_with_consensus_creates_service() {
     use crate::bootstrap::build_replay_service_with_consensus;
     use paradencer_mesh::{bounded_link, DualReceiver};
