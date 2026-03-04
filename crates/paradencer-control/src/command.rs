@@ -37,6 +37,8 @@ pub enum ControlCommand {
     Preflight,
     Diagnostics,
     Config,
+    Configure,
+    Monitor,
     Keys,
     Version,
     GenesisInit,
@@ -101,6 +103,8 @@ pub fn parse_command(args: impl IntoIterator<Item = String>) -> Result<ControlCo
             "preflight" => command = ControlCommand::Preflight,
             "diagnostics" | "doctor" => command = ControlCommand::Diagnostics,
             "config" => command = ControlCommand::Config,
+            "configure" | "check" => command = ControlCommand::Configure,
+            "monitor" | "status" => command = ControlCommand::Monitor,
             "keys" => command = ControlCommand::Keys,
             "version" | "--version" | "-V" => command = ControlCommand::Version,
             "genesis" => {
@@ -178,6 +182,7 @@ pub fn parse_command(args: impl IntoIterator<Item = String>) -> Result<ControlCo
         command,
         ControlCommand::Keys
             | ControlCommand::Version
+            | ControlCommand::Configure
             | ControlCommand::GenesisInit
             | ControlCommand::GenesisCluster(_)
     );
@@ -200,7 +205,7 @@ pub fn parse_command(args: impl IntoIterator<Item = String>) -> Result<ControlCo
     if mainnet_readiness
         && !matches!(
             command,
-            ControlCommand::Preflight | ControlCommand::Diagnostics
+            ControlCommand::Preflight | ControlCommand::Diagnostics | ControlCommand::Configure
         )
     {
         return Err(ControlPlaneError::InvalidCommand {
@@ -444,6 +449,48 @@ mod tests {
     #[test]
     fn parse_command_rejects_genesis_cluster_over_limit() {
         let result = parse_command(args(&["paradencer-node", "genesis", "cluster", "101"]));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn parse_command_accepts_configure() {
+        let parsed = parse_command(args(&["paradencer-node", "configure"])).unwrap();
+        assert_eq!(parsed.command, ControlCommand::Configure);
+    }
+
+    #[test]
+    fn parse_command_accepts_check_alias() {
+        let parsed = parse_command(args(&["paradencer-node", "check"])).unwrap();
+        assert_eq!(parsed.command, ControlCommand::Configure);
+    }
+
+    #[test]
+    fn parse_command_accepts_configure_with_mainnet_readiness() {
+        let parsed = parse_command(args(&[
+            "paradencer-node",
+            "configure",
+            "--mainnet-readiness",
+        ]))
+        .unwrap();
+        assert_eq!(parsed.command, ControlCommand::Configure);
+        assert!(parsed.mainnet_readiness);
+    }
+
+    #[test]
+    fn parse_command_accepts_monitor() {
+        let parsed = parse_command(args(&["paradencer-node", "monitor"])).unwrap();
+        assert_eq!(parsed.command, ControlCommand::Monitor);
+    }
+
+    #[test]
+    fn parse_command_accepts_status_alias() {
+        let parsed = parse_command(args(&["paradencer-node", "status"])).unwrap();
+        assert_eq!(parsed.command, ControlCommand::Monitor);
+    }
+
+    #[test]
+    fn parse_command_rejects_mainnet_readiness_for_monitor() {
+        let result = parse_command(args(&["paradencer-node", "monitor", "--mainnet-readiness"]));
         assert!(result.is_err());
     }
 

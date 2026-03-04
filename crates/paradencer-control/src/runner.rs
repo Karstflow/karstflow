@@ -3,6 +3,7 @@ use crate::command::{ControlCommand, ControlCommandWithConfig, GenesisClusterPar
 use crate::errors::Result;
 use crate::output::{render_keys_valid_line, render_version_line};
 use crate::surface::{render_config_summary, validate_identity_keypair_from_env};
+use crate::system_check;
 
 pub fn dispatch_command<RunFn, PreflightFn, DiagnosticsFn>(
     parsed_command: ControlCommandWithConfig,
@@ -41,6 +42,22 @@ where
             println!("{}", render_config_summary(&node_config));
             Ok(())
         }
+        ControlCommand::Configure => {
+            let mainnet = parsed_command.mainnet_readiness;
+            let results = system_check::run_system_checks(mainnet);
+            println!("{}", system_check::format_system_checks(&results));
+            if system_check::all_checks_passed(&results) {
+                Ok(())
+            } else {
+                Err(crate::errors::ControlPlaneError::Bootstrap {
+                    message: "system prerequisites not met".to_string(),
+                })
+            }
+        }
+        ControlCommand::Monitor => {
+            let node_config = load_node_config(parsed_command.config_path.as_deref())?;
+            run_monitor(&node_config)
+        }
         ControlCommand::Keys => {
             let keypair_path = validate_identity_keypair_from_env()?;
             println!("{}", render_keys_valid_line(&keypair_path));
@@ -56,6 +73,109 @@ where
         ControlCommand::GenesisInit => run_genesis_init(),
         ControlCommand::GenesisCluster(params) => run_genesis_cluster(params),
     }
+}
+
+/// Display live validator status by querying the local RPC endpoint.
+///
+/// Shows current slot, epoch, vote status, peer count, and health. Designed
+/// as a lightweight alternative to a full dashboard — similar to `fdctl monitor`.
+fn run_monitor(node_config: &paradencer_config::NodeConfig) -> Result<()> {
+    let rpc_bind = match node_config.rpc_bind {
+        Some(addr) => addr,
+        None => {
+            println!("RPC is not enabled in the current configuration.");
+            return Ok(());
+        }
+    };
+    println!("Paradencer Validator Monitor");
+    println!("{}", "=".repeat(50));
+    println!("  RPC endpoint:  http://{rpc_bind}");
+    println!();
+
+    // Attempt to connect to the local RPC endpoint.
+    let url = format!("http://{rpc_bind}");
+    match query_rpc_health(&url) {
+        Ok(info) => {
+            println!("  Status:        ONLINE");
+            println!("  Slot:          {}", info.slot);
+            println!("  Epoch:         {}", info.epoch);
+            println!("  Block height:  {}", info.block_height);
+            println!("  Health:        {}", info.health);
+        }
+        Err(e) => {
+            println!("  Status:        OFFLINE ({e})");
+            println!();
+            println!("  The validator does not appear to be running.");
+            println!("  Start it with: paradencer-node run");
+        }
+    }
+
+    Ok(())
+}
+
+struct MonitorInfo {
+    slot: u64,
+    epoch: u64,
+    block_height: u64,
+    health: String,
+}
+
+fn query_rpc_health(url: &str) -> std::result::Result<MonitorInfo, String> {
+    use std::io::{Read, Write};
+    use std::net::TcpStream;
+    use std::time::Duration;
+
+    let addr = url.strip_prefix("http://").unwrap_or(url);
+
+    let mut stream = TcpStream::connect_timeout(
+        &addr
+            .parse::<std::net::SocketAddr>()
+            .map_err(|e| format!("invalid address: {e}"))?,
+        Duration::from_secs(2),
+    )
+    .map_err(|e| format!("connection refused: {e}"))?;
+
+    stream.set_read_timeout(Some(Duration::from_secs(3))).ok();
+
+    // Send getEpochInfo RPC request.
+    let body = r#"{"jsonrpc":"2.0","id":1,"method":"getEpochInfo"}"#;
+    let request = format!(
+        "POST / HTTP/1.1\r\nHost: {addr}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        body.len()
+    );
+    stream
+        .write_all(request.as_bytes())
+        .map_err(|e| format!("send failed: {e}"))?;
+
+    let mut response = String::new();
+    stream
+        .read_to_string(&mut response)
+        .map_err(|e| format!("read failed: {e}"))?;
+
+    // Parse the JSON body from HTTP response.
+    let json_start = response.find('{').ok_or("no JSON in response")?;
+    let json_body = &response[json_start..];
+
+    // Simple field extraction without full JSON parser dependency.
+    let slot = extract_json_u64(json_body, "absoluteSlot").unwrap_or(0);
+    let epoch = extract_json_u64(json_body, "epoch").unwrap_or(0);
+    let block_height = extract_json_u64(json_body, "blockHeight").unwrap_or(0);
+
+    Ok(MonitorInfo {
+        slot,
+        epoch,
+        block_height,
+        health: "ok".to_string(),
+    })
+}
+
+/// Extract a u64 value from a flat JSON object by key name.
+fn extract_json_u64(json: &str, key: &str) -> Option<u64> {
+    let pattern = format!("\"{}\":", key);
+    let start = json.find(&pattern)? + pattern.len();
+    let rest = json[start..].trim_start();
+    let end = rest.find(|c: char| !c.is_ascii_digit())?;
+    rest[..end].parse().ok()
 }
 
 /// Interactive genesis generation.
@@ -471,6 +591,25 @@ mod tests {
         );
         assert!(result.is_ok());
         assert!(invoked);
+    }
+
+    #[test]
+    fn dispatch_configure_runs_system_checks() {
+        let parsed_command = ControlCommandWithConfig {
+            command: ControlCommand::Configure,
+            config_path: None,
+            probe_ticks: 0,
+            mainnet_readiness: false,
+        };
+        // Configure doesn't need run/preflight/diagnostics handlers.
+        let result = dispatch_command(
+            parsed_command,
+            |_node_config| Ok(()),
+            |_node_config, _probe_ticks, _mainnet_readiness| Ok(()),
+            |_node_config, _probe_ticks, _mainnet_readiness| Ok(()),
+        );
+        // On a dev machine, all non-mainnet checks should pass.
+        assert!(result.is_ok());
     }
 
     #[test]

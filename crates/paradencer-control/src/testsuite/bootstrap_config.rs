@@ -23,7 +23,12 @@ fn load_node_config_from_profile_file_path() {
 
 #[test]
 fn resolve_identity_generates_ephemeral_in_dev_mode() {
-    let node_config = NodeConfig::from_profile(None).unwrap();
+    // Build a minimal dev-mode config without touching env vars.
+    // Using from_profile(None) is racy because parallel tests may set
+    // PARADENCER_IDENTITY_KEYPAIR_PATH to a path whose keypair doesn't
+    // match this test's expectations.
+    let mut node_config = NodeConfig::from_profile(None).unwrap();
+    node_config.identity_keypair_path = None;
     let identity = resolve_validator_identity(&node_config).unwrap();
     let derived = paradencer_crypto::public_key_from_secret(identity.secret_key());
     assert_eq!(&derived, identity.pubkey());

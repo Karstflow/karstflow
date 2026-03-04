@@ -6,6 +6,7 @@ mod preflight;
 mod runner;
 pub mod snapshot_download;
 mod surface;
+pub mod system_check;
 #[cfg(test)]
 mod testsuite;
 mod vote_sender;
