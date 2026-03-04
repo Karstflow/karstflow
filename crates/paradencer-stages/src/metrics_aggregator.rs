@@ -19,6 +19,7 @@ use crate::pack_stage::{PackStats, PackStatsSnapshot};
 use crate::resolv_stage::{ResolvStats, ResolvStatsSnapshot};
 use crate::shred_network::{ShredNetworkStats, ShredNetworkStatsSnapshot};
 use crate::verify_stage::{VerifyStats, VerifyStatsSnapshot};
+use paradencer_storage::blockstore::{BlockstoreStats, BlockstoreStatsSnapshot};
 
 /// Holds references to all stage stats for aggregation.
 pub struct MetricsAggregator {
@@ -39,6 +40,7 @@ pub struct MetricsAggregator {
     replay: Option<ReplaySnapshot>,
     repair: Option<Arc<AtomicRepairStats>>,
     consensus: Option<Arc<AtomicConsensusStats>>,
+    blockstore: Option<Arc<BlockstoreStats>>,
 }
 
 /// Builder and snapshot methods for MetricsAggregator.
@@ -60,6 +62,7 @@ impl MetricsAggregator {
             replay: None,
             repair: None,
             consensus: None,
+            blockstore: None,
         }
     }
 
@@ -147,6 +150,12 @@ impl MetricsAggregator {
         self
     }
 
+    /// Register blockstore stats (atomic — snapshotted on demand).
+    pub fn with_blockstore(mut self, stats: Arc<BlockstoreStats>) -> Self {
+        self.blockstore = Some(stats);
+        self
+    }
+
     /// Update dedup stats snapshot (call before `snapshot()` for fresh data).
     pub fn update_dedup(&mut self, snapshot: DedupSnapshot) {
         self.dedup = Some(snapshot);
@@ -198,6 +207,7 @@ impl MetricsAggregator {
             replay: self.replay.clone(),
             repair: self.repair.as_ref().map(|s| s.snapshot()),
             consensus: self.consensus.as_ref().map(|s| s.snapshot()),
+            blockstore: self.blockstore.as_ref().map(|s| s.snapshot()),
         }
     }
 }
@@ -483,6 +493,7 @@ pub struct AggregatedSnapshot {
     pub replay: Option<ReplaySnapshot>,
     pub repair: Option<RepairSnapshot>,
     pub consensus: Option<ConsensusSnapshot>,
+    pub blockstore: Option<BlockstoreStatsSnapshot>,
 }
 
 impl AggregatedSnapshot {
@@ -884,6 +895,26 @@ impl AggregatedSnapshot {
             ));
         }
 
+        if let Some(ref b) = self.blockstore {
+            lines.push(format!(
+                "paradencer_blockstore_shreds_inserted {}",
+                b.shreds_inserted
+            ));
+            lines.push(format!(
+                "paradencer_blockstore_slots_completed {}",
+                b.slots_completed
+            ));
+            lines.push(format!("paradencer_blockstore_slots_dead {}", b.slots_dead));
+            lines.push(format!(
+                "paradencer_blockstore_slots_duplicate {}",
+                b.slots_duplicate
+            ));
+            lines.push(format!(
+                "paradencer_blockstore_slots_rooted {}",
+                b.slots_rooted
+            ));
+        }
+
         lines
     }
 }
@@ -1229,5 +1260,36 @@ mod tests {
         assert_eq!(snapshot.total_checked, 1000);
         assert_eq!(snapshot.duplicates_found, 100);
         assert_eq!(snapshot.unique_passed, 900);
+    }
+
+    #[test]
+    fn blockstore_stats_prometheus_lines() {
+        let stats = Arc::new(BlockstoreStats::default());
+        stats
+            .shreds_inserted
+            .store(500, std::sync::atomic::Ordering::Relaxed);
+        stats
+            .slots_completed
+            .store(10, std::sync::atomic::Ordering::Relaxed);
+        stats
+            .slots_dead
+            .store(2, std::sync::atomic::Ordering::Relaxed);
+        stats
+            .slots_duplicate
+            .store(1, std::sync::atomic::Ordering::Relaxed);
+        stats
+            .slots_rooted
+            .store(8, std::sync::atomic::Ordering::Relaxed);
+
+        let agg = MetricsAggregator::new().with_blockstore(stats);
+        let snap = agg.snapshot();
+        let lines = snap.to_prometheus_lines();
+        let text = lines.join("\n");
+
+        assert!(text.contains("paradencer_blockstore_shreds_inserted 500"));
+        assert!(text.contains("paradencer_blockstore_slots_completed 10"));
+        assert!(text.contains("paradencer_blockstore_slots_dead 2"));
+        assert!(text.contains("paradencer_blockstore_slots_duplicate 1"));
+        assert!(text.contains("paradencer_blockstore_slots_rooted 8"));
     }
 }

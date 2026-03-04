@@ -40,8 +40,8 @@ pub struct Blockstore {
     lowest_cleanup_slot: RwLock<u64>,
     /// Optional publisher for slot lifecycle events.
     event_publisher: Option<BlockStreamPublisher>,
-    /// Operational statistics.
-    stats: BlockstoreStats,
+    /// Operational statistics (shared via Arc for metrics export).
+    stats: std::sync::Arc<BlockstoreStats>,
 }
 
 impl Blockstore {
@@ -72,7 +72,7 @@ impl Blockstore {
             roots: RwLock::new(recovered_roots),
             lowest_cleanup_slot: RwLock::new(0),
             event_publisher: None,
-            stats: BlockstoreStats::default(),
+            stats: std::sync::Arc::new(BlockstoreStats::default()),
         })
     }
 
@@ -83,7 +83,7 @@ impl Blockstore {
             roots: RwLock::new(BTreeSet::new()),
             lowest_cleanup_slot: RwLock::new(0),
             event_publisher: None,
-            stats: BlockstoreStats::default(),
+            stats: std::sync::Arc::new(BlockstoreStats::default()),
         }
     }
 
@@ -96,7 +96,7 @@ impl Blockstore {
     }
 
     /// Get a reference to the blockstore statistics.
-    pub fn stats(&self) -> &BlockstoreStats {
+    pub fn stats(&self) -> &std::sync::Arc<BlockstoreStats> {
         &self.stats
     }
 

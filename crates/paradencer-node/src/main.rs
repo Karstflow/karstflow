@@ -802,6 +802,9 @@ fn run_with_node_config(
         }
         aggregator = aggregator.with_repair_live(std::sync::Arc::clone(&repair_stats));
         aggregator = aggregator.with_consensus_live(std::sync::Arc::clone(&consensus_stats));
+        if let Some(ref bs) = shared_blockstore {
+            aggregator = aggregator.with_blockstore(std::sync::Arc::clone(bs.stats()));
+        }
         rpt.with_aggregator(aggregator)
     });
 
