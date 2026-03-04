@@ -1804,6 +1804,7 @@ dependencies = [
  "bincode",
  "crc32fast",
  "criterion",
+ "crossbeam-channel",
  "dashmap",
  "lz4_flex",
  "memmap2",

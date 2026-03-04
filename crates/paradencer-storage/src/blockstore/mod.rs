@@ -5,6 +5,7 @@
 
 pub(crate) mod backend;
 mod block_assembly;
+pub mod block_stream;
 mod cleanup;
 mod fec_tracker;
 mod meta;
@@ -14,6 +15,9 @@ mod shred_store;
 mod tests;
 
 pub use block_assembly::{extract_signatures, AssembledBlock, BlockAssembler, ParsedEntry};
+pub use block_stream::{
+    block_stream, BlockStreamPublisher, BlockStreamStats, BlockStreamSubscriber, SlotEvent,
+};
 pub use cleanup::{
     BlockstoreCleanup, BlockstoreGarbageCollector, GarbageCollectorConfig, GarbageCollectorStats,
 };
