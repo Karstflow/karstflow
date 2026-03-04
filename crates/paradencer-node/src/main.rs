@@ -261,7 +261,10 @@ fn run_with_node_config(
         let plugin_manager = plugin_service.manager();
         let notifier =
             std::sync::Arc::new(plugin_notifier::PluginBankNotifier::new(plugin_manager));
-        let mut forks = consensus.bank_forks.write().unwrap();
+        let mut forks = consensus
+            .bank_forks
+            .write()
+            .expect("bank_forks lock poisoned");
         forks.set_bank_notifier(notifier);
     }
 
@@ -278,10 +281,13 @@ fn run_with_node_config(
     // Only activates when a bank hash is configured (coordinated restart).
     // Gossip is already running, so peers accumulate while we poll.
     if node_config.wait_for_supermajority_bank_hash.is_some() {
-        let forks = consensus.bank_forks.read().unwrap();
+        let forks = consensus
+            .bank_forks
+            .read()
+            .expect("bank_forks lock poisoned");
         let bank = forks.working_bank();
         if let Some(vote_cache) = bank.vote_account_cache() {
-            let cache = vote_cache.read().unwrap();
+            let cache = vote_cache.read().expect("vote_cache lock poisoned");
             let shred_version = node_config.expected_shred_version.unwrap_or(0);
             drop(forks);
             let wfs_config =
@@ -320,7 +326,7 @@ fn run_with_node_config(
         let tower_save_rx = replay_bundle
             .signal_bus
             .lock()
-            .unwrap()
+            .expect("signal_bus lock poisoned")
             .subscribe()
             .expect("signal bus subscriber limit not reached");
         let tower_arc = std::sync::Arc::clone(&tower_for_persist);
@@ -332,7 +338,7 @@ fn run_with_node_config(
             .spawn(move || {
                 while let Ok(signal) = tower_save_rx.recv() {
                     if let paradencer_stages::ReplaySignal::RootAdvanced(_) = signal {
-                        let tower_r = tower_arc.read().unwrap();
+                        let tower_r = tower_arc.read().expect("tower lock poisoned");
                         if let Err(e) = save_tower_to_disk(&tower_r, &save_dir, &identity_pubkey) {
                             warn!(error = %e, "failed to persist tower on root advance");
                         }
@@ -346,7 +352,11 @@ fn run_with_node_config(
     // when the root advances. Only runs when persistent storage is available.
     // Publishes snapshot hashes via gossip so peers can discover snapshots.
     let _snapshot_thread = if node_config.data_dir.is_some() {
-        let snapshot_dir = node_config.data_dir.as_ref().unwrap().join("snapshots");
+        let snapshot_dir = node_config
+            .data_dir
+            .as_ref()
+            .expect("data_dir required for snapshot creation")
+            .join("snapshots");
         paradencer_control::spawn_snapshot_thread_with_gossip(
             &replay_bundle.signal_bus,
             consensus.accounts.clone(),
@@ -365,7 +375,7 @@ fn run_with_node_config(
         let gossip_status_rx = replay_bundle
             .signal_bus
             .lock()
-            .unwrap()
+            .expect("signal_bus lock poisoned")
             .subscribe()
             .expect("signal bus subscriber limit not reached");
         let gossip_ci = cluster_info.clone();
@@ -419,7 +429,7 @@ fn run_with_node_config(
         let signal_rx = replay_bundle
             .signal_bus
             .lock()
-            .unwrap()
+            .expect("signal_bus lock poisoned")
             .subscribe()
             .expect("signal bus subscriber limit not reached");
 
@@ -536,7 +546,7 @@ fn run_with_node_config(
         let leader_signal_rx = replay_bundle
             .signal_bus
             .lock()
-            .unwrap()
+            .expect("signal_bus lock poisoned")
             .subscribe()
             .expect("signal bus subscriber limit not reached");
         let handle = pipeline_bundle.handle.clone();
@@ -745,9 +755,11 @@ fn run_with_node_config(
 
                     // Lock vote processor to resolve identity → vote account
                     // and process each gossip vote.
-                    let mut vp = gv_vote_processor.lock().unwrap();
-                    let mut fc = gv_fork_choice.lock().unwrap();
-                    let mut ct = gv_commitment.lock().unwrap();
+                    let mut vp = gv_vote_processor
+                        .lock()
+                        .expect("vote_processor lock poisoned");
+                    let mut fc = gv_fork_choice.lock().expect("fork_choice lock poisoned");
+                    let mut ct = gv_commitment.lock().expect("commitment lock poisoned");
 
                     for (node_identity, slot) in votes {
                         let node_pubkey = paradencer_storage::Pubkey::from(node_identity);
@@ -897,7 +909,9 @@ fn run_with_node_config(
 
     // Save tower state to disk before shutdown so lockouts survive restarts.
     if let Some(ref data_dir) = node_config.data_dir {
-        let tower_r = tower_for_persist.read().unwrap();
+        let tower_r = tower_for_persist
+            .read()
+            .expect("tower lock poisoned at shutdown");
         let identity_pubkey = paradencer_storage::Pubkey::from(*identity.pubkey());
         if let Err(e) = save_tower_to_disk(&tower_r, data_dir, &identity_pubkey) {
             warn!(error = %e, "failed to save tower on shutdown");
