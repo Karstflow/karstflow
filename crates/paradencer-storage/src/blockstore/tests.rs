@@ -612,3 +612,61 @@ fn in_memory_backend_is_not_persistent() {
     let bs = Blockstore::in_memory();
     assert!(!bs.backend.is_persistent());
 }
+
+// ---------------------------------------------------------------------------
+// Block stream event publishing tests
+// ---------------------------------------------------------------------------
+
+#[test]
+fn event_published_on_set_root() {
+    let mut bs = Blockstore::in_memory();
+    let (pub_, sub) = block_stream::block_stream(16);
+    bs.set_event_publisher(pub_);
+
+    bs.set_root(42).unwrap();
+    let event = sub.try_recv().unwrap();
+    assert_eq!(event, block_stream::SlotEvent::Rooted { slot: 42 });
+}
+
+#[test]
+fn event_published_on_set_roots() {
+    let mut bs = Blockstore::in_memory();
+    let (pub_, sub) = block_stream::block_stream(16);
+    bs.set_event_publisher(pub_);
+
+    bs.set_roots(&[10, 20, 30]).unwrap();
+    let events = sub.drain();
+    assert_eq!(events.len(), 3);
+    assert_eq!(events[0], block_stream::SlotEvent::Rooted { slot: 10 });
+    assert_eq!(events[2], block_stream::SlotEvent::Rooted { slot: 30 });
+}
+
+#[test]
+fn event_published_on_mark_dead() {
+    let mut bs = Blockstore::in_memory();
+    let (pub_, sub) = block_stream::block_stream(16);
+    bs.set_event_publisher(pub_);
+
+    bs.mark_dead(5).unwrap();
+    let event = sub.try_recv().unwrap();
+    assert_eq!(event, block_stream::SlotEvent::Dead { slot: 5 });
+}
+
+#[test]
+fn event_published_on_mark_duplicate() {
+    let mut bs = Blockstore::in_memory();
+    let (pub_, sub) = block_stream::block_stream(16);
+    bs.set_event_publisher(pub_);
+
+    bs.mark_duplicate(7).unwrap();
+    let event = sub.try_recv().unwrap();
+    assert_eq!(event, block_stream::SlotEvent::Duplicate { slot: 7 });
+}
+
+#[test]
+fn no_event_without_publisher() {
+    let bs = Blockstore::in_memory();
+    // Should not panic even without a publisher.
+    bs.set_root(42).unwrap();
+    bs.mark_dead(99).unwrap_or(()); // Slot already dead is ok.
+}

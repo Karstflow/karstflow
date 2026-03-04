@@ -38,6 +38,8 @@ pub struct Blockstore {
     roots: RwLock<BTreeSet<u64>>,
     /// Lowest slot that has been cleaned up; all data below is purged.
     lowest_cleanup_slot: RwLock<u64>,
+    /// Optional publisher for slot lifecycle events.
+    event_publisher: Option<BlockStreamPublisher>,
 }
 
 impl Blockstore {
@@ -67,6 +69,7 @@ impl Blockstore {
             backend,
             roots: RwLock::new(recovered_roots),
             lowest_cleanup_slot: RwLock::new(0),
+            event_publisher: None,
         })
     }
 
@@ -76,7 +79,16 @@ impl Blockstore {
             backend: BlockstoreBackend::in_memory(),
             roots: RwLock::new(BTreeSet::new()),
             lowest_cleanup_slot: RwLock::new(0),
+            event_publisher: None,
         }
+    }
+
+    /// Attach an event publisher for slot lifecycle notifications.
+    ///
+    /// When set, the blockstore will publish [`SlotEvent`] notifications
+    /// when slots complete, become rooted, die, or are marked as duplicates.
+    pub fn set_event_publisher(&mut self, publisher: BlockStreamPublisher) {
+        self.event_publisher = Some(publisher);
     }
 
     /// Insert a data shred.
@@ -190,6 +202,18 @@ impl Blockstore {
 
             self.save_slot_meta(&meta)?;
 
+            // Publish slot completion event.
+            if slot_complete {
+                if let Some(pub_) = &self.event_publisher {
+                    pub_.publish(SlotEvent::Completed {
+                        slot,
+                        parent_slot: meta.parent_slot,
+                        num_shreds: meta.received_data_shreds,
+                        num_transactions: 0, // Populated after block assembly.
+                    });
+                }
+            }
+
             Ok(ShredInsertResult {
                 fec_result,
                 slot_complete,
@@ -239,6 +263,9 @@ impl Blockstore {
             let key = slot.to_be_bytes();
             self.backend.put(CF_ROOTS, &key, &[1])?;
             roots.insert(slot);
+            if let Some(pub_) = &self.event_publisher {
+                pub_.publish(SlotEvent::Rooted { slot });
+            }
         }
         Ok(())
     }
@@ -303,6 +330,10 @@ impl Blockstore {
         let key = slot.to_be_bytes();
         self.backend.put(CF_DEAD_SLOTS, &key, &[1])?;
 
+        if let Some(pub_) = &self.event_publisher {
+            pub_.publish(SlotEvent::Dead { slot });
+        }
+
         Ok(())
     }
 
@@ -314,6 +345,10 @@ impl Blockstore {
 
         let key = slot.to_be_bytes();
         self.backend.put(CF_DUPLICATE_SLOTS, &key, &[1])?;
+
+        if let Some(pub_) = &self.event_publisher {
+            pub_.publish(SlotEvent::Duplicate { slot });
+        }
 
         Ok(())
     }
@@ -334,6 +369,9 @@ impl Blockstore {
             .write()
             .expect("roots lock poisoned")
             .insert(slot);
+        if let Some(pub_) = &self.event_publisher {
+            pub_.publish(SlotEvent::Rooted { slot });
+        }
         Ok(())
     }
 
