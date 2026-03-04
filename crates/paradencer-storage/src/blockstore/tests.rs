@@ -770,3 +770,37 @@ fn block_time_overwrite() {
     bs.set_block_time(50, 2000).unwrap();
     assert_eq!(bs.get_block_time(50).unwrap(), Some(2000));
 }
+
+// --- Blockstore stats ---
+
+#[test]
+fn stats_track_shred_inserts_and_slot_lifecycle() {
+    let bs = Blockstore::in_memory();
+
+    // No activity yet.
+    let snap = bs.stats().snapshot();
+    assert_eq!(snap.shreds_inserted, 0);
+    assert_eq!(snap.slots_completed, 0);
+
+    // Insert a data shred (not last in slot).
+    let shred = make_data_shred(100, 0, false, 1);
+    bs.insert_shred(&shred).unwrap();
+    assert_eq!(bs.stats().snapshot().shreds_inserted, 1);
+    assert_eq!(bs.stats().snapshot().slots_completed, 0);
+
+    // Insert last-in-slot shred → slot completes.
+    let last_shred = make_data_shred(100, 1, true, 1);
+    bs.insert_shred(&last_shred).unwrap();
+    assert_eq!(bs.stats().snapshot().shreds_inserted, 2);
+    assert_eq!(bs.stats().snapshot().slots_completed, 1);
+
+    // Mark dead / duplicate / root.
+    bs.mark_dead(200).unwrap();
+    bs.mark_duplicate(300).unwrap();
+    bs.set_root(100).unwrap();
+
+    let snap = bs.stats().snapshot();
+    assert_eq!(snap.slots_dead, 1);
+    assert_eq!(snap.slots_duplicate, 1);
+    assert_eq!(snap.slots_rooted, 1);
+}

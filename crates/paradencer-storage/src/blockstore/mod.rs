@@ -40,6 +40,8 @@ pub struct Blockstore {
     lowest_cleanup_slot: RwLock<u64>,
     /// Optional publisher for slot lifecycle events.
     event_publisher: Option<BlockStreamPublisher>,
+    /// Operational statistics.
+    stats: BlockstoreStats,
 }
 
 impl Blockstore {
@@ -70,6 +72,7 @@ impl Blockstore {
             roots: RwLock::new(recovered_roots),
             lowest_cleanup_slot: RwLock::new(0),
             event_publisher: None,
+            stats: BlockstoreStats::default(),
         })
     }
 
@@ -80,6 +83,7 @@ impl Blockstore {
             roots: RwLock::new(BTreeSet::new()),
             lowest_cleanup_slot: RwLock::new(0),
             event_publisher: None,
+            stats: BlockstoreStats::default(),
         }
     }
 
@@ -89,6 +93,11 @@ impl Blockstore {
     /// when slots complete, become rooted, die, or are marked as duplicates.
     pub fn set_event_publisher(&mut self, publisher: BlockStreamPublisher) {
         self.event_publisher = Some(publisher);
+    }
+
+    /// Get a reference to the blockstore statistics.
+    pub fn stats(&self) -> &BlockstoreStats {
+        &self.stats
     }
 
     /// Insert a data shred.
@@ -161,6 +170,9 @@ impl Blockstore {
             // Store the shred data.
             let store = ShredStore::new(&self.backend);
             store.insert_data(slot, index, &shred.payload, &mut meta)?;
+            self.stats
+                .shreds_inserted
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
             // Check for last-in-slot flag to set expected count.
             if shred.is_last_in_slot() {
@@ -203,8 +215,11 @@ impl Blockstore {
 
             self.save_slot_meta(&meta)?;
 
-            // Publish slot completion event.
+            // Update stats and publish slot completion event.
             if slot_complete {
+                self.stats
+                    .slots_completed
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 if let Some(pub_) = &self.event_publisher {
                     pub_.publish(SlotEvent::Completed {
                         slot,
@@ -233,6 +248,9 @@ impl Blockstore {
             let store = ShredStore::new(&self.backend);
             store.insert_coding(slot, index, &shred.payload)?;
             meta.received_coding_shreds += 1;
+            self.stats
+                .shreds_inserted
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
             let (num_data, num_coding) = match shred.coding_header() {
                 Some(h) => (h.num_data_shreds, h.num_coding_shreds),
@@ -418,6 +436,9 @@ impl Blockstore {
         let key = slot.to_be_bytes();
         self.backend.put(CF_DEAD_SLOTS, &key, &[1])?;
 
+        self.stats
+            .slots_dead
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         if let Some(pub_) = &self.event_publisher {
             pub_.publish(SlotEvent::Dead { slot });
         }
@@ -434,6 +455,9 @@ impl Blockstore {
         let key = slot.to_be_bytes();
         self.backend.put(CF_DUPLICATE_SLOTS, &key, &[1])?;
 
+        self.stats
+            .slots_duplicate
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         if let Some(pub_) = &self.event_publisher {
             pub_.publish(SlotEvent::Duplicate { slot });
         }
@@ -457,6 +481,9 @@ impl Blockstore {
             .write()
             .expect("roots lock poisoned")
             .insert(slot);
+        self.stats
+            .slots_rooted
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         if let Some(pub_) = &self.event_publisher {
             pub_.publish(SlotEvent::Rooted { slot });
         }
@@ -569,6 +596,45 @@ impl Blockstore {
         // Real coding params come from the coding shred headers.
         (32, 32)
     }
+}
+
+/// Blockstore-level statistics for monitoring.
+#[derive(Debug, Default)]
+pub struct BlockstoreStats {
+    /// Total shreds inserted (data + coding).
+    pub shreds_inserted: std::sync::atomic::AtomicU64,
+    /// Total slots that reached complete status.
+    pub slots_completed: std::sync::atomic::AtomicU64,
+    /// Total slots marked as dead.
+    pub slots_dead: std::sync::atomic::AtomicU64,
+    /// Total slots marked as duplicate.
+    pub slots_duplicate: std::sync::atomic::AtomicU64,
+    /// Total slots set as root.
+    pub slots_rooted: std::sync::atomic::AtomicU64,
+}
+
+impl BlockstoreStats {
+    /// Take a snapshot of current counters.
+    pub fn snapshot(&self) -> BlockstoreStatsSnapshot {
+        use std::sync::atomic::Ordering::Relaxed;
+        BlockstoreStatsSnapshot {
+            shreds_inserted: self.shreds_inserted.load(Relaxed),
+            slots_completed: self.slots_completed.load(Relaxed),
+            slots_dead: self.slots_dead.load(Relaxed),
+            slots_duplicate: self.slots_duplicate.load(Relaxed),
+            slots_rooted: self.slots_rooted.load(Relaxed),
+        }
+    }
+}
+
+/// Immutable snapshot of blockstore statistics.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BlockstoreStatsSnapshot {
+    pub shreds_inserted: u64,
+    pub slots_completed: u64,
+    pub slots_dead: u64,
+    pub slots_duplicate: u64,
+    pub slots_rooted: u64,
 }
 
 /// Result of inserting a typed shred into the blockstore.
