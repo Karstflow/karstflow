@@ -913,6 +913,10 @@ impl AggregatedSnapshot {
                 "paradencer_blockstore_slots_rooted {}",
                 b.slots_rooted
             ));
+            lines.push(format!(
+                "paradencer_blockstore_slots_purged {}",
+                b.slots_purged
+            ));
         }
 
         lines
@@ -1280,6 +1284,9 @@ mod tests {
         stats
             .slots_rooted
             .store(8, std::sync::atomic::Ordering::Relaxed);
+        stats
+            .slots_purged
+            .store(3, std::sync::atomic::Ordering::Relaxed);
 
         let agg = MetricsAggregator::new().with_blockstore(stats);
         let snap = agg.snapshot();
@@ -1291,5 +1298,6 @@ mod tests {
         assert!(text.contains("paradencer_blockstore_slots_dead 2"));
         assert!(text.contains("paradencer_blockstore_slots_duplicate 1"));
         assert!(text.contains("paradencer_blockstore_slots_rooted 8"));
+        assert!(text.contains("paradencer_blockstore_slots_purged 3"));
     }
 }

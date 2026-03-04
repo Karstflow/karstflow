@@ -533,6 +533,9 @@ impl Blockstore {
     /// Returns the number of slots purged.
     pub fn purge_slots_below(&self, min_slot: u64) -> Result<usize, BlockstoreError> {
         let purged = BlockstoreCleanup::purge_below(&self.backend, min_slot)?;
+        self.stats
+            .slots_purged
+            .fetch_add(purged as u64, std::sync::atomic::Ordering::Relaxed);
 
         // Remove purged roots from the cached set
         let mut roots = self.roots.write().expect("roots lock poisoned");
@@ -611,6 +614,8 @@ pub struct BlockstoreStats {
     pub slots_duplicate: std::sync::atomic::AtomicU64,
     /// Total slots set as root.
     pub slots_rooted: std::sync::atomic::AtomicU64,
+    /// Total slots purged by GC.
+    pub slots_purged: std::sync::atomic::AtomicU64,
 }
 
 impl BlockstoreStats {
@@ -623,6 +628,7 @@ impl BlockstoreStats {
             slots_dead: self.slots_dead.load(Relaxed),
             slots_duplicate: self.slots_duplicate.load(Relaxed),
             slots_rooted: self.slots_rooted.load(Relaxed),
+            slots_purged: self.slots_purged.load(Relaxed),
         }
     }
 }
@@ -635,6 +641,7 @@ pub struct BlockstoreStatsSnapshot {
     pub slots_dead: u64,
     pub slots_duplicate: u64,
     pub slots_rooted: u64,
+    pub slots_purged: u64,
 }
 
 /// Result of inserting a typed shred into the blockstore.
