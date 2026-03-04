@@ -273,8 +273,13 @@ impl SnapshotLoader {
     }
 
     fn validate_account(&self, account: &SerializedAccount) -> bool {
-        // Basic validation
+        // Reject accounts with excessively large data (10 MB limit).
         if account.data.len() > 10 * 1024 * 1024 {
+            return false;
+        }
+
+        // Reject accounts claiming to be executable with no data (impossible state).
+        if account.executable && account.data.is_empty() {
             return false;
         }
 
@@ -490,27 +495,49 @@ mod tests {
     fn test_account_validation() {
         let loader = SnapshotLoader::new();
 
+        // Valid: non-zero owner with data.
         let valid_account = SerializedAccount {
             pubkey: Pubkey::zeroed(),
             lamports: 1000,
-            owner: Pubkey::zeroed(),
+            owner: Pubkey::from([1u8; 32]),
             executable: false,
             rent_epoch: 0,
             data: vec![1, 2, 3],
         };
-
         assert!(loader.validate_account(&valid_account));
 
-        let invalid_account = SerializedAccount {
+        // Valid: zeroed owner with no data (system-owned empty account).
+        let empty_system = SerializedAccount {
+            pubkey: Pubkey::zeroed(),
+            lamports: 500,
+            owner: Pubkey::zeroed(),
+            executable: false,
+            rent_epoch: 0,
+            data: Vec::new(),
+        };
+        assert!(loader.validate_account(&empty_system));
+
+        // Invalid: data too large.
+        let too_large = SerializedAccount {
             pubkey: Pubkey::zeroed(),
             lamports: 1000,
-            owner: Pubkey::zeroed(),
+            owner: Pubkey::from([1u8; 32]),
             executable: false,
             rent_epoch: 0,
             data: vec![0; 11 * 1024 * 1024],
         };
+        assert!(!loader.validate_account(&too_large));
 
-        assert!(!loader.validate_account(&invalid_account));
+        // Invalid: executable with no data.
+        let exec_no_data = SerializedAccount {
+            pubkey: Pubkey::zeroed(),
+            lamports: 1000,
+            owner: Pubkey::from([1u8; 32]),
+            executable: true,
+            rent_epoch: 0,
+            data: Vec::new(),
+        };
+        assert!(!loader.validate_account(&exec_no_data));
     }
 
     #[test]
