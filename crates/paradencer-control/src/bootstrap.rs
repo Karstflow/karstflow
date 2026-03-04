@@ -235,7 +235,9 @@ pub fn build_consensus_infrastructure(
         None => Pubkey::new_unique(),
     };
     let validators = vec![(validator, initial_stake)];
-    let leader_schedule = Arc::new(LeaderSchedule::new(0, &validators).unwrap());
+    let leader_schedule = Arc::new(
+        LeaderSchedule::new(0, &validators).expect("leader schedule from single validator"),
+    );
     let genesis = Bank::new_genesis(accounts, epoch_schedule, leader_schedule);
 
     // Extract real stake data from the bank if available.
@@ -243,7 +245,7 @@ pub fn build_consensus_infrastructure(
     // with actual delegations — use that for accurate consensus weights.
     let (effective_stake, vote_processor_tracker) =
         if let Some(tracker_arc) = genesis.stake_tracker() {
-            let tracker = tracker_arc.read().unwrap();
+            let tracker = tracker_arc.read().expect("stake_tracker lock poisoned");
             let real_stake = tracker.total_stake();
             if real_stake > 0 {
                 info!(
@@ -263,7 +265,7 @@ pub fn build_consensus_infrastructure(
     let mut vote_processor_inner =
         VoteProcessor::new(VoteProcessorConfig::default(), vote_processor_tracker);
     if let Some(cache_lock) = genesis.vote_account_cache() {
-        let cache = cache_lock.read().unwrap();
+        let cache = cache_lock.read().expect("vote_cache lock poisoned");
         for (vote_pubkey, entry) in cache.iter() {
             let vote_state = VoteState::new(
                 entry.node_pubkey,
@@ -321,7 +323,7 @@ pub fn build_consensus_from_bank_forks(
     // Extract real stake data from the snapshot-initialized bank.
     let (effective_stake, vote_processor_tracker) =
         if let Some(tracker_arc) = working_bank.stake_tracker() {
-            let tracker = tracker_arc.read().unwrap();
+            let tracker = tracker_arc.read().expect("stake_tracker lock poisoned");
             let real_stake = tracker.total_stake();
             if real_stake > 0 {
                 info!(
@@ -345,7 +347,7 @@ pub fn build_consensus_from_bank_forks(
     let mut vote_processor_inner =
         VoteProcessor::new(VoteProcessorConfig::default(), vote_processor_tracker);
     if let Some(cache_lock) = working_bank.vote_account_cache() {
-        let cache = cache_lock.read().unwrap();
+        let cache = cache_lock.read().expect("vote_cache lock poisoned");
         let mut registered = 0u32;
         for (vote_pubkey, entry) in cache.iter() {
             let vote_state = VoteState::new(
@@ -433,7 +435,9 @@ pub fn bootstrap_from_genesis_file(
             None => vec![(Pubkey::new_unique(), 500_000_000)],
         }
     };
-    let leader_schedule = Arc::new(LeaderSchedule::new(0, &validators).unwrap());
+    let leader_schedule = Arc::new(
+        LeaderSchedule::new(0, &validators).expect("leader schedule from single validator"),
+    );
 
     let result = paradencer_consensus::bootstrap_from_genesis(&genesis, leader_schedule);
 
@@ -499,7 +503,9 @@ pub fn bootstrap_from_development_genesis(
     ));
 
     let validators = vec![(identity, 500_000_000)];
-    let leader_schedule = Arc::new(LeaderSchedule::new(0, &validators).unwrap());
+    let leader_schedule = Arc::new(
+        LeaderSchedule::new(0, &validators).expect("leader schedule from single validator"),
+    );
 
     let result = paradencer_consensus::bootstrap_from_genesis(&genesis, leader_schedule);
 
@@ -1058,7 +1064,11 @@ impl TurbineServiceAdapter {
 
         // Use real stake weights from the vote processor for
         // stake-weighted turbine tree construction.
-        let node_stakes = self.vote_processor.lock().unwrap().stake_by_node_identity();
+        let node_stakes = self
+            .vote_processor
+            .lock()
+            .expect("vote_processor lock poisoned")
+            .stake_by_node_identity();
 
         let validators: Vec<ValidatorInfo> = peers
             .into_iter()
@@ -1091,11 +1101,11 @@ pub fn build_turbine_service(
     vote_processor: Arc<Mutex<VoteProcessor>>,
 ) -> Result<TurbineBundle> {
     let transport = Arc::new(
-        UdpShredTransport::new("0.0.0.0:0".parse().unwrap()).map_err(|e| {
-            ControlPlaneError::GossipServiceStartFailed {
+        UdpShredTransport::new("0.0.0.0:0".parse().expect("valid socket addr literal")).map_err(
+            |e| ControlPlaneError::GossipServiceStartFailed {
                 detail: format!("failed to bind turbine UDP socket: {e}"),
-            }
-        })?,
+            },
+        )?,
     );
 
     let turbine_config = TurbineConfig::default();
@@ -1212,7 +1222,11 @@ impl Service for RepairServiceAdapter {
         _context: &paradencer_runtime::ServiceContext,
     ) -> paradencer_runtime::RuntimeResult<()> {
         // Advance the repair root when consensus root moves forward.
-        let current_root = self.bank_forks.read().unwrap().root_slot();
+        let current_root = self
+            .bank_forks
+            .read()
+            .expect("bank_forks lock poisoned")
+            .root_slot();
         if current_root > self.last_root {
             self.coordinator.advance_root(current_root);
             self.last_root = current_root;
@@ -1278,7 +1292,11 @@ impl RepairServiceAdapter {
     /// identity does not appear in the stake map receive a fallback
     /// weight of 1 so they still participate in repair.
     fn sync_peers_from_gossip(&mut self) {
-        let node_stakes = self.vote_processor.lock().unwrap().stake_by_node_identity();
+        let node_stakes = self
+            .vote_processor
+            .lock()
+            .expect("vote_processor lock poisoned")
+            .stake_by_node_identity();
         let all_peers = self.cluster_info.get_all();
         for contact in all_peers {
             let peer_id = contact.node_id.0;
@@ -1404,7 +1422,10 @@ pub fn build_repair_service(
     shred_provider: Option<Arc<dyn ShredProvider>>,
     shred_arrival_rx: crossbeam_channel::Receiver<ShredArrival>,
 ) -> Result<RepairBundle> {
-    let root_slot = bank_forks.read().unwrap().root_slot();
+    let root_slot = bank_forks
+        .read()
+        .expect("bank_forks lock poisoned")
+        .root_slot();
     let coordinator = RepairCoordinator::new(root_slot, RepairCoordinatorConfig::default());
 
     // Channel for forwarding outbound repair requests to the I/O thread.
@@ -1577,7 +1598,7 @@ impl Service for VoteBroadcastAdapter {
             return Ok(());
         }
 
-        let vote_slot = current_vote_slot.unwrap();
+        let vote_slot = current_vote_slot.expect("checked is_none above");
 
         // Get the bank hash for the voted slot from BankForks.
         let bank_hash = {
@@ -1811,7 +1832,7 @@ pub fn spawn_snapshot_thread_with_gossip(
 
     let signal_rx = signal_bus
         .lock()
-        .unwrap()
+        .expect("signal_bus lock poisoned")
         .subscribe()
         .expect("signal bus subscriber limit not reached");
 
