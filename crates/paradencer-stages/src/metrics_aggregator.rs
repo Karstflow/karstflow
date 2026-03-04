@@ -617,9 +617,52 @@ impl AggregatedSnapshot {
                 e.compute_units_consumed
             ));
             lines.push(format!(
+                "paradencer_exec_compute_units_rebated {}",
+                e.compute_units_rebated
+            ));
+            lines.push(format!(
                 "paradencer_exec_fees_collected {}",
                 e.fees_collected
             ));
+            // Landing classification.
+            lines.push(format!(
+                "paradencer_exec_transactions_landed {}",
+                e.transactions_landed
+            ));
+            lines.push(format!(
+                "paradencer_exec_transactions_landed_fees_only {}",
+                e.transactions_landed_fees_only
+            ));
+            lines.push(format!(
+                "paradencer_exec_transactions_unlanded {}",
+                e.transactions_unlanded
+            ));
+            // Error categories.
+            lines.push(format!(
+                "paradencer_exec_err_insufficient_funds {}",
+                e.err_insufficient_funds
+            ));
+            lines.push(format!(
+                "paradencer_exec_err_invalid_account {}",
+                e.err_invalid_account
+            ));
+            lines.push(format!(
+                "paradencer_exec_err_blockhash_not_found {}",
+                e.err_blockhash_not_found
+            ));
+            lines.push(format!(
+                "paradencer_exec_err_duplicate_signature {}",
+                e.err_duplicate_signature
+            ));
+            lines.push(format!(
+                "paradencer_exec_err_instruction_error {}",
+                e.err_instruction_error
+            ));
+            lines.push(format!(
+                "paradencer_exec_err_compute_budget {}",
+                e.err_compute_budget
+            ));
+            lines.push(format!("paradencer_exec_err_other {}", e.err_other));
         }
 
         if let Some(ref s) = self.shred_network {
@@ -1012,6 +1055,12 @@ mod tests {
         assert!(text.contains("paradencer_pack_microblocks_produced 10"));
         assert!(text.contains("paradencer_exec_transactions_executed 75"));
         assert!(text.contains("paradencer_exec_compute_units_consumed 500000"));
+        assert!(text.contains("paradencer_exec_compute_units_rebated 0"));
+        assert!(text.contains("paradencer_exec_transactions_landed 0"));
+        assert!(text.contains("paradencer_exec_transactions_landed_fees_only 0"));
+        assert!(text.contains("paradencer_exec_transactions_unlanded 0"));
+        assert!(text.contains("paradencer_exec_err_insufficient_funds 0"));
+        assert!(text.contains("paradencer_exec_err_instruction_error 0"));
         assert!(text.contains("paradencer_shred_network_shreds_received 1000"));
         assert!(text.contains("paradencer_shred_network_fec_sets_completed 50"));
 
