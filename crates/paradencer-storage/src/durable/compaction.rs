@@ -9,8 +9,8 @@
 // eliminate dead space from overwrites and deletes.
 
 use paradencer_constants::durable_store::{
-    CF_BLOCK_HEIGHT, CF_CODE_SHRED, CF_DATA_SHRED, CF_DEAD_SLOTS, CF_DUPLICATE_SLOTS,
-    CF_ERASURE_META, CF_ROOTS, CF_SLOT_META, COMPACTION_DEAD_SPACE_RATIO,
+    CF_BLOCK_HEIGHT, CF_BLOCK_TIME, CF_CODE_SHRED, CF_DATA_SHRED, CF_DEAD_SLOTS,
+    CF_DUPLICATE_SLOTS, CF_ERASURE_META, CF_ROOTS, CF_SLOT_META, COMPACTION_DEAD_SPACE_RATIO,
 };
 
 use super::file_store::CfCompactionStats;
@@ -43,6 +43,7 @@ const SLOT_KEYED_CFS: &[&str] = &[
     CF_ROOTS,
     CF_ERASURE_META,
     CF_BLOCK_HEIGHT,
+    CF_BLOCK_TIME,
 ];
 
 /// Remove all slot-keyed records below `min_slot` from the durable store,

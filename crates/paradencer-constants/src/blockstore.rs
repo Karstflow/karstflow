@@ -36,5 +36,8 @@ pub const CF_ERASURE_META: &str = "erasure_meta";
 /// Column family name for block height records.
 pub const CF_BLOCK_HEIGHT: &str = "block_height";
 
+/// Column family name for block time (unix timestamp) records.
+pub const CF_BLOCK_TIME: &str = "block_time";
+
 /// Maximum block assembly attempts before marking dead.
 pub const MAX_BLOCK_ASSEMBLY_RETRIES: usize = 3;

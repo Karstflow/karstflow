@@ -192,12 +192,13 @@ impl Blockstore {
             let slot_complete = meta.is_complete();
             if slot_complete && meta.status == SlotStatus::Incomplete {
                 meta.status = SlotStatus::Complete;
-                meta.completion_timestamp = Some(
-                    std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .unwrap_or_default()
-                        .as_secs() as i64,
-                );
+                let timestamp = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs() as i64;
+                meta.completion_timestamp = Some(timestamp);
+                // Persist block time for direct slot→timestamp lookups.
+                let _ = self.set_block_time(slot, timestamp);
             }
 
             self.save_slot_meta(&meta)?;
@@ -284,6 +285,35 @@ impl Blockstore {
     /// Get the FEC tracker for querying erasure set state.
     pub fn fec_tracker(&self) -> FecTracker<'_> {
         FecTracker::new(&self.backend)
+    }
+
+    /// Record the block time (unix timestamp) for a slot.
+    ///
+    /// Stores the wall-clock time when the slot was completed or observed.
+    /// Used by RPC method `getBlockTime`.
+    pub fn set_block_time(&self, slot: u64, timestamp: i64) -> Result<(), BlockstoreError> {
+        let key = slot.to_be_bytes();
+        let value = timestamp.to_be_bytes();
+        self.backend.put(CF_BLOCK_TIME, &key, &value)
+    }
+
+    /// Get the block time for a slot.
+    pub fn get_block_time(&self, slot: u64) -> Result<Option<i64>, BlockstoreError> {
+        let key = slot.to_be_bytes();
+        match self.backend.get(CF_BLOCK_TIME, &key)? {
+            Some(data) if data.len() == 8 => {
+                let ts = i64::from_be_bytes(
+                    data.as_slice()
+                        .try_into()
+                        .unwrap_or_else(|_| unreachable!()),
+                );
+                Ok(Some(ts))
+            }
+            Some(_) => Err(BlockstoreError::DeserializationError(
+                "invalid block time encoding".to_string(),
+            )),
+            None => Ok(None),
+        }
     }
 
     /// Record the block height for a rooted slot.

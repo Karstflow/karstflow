@@ -35,6 +35,9 @@ pub const CF_ERASURE_META: &str = "erasure_meta";
 /// Column family for block height records.
 pub const CF_BLOCK_HEIGHT: &str = "block_height";
 
+/// Column family for block time (unix timestamp) records.
+pub const CF_BLOCK_TIME: &str = "block_time";
+
 // Metadata keys (stored in CF_METADATA)
 
 /// Key for the latest persisted slot number.
@@ -80,6 +83,7 @@ pub const STANDARD_COLUMN_FAMILIES: &[&str] = &[
     CF_DUPLICATE_SLOTS,
     CF_ERASURE_META,
     CF_BLOCK_HEIGHT,
+    CF_BLOCK_TIME,
 ];
 
 // File format constants

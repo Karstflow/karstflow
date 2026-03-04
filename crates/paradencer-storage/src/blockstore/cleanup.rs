@@ -31,6 +31,7 @@ impl BlockstoreCleanup {
             CF_DUPLICATE_SLOTS,
             CF_ROOTS,
             CF_BLOCK_HEIGHT,
+            CF_BLOCK_TIME,
         ] {
             let keys = backend.all_keys(cf)?;
             for key in keys {
@@ -201,6 +202,7 @@ impl BlockstoreGarbageCollector {
             CF_DUPLICATE_SLOTS,
             CF_ROOTS,
             CF_BLOCK_HEIGHT,
+            CF_BLOCK_TIME,
             CF_DATA_SHRED,
             CF_CODE_SHRED,
             CF_ERASURE_META,

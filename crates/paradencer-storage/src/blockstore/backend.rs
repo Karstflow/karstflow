@@ -27,6 +27,7 @@ const BLOCKSTORE_CFS: &[&str] = &[
     CF_ROOTS,
     CF_ERASURE_META,
     CF_BLOCK_HEIGHT,
+    CF_BLOCK_TIME,
 ];
 
 /// Inner storage variant.

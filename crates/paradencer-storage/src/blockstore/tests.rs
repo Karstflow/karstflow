@@ -732,3 +732,41 @@ fn highest_block_height_tracks_latest_root() {
     bs.set_block_height(20, 12).unwrap();
     assert_eq!(bs.highest_block_height().unwrap(), Some(12));
 }
+
+// --- Block time ---
+
+#[test]
+fn set_and_get_block_time() {
+    let bs = Blockstore::in_memory();
+    bs.set_block_time(100, 1_700_000_000).unwrap();
+    bs.set_block_time(200, 1_700_000_400).unwrap();
+
+    assert_eq!(bs.get_block_time(100).unwrap(), Some(1_700_000_000));
+    assert_eq!(bs.get_block_time(200).unwrap(), Some(1_700_000_400));
+    assert_eq!(bs.get_block_time(300).unwrap(), None);
+}
+
+#[test]
+fn block_time_recorded_on_slot_completion() {
+    let bs = Blockstore::in_memory();
+    let shred = make_data_shred(42, 0, true, 1);
+    bs.insert_shred(&shred).unwrap();
+
+    // Slot should be complete (last_in_slot flag set).
+    assert!(bs.is_slot_complete(42));
+
+    // Block time should have been recorded.
+    let block_time = bs.get_block_time(42).unwrap();
+    assert!(block_time.is_some());
+    let ts = block_time.unwrap();
+    // Should be a recent unix timestamp (after 2024).
+    assert!(ts > 1_700_000_000);
+}
+
+#[test]
+fn block_time_overwrite() {
+    let bs = Blockstore::in_memory();
+    bs.set_block_time(50, 1000).unwrap();
+    bs.set_block_time(50, 2000).unwrap();
+    assert_eq!(bs.get_block_time(50).unwrap(), Some(2000));
+}
