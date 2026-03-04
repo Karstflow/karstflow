@@ -7,9 +7,12 @@
 /// This corresponds to Firedancer's execle tile which handles actual
 /// transaction execution during block production.
 use crate::pack_stage::{Microblock, PackedTransaction};
-use std::collections::HashMap;
+use paradencer_consensus::{
+    deserialize_transaction, resolve_address_lookups, Bank, BankForks, ExecutionBackend,
+};
+use paradencer_constants::execution::MAX_COMPUTE_UNITS;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 
 /// Result of executing a single transaction.
 #[derive(Debug, Clone)]
@@ -133,6 +136,97 @@ impl ExecutionEngine for MockExecutionEngine {
             logs: Vec::new(),
             modified_accounts: Vec::new(),
         }
+    }
+}
+
+/// Real execution engine that routes transactions through the bank pipeline.
+///
+/// Uses the working bank from BankForks to execute transactions with full
+/// account loading, fee deduction, instruction execution via sBPF, and
+/// account writeback. This replaces MockExecutionEngine in production.
+pub struct BankExecutionEngine {
+    bank_forks: Arc<RwLock<BankForks>>,
+    backend: Arc<dyn ExecutionBackend>,
+}
+
+impl BankExecutionEngine {
+    pub fn new(bank_forks: Arc<RwLock<BankForks>>, backend: Arc<dyn ExecutionBackend>) -> Self {
+        Self {
+            bank_forks,
+            backend,
+        }
+    }
+
+    fn execute_with_bank(&self, tx: &PackedTransaction, bank: &Arc<Bank>) -> TransactionExecResult {
+        // Deserialize from wire format.
+        let mut deserialized = match deserialize_transaction(&tx.payload) {
+            Ok(d) => d,
+            Err(msg) => {
+                return TransactionExecResult {
+                    payload: tx.payload.clone(),
+                    success: false,
+                    compute_units_consumed: 0,
+                    fee_paid: 0,
+                    error: Some(msg),
+                    logs: Vec::new(),
+                    modified_accounts: Vec::new(),
+                };
+            }
+        };
+
+        // Resolve address lookup table references for V0 transactions.
+        if !deserialized.address_table_lookups.is_empty() {
+            let db = bank.accounts();
+            match resolve_address_lookups(&deserialized.address_table_lookups, |pubkey| {
+                db.get_published_account(pubkey)
+            }) {
+                Ok(resolved) => {
+                    deserialized.tx.num_writable_lookup_keys = resolved.writable.len();
+                    deserialized.tx.account_keys.extend(resolved.writable);
+                    deserialized.tx.account_keys.extend(resolved.readonly);
+                }
+                Err(e) => {
+                    return TransactionExecResult {
+                        payload: tx.payload.clone(),
+                        success: false,
+                        compute_units_consumed: 0,
+                        fee_paid: 0,
+                        error: Some(e.to_string()),
+                        logs: Vec::new(),
+                        modified_accounts: Vec::new(),
+                    };
+                }
+            }
+        }
+
+        let sanitized = deserialized.tx;
+
+        // Execute through the full bank pipeline.
+        let result = bank.process_transaction(&sanitized, self.backend.as_ref(), MAX_COMPUTE_UNITS);
+
+        let modified_accounts = result
+            .modified_accounts
+            .iter()
+            .map(|(pubkey, account)| (pubkey.to_bytes(), account.data.as_slice().to_vec()))
+            .collect();
+
+        TransactionExecResult {
+            payload: tx.payload.clone(),
+            success: result.success,
+            compute_units_consumed: result.compute_units_consumed,
+            fee_paid: result.fee,
+            error: result.error.as_ref().map(|e| format!("{:?}", e)),
+            logs: result.logs,
+            modified_accounts,
+        }
+    }
+}
+
+impl ExecutionEngine for BankExecutionEngine {
+    fn execute(&self, tx: &PackedTransaction) -> TransactionExecResult {
+        let bank_forks = self.bank_forks.read().unwrap();
+        let bank = bank_forks.working_bank();
+        self.execute_with_bank(tx, &bank)
     }
 }
 

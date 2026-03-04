@@ -513,9 +513,19 @@ fn run_with_node_config(
 
     // Build the transaction pipeline for block production.
     // Pipeline inputs come from topology TxFilter stages plus optional QUIC bridge.
+    // Wire real sBPF execution engine so leader-produced blocks execute transactions
+    // through the full bank pipeline instead of the test mock.
+    let leader_exec_engine: Box<dyn paradencer_stages::ExecutionEngine> = {
+        let backend = std::sync::Arc::new(paradencer_stages::SbpfExecutionAdapter::with_defaults());
+        Box::new(paradencer_stages::BankExecutionEngine::new(
+            consensus.bank_forks.clone(),
+            backend,
+        ))
+    };
     let pipeline_bundle = build_pipeline_service(
         paradencer_stages::PipelineServiceConfig::default(),
         pipeline_inputs,
+        Some(leader_exec_engine),
     );
     // Wire leader slot orchestration: subscribe to replay signals and
     // drive the pipeline handle when this validator becomes leader.

@@ -3,7 +3,12 @@ use crate::bootstrap::{
     start_gossip_service,
 };
 use paradencer_config::NodeConfig;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
+
+/// Guard for tests that modify process-global environment variables.
+/// `std::env::set_var` is not thread-safe, so tests touching env vars
+/// must hold this lock to avoid contaminating parallel tests.
+static ENV_LOCK: Mutex<()> = Mutex::new(());
 
 #[test]
 fn build_consensus_infrastructure_creates_all_components() {
@@ -133,6 +138,7 @@ fn save_tower_to_disk_roundtrip() {
 
 #[test]
 fn start_gossip_service_creates_handle_with_cluster_info() {
+    let _guard = ENV_LOCK.lock().unwrap();
     // Use port 0 so the OS assigns a free ephemeral port — avoids conflicts under parallel tests.
     std::env::set_var("PARADENCER_GOSSIP_BIND_ADDR", "127.0.0.1:0");
     let node_config = NodeConfig::from_profile(None).unwrap();
@@ -145,6 +151,7 @@ fn start_gossip_service_creates_handle_with_cluster_info() {
 
 #[test]
 fn gossip_node_id_matches_identity_pubkey() {
+    let _guard = ENV_LOCK.lock().unwrap();
     // Use port 0 so the OS assigns a free ephemeral port — avoids conflicts under parallel tests.
     std::env::set_var("PARADENCER_GOSSIP_BIND_ADDR", "127.0.0.1:0");
     let node_config = NodeConfig::from_profile(None).unwrap();

@@ -31,7 +31,7 @@ fn build_pipeline_service_creates_service_and_handle() {
     use paradencer_runtime::{ServiceContext, ShutdownSwitch};
     use paradencer_stages::PipelineServiceConfig;
 
-    let bundle = build_pipeline_service(PipelineServiceConfig::default(), Vec::new());
+    let bundle = build_pipeline_service(PipelineServiceConfig::default(), Vec::new(), None);
     assert_eq!(bundle.service.name(), "validator-pipeline");
     assert!(!bundle.handle.is_leading());
 
@@ -49,6 +49,7 @@ fn pipeline_service_integrates_with_topology_services() {
     let bundle = build_pipeline_service(
         PipelineServiceConfig::default(),
         materialized.pipeline_inputs,
+        None,
     );
 
     let mut services = materialized.services;
@@ -89,6 +90,7 @@ fn replay_and_pipeline_integrate_with_topology() {
     let pipeline_bundle = build_pipeline_service(
         PipelineServiceConfig::default(),
         materialized.pipeline_inputs,
+        None,
     );
 
     let mut services = materialized.services;
@@ -195,6 +197,7 @@ fn topology_includes_shred_collector_and_integrates_with_bootstrap_services() {
     let pipeline_bundle = build_pipeline_service(
         PipelineServiceConfig::default(),
         materialized.pipeline_inputs,
+        None,
     );
 
     let mut services = materialized.services;

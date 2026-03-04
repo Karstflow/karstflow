@@ -85,10 +85,14 @@ pub struct PipelineBundle {
 pub fn build_pipeline_service(
     config: PipelineServiceConfig,
     inputs: Vec<DualReceiver<RawTransaction>>,
+    execution_engine: Option<Box<dyn paradencer_stages::ExecutionEngine>>,
 ) -> PipelineBundle {
     let mut builder = PipelineServiceBuilder::new().with_config(config);
     for input in inputs {
         builder = builder.add_input(input);
+    }
+    if let Some(engine) = execution_engine {
+        builder = builder.with_execution_engine(engine);
     }
     let (service, handle) = builder.build();
     PipelineBundle {
