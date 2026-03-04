@@ -14,7 +14,9 @@ mod shred_store;
 mod tests;
 
 pub use block_assembly::{extract_signatures, AssembledBlock, BlockAssembler, ParsedEntry};
-pub use cleanup::BlockstoreCleanup;
+pub use cleanup::{
+    BlockstoreCleanup, BlockstoreGarbageCollector, GarbageCollectorConfig, GarbageCollectorStats,
+};
 pub use fec_tracker::{FecInsertResult, FecTracker};
 pub use meta::{ErasureMeta, SlotMeta, SlotStatus};
 pub use shred_store::ShredStore;

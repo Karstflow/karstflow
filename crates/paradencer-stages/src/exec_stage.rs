@@ -14,6 +14,84 @@ use paradencer_constants::execution::MAX_COMPUTE_UNITS;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
 
+/// Classification of a transaction's landing status after execution.
+///
+/// This distinguishes between fully executed transactions, those that only
+/// paid fees without applying state changes, and those that never landed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TransactionLanded {
+    /// Transaction executed and all state changes committed.
+    Landed,
+    /// Transaction failed but fees were still collected (no state changes).
+    LandedFeesOnly,
+    /// Transaction was not included (e.g., duplicate, invalid).
+    Unlanded,
+}
+
+/// Categorized transaction error codes for metrics and diagnostics.
+///
+/// Maps to Solana's transaction error taxonomy with additional categories
+/// for pack/scheduling-level failures.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TransactionErrorCode {
+    /// No error — transaction succeeded.
+    Success,
+    /// Account required for fee payment was not found or invalid.
+    InvalidAccountForFee,
+    /// Insufficient lamports to pay transaction fee.
+    InsufficientFundsForFee,
+    /// An account referenced by the transaction was invalid.
+    InvalidAccount,
+    /// Transaction signature was already processed (duplicate).
+    DuplicateSignature,
+    /// Blockhash not found or expired.
+    BlockhashNotFound,
+    /// An instruction returned an error.
+    InstructionError,
+    /// Transaction exceeded its compute budget.
+    ComputeBudgetExceeded,
+    /// Address lookup table entry was not found.
+    AddressLookupFailure,
+    /// Transaction deserialization failed.
+    DeserializationError,
+    /// Transaction was too large.
+    TransactionTooLarge,
+    /// Account data too small for instruction.
+    AccountDataTooSmall,
+    /// Program execution failed (sBPF runtime error).
+    ProgramExecutionFailed,
+    /// Other unclassified error.
+    Other,
+}
+
+impl TransactionErrorCode {
+    /// Classify an error string into a structured error code.
+    pub fn classify(error_msg: &str) -> Self {
+        let lower = error_msg.to_lowercase();
+        if lower.contains("insufficient funds") || lower.contains("insufficient lamports") {
+            Self::InsufficientFundsForFee
+        } else if lower.contains("invalid account") || lower.contains("account not found") {
+            Self::InvalidAccount
+        } else if lower.contains("blockhash") {
+            Self::BlockhashNotFound
+        } else if lower.contains("duplicate") {
+            Self::DuplicateSignature
+        } else if lower.contains("compute") || lower.contains("budget exceeded") {
+            Self::ComputeBudgetExceeded
+        } else if lower.contains("lookup") {
+            Self::AddressLookupFailure
+        } else if lower.contains("deserializ") {
+            Self::DeserializationError
+        } else if lower.contains("too large") {
+            Self::TransactionTooLarge
+        } else if lower.contains("program") || lower.contains("instruction") {
+            Self::InstructionError
+        } else {
+            Self::Other
+        }
+    }
+}
+
 /// Result of executing a single transaction.
 #[derive(Debug, Clone)]
 pub struct TransactionExecResult {
@@ -23,14 +101,48 @@ pub struct TransactionExecResult {
     pub success: bool,
     /// Compute units actually consumed.
     pub compute_units_consumed: u64,
+    /// Compute units that were requested but not consumed (available for rebate).
+    pub compute_units_rebated: u64,
     /// Priority fee actually paid (for rebates).
     pub fee_paid: u64,
+    /// Landing status classification.
+    pub landed: TransactionLanded,
+    /// Structured error code for metrics.
+    pub error_code: TransactionErrorCode,
     /// Error message if failed.
     pub error: Option<String>,
     /// Execution logs.
     pub logs: Vec<String>,
     /// Modified account states after execution.
     pub modified_accounts: Vec<([u8; 32], Vec<u8>)>,
+}
+
+/// Per-transaction rebate information for fee refund tracking.
+///
+/// After execution, unused compute units may be rebated to the fee payer.
+/// This structure tracks the rebate amount per transaction so the pack
+/// scheduler can update its fee accounting.
+#[derive(Debug, Clone)]
+pub struct TransactionRebate {
+    /// Index of this transaction within the microblock.
+    pub tx_index: u32,
+    /// Compute units that were budgeted but not consumed.
+    pub rebated_cus: u64,
+    /// Actual compute units consumed.
+    pub actual_cus: u64,
+    /// Whether this transaction was fees-only (failed but fee collected).
+    pub fees_only: bool,
+}
+
+/// Aggregated rebate summary for a microblock.
+#[derive(Debug, Clone, Default)]
+pub struct RebateSummary {
+    /// Per-transaction rebate entries.
+    pub rebates: Vec<TransactionRebate>,
+    /// Total rebated CUs across all transactions.
+    pub total_rebated_cus: u64,
+    /// Total actual CUs consumed across all transactions.
+    pub total_actual_cus: u64,
 }
 
 /// Result of executing an entire microblock.
@@ -46,8 +158,14 @@ pub struct MicroblockExecResult {
     pub success_count: usize,
     /// Number of failed transactions.
     pub failure_count: usize,
+    /// Number of transactions that landed (including fees-only).
+    pub landed_count: usize,
+    /// Number of fees-only transactions.
+    pub fees_only_count: usize,
     /// Merkle root hash of the entry produced from this microblock.
     pub entry_hash: [u8; 32],
+    /// Rebate summary for pack scheduler feedback.
+    pub rebate_summary: RebateSummary,
 }
 
 /// Configuration for the execution tile.
@@ -79,7 +197,20 @@ pub struct ExecStats {
     pub transactions_succeeded: AtomicU64,
     pub transactions_failed: AtomicU64,
     pub compute_units_consumed: AtomicU64,
+    pub compute_units_rebated: AtomicU64,
     pub fees_collected: AtomicU64,
+    // Landing classification counters.
+    pub transactions_landed: AtomicU64,
+    pub transactions_landed_fees_only: AtomicU64,
+    pub transactions_unlanded: AtomicU64,
+    // Error category counters.
+    pub err_insufficient_funds: AtomicU64,
+    pub err_invalid_account: AtomicU64,
+    pub err_blockhash_not_found: AtomicU64,
+    pub err_duplicate_signature: AtomicU64,
+    pub err_instruction_error: AtomicU64,
+    pub err_compute_budget: AtomicU64,
+    pub err_other: AtomicU64,
 }
 
 impl ExecStats {
@@ -90,7 +221,49 @@ impl ExecStats {
             transactions_succeeded: self.transactions_succeeded.load(Ordering::Relaxed),
             transactions_failed: self.transactions_failed.load(Ordering::Relaxed),
             compute_units_consumed: self.compute_units_consumed.load(Ordering::Relaxed),
+            compute_units_rebated: self.compute_units_rebated.load(Ordering::Relaxed),
             fees_collected: self.fees_collected.load(Ordering::Relaxed),
+            transactions_landed: self.transactions_landed.load(Ordering::Relaxed),
+            transactions_landed_fees_only: self
+                .transactions_landed_fees_only
+                .load(Ordering::Relaxed),
+            transactions_unlanded: self.transactions_unlanded.load(Ordering::Relaxed),
+            err_insufficient_funds: self.err_insufficient_funds.load(Ordering::Relaxed),
+            err_invalid_account: self.err_invalid_account.load(Ordering::Relaxed),
+            err_blockhash_not_found: self.err_blockhash_not_found.load(Ordering::Relaxed),
+            err_duplicate_signature: self.err_duplicate_signature.load(Ordering::Relaxed),
+            err_instruction_error: self.err_instruction_error.load(Ordering::Relaxed),
+            err_compute_budget: self.err_compute_budget.load(Ordering::Relaxed),
+            err_other: self.err_other.load(Ordering::Relaxed),
+        }
+    }
+
+    /// Increment the error category counter for a given error code.
+    pub fn record_error(&self, code: TransactionErrorCode) {
+        match code {
+            TransactionErrorCode::Success => {}
+            TransactionErrorCode::InsufficientFundsForFee => {
+                self.err_insufficient_funds.fetch_add(1, Ordering::Relaxed);
+            }
+            TransactionErrorCode::InvalidAccount | TransactionErrorCode::InvalidAccountForFee => {
+                self.err_invalid_account.fetch_add(1, Ordering::Relaxed);
+            }
+            TransactionErrorCode::BlockhashNotFound => {
+                self.err_blockhash_not_found.fetch_add(1, Ordering::Relaxed);
+            }
+            TransactionErrorCode::DuplicateSignature => {
+                self.err_duplicate_signature.fetch_add(1, Ordering::Relaxed);
+            }
+            TransactionErrorCode::InstructionError
+            | TransactionErrorCode::ProgramExecutionFailed => {
+                self.err_instruction_error.fetch_add(1, Ordering::Relaxed);
+            }
+            TransactionErrorCode::ComputeBudgetExceeded => {
+                self.err_compute_budget.fetch_add(1, Ordering::Relaxed);
+            }
+            _ => {
+                self.err_other.fetch_add(1, Ordering::Relaxed);
+            }
         }
     }
 }
@@ -103,7 +276,20 @@ pub struct ExecStatsSnapshot {
     pub transactions_succeeded: u64,
     pub transactions_failed: u64,
     pub compute_units_consumed: u64,
+    pub compute_units_rebated: u64,
     pub fees_collected: u64,
+    // Landing classification.
+    pub transactions_landed: u64,
+    pub transactions_landed_fees_only: u64,
+    pub transactions_unlanded: u64,
+    // Error categories.
+    pub err_insufficient_funds: u64,
+    pub err_invalid_account: u64,
+    pub err_blockhash_not_found: u64,
+    pub err_duplicate_signature: u64,
+    pub err_instruction_error: u64,
+    pub err_compute_budget: u64,
+    pub err_other: u64,
 }
 
 /// Trait for the actual transaction execution backend.
@@ -127,11 +313,16 @@ impl MockExecutionEngine {
 
 impl ExecutionEngine for MockExecutionEngine {
     fn execute(&self, tx: &PackedTransaction) -> TransactionExecResult {
+        let consumed = self.cu_per_tx.min(tx.compute_units);
+        let rebated = tx.compute_units.saturating_sub(consumed);
         TransactionExecResult {
             payload: tx.payload.clone(),
             success: true,
-            compute_units_consumed: self.cu_per_tx.min(tx.compute_units),
+            compute_units_consumed: consumed,
+            compute_units_rebated: rebated,
             fee_paid: tx.priority_fee,
+            landed: TransactionLanded::Landed,
+            error_code: TransactionErrorCode::Success,
             error: None,
             logs: Vec::new(),
             modified_accounts: Vec::new(),
@@ -166,7 +357,10 @@ impl BankExecutionEngine {
                     payload: tx.payload.clone(),
                     success: false,
                     compute_units_consumed: 0,
+                    compute_units_rebated: tx.compute_units,
                     fee_paid: 0,
+                    landed: TransactionLanded::Unlanded,
+                    error_code: TransactionErrorCode::DeserializationError,
                     error: Some(msg),
                     logs: Vec::new(),
                     modified_accounts: Vec::new(),
@@ -190,7 +384,10 @@ impl BankExecutionEngine {
                         payload: tx.payload.clone(),
                         success: false,
                         compute_units_consumed: 0,
+                        compute_units_rebated: tx.compute_units,
                         fee_paid: 0,
+                        landed: TransactionLanded::Unlanded,
+                        error_code: TransactionErrorCode::AddressLookupFailure,
                         error: Some(e.to_string()),
                         logs: Vec::new(),
                         modified_accounts: Vec::new(),
@@ -210,11 +407,37 @@ impl BankExecutionEngine {
             .map(|(pubkey, account)| (pubkey.to_bytes(), account.data.as_slice().to_vec()))
             .collect();
 
+        let consumed = result.compute_units_consumed;
+        let rebated = tx.compute_units.saturating_sub(consumed);
+
+        // Classify landing status and error code.
+        let (landed, error_code) = if result.success {
+            (TransactionLanded::Landed, TransactionErrorCode::Success)
+        } else if result.fee > 0 {
+            // Fee was collected but execution failed — fees-only landing.
+            let code = result
+                .error
+                .as_ref()
+                .map(|e| TransactionErrorCode::classify(&format!("{:?}", e)))
+                .unwrap_or(TransactionErrorCode::Other);
+            (TransactionLanded::LandedFeesOnly, code)
+        } else {
+            let code = result
+                .error
+                .as_ref()
+                .map(|e| TransactionErrorCode::classify(&format!("{:?}", e)))
+                .unwrap_or(TransactionErrorCode::Other);
+            (TransactionLanded::Unlanded, code)
+        };
+
         TransactionExecResult {
             payload: tx.payload.clone(),
             success: result.success,
-            compute_units_consumed: result.compute_units_consumed,
+            compute_units_consumed: consumed,
+            compute_units_rebated: rebated,
             fee_paid: result.fee,
+            landed,
+            error_code,
             error: result.error.as_ref().map(|e| format!("{:?}", e)),
             logs: result.logs,
             modified_accounts,
@@ -266,23 +489,63 @@ impl ExecStage {
     }
 
     /// Execute a microblock. Returns the execution result with
-    /// per-transaction outcomes and the entry hash.
+    /// per-transaction outcomes, entry hash, and rebate summary.
     pub fn execute_microblock(&mut self, microblock: &Microblock) -> MicroblockExecResult {
         let mut transaction_results = Vec::with_capacity(microblock.transactions.len());
         let mut total_cu = 0u64;
+        let mut total_rebated_cu = 0u64;
         let mut success_count = 0usize;
         let mut failure_count = 0usize;
+        let mut landed_count = 0usize;
+        let mut fees_only_count = 0usize;
         let mut total_fees = 0u64;
+        let mut rebates = Vec::new();
 
-        for tx in &microblock.transactions {
+        for (idx, tx) in microblock.transactions.iter().enumerate() {
             let result = self.engine.execute(tx);
 
             total_cu += result.compute_units_consumed;
-            if result.success {
-                success_count += 1;
-                total_fees += result.fee_paid;
-            } else {
-                failure_count += 1;
+            total_rebated_cu += result.compute_units_rebated;
+
+            match result.landed {
+                TransactionLanded::Landed => {
+                    success_count += 1;
+                    landed_count += 1;
+                    total_fees += result.fee_paid;
+                    self.stats
+                        .transactions_landed
+                        .fetch_add(1, Ordering::Relaxed);
+                }
+                TransactionLanded::LandedFeesOnly => {
+                    failure_count += 1;
+                    landed_count += 1;
+                    fees_only_count += 1;
+                    total_fees += result.fee_paid;
+                    self.stats
+                        .transactions_landed_fees_only
+                        .fetch_add(1, Ordering::Relaxed);
+                }
+                TransactionLanded::Unlanded => {
+                    failure_count += 1;
+                    self.stats
+                        .transactions_unlanded
+                        .fetch_add(1, Ordering::Relaxed);
+                }
+            }
+
+            // Track error category.
+            self.stats.record_error(result.error_code);
+
+            // Record rebate for pack scheduler feedback.
+            if result.compute_units_rebated > 0
+                || result.landed == TransactionLanded::LandedFeesOnly
+            {
+                rebates.push(TransactionRebate {
+                    tx_index: idx as u32,
+                    rebated_cus: result.compute_units_rebated,
+                    actual_cus: result.compute_units_consumed,
+                    fees_only: result.landed == TransactionLanded::LandedFeesOnly,
+                });
             }
 
             transaction_results.push(result);
@@ -307,6 +570,9 @@ impl ExecStage {
             .compute_units_consumed
             .fetch_add(total_cu, Ordering::Relaxed);
         self.stats
+            .compute_units_rebated
+            .fetch_add(total_rebated_cu, Ordering::Relaxed);
+        self.stats
             .fees_collected
             .fetch_add(total_fees, Ordering::Relaxed);
 
@@ -316,7 +582,14 @@ impl ExecStage {
             total_compute_units: total_cu,
             success_count,
             failure_count,
+            landed_count,
+            fees_only_count,
             entry_hash,
+            rebate_summary: RebateSummary {
+                rebates,
+                total_rebated_cus: total_rebated_cu,
+                total_actual_cus: total_cu,
+            },
         }
     }
 
@@ -420,7 +693,10 @@ mod tests {
                     payload: tx.payload.clone(),
                     success: false,
                     compute_units_consumed: 1_000,
+                    compute_units_rebated: tx.compute_units.saturating_sub(1_000),
                     fee_paid: 0,
+                    landed: TransactionLanded::Unlanded,
+                    error_code: TransactionErrorCode::InstructionError,
                     error: Some("deliberate failure".to_string()),
                     logs: vec!["error".to_string()],
                     modified_accounts: Vec::new(),
@@ -505,5 +781,162 @@ mod tests {
         assert_eq!(result.success_count, 0);
         assert_eq!(result.failure_count, 0);
         assert_eq!(result.total_compute_units, 0);
+    }
+
+    #[test]
+    fn mock_engine_produces_rebates() {
+        let engine = MockExecutionEngine::new(100_000);
+        let mut stage = ExecStage::new(Box::new(engine));
+
+        let mb = make_microblock(vec![make_tx(1, 200_000, 5_000)]);
+        let result = stage.execute_microblock(&mb);
+
+        // Mock consumes 100K of 200K budget → 100K rebated.
+        let tx = &result.transaction_results[0];
+        assert_eq!(tx.compute_units_consumed, 100_000);
+        assert_eq!(tx.compute_units_rebated, 100_000);
+        assert_eq!(tx.landed, TransactionLanded::Landed);
+        assert_eq!(tx.error_code, TransactionErrorCode::Success);
+
+        // Rebate summary should contain the rebate entry.
+        assert_eq!(result.rebate_summary.rebates.len(), 1);
+        assert_eq!(result.rebate_summary.total_rebated_cus, 100_000);
+        assert_eq!(result.rebate_summary.total_actual_cus, 100_000);
+    }
+
+    #[test]
+    fn landing_classification_tracks_correctly() {
+        struct MixedEngine;
+        impl ExecutionEngine for MixedEngine {
+            fn execute(&self, tx: &PackedTransaction) -> TransactionExecResult {
+                let id = tx.payload[0];
+                match id {
+                    1 => TransactionExecResult {
+                        payload: tx.payload.clone(),
+                        success: true,
+                        compute_units_consumed: 50_000,
+                        compute_units_rebated: 150_000,
+                        fee_paid: 1_000,
+                        landed: TransactionLanded::Landed,
+                        error_code: TransactionErrorCode::Success,
+                        error: None,
+                        logs: vec![],
+                        modified_accounts: vec![],
+                    },
+                    2 => TransactionExecResult {
+                        payload: tx.payload.clone(),
+                        success: false,
+                        compute_units_consumed: 10_000,
+                        compute_units_rebated: 190_000,
+                        fee_paid: 500,
+                        landed: TransactionLanded::LandedFeesOnly,
+                        error_code: TransactionErrorCode::InstructionError,
+                        error: Some("instruction error".into()),
+                        logs: vec![],
+                        modified_accounts: vec![],
+                    },
+                    _ => TransactionExecResult {
+                        payload: tx.payload.clone(),
+                        success: false,
+                        compute_units_consumed: 0,
+                        compute_units_rebated: 200_000,
+                        fee_paid: 0,
+                        landed: TransactionLanded::Unlanded,
+                        error_code: TransactionErrorCode::BlockhashNotFound,
+                        error: Some("blockhash not found".into()),
+                        logs: vec![],
+                        modified_accounts: vec![],
+                    },
+                }
+            }
+        }
+
+        let mut stage = ExecStage::new(Box::new(MixedEngine));
+        let txns = vec![
+            make_tx(1, 200_000, 1_000),
+            make_tx(2, 200_000, 500),
+            make_tx(3, 200_000, 0),
+        ];
+        let mb = make_microblock(txns);
+        let result = stage.execute_microblock(&mb);
+
+        assert_eq!(result.success_count, 1);
+        assert_eq!(result.failure_count, 2);
+        assert_eq!(result.landed_count, 2); // Landed + LandedFeesOnly.
+        assert_eq!(result.fees_only_count, 1);
+
+        let snap = stage.stats().snapshot();
+        assert_eq!(snap.transactions_landed, 1);
+        assert_eq!(snap.transactions_landed_fees_only, 1);
+        assert_eq!(snap.transactions_unlanded, 1);
+        assert_eq!(snap.err_instruction_error, 1);
+        assert_eq!(snap.err_blockhash_not_found, 1);
+    }
+
+    #[test]
+    fn error_code_classification() {
+        assert_eq!(
+            TransactionErrorCode::classify("insufficient funds for fee"),
+            TransactionErrorCode::InsufficientFundsForFee
+        );
+        assert_eq!(
+            TransactionErrorCode::classify("blockhash not found in recent slots"),
+            TransactionErrorCode::BlockhashNotFound
+        );
+        assert_eq!(
+            TransactionErrorCode::classify("compute budget exceeded"),
+            TransactionErrorCode::ComputeBudgetExceeded
+        );
+        assert_eq!(
+            TransactionErrorCode::classify("failed to deserialize"),
+            TransactionErrorCode::DeserializationError
+        );
+        assert_eq!(
+            TransactionErrorCode::classify("unknown error xyz"),
+            TransactionErrorCode::Other
+        );
+    }
+
+    #[test]
+    fn rebate_summary_tracks_fees_only() {
+        struct FeesOnlyEngine;
+        impl ExecutionEngine for FeesOnlyEngine {
+            fn execute(&self, tx: &PackedTransaction) -> TransactionExecResult {
+                TransactionExecResult {
+                    payload: tx.payload.clone(),
+                    success: false,
+                    compute_units_consumed: tx.compute_units, // All CUs consumed.
+                    compute_units_rebated: 0,
+                    fee_paid: tx.priority_fee,
+                    landed: TransactionLanded::LandedFeesOnly,
+                    error_code: TransactionErrorCode::InstructionError,
+                    error: Some("instruction failed".into()),
+                    logs: vec![],
+                    modified_accounts: vec![],
+                }
+            }
+        }
+
+        let mut stage = ExecStage::new(Box::new(FeesOnlyEngine));
+        let mb = make_microblock(vec![make_tx(1, 200_000, 5_000)]);
+        let result = stage.execute_microblock(&mb);
+
+        // Fees-only transactions get a rebate entry even with 0 rebated CUs.
+        assert_eq!(result.rebate_summary.rebates.len(), 1);
+        assert!(result.rebate_summary.rebates[0].fees_only);
+        assert_eq!(result.fees_only_count, 1);
+    }
+
+    #[test]
+    fn stats_track_rebated_cus() {
+        let engine = MockExecutionEngine::new(50_000);
+        let mut stage = ExecStage::new(Box::new(engine));
+
+        let mb = make_microblock(vec![make_tx(1, 200_000, 5_000)]);
+        stage.execute_microblock(&mb);
+
+        let snap = stage.stats().snapshot();
+        assert_eq!(snap.compute_units_consumed, 50_000);
+        assert_eq!(snap.compute_units_rebated, 150_000);
     }
 }

@@ -107,7 +107,8 @@ pub use types::{
 pub use block_producer::{EntryShredder, PohEntry, ShredderConfig, ShredderError};
 pub use exec_stage::{
     BankExecutionEngine, ExecConfig, ExecStage, ExecStats, ExecStatsSnapshot, ExecutionEngine,
-    MicroblockExecResult, MockExecutionEngine, TransactionExecResult,
+    MicroblockExecResult, MockExecutionEngine, RebateSummary, TransactionErrorCode,
+    TransactionExecResult, TransactionLanded, TransactionRebate,
 };
 pub use fec_cache::{CachedFecSet, FecCacheConfig, FecCacheStats, FecSetCache};
 pub use fec_resolver::{

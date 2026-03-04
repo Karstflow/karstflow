@@ -11,7 +11,10 @@
 /// The pipeline also manages the tick cadence: between microblock executions,
 /// the PoH service advances the hash chain to produce tick entries.
 use crate::block_producer::{Entry, MicroblockEntry, PohEntry, PohService, PohState};
-use crate::exec_stage::{ExecStage, ExecutionEngine, MicroblockExecResult, TransactionExecResult};
+use crate::exec_stage::{
+    ExecStage, ExecutionEngine, MicroblockExecResult, TransactionErrorCode, TransactionExecResult,
+    TransactionLanded,
+};
 use crate::pack_stage::{MicroblockRebate, PackPacer, PackScheduler, PackedTransaction};
 use paradencer_sbpf::TransactionProcessor;
 use paradencer_types::{Account, Pubkey};
@@ -130,11 +133,25 @@ impl SbpfExecutionEngine {
                     .map(|k| (k.to_bytes(), Vec::new()))
                     .collect();
 
+                let consumed = result.compute_units_consumed;
+                let rebated = tx.compute_units.saturating_sub(consumed);
+                let (landed, error_code) = if result.success {
+                    (TransactionLanded::Landed, TransactionErrorCode::Success)
+                } else {
+                    (
+                        TransactionLanded::LandedFeesOnly,
+                        TransactionErrorCode::InstructionError,
+                    )
+                };
+
                 TransactionExecResult {
                     payload: tx.payload.clone(),
                     success: result.success,
-                    compute_units_consumed: result.compute_units_consumed,
+                    compute_units_consumed: consumed,
+                    compute_units_rebated: rebated,
                     fee_paid: if result.success { tx.priority_fee } else { 0 },
+                    landed,
+                    error_code,
                     error: result.error,
                     logs: result.logs,
                     modified_accounts: modified,
@@ -146,7 +163,10 @@ impl SbpfExecutionEngine {
                     payload: tx.payload.clone(),
                     success: false,
                     compute_units_consumed: 0,
+                    compute_units_rebated: tx.compute_units,
                     fee_paid: 0,
+                    landed: TransactionLanded::Unlanded,
+                    error_code: TransactionErrorCode::DeserializationError,
                     error: Some("failed to parse transaction payload".to_string()),
                     logs: vec![],
                     modified_accounts: vec![],
@@ -559,13 +579,17 @@ mod tests {
 
     #[test]
     fn mixin_hash_is_deterministic() {
+        use crate::exec_stage::RebateSummary;
         let result = MicroblockExecResult {
             microblock_id: 0,
             transaction_results: vec![TransactionExecResult {
                 payload: vec![0xAA; 128],
                 success: true,
                 compute_units_consumed: 100,
+                compute_units_rebated: 0,
                 fee_paid: 50,
+                landed: TransactionLanded::Landed,
+                error_code: TransactionErrorCode::Success,
                 error: None,
                 logs: vec![],
                 modified_accounts: vec![],
@@ -573,7 +597,10 @@ mod tests {
             total_compute_units: 100,
             success_count: 1,
             failure_count: 0,
+            landed_count: 1,
+            fees_only_count: 0,
             entry_hash: [0u8; 32],
+            rebate_summary: RebateSummary::default(),
         };
 
         let hash1 = compute_mixin_hash(&result);
@@ -584,13 +611,17 @@ mod tests {
 
     #[test]
     fn mixin_hash_differs_by_signature() {
+        use crate::exec_stage::RebateSummary;
         let make_result = |payload: Vec<u8>| MicroblockExecResult {
             microblock_id: 0,
             transaction_results: vec![TransactionExecResult {
                 payload,
                 success: true,
                 compute_units_consumed: 100,
+                compute_units_rebated: 0,
                 fee_paid: 50,
+                landed: TransactionLanded::Landed,
+                error_code: TransactionErrorCode::Success,
                 error: None,
                 logs: vec![],
                 modified_accounts: vec![],
@@ -598,7 +629,10 @@ mod tests {
             total_compute_units: 100,
             success_count: 1,
             failure_count: 0,
+            landed_count: 1,
+            fees_only_count: 0,
             entry_hash: [0u8; 32],
+            rebate_summary: RebateSummary::default(),
         };
 
         let h1 = compute_mixin_hash(&make_result(vec![0xAA; 128]));
