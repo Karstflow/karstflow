@@ -670,3 +670,65 @@ fn no_event_without_publisher() {
     bs.set_root(42).unwrap();
     bs.mark_dead(99).unwrap_or(()); // Slot already dead is ok.
 }
+
+// --- Block height index ---
+
+#[test]
+fn set_and_get_block_height() {
+    let bs = Blockstore::in_memory();
+    bs.set_block_height(100, 50).unwrap();
+    bs.set_block_height(200, 99).unwrap();
+
+    assert_eq!(bs.get_block_height(100).unwrap(), Some(50));
+    assert_eq!(bs.get_block_height(200).unwrap(), Some(99));
+    assert_eq!(bs.get_block_height(300).unwrap(), None);
+}
+
+#[test]
+fn block_height_overwrite() {
+    let bs = Blockstore::in_memory();
+    bs.set_block_height(100, 50).unwrap();
+    bs.set_block_height(100, 51).unwrap();
+    assert_eq!(bs.get_block_height(100).unwrap(), Some(51));
+}
+
+#[test]
+fn slot_for_block_height_found() {
+    let bs = Blockstore::in_memory();
+    bs.set_block_height(10, 5).unwrap();
+    bs.set_block_height(20, 10).unwrap();
+    bs.set_block_height(30, 15).unwrap();
+
+    assert_eq!(bs.slot_for_block_height(10).unwrap(), Some(20));
+    assert_eq!(bs.slot_for_block_height(15).unwrap(), Some(30));
+}
+
+#[test]
+fn slot_for_block_height_not_found() {
+    let bs = Blockstore::in_memory();
+    bs.set_block_height(10, 5).unwrap();
+    assert_eq!(bs.slot_for_block_height(999).unwrap(), None);
+}
+
+#[test]
+fn block_height_zero_values() {
+    let bs = Blockstore::in_memory();
+    // Slot 0 with height 0 (genesis).
+    bs.set_block_height(0, 0).unwrap();
+    assert_eq!(bs.get_block_height(0).unwrap(), Some(0));
+    assert_eq!(bs.slot_for_block_height(0).unwrap(), Some(0));
+}
+
+#[test]
+fn highest_block_height_tracks_latest_root() {
+    let bs = Blockstore::in_memory();
+    assert_eq!(bs.highest_block_height().unwrap(), None);
+
+    bs.set_root(10).unwrap();
+    bs.set_block_height(10, 5).unwrap();
+    assert_eq!(bs.highest_block_height().unwrap(), Some(5));
+
+    bs.set_root(20).unwrap();
+    bs.set_block_height(20, 12).unwrap();
+    assert_eq!(bs.highest_block_height().unwrap(), Some(12));
+}

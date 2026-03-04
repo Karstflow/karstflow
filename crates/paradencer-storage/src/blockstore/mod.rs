@@ -286,6 +286,64 @@ impl Blockstore {
         FecTracker::new(&self.backend)
     }
 
+    /// Record the block height for a rooted slot.
+    ///
+    /// Block height is the number of blocks since genesis, excluding skipped
+    /// slots. Used by RPC methods like `getBlockHeight`.
+    pub fn set_block_height(&self, slot: u64, height: u64) -> Result<(), BlockstoreError> {
+        let key = slot.to_be_bytes();
+        let value = height.to_be_bytes();
+        self.backend.put(CF_BLOCK_HEIGHT, &key, &value)
+    }
+
+    /// Get the block height for a slot.
+    pub fn get_block_height(&self, slot: u64) -> Result<Option<u64>, BlockstoreError> {
+        let key = slot.to_be_bytes();
+        match self.backend.get(CF_BLOCK_HEIGHT, &key)? {
+            Some(data) if data.len() == 8 => {
+                let height = u64::from_be_bytes(
+                    data.as_slice()
+                        .try_into()
+                        .unwrap_or_else(|_| unreachable!()),
+                );
+                Ok(Some(height))
+            }
+            Some(_) => Err(BlockstoreError::DeserializationError(
+                "invalid block height encoding".to_string(),
+            )),
+            None => Ok(None),
+        }
+    }
+
+    /// Get the highest recorded block height.
+    ///
+    /// Looks up the block height for the latest root. Returns `None` if
+    /// no roots or no block height has been recorded.
+    pub fn highest_block_height(&self) -> Result<Option<u64>, BlockstoreError> {
+        if let Some(root) = self.latest_root() {
+            return self.get_block_height(root);
+        }
+        Ok(None)
+    }
+
+    /// Find the slot corresponding to a block height by scanning.
+    ///
+    /// Linear scan — callers should cache recent results. Returns `None`
+    /// if no slot has the given height.
+    pub fn slot_for_block_height(&self, height: u64) -> Result<Option<u64>, BlockstoreError> {
+        let entries = self.backend.prefix_scan(CF_BLOCK_HEIGHT, &[])?;
+        let height_bytes = height.to_be_bytes();
+        for (key, value) in entries {
+            if value == height_bytes && key.len() == 8 {
+                let slot = u64::from_be_bytes(
+                    key.as_slice().try_into().unwrap_or_else(|_| unreachable!()),
+                );
+                return Ok(Some(slot));
+            }
+        }
+        Ok(None)
+    }
+
     /// Get slot metadata.
     pub fn get_slot_meta(&self, slot: u64) -> Result<Option<SlotMeta>, BlockstoreError> {
         let key = slot.to_be_bytes();
