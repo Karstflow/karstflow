@@ -11,7 +11,7 @@ use paradencer_consensus::{
     bootstrap_from_snapshot, collect_validator_stakes, deserialize_transaction,
     resolve_address_lookups, Bank, BankForks, CommitmentLevel, CommitmentTracker, EpochSchedule,
     ForkChoice, LeaderSchedule, SavedTower, StakeTracker, Tower, TowerPersistenceError,
-    VoteProcessor, VoteProcessorConfig,
+    VoteProcessor, VoteProcessorConfig, VoteState,
 };
 use paradencer_core::{ExecutionMode, LinkKind, PinnedCorePolicy, StageKind};
 use paradencer_execution::{ExecutionBridge, SbpfBackend};
@@ -255,13 +255,26 @@ pub fn build_consensus_infrastructure(
             (initial_stake, StakeTracker::new(0))
         };
 
+    // Seed vote accounts into the processor if the bank has a vote cache.
+    let mut vote_processor_inner =
+        VoteProcessor::new(VoteProcessorConfig::default(), vote_processor_tracker);
+    if let Some(cache_lock) = genesis.vote_account_cache() {
+        let cache = cache_lock.read().unwrap();
+        for (vote_pubkey, entry) in cache.iter() {
+            let vote_state = VoteState::new(
+                entry.node_pubkey,
+                *vote_pubkey,
+                entry.node_pubkey,
+                entry.commission,
+            );
+            vote_processor_inner.register_vote_account(*vote_pubkey, vote_state);
+        }
+    }
+
     let bank_forks = Arc::new(RwLock::new(BankForks::new(genesis)));
     let fork_choice = Arc::new(Mutex::new(ForkChoice::new(effective_stake)));
     let execution_bridge = Arc::new(ExecutionBridge::new());
-    let vote_processor = Arc::new(Mutex::new(VoteProcessor::new(
-        VoteProcessorConfig::default(),
-        vote_processor_tracker,
-    )));
+    let vote_processor = Arc::new(Mutex::new(vote_processor_inner));
     let identity_pubkey = validator_pubkey.map(|pk| Pubkey::from(*pk));
     let tower = Arc::new(RwLock::new(try_load_tower(
         data_dir,
@@ -322,15 +335,38 @@ pub fn build_consensus_from_bank_forks(
             (1, StakeTracker::new(0))
         };
 
+    // Seed the VoteProcessor with vote accounts from the bank's cache.
+    // Without this, gossip votes cannot be attributed to vote accounts
+    // and fork choice never gets stake-weighted by gossip votes.
+    let mut vote_processor_inner =
+        VoteProcessor::new(VoteProcessorConfig::default(), vote_processor_tracker);
+    if let Some(cache_lock) = working_bank.vote_account_cache() {
+        let cache = cache_lock.read().unwrap();
+        let mut registered = 0u32;
+        for (vote_pubkey, entry) in cache.iter() {
+            let vote_state = VoteState::new(
+                entry.node_pubkey,
+                *vote_pubkey,      // authorized voter = vote account itself
+                entry.node_pubkey, // authorized withdrawer = node identity
+                entry.commission,
+            );
+            vote_processor_inner.register_vote_account(*vote_pubkey, vote_state);
+            registered += 1;
+        }
+        if registered > 0 {
+            info!(
+                vote_accounts = registered,
+                "seeded vote processor from bank vote account cache",
+            );
+        }
+    }
+
     drop(working_bank);
 
     let bank_forks = Arc::new(RwLock::new(bank_forks));
     let fork_choice = Arc::new(Mutex::new(ForkChoice::new(effective_stake)));
     let execution_bridge = Arc::new(ExecutionBridge::new());
-    let vote_processor = Arc::new(Mutex::new(VoteProcessor::new(
-        VoteProcessorConfig::default(),
-        vote_processor_tracker,
-    )));
+    let vote_processor = Arc::new(Mutex::new(vote_processor_inner));
     let tower = Arc::new(RwLock::new(try_load_tower(data_dir, validator_identity)));
     let commitment_tracker = Arc::new(Mutex::new(CommitmentTracker::default()));
 

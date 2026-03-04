@@ -235,6 +235,84 @@ fn bootstrap_from_genesis_file_multi_validator_builds_leader_schedule() {
 }
 
 #[test]
+fn build_consensus_from_bank_forks_seeds_vote_accounts() {
+    use crate::bootstrap::build_consensus_from_bank_forks;
+    use paradencer_consensus::{Bank, BankForks, EpochSchedule, LeaderSchedule, VoteAccountCache};
+    use paradencer_storage::{AccountDatabase, Pubkey};
+    use std::sync::RwLock;
+
+    let node_a = Pubkey::new_unique();
+    let node_b = Pubkey::new_unique();
+    let vote_a = Pubkey::new_unique();
+    let vote_b = Pubkey::new_unique();
+
+    let db = Arc::new(AccountDatabase::new());
+    let epoch_schedule = Arc::new(EpochSchedule::default());
+    let validator = Pubkey::new_unique();
+    let ls = Arc::new(LeaderSchedule::new(0, &[(validator, 1000)]).unwrap());
+    let mut bank = Bank::new_genesis(db, epoch_schedule, ls);
+
+    // Populate the vote account cache on the bank.
+    let mut cache = VoteAccountCache::new();
+    cache.update_from_vote_state(vote_a, node_a, 5, 0, 0);
+    cache.update_from_vote_state(vote_b, node_b, 10, 0, 0);
+    bank.set_vote_account_cache(Arc::new(RwLock::new(cache)));
+
+    let bank_forks = BankForks::new(bank);
+    let consensus = build_consensus_from_bank_forks(bank_forks, None, None, None, None);
+
+    let vp = consensus.vote_processor.lock().unwrap();
+
+    // Vote accounts should be registered.
+    assert!(
+        vp.get_vote_state(&vote_a).is_some(),
+        "vote_a not registered"
+    );
+    assert!(
+        vp.get_vote_state(&vote_b).is_some(),
+        "vote_b not registered"
+    );
+
+    // Reverse lookup: node identity → vote account should work.
+    assert_eq!(
+        vp.vote_account_for_node_identity(&node_a),
+        Some(vote_a),
+        "node_a → vote_a mapping missing",
+    );
+    assert_eq!(
+        vp.vote_account_for_node_identity(&node_b),
+        Some(vote_b),
+        "node_b → vote_b mapping missing",
+    );
+
+    // Commission should be preserved.
+    assert_eq!(vp.get_vote_state(&vote_a).unwrap().commission, 5);
+    assert_eq!(vp.get_vote_state(&vote_b).unwrap().commission, 10);
+}
+
+#[test]
+fn build_consensus_from_bank_forks_no_cache_still_works() {
+    use crate::bootstrap::build_consensus_from_bank_forks;
+    use paradencer_consensus::{Bank, BankForks, EpochSchedule, LeaderSchedule};
+    use paradencer_storage::{AccountDatabase, Pubkey};
+
+    let db = Arc::new(AccountDatabase::new());
+    let epoch_schedule = Arc::new(EpochSchedule::default());
+    let validator = Pubkey::new_unique();
+    let ls = Arc::new(LeaderSchedule::new(0, &[(validator, 1000)]).unwrap());
+    let bank = Bank::new_genesis(db, epoch_schedule, ls);
+    let bank_forks = BankForks::new(bank);
+
+    // No vote account cache set — should still build without panic.
+    let consensus = build_consensus_from_bank_forks(bank_forks, None, None, None, None);
+    let vp = consensus.vote_processor.lock().unwrap();
+    assert_eq!(
+        vp.vote_account_for_node_identity(&Pubkey::new_unique()),
+        None
+    );
+}
+
+#[test]
 fn build_replay_service_with_consensus_creates_service() {
     use crate::bootstrap::build_replay_service_with_consensus;
     use paradencer_mesh::{bounded_link, DualReceiver};
