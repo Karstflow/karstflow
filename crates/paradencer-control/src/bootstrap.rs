@@ -2574,7 +2574,14 @@ impl BankAccessProvider for ConsensusBankAccessProvider {
     }
 
     fn get_block_height(&self, commitment: paradencer_rpc::RpcCommitment) -> u64 {
-        // Block height currently equals slot number.
+        // Try blockstore block height index first (accurate, excludes skipped slots).
+        if let Some(bs) = self.blockstore.as_ref() {
+            let slot = self.get_slot(commitment);
+            if let Ok(Some(height)) = bs.get_block_height(slot) {
+                return height;
+            }
+        }
+        // Fallback: block height approximated as slot number.
         self.get_slot(commitment)
     }
 
@@ -2843,6 +2850,11 @@ impl BankAccessProvider for ConsensusBankAccessProvider {
 
     fn get_block_time(&self, slot: u64) -> Option<i64> {
         let bs = self.blockstore.as_ref()?;
+        // Prefer the dedicated block time index (completion timestamp).
+        if let Ok(Some(ts)) = bs.get_block_time(slot) {
+            return Some(ts);
+        }
+        // Fallback to first shred reception timestamp from slot meta.
         let meta = bs.get_slot_meta(slot).ok()??;
         let ts = meta.first_shred_timestamp;
         if ts > 0 {
