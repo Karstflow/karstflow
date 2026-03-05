@@ -16,7 +16,7 @@ pub struct RepairServiceConfig {
 impl Default for RepairServiceConfig {
     fn default() -> Self {
         Self {
-            requester_bind_addr: "0.0.0.0:0".parse().unwrap(),
+            requester_bind_addr: "0.0.0.0:0".parse().expect("valid socket addr literal"),
             server_config: RepairServerConfig::default(),
         }
     }

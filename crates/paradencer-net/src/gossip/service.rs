@@ -35,7 +35,7 @@ pub struct GossipConfig {
 impl Default for GossipConfig {
     fn default() -> Self {
         Self {
-            bind_addr: "0.0.0.0:8001".parse().unwrap(),
+            bind_addr: "0.0.0.0:8001".parse().expect("valid socket addr literal"),
             push_fanout: gossip_const::PUSH_FANOUT,
             pull_fanout: gossip_const::PULL_FANOUT,
             push_interval: Duration::from_millis(gossip_const::PUSH_INTERVAL_MS),
@@ -291,7 +291,11 @@ impl GossipService {
         let push_stats = self.stats.clone();
         let push_socket = Arc::clone(&self.socket);
         let push_config = self.config.clone();
-        let mut push_shutdown_rx = self.shutdown_tx.as_ref().unwrap().subscribe();
+        let mut push_shutdown_rx = self
+            .shutdown_tx
+            .as_ref()
+            .expect("gossip not yet started")
+            .subscribe();
         tokio::spawn(async move {
             Self::push_loop(
                 push_socket,
@@ -308,7 +312,11 @@ impl GossipService {
         let pull_stats = self.stats.clone();
         let pull_socket = Arc::clone(&self.socket);
         let pull_config = self.config.clone();
-        let mut pull_shutdown_rx = self.shutdown_tx.as_ref().unwrap().subscribe();
+        let mut pull_shutdown_rx = self
+            .shutdown_tx
+            .as_ref()
+            .expect("gossip not yet started")
+            .subscribe();
         tokio::spawn(async move {
             Self::pull_loop(
                 pull_socket,
@@ -324,7 +332,11 @@ impl GossipService {
         let prune_cluster_info = Arc::clone(&self.cluster_info);
         let prune_stats = self.stats.clone();
         let prune_config = self.config.clone();
-        let mut prune_shutdown_rx = self.shutdown_tx.as_ref().unwrap().subscribe();
+        let mut prune_shutdown_rx = self
+            .shutdown_tx
+            .as_ref()
+            .expect("gossip not yet started")
+            .subscribe();
         tokio::spawn(async move {
             Self::prune_loop(
                 prune_cluster_info,

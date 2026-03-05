@@ -27,7 +27,7 @@ pub struct RepairServerConfig {
 impl Default for RepairServerConfig {
     fn default() -> Self {
         Self {
-            bind_addr: "0.0.0.0:8002".parse().unwrap(),
+            bind_addr: "0.0.0.0:8002".parse().expect("valid socket addr literal"),
             rate_limit_per_peer: DEFAULT_RATE_LIMIT_PER_PEER,
             rate_limit_window: Duration::from_millis(RATE_LIMIT_WINDOW_MS),
             max_response_size: 10 * 1024 * 1024, // 10 MB

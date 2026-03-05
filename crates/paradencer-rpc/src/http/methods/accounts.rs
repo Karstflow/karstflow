@@ -572,7 +572,7 @@ fn build_signature_statuses_response(
         // Only proceed with real lookup if all signatures decoded successfully.
         let all_decoded = decoded.iter().all(|d| d.is_some());
         if all_decoded {
-            let sig_array: Vec<[u8; 64]> = decoded.into_iter().map(|d| d.unwrap()).collect();
+            let sig_array: Vec<[u8; 64]> = decoded.into_iter().flatten().collect();
             let results = bank.get_signature_statuses(&sig_array);
 
             if results.iter().any(|r| r.is_some()) {

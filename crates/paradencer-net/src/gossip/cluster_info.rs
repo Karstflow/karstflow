@@ -904,7 +904,7 @@ fn current_timestamp_ms() -> u64 {
     use std::time::SystemTime;
     SystemTime::now()
         .duration_since(SystemTime::UNIX_EPOCH)
-        .unwrap()
+        .expect("system clock before UNIX epoch")
         .as_millis() as u64
 }
 
@@ -912,7 +912,7 @@ fn current_timestamp_nanos() -> i64 {
     use std::time::SystemTime;
     SystemTime::now()
         .duration_since(SystemTime::UNIX_EPOCH)
-        .unwrap()
+        .expect("system clock before UNIX epoch")
         .as_nanos() as i64
 }
 
