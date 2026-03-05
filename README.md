@@ -4,7 +4,7 @@
 
 Karstflow is a ground-up Solana validator built for maximum throughput and minimal latency. It features a custom network stack, pre-allocated data structures, zero-copy I/O patterns, and a modular tile-based architecture designed for predictable performance at scale.
 
-**255K+ lines of Rust | 5,300+ tests | 20 crates**
+**255K+ lines of Rust | 5,350+ tests | 20 crates**
 
 ## Design Principles
 
@@ -416,20 +416,20 @@ Current maturity of each subsystem (as of March 2026):
 
 | Module | Maturity | Notes |
 |--------|----------|-------|
-| Consensus | 94% | Tower BFT, GHOST fork choice, bank lifecycle, epoch processing, rewards, leader schedule, vote processing, optimistic confirmation, commitment tracking, equivocation detection |
-| sBPF VM | 88% | All 126 opcodes, 14 builtins, 40+ syscalls, ELF loader, program cache, CPI. Remaining: JIT not planned, segment metering edge cases |
-| Network | 83% | Custom QUIC, TLS 1.3, gossip (14 CRDS types + vote integration), turbine with real stake weights, repair protocol, DNS resolution. Remaining: gRPC transport |
+| Consensus | 95% | Tower BFT, GHOST fork choice, bank lifecycle, epoch processing, rewards, leader schedule, vote processing, optimistic confirmation, commitment tracking, equivocation detection, tower persistence with atomic writes |
+| sBPF VM | 90% | All 126 opcodes, 14 builtins, 40+ syscalls, ELF loader, program cache, CPI depth enforcement (max 4), Poseidon syscall. Remaining: JIT not planned, segment metering edge cases |
+| Network | 88% | Custom QUIC, TLS 1.3, gossip (14 CRDS types + vote integration), turbine with real stake weights + XDP transport wiring, repair protocol, DNS resolution, AF_XDP kernel-bypass (4K LOC). Remaining: gRPC transport |
 | Pipeline Stages | 93% | Full leader pipeline (verify → resolv → pack → exec → PoH → shred → broadcast), shred network with FEC resolver, replay with orphan buffering, dual-mode IPC, Prometheus metrics for all stages. Real execution engine enforced (no mock fallback) |
 | Storage | 93% | Disk-primary MVCC accounts, file-backed store, full/incremental snapshots with gossip hash publishing, blockstore with transaction/block-height/time indexes, LZ4 compression, lattice hash, auto-scheduled snapshot creation |
 | IPC / Mesh | 95% | Dual-mode SPSC (channels + shared memory), 9 FragmentCodec implementations, tile links, bounded channels with backpressure stats |
 | RPC | 95% | 52 JSON-RPC methods with real bank data via BankAccessProvider, WebSocket subscriptions, getHealth wired to real health check |
-| Execution | 92% | SVM adapter with real BankExecutionEngine enforced in production, batch orchestration, retry policies |
+| Execution | 94% | SVM adapter with real BankExecutionEngine enforced in production, batch orchestration, retry policies, compute budget enforcement, no production panics |
 | Crypto | 88% | Ed25519 batch verify, Blake3/SHA-256/Keccak, secp256k1/r1, BN254 pairing, Reed-Solomon FEC, LtHash, ChaCha RNG, ZK ElGamal proofs |
-| Config | 91% | TOML with env override, live-mode preflight, schema migration, cluster profiles (devnet/testnet/mainnet/local) |
-| Control | 93% | Bootstrap, materialization, consensus wiring, shred store service, snapshot scheduling, configure/monitor CLI commands |
+| Config | 95% | TOML with env override, live-mode preflight, schema migration, cluster profiles, UDP/XDP transport backend config, feature gate registry with override modes |
+| Control | 94% | Bootstrap with transport branching (UDP/XDP), materialization, consensus wiring, shred store service, snapshot scheduling, configure/monitor CLI commands |
 | Runtime | 95% | Tokio/pinned/tile modes, CnC supervisor, heartbeat, stuck detection, graceful shutdown |
 
-### Overall Readiness: 92%
+### Overall Readiness: 93%
 
 Weighted readiness score across all subsystems (consensus 15%, networking 12%, stages 15%, storage 10%, execution 10%, native programs 10%, crypto 10%, IPC 5%, RPC 5%, config 5%, runtime 3%).
 
