@@ -1,0 +1,197 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 400 400" fill="none">
+  <defs>
+    <radialGradient id="bgAmbient" cx="50%" cy="46%" r="52%">
+      <stop offset="0%"   stop-color="#0d1e3a"/>
+      <stop offset="100%" stop-color="#060a16"/>
+    </radialGradient>
+    <linearGradient id="sGrad" x1="0" y1="44" x2="0" y2="278" gradientUnits="userSpaceOnUse">
+      <stop offset="0%"   stop-color="#38e6f5"/>
+      <stop offset="55%"  stop-color="#6cb6f7"/>
+      <stop offset="100%" stop-color="#b89eff"/>
+    </linearGradient>
+    <linearGradient id="rock1" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%"   stop-color="#224060"/>
+      <stop offset="35%"  stop-color="#162e4a"/>
+      <stop offset="100%" stop-color="#0c1c32"/>
+    </linearGradient>
+    <linearGradient id="rock2" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%"   stop-color="#1e3a58"/>
+      <stop offset="35%"  stop-color="#132848"/>
+      <stop offset="100%" stop-color="#0a1a30"/>
+    </linearGradient>
+    <linearGradient id="rock3" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%"   stop-color="#253f5e"/>
+      <stop offset="35%"  stop-color="#182e4c"/>
+      <stop offset="100%" stop-color="#0e1e36"/>
+    </linearGradient>
+    <linearGradient id="sheen" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%"   stop-color="#38e6f5" stop-opacity="0.22"/>
+      <stop offset="38%"  stop-color="#38e6f5" stop-opacity="0.05"/>
+      <stop offset="100%" stop-color="#38e6f5" stop-opacity="0"/>
+    </linearGradient>
+    <filter id="richGlow" x="-80%" y="-160%" width="260%" height="420%">
+      <feGaussianBlur stdDeviation="7"   in="SourceGraphic" result="g7"/>
+      <feGaussianBlur stdDeviation="2.5" in="SourceGraphic" result="g2"/>
+      <feBlend in="g7" in2="g2" mode="screen" result="blended"/>
+      <feMerge><feMergeNode in="blended"/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+    <filter id="coreGlow" x="-40%" y="-120%" width="180%" height="340%">
+      <feGaussianBlur stdDeviation="1.2" result="blur"/>
+      <feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+    <filter id="dotHalo" x="-200%" y="-200%" width="500%" height="500%">
+      <feGaussianBlur stdDeviation="8" result="halo"/>
+      <feMerge><feMergeNode in="halo"/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+    <filter id="cloudShadow" x="-8%" y="-25%" width="116%" height="160%">
+      <feDropShadow dx="0" dy="4" stdDeviation="4.5" flood-color="#000" flood-opacity="0.38"/>
+    </filter>
+    <filter id="cloudEdge" x="-6%" y="-30%" width="112%" height="165%">
+      <feGaussianBlur stdDeviation="1.6" result="blur"/>
+      <feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+    <filter id="bitFx" x="-120%" y="-120%" width="340%" height="340%">
+      <feGaussianBlur stdDeviation="1.8" result="blur"/>
+      <feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+  </defs>
+
+  <!-- Background (not shifted) -->
+  <rect width="400" height="400" rx="80" fill="url(#bgAmbient)"/>
+  <rect x="1.5" y="1.5" width="397" height="397" rx="78.5"
+        fill="none" stroke="#1e3a60" stroke-width="1" opacity="0.55"/>
+
+  <!-- Icon content shifted +39px to center vertically in square
+       Icon spans y=44→278 (234px), center at y=161 → shift to 200 -->
+  <g transform="translate(0, 39)">
+
+    <ellipse cx="200" cy="162" rx="110" ry="90" fill="#0d2a50" opacity="0.32"/>
+
+    <!-- LAYER 1 -->
+    <path d="M 63 112 L 240 112 C 241 106 241 99 239 93 C 235 87 226 83 215 83 C 204 83 193 78 182 81 C 171 84 161 77 150 80 C 139 83 127 80 117 83 C 107 86 94 82 83 87 C 73 90 63 96 63 105 Z"
+          fill="url(#rock1)" filter="url(#cloudShadow)"/>
+    <path d="M 63 112 L 240 112 C 241 106 241 99 239 93 C 235 87 226 83 215 83 C 204 83 193 78 182 81 C 171 84 161 77 150 80 C 139 83 127 80 117 83 C 107 86 94 82 83 87 C 73 90 63 96 63 105 Z"
+          fill="url(#sheen)" filter="url(#cloudEdge)"/>
+    <text x="143" y="96" text-anchor="middle" font-family="'SF Mono','Fira Code','Courier New',monospace" font-size="6" letter-spacing="0.8" fill="#7ab8d8" opacity="0.72">TRANSACTIONS</text>
+    <text x="86"  y="105" text-anchor="start"  font-family="'SF Mono','Fira Code','Courier New',monospace" font-size="5" letter-spacing="0.4" fill="#5e9ab8" opacity="0.46" filter="url(#bitFx)">Slot</text>
+    <text x="178" y="108" text-anchor="middle" font-family="'SF Mono','Fira Code','Courier New',monospace" font-size="5" letter-spacing="0.3" fill="#5e9ab8" opacity="0.42" filter="url(#bitFx)">Epoch</text>
+    <text x="215" y="91"  text-anchor="middle" font-family="'SF Mono','Fira Code','Courier New',monospace" font-size="5.5" letter-spacing="0.5" fill="#5eadc0" opacity="0.50" filter="url(#bitFx)">PoH</text>
+
+    <path d="M 294 112 C 294 106 294 100 296 95 C 299 89 308 85 317 85 C 326 85 334 88 337 93 L 337 112 Z"
+          fill="url(#rock1)" filter="url(#cloudShadow)"/>
+    <path d="M 294 112 C 294 106 294 100 296 95 C 299 89 308 85 317 85 C 326 85 334 88 337 93 L 337 112 Z"
+          fill="url(#sheen)" filter="url(#cloudEdge)"/>
+    <text x="316" y="100" text-anchor="middle" font-family="'SF Mono','Fira Code','Courier New',monospace" font-size="5.5" letter-spacing="0.5" fill="#7ab8d8" opacity="0.68">BLOCKS</text>
+    <text x="309" y="108" text-anchor="middle" font-family="'SF Mono','Fira Code','Courier New',monospace" font-size="5" letter-spacing="0.4" fill="#5e9ab8" opacity="0.44" filter="url(#bitFx)">Vote</text>
+
+    <!-- LAYER 2 -->
+    <path d="M 63 182 L 106 182 C 107 176 108 170 106 163 C 103 157 96 152 88 152 C 80 152 72 155 67 161 C 64 165 63 172 63 179 Z"
+          fill="url(#rock2)" filter="url(#cloudShadow)"/>
+    <path d="M 63 182 L 106 182 C 107 176 108 170 106 163 C 103 157 96 152 88 152 C 80 152 72 155 67 161 C 64 165 63 172 63 179 Z"
+          fill="url(#sheen)" filter="url(#cloudEdge)"/>
+    <text x="85" y="167" text-anchor="middle" font-family="'SF Mono','Fira Code','Courier New',monospace" font-size="5.5" letter-spacing="0.6" fill="#8abce0" opacity="0.70">TOOLS</text>
+    <text x="84" y="178" text-anchor="middle" font-family="'SF Mono','Fira Code','Courier New',monospace" font-size="5" letter-spacing="0.3" fill="#6ea0bc" opacity="0.46" filter="url(#bitFx)">Stake</text>
+
+    <path d="M 160 182 L 337 182 L 337 162 C 334 155 327 151 318 151 C 308 151 297 146 286 149 C 275 152 264 144 253 148 C 242 152 230 146 220 150 C 210 154 198 149 188 153 C 178 157 172 153 167 158 C 162 162 160 169 160 176 Z"
+          fill="url(#rock2)" filter="url(#cloudShadow)"/>
+    <path d="M 160 182 L 337 182 L 337 162 C 334 155 327 151 318 151 C 308 151 297 146 286 149 C 275 152 264 144 253 148 C 242 152 230 146 220 150 C 210 154 198 149 188 153 C 178 157 172 153 167 158 C 162 162 160 169 160 176 Z"
+          fill="url(#sheen)" filter="url(#cloudEdge)"/>
+    <text x="264" y="162" text-anchor="middle" font-family="'SF Mono','Fira Code','Courier New',monospace" font-size="6" letter-spacing="0.8" fill="#8abce0" opacity="0.73">TRUST</text>
+    <text x="192" y="173" text-anchor="middle" font-family="'SF Mono','Fira Code','Courier New',monospace" font-size="5" letter-spacing="0.4" fill="#6e9ec0" opacity="0.46" filter="url(#bitFx)">Validator</text>
+    <text x="240" y="175" text-anchor="middle" font-family="'SF Mono','Fira Code','Courier New',monospace" font-size="5" letter-spacing="0.3" fill="#6e9ec0" opacity="0.42" filter="url(#bitFx)">Turbine</text>
+    <text x="308" y="175" text-anchor="middle" font-family="'SF Mono','Fira Code','Courier New',monospace" font-size="5" letter-spacing="0.4" fill="#6e9ec0" opacity="0.46" filter="url(#bitFx)">Leader</text>
+
+    <!-- LAYER 3 -->
+    <path d="M 63 252 L 214 252 C 215 246 216 240 214 233 C 211 227 203 222 192 223 C 181 224 170 218 159 221 C 148 224 136 218 125 222 C 114 226 102 222 91 226 C 80 229 70 226 66 232 C 63 235 63 243 63 250 Z"
+          fill="url(#rock3)" filter="url(#cloudShadow)"/>
+    <path d="M 63 252 L 214 252 C 215 246 216 240 214 233 C 211 227 203 222 192 223 C 181 224 170 218 159 221 C 148 224 136 218 125 222 C 114 226 102 222 91 226 C 80 229 70 226 66 232 C 63 235 63 243 63 250 Z"
+          fill="url(#sheen)" filter="url(#cloudEdge)"/>
+    <text x="135" y="237" text-anchor="middle" font-family="'SF Mono','Fira Code','Courier New',monospace" font-size="6" letter-spacing="0.8" fill="#9ab6e8" opacity="0.72">PLUGINS</text>
+    <text x="95"  y="248" text-anchor="middle" font-family="'SF Mono','Fira Code','Courier New',monospace" font-size="5" letter-spacing="0.3" fill="#7aa4d0" opacity="0.46" filter="url(#bitFx)">Gulf Stream</text>
+    <text x="172" y="248" text-anchor="middle" font-family="'SF Mono','Fira Code','Courier New',monospace" font-size="5" letter-spacing="0.4" fill="#7aa4d0" opacity="0.42" filter="url(#bitFx)">Sealevel</text>
+
+    <path d="M 268 252 L 337 252 L 337 228 C 334 222 327 219 319 220 C 311 221 302 218 293 222 C 284 225 276 227 271 229 C 268 231 268 239 268 248 Z"
+          fill="url(#rock3)" filter="url(#cloudShadow)"/>
+    <path d="M 268 252 L 337 252 L 337 228 C 334 222 327 219 319 220 C 311 221 302 218 293 222 C 284 225 276 227 271 229 C 268 231 268 239 268 248 Z"
+          fill="url(#sheen)" filter="url(#cloudEdge)"/>
+    <text x="302" y="240" text-anchor="middle" font-family="'SF Mono','Fira Code','Courier New',monospace" font-size="5.5" letter-spacing="0.4" fill="#9ab6e8" opacity="0.68">INTERFACES</text>
+    <text x="285" y="249" text-anchor="middle" font-family="'SF Mono','Fira Code','Courier New',monospace" font-size="5" letter-spacing="0.4" fill="#7aa4d0" opacity="0.44" filter="url(#bitFx)">PoH</text>
+
+    <!-- STREAMS -->
+    <path d="M 251 44 C 251 70 251 78 251 95 C 251 132 116 143 116 167 C 116 202 228 213 228 236 C 228 262 224 268 222 278"
+          stroke="url(#sGrad)" stroke-width="10" stroke-linecap="round" fill="none" opacity="0.18" filter="url(#richGlow)"/>
+    <path d="M 251 44 C 251 70 251 78 251 95 C 251 132 116 143 116 167 C 116 202 228 213 228 236 C 228 262 224 268 222 278"
+          stroke="url(#sGrad)" stroke-width="2" stroke-linecap="round" fill="none" opacity="0.55"/>
+    <path d="M 279 44 C 279 70 279 78 279 95 C 279 132 144 143 144 167 C 144 202 256 213 256 236 C 256 262 252 268 250 278"
+          stroke="url(#sGrad)" stroke-width="10" stroke-linecap="round" fill="none" opacity="0.18" filter="url(#richGlow)"/>
+    <path d="M 279 44 C 279 70 279 78 279 95 C 279 132 144 143 144 167 C 144 202 256 213 256 236 C 256 262 252 268 250 278"
+          stroke="url(#sGrad)" stroke-width="2" stroke-linecap="round" fill="none" opacity="0.55"/>
+    <path d="M 265 44 C 265 70 265 78 265 95 C 265 132 130 143 130 167 C 130 202 242 213 242 236 C 242 262 238 268 236 278"
+          stroke="url(#sGrad)" stroke-width="14" stroke-linecap="round" fill="none" opacity="0.22" filter="url(#richGlow)"/>
+    <path d="M 265 44 C 265 70 265 78 265 95 C 265 132 130 143 130 167 C 130 202 242 213 242 236 C 242 262 238 268 236 278"
+          stroke="url(#sGrad)" stroke-width="3.2" stroke-linecap="round" fill="none" opacity="0.85" filter="url(#coreGlow)"/>
+    <path d="M 265 44 C 265 70 265 78 265 95 C 265 132 130 143 130 167 C 130 202 242 213 242 236 C 242 262 238 268 236 278"
+          stroke="white" stroke-width="0.9" stroke-linecap="round" fill="none" opacity="0.35"/>
+
+    <!-- HALOS -->
+    <circle cx="265" cy="44" r="18" fill="#38e6f5" opacity="0.05" filter="url(#dotHalo)"/>
+    <circle cx="265" cy="44" r="10" fill="#38e6f5" opacity="0.10"/>
+    <circle cx="265" cy="44" r="5"  fill="#38e6f5" opacity="0.80"/>
+    <circle cx="236" cy="278" r="18" fill="#b89eff" opacity="0.05" filter="url(#dotHalo)"/>
+    <circle cx="236" cy="278" r="10" fill="#b89eff" opacity="0.10"/>
+    <circle cx="236" cy="278" r="5"  fill="#b89eff" opacity="0.80"/>
+
+    <!-- TRANSACTION DOTS -->
+    <circle cx="265" cy="70"  r="2.5" fill="#38e6f5" opacity="0.80" filter="url(#coreGlow)"/>
+    <circle cx="250" cy="110" r="2.2" fill="#4ddaf2" opacity="0.70" filter="url(#coreGlow)"/>
+    <circle cx="195" cy="140" r="2.5" fill="#6ecff3" opacity="0.75" filter="url(#coreGlow)"/>
+    <circle cx="130" cy="167" r="2.2" fill="#8bbef8" opacity="0.70" filter="url(#coreGlow)"/>
+    <circle cx="158" cy="194" r="2.5" fill="#a0adfb" opacity="0.75" filter="url(#coreGlow)"/>
+    <circle cx="208" cy="216" r="2.2" fill="#b4a2fb" opacity="0.70" filter="url(#coreGlow)"/>
+    <circle cx="242" cy="236" r="2.5" fill="#b89eff" opacity="0.80" filter="url(#coreGlow)"/>
+    <circle cx="279" cy="82"  r="1.8" fill="#38e6f5" opacity="0.45" filter="url(#coreGlow)"/>
+    <circle cx="222" cy="134" r="1.8" fill="#6ecff3" opacity="0.40" filter="url(#coreGlow)"/>
+    <circle cx="172" cy="192" r="1.8" fill="#a9aafb" opacity="0.40" filter="url(#coreGlow)"/>
+    <circle cx="256" cy="236" r="1.8" fill="#b89eff" opacity="0.45" filter="url(#coreGlow)"/>
+    <circle cx="251" cy="60"  r="1.8" fill="#38e6f5" opacity="0.45" filter="url(#coreGlow)"/>
+    <circle cx="168" cy="146" r="1.8" fill="#5dd6f0" opacity="0.40" filter="url(#coreGlow)"/>
+    <circle cx="144" cy="200" r="1.8" fill="#9ab4f8" opacity="0.40" filter="url(#coreGlow)"/>
+    <circle cx="226" cy="240" r="1.8" fill="#b89eff" opacity="0.45" filter="url(#coreGlow)"/>
+
+    <!-- LOCKS -->
+    <g transform="translate(294, 74) scale(0.58)" opacity="0.52" filter="url(#bitFx)">
+      <path d="M -4 0 L -4 -5 A 4 4 0 0 1 4 -5 L 4 0" stroke="#38e6f5" stroke-width="1.6" fill="none" stroke-linecap="round"/>
+      <rect x="-6" y="0" width="12" height="9" rx="2" fill="#38e6f5"/>
+      <circle cx="0" cy="4.5" r="1.6" fill="#0c1628"/>
+    </g>
+    <g transform="translate(84, 164) scale(0.58)" opacity="0.46" filter="url(#bitFx)">
+      <path d="M -4 0 L -4 -5 A 4 4 0 0 1 4 -5 L 4 0" stroke="#8bbef8" stroke-width="1.6" fill="none" stroke-linecap="round"/>
+      <rect x="-6" y="0" width="12" height="9" rx="2" fill="#8bbef8"/>
+      <circle cx="0" cy="4.5" r="1.6" fill="#0c1628"/>
+    </g>
+    <g transform="translate(275, 244) scale(0.58)" opacity="0.50" filter="url(#bitFx)">
+      <path d="M -4 0 L -4 -5 A 4 4 0 0 1 4 -5 L 4 0" stroke="#b89eff" stroke-width="1.6" fill="none" stroke-linecap="round"/>
+      <rect x="-6" y="0" width="12" height="9" rx="2" fill="#b89eff"/>
+      <circle cx="0" cy="4.5" r="1.6" fill="#0c1628"/>
+    </g>
+
+    <!-- CRYPTO LABELS + BINARY -->
+    <text x="237" y="64"  font-family="'SF Mono','Fira Code','Courier New',monospace" font-size="8"   fill="#38e6f5" opacity="0.44" filter="url(#bitFx)">1</text>
+    <text x="284" y="60"  font-family="'SF Mono','Fira Code','Courier New',monospace" font-size="7"   fill="#38e6f5" opacity="0.28" filter="url(#bitFx)">0</text>
+    <text x="220" y="76"  font-family="'SF Mono','Fira Code','Courier New',monospace" font-size="6.5" fill="#38e6f5" opacity="0.34" filter="url(#bitFx)">Blake3</text>
+    <text x="272" y="112" font-family="'SF Mono','Fira Code','Courier New',monospace" font-size="6.5" fill="#38e6f5" opacity="0.36" filter="url(#bitFx)">SHA256</text>
+    <text x="253" y="127" font-family="'SF Mono','Fira Code','Courier New',monospace" font-size="7.5" fill="#38e6f5" opacity="0.42" filter="url(#bitFx)">1</text>
+    <text x="212" y="137" font-family="'SF Mono','Fira Code','Courier New',monospace" font-size="6"   fill="#5dd6f0" opacity="0.38" filter="url(#bitFx)">Ed25519</text>
+    <text x="178" y="148" font-family="'SF Mono','Fira Code','Courier New',monospace" font-size="7"   fill="#5dd6f0" opacity="0.32" filter="url(#bitFx)">0</text>
+    <text x="138" y="154" font-family="'SF Mono','Fira Code','Courier New',monospace" font-size="6.5" fill="#6ecff3" opacity="0.40" filter="url(#bitFx)">Keccak</text>
+    <text x="100" y="183" font-family="'SF Mono','Fira Code','Courier New',monospace" font-size="7.5" fill="#8bbef8" opacity="0.36" filter="url(#bitFx)">1</text>
+    <text x="115" y="197" font-family="'SF Mono','Fira Code','Courier New',monospace" font-size="6.5" fill="#9ab4f8" opacity="0.38" filter="url(#bitFx)">Blake3</text>
+    <text x="162" y="207" font-family="'SF Mono','Fira Code','Courier New',monospace" font-size="7"   fill="#a9aafb" opacity="0.38" filter="url(#bitFx)">0</text>
+    <text x="196" y="216" font-family="'SF Mono','Fira Code','Courier New',monospace" font-size="6"   fill="#b4a2fb" opacity="0.36" filter="url(#bitFx)">secp256k</text>
+    <text x="247" y="221" font-family="'SF Mono','Fira Code','Courier New',monospace" font-size="6"   fill="#b89eff" opacity="0.34" filter="url(#bitFx)">Poseidon</text>
+    <text x="216" y="254" font-family="'SF Mono','Fira Code','Courier New',monospace" font-size="7.5" fill="#b89eff" opacity="0.40" filter="url(#bitFx)">1</text>
+    <text x="243" y="260" font-family="'SF Mono','Fira Code','Courier New',monospace" font-size="6.5" fill="#b89eff" opacity="0.32" filter="url(#bitFx)">AES</text>
+    <text x="224" y="271" font-family="'SF Mono','Fira Code','Courier New',monospace" font-size="6"   fill="#b89eff" opacity="0.30" filter="url(#bitFx)">SHA256</text>
+
+  </g><!-- end translate group -->
+</svg>
