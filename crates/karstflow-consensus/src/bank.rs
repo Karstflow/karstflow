@@ -638,14 +638,16 @@ impl Bank {
         };
 
         // Snapshot epoch rewards and raw sysvar data for the execution layer.
-        let (epoch_rewards_active, sysvar_data) = if let Some(ref sysvars) = self.sysvars {
-            (
-                sysvars.is_epoch_rewards_active(),
-                sysvars.serialize_all_sysvars(),
-            )
-        } else {
-            (false, std::collections::HashMap::new())
-        };
+        let (epoch_rewards_active, epoch_rewards_total_rewards, sysvar_data) =
+            if let Some(ref sysvars) = self.sysvars {
+                (
+                    sysvars.is_epoch_rewards_active(),
+                    sysvars.epoch_rewards_total(),
+                    sysvars.serialize_all_sysvars(),
+                )
+            } else {
+                (false, 0, std::collections::HashMap::new())
+            };
 
         // Snapshot epoch stake per vote account for sol_get_epoch_stake syscall.
         let epoch_stake = if let Some(ref tracker_lock) = self.stake_tracker {
@@ -677,6 +679,7 @@ impl Bank {
             recent_blockhash: *self.last_blockhash.read().expect("blockhash lock poisoned"),
             lamports_per_signature: self.lamports_per_signature(),
             epoch_rewards_active,
+            epoch_rewards_total_rewards,
             sysvar_data,
             epoch_stake,
             active_features,

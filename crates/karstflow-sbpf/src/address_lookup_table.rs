@@ -58,6 +58,7 @@ pub enum LookupTableError {
     AuthorityMismatch,
     CooldownNotExpired,
     MissingAuthority,
+    TableDeactivating,
 }
 
 impl LookupTableError {
@@ -73,6 +74,7 @@ impl LookupTableError {
             Self::AuthorityMismatch => "Authority does not match",
             Self::CooldownNotExpired => "Deactivation cooldown has not expired",
             Self::MissingAuthority => "Table has no authority",
+            Self::TableDeactivating => "Cannot extend a deactivating lookup table",
         }
     }
 }
@@ -257,6 +259,16 @@ impl AddressLookupTableExecutor {
 
         if &stored_authority != authority_pubkey {
             return Err(LookupTableError::AuthorityMismatch.message().to_string());
+        }
+
+        // Reject extension of deactivating tables (deactivation_slot != u64::MAX)
+        let deactivation_slot = u64::from_le_bytes(
+            table_account.data.as_ref()[32..40]
+                .try_into()
+                .map_err(|_| "Failed to read deactivation_slot")?,
+        );
+        if deactivation_slot != u64::MAX {
+            return Err(LookupTableError::TableDeactivating.message().to_string());
         }
 
         // Parse new addresses from instruction data
@@ -745,5 +757,36 @@ mod tests {
         let result = executor.execute(&ctx);
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("cooldown"));
+    }
+
+    #[test]
+    fn extend_rejects_deactivating_table() {
+        let executor = AddressLookupTableExecutor::new(150);
+
+        let authority = Pubkey::new_unique();
+        let table_pubkey = Pubkey::new_unique();
+        let addr1 = Pubkey::new_unique();
+
+        let mut instruction_data = constants::INSTRUCTION_EXTEND.to_le_bytes().to_vec();
+        instruction_data.extend_from_slice(&1u32.to_le_bytes());
+        instruction_data.extend_from_slice(addr1.as_bytes());
+
+        // Use a deactivating table (deactivation_slot != u64::MAX)
+        let ctx = ExecutionContext::new(
+            ADDRESS_LOOKUP_TABLE_PROGRAM_ID,
+            vec![
+                (
+                    table_pubkey,
+                    make_deactivated_table_account(&authority, 500),
+                    true,
+                ),
+                (authority, make_authority_account(), false),
+            ],
+            instruction_data,
+        );
+
+        let result = executor.execute(&ctx);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("deactivating"));
     }
 }
