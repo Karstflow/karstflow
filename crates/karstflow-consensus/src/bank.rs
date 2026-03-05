@@ -675,7 +675,7 @@ impl Bank {
             lamports_per_byte_year: self.rent.lamports_per_byte_year,
             exemption_threshold: self.rent.exemption_threshold,
             burn_percent: self.rent.burn_percent,
-            last_restart_slot: 0,
+            last_restart_slot: self.sysvars.as_ref().map_or(0, |s| s.last_restart_slot()),
             recent_blockhash: *self.last_blockhash.read().expect("blockhash lock poisoned"),
             lamports_per_signature: self.lamports_per_signature(),
             epoch_rewards_active,

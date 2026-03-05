@@ -424,7 +424,7 @@ Current maturity of each subsystem (as of March 2026):
 | IPC / Mesh | 95% | Dual-mode SPSC (channels + shared memory), 9 FragmentCodec implementations, tile links, bounded channels with backpressure stats |
 | RPC | 95% | 52 JSON-RPC methods with real bank data via BankAccessProvider, WebSocket subscriptions, getHealth wired to real health check |
 | Execution | 95% | SVM adapter with real BankExecutionEngine enforced in production, batch orchestration, retry policies, compute budget enforcement, epoch rewards sysvar wiring, no production panics |
-| Crypto | 88% | Ed25519 batch verify, Blake3/SHA-256/Keccak, secp256k1/r1, BN254 pairing, Reed-Solomon FEC, LtHash, ChaCha RNG, ZK ElGamal proofs |
+| Crypto | 90% | Ed25519 batch verify, Blake3/SHA-256/Keccak, secp256k1 (verify + recover)/r1, BN254 pairing, BLS12-381 (G1/G2 decompress + multi-pairing via BLST), Reed-Solomon FEC, LtHash, ChaCha20 RNG, ZK ElGamal proofs (13 instruction types) |
 | Config | 95% | TOML with env override, live-mode preflight, schema migration, cluster profiles, UDP/XDP transport backend config, feature gate registry with override modes |
 | Control | 94% | Bootstrap with transport branching (UDP/XDP), materialization, consensus wiring, shred store service, snapshot scheduling, configure/monitor CLI commands |
 | Runtime | 95% | Tokio/pinned/tile modes, CnC supervisor, heartbeat, stuck detection, graceful shutdown |
