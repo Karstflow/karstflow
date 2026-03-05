@@ -54,8 +54,6 @@ pub(crate) fn resolve_pinned_core_assignment(
     pinned_core_policy: PinnedCorePolicy,
     pinned_service_core_ids: Option<&[usize]>,
 ) -> RuntimeResult<Vec<usize>> {
-    validate_pinned_assignment(service_count, available_core_ids.len(), pinned_core_policy)?;
-
     if let Some(explicit_core_ids) = pinned_service_core_ids {
         if explicit_core_ids.len() != service_count {
             return Err(RuntimeError::ExplicitPinnedAssignmentLengthMismatch {
@@ -84,6 +82,8 @@ pub(crate) fn resolve_pinned_core_assignment(
 
         return Ok(explicit_core_ids.to_vec());
     }
+
+    validate_pinned_assignment(service_count, available_core_ids.len(), pinned_core_policy)?;
 
     Ok((0..service_count)
         .map(|index| available_core_ids[index % available_core_ids.len()])
