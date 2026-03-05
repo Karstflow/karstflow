@@ -2,6 +2,10 @@
 //!
 //! These tests ensure that performance doesn't regress over time.
 //! They use loose thresholds to account for system variability.
+//!
+//! All absolute-threshold tests are `#[ignore]` because debug-mode builds
+//! on resource-constrained CI runners produce wildly variable timings.
+//! Run explicitly: `cargo test -p karstflow-crypto --test performance_regression -- --ignored`
 
 use ed25519_dalek::{Signer, SigningKey};
 use karstflow_crypto::{
@@ -26,6 +30,7 @@ where
 }
 
 #[test]
+#[ignore]
 fn test_single_signature_verification_performance() {
     // Generate a valid signature
     let signing_key = SigningKey::generate(&mut OsRng);
@@ -71,6 +76,7 @@ fn test_single_signature_verification_performance() {
 }
 
 #[test]
+#[ignore]
 fn test_batch_verification_32_performance() {
     // Generate 32 valid signatures
     let mut sig_sets = Vec::new();
@@ -130,6 +136,7 @@ fn test_batch_verification_32_performance() {
 }
 
 #[test]
+#[ignore]
 fn test_batch_verification_128_performance() {
     // Generate 128 valid signatures
     let mut sig_sets = Vec::new();
