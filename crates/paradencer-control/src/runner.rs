@@ -594,6 +594,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "requires >=16GB RAM, >=4 cores, >=50GB disk — skipped on CI runners"]
     fn dispatch_configure_runs_system_checks() {
         let parsed_command = ControlCommandWithConfig {
             command: ControlCommand::Configure,

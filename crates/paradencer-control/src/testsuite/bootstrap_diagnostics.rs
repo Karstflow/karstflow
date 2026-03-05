@@ -89,11 +89,18 @@ fn diagnostics_fails_early_for_mismatched_pinned_service_core_ids_length() {
 
     let mut node_config = NodeConfig::from_profile(None).unwrap();
     node_config.runtime_spec.mode = paradencer_core::ExecutionMode::Pinned;
+    // Use a mismatched length: always 2 core IDs regardless of service count.
     node_config.runtime_spec.pinned_service_core_ids = Some(vec![0, 1]);
     let mut materialized = materialize_services_from_config(&node_config).unwrap();
     if let Some(rpt) = materialized.reporter {
         materialized.services.push(Box::new(rpt));
     }
+    // Guard: if service count happens to be 2, the test premise is invalid.
+    assert_ne!(
+        materialized.services.len(),
+        2,
+        "test requires service count != 2 for length mismatch"
+    );
     let result = run_diagnostics_phase(
         &node_config,
         materialized.topology_spec.topology_name.clone(),
@@ -117,11 +124,13 @@ fn diagnostics_fails_early_for_duplicate_pinned_service_core_ids_in_strict_mode(
     let mut node_config = NodeConfig::from_profile(None).unwrap();
     node_config.runtime_spec.mode = paradencer_core::ExecutionMode::Pinned;
     node_config.runtime_spec.pinned_core_policy = paradencer_core::PinnedCorePolicy::Strict;
-    node_config.runtime_spec.pinned_service_core_ids = Some(vec![0, 0, 0, 0, 0, 0, 0]);
     let mut materialized = materialize_services_from_config(&node_config).unwrap();
     if let Some(rpt) = materialized.reporter {
         materialized.services.push(Box::new(rpt));
     }
+    // Build a core ID list matching service count, all zeros (duplicates).
+    let service_count = materialized.services.len();
+    node_config.runtime_spec.pinned_service_core_ids = Some(vec![0; service_count]);
     let result = run_diagnostics_phase(
         &node_config,
         materialized.topology_spec.topology_name.clone(),
