@@ -58,7 +58,8 @@ impl LeaderSchedule {
         sort_stakes(&mut sorted);
 
         let (keys, stakes): (Vec<&Pubkey>, Vec<u64>) = sorted.into_iter().unzip();
-        let weighted_index = WeightedIndex::new(stakes).unwrap();
+        let weighted_index =
+            WeightedIndex::new(stakes).expect("non-empty stakes for leader schedule");
 
         // Seed ChaCha20 with epoch in first 8 bytes, rest zero
         let mut seed = [0u8; 32];

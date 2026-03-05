@@ -68,7 +68,7 @@ impl BankTransition {
     ///
     /// Returns the bank if it exists, otherwise returns BankNotFound error
     pub fn get_working_bank(&self, slot: u64) -> Result<Arc<Bank>, BankTransitionError> {
-        let bank_forks = self.bank_forks.read().unwrap();
+        let bank_forks = self.bank_forks.read().expect("bank_forks lock poisoned");
         bank_forks
             .get(slot)
             .ok_or(BankTransitionError::BankNotFound(slot))
@@ -76,7 +76,7 @@ impl BankTransition {
 
     /// Get the current working bank (highest slot)
     pub fn get_current_working_bank(&self) -> Arc<Bank> {
-        let bank_forks = self.bank_forks.read().unwrap();
+        let bank_forks = self.bank_forks.read().expect("bank_forks lock poisoned");
         bank_forks.working_bank()
     }
 
@@ -91,7 +91,7 @@ impl BankTransition {
     ) -> Result<Arc<Bank>, BankTransitionError> {
         // Get parent bank
         let parent_bank = {
-            let bank_forks = self.bank_forks.read().unwrap();
+            let bank_forks = self.bank_forks.read().expect("bank_forks lock poisoned");
             bank_forks
                 .get(parent_slot)
                 .ok_or(BankTransitionError::ParentNotFound(parent_slot))?
@@ -134,15 +134,15 @@ impl BankTransition {
         let child_bank = Bank::new_from_parent(&parent_bank, slot, leader_schedule);
 
         // Insert into bank forks
-        let mut bank_forks = self.bank_forks.write().unwrap();
+        let mut bank_forks = self.bank_forks.write().expect("bank_forks lock poisoned");
         bank_forks.insert(child_bank)?;
 
         // Add to fork choice
-        let mut fork_choice = self.fork_choice.lock().unwrap();
+        let mut fork_choice = self.fork_choice.lock().expect("fork_choice lock poisoned");
         fork_choice.add_fork(slot, Some(parent_slot));
 
         // Get the newly inserted bank
-        Ok(bank_forks.get(slot).unwrap())
+        Ok(bank_forks.get(slot).expect("bank just inserted above"))
     }
 
     /// Freeze a bank when its slot is complete.
@@ -206,26 +206,26 @@ impl BankTransition {
     ///
     /// Returns the number of slots evicted.
     pub fn mark_slot_dead(&mut self, slot: u64) -> usize {
-        let mut bank_forks = self.bank_forks.write().unwrap();
+        let mut bank_forks = self.bank_forks.write().expect("bank_forks lock poisoned");
         let report = bank_forks.mark_dead_and_evict(slot);
         report.total_evicted()
     }
 
     /// Check if a bank exists for a slot
     pub fn has_bank(&self, slot: u64) -> bool {
-        let bank_forks = self.bank_forks.read().unwrap();
+        let bank_forks = self.bank_forks.read().expect("bank_forks lock poisoned");
         bank_forks.get(slot).is_some()
     }
 
     /// Get the root slot
     pub fn root_slot(&self) -> u64 {
-        let bank_forks = self.bank_forks.read().unwrap();
+        let bank_forks = self.bank_forks.read().expect("bank_forks lock poisoned");
         bank_forks.root_slot()
     }
 
     /// Get the root bank
     pub fn root_bank(&self) -> Option<Arc<Bank>> {
-        let bank_forks = self.bank_forks.read().unwrap();
+        let bank_forks = self.bank_forks.read().expect("bank_forks lock poisoned");
         bank_forks.root_bank()
     }
 
@@ -233,26 +233,26 @@ impl BankTransition {
     ///
     /// This prunes all banks below the new root and marks the root bank as rooted.
     pub fn set_root(&mut self, new_root_slot: u64) -> Result<(), BankTransitionError> {
-        let mut bank_forks = self.bank_forks.write().unwrap();
+        let mut bank_forks = self.bank_forks.write().expect("bank_forks lock poisoned");
         bank_forks.set_root(new_root_slot).map(|_| ())?;
         Ok(())
     }
 
     /// Get the highest slot in bank forks
     pub fn highest_slot(&self) -> u64 {
-        let bank_forks = self.bank_forks.read().unwrap();
+        let bank_forks = self.bank_forks.read().expect("bank_forks lock poisoned");
         bank_forks.highest_slot()
     }
 
     /// Check if a slot is an ancestor of another slot
     pub fn is_ancestor(&self, ancestor_slot: u64, slot: u64) -> bool {
-        let bank_forks = self.bank_forks.read().unwrap();
+        let bank_forks = self.bank_forks.read().expect("bank_forks lock poisoned");
         bank_forks.is_ancestor(ancestor_slot, slot)
     }
 
     /// Get all descendant slots of a given slot
     pub fn descendants(&self, slot: u64) -> Vec<u64> {
-        let bank_forks = self.bank_forks.read().unwrap();
+        let bank_forks = self.bank_forks.read().expect("bank_forks lock poisoned");
         bank_forks.descendants(slot)
     }
 
@@ -260,7 +260,7 @@ impl BankTransition {
     ///
     /// Returns the slot of the heaviest fork tip
     pub fn select_best_fork(&self) -> Option<u64> {
-        let fork_choice = self.fork_choice.lock().unwrap();
+        let fork_choice = self.fork_choice.lock().expect("fork_choice lock poisoned");
         fork_choice.best_slot()
     }
 
@@ -268,13 +268,13 @@ impl BankTransition {
     ///
     /// Keeps banks above a certain slot threshold and all rooted banks
     pub fn prune_non_rooted(&mut self, keep_above_slot: u64) {
-        let mut bank_forks = self.bank_forks.write().unwrap();
+        let mut bank_forks = self.bank_forks.write().expect("bank_forks lock poisoned");
         bank_forks.prune_non_rooted(keep_above_slot);
     }
 
     /// Get bank count
     pub fn bank_count(&self) -> usize {
-        let bank_forks = self.bank_forks.read().unwrap();
+        let bank_forks = self.bank_forks.read().expect("bank_forks lock poisoned");
         bank_forks.len()
     }
 }

@@ -71,7 +71,7 @@ impl SignatureStatusCache {
 
     /// Record a successful transaction.
     pub fn insert_success(&self, signature: [u8; 64], slot: u64) {
-        let mut map = self.entries.write().unwrap();
+        let mut map = self.entries.write().expect("status_entries lock poisoned");
         self.evict_if_needed(&mut map);
         map.insert(
             signature,
@@ -85,7 +85,7 @@ impl SignatureStatusCache {
 
     /// Record a failed transaction with an error description.
     pub fn insert_failure(&self, signature: [u8; 64], slot: u64, error: String) {
-        let mut map = self.entries.write().unwrap();
+        let mut map = self.entries.write().expect("status_entries lock poisoned");
         self.evict_if_needed(&mut map);
         map.insert(
             signature,
@@ -109,7 +109,10 @@ impl SignatureStatusCache {
         succeeded: bool,
         error: Option<String>,
     ) {
-        let mut index = self.address_index.write().unwrap();
+        let mut index = self
+            .address_index
+            .write()
+            .expect("address_index lock poisoned");
         let entry = AddressSignatureEntry {
             signature,
             slot,
@@ -147,7 +150,10 @@ impl SignatureStatusCache {
         before_signature: Option<&[u8; 64]>,
         until_signature: Option<&[u8; 64]>,
     ) -> Vec<AddressSignatureEntry> {
-        let index = self.address_index.read().unwrap();
+        let index = self
+            .address_index
+            .read()
+            .expect("address_index lock poisoned");
         let list = match index.get(address) {
             Some(list) => list,
             None => return Vec::new(),
@@ -182,23 +188,33 @@ impl SignatureStatusCache {
 
     /// Look up the status of a transaction by its first signature.
     pub fn get(&self, signature: &[u8; 64]) -> Option<SignatureStatus> {
-        self.entries.read().unwrap().get(signature).cloned()
+        self.entries
+            .read()
+            .expect("status_entries lock poisoned")
+            .get(signature)
+            .cloned()
     }
 
     /// Look up statuses for multiple signatures at once.
     pub fn get_batch(&self, signatures: &[[u8; 64]]) -> Vec<Option<SignatureStatus>> {
-        let map = self.entries.read().unwrap();
+        let map = self.entries.read().expect("status_entries lock poisoned");
         signatures.iter().map(|sig| map.get(sig).cloned()).collect()
     }
 
     /// Number of entries currently in the cache.
     pub fn len(&self) -> usize {
-        self.entries.read().unwrap().len()
+        self.entries
+            .read()
+            .expect("status_entries lock poisoned")
+            .len()
     }
 
     /// Returns `true` if the cache contains no entries.
     pub fn is_empty(&self) -> bool {
-        self.entries.read().unwrap().is_empty()
+        self.entries
+            .read()
+            .expect("status_entries lock poisoned")
+            .is_empty()
     }
 
     /// Evict oldest entries when at capacity. Removes entries from the
@@ -225,7 +241,10 @@ impl SignatureStatusCache {
         if evicted_sigs.is_empty() {
             return;
         }
-        let mut index = self.address_index.write().unwrap();
+        let mut index = self
+            .address_index
+            .write()
+            .expect("address_index lock poisoned");
         index.retain(|_, entries| {
             entries.retain(|e| !evicted_sigs.contains(&e.signature));
             !entries.is_empty()

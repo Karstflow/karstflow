@@ -628,7 +628,10 @@ impl BlockProcessor {
         block: &AssembledBlock,
         outcome: &BlockOutcome,
     ) -> Result<(), BlockProcessorError> {
-        let mut tracker = self.commitment_tracker.lock().unwrap();
+        let mut tracker = self
+            .commitment_tracker
+            .lock()
+            .expect("commitment_tracker lock poisoned");
 
         // Mark slot as processed with execution metrics
         let executed = outcome.executed_count as u64;

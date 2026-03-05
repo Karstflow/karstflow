@@ -347,7 +347,7 @@ impl Bank {
             parent
                 .next_leader_schedule
                 .read()
-                .unwrap()
+                .expect("leader_schedule lock poisoned")
                 .clone()
                 .unwrap_or(leader_schedule)
         } else {
@@ -376,10 +376,22 @@ impl Bank {
             rent: parent.rent,
             inflation: parent.inflation,
             sysvars: parent.sysvars.clone(),
-            lthash: RwLock::new(parent.lthash.read().unwrap().clone()),
+            lthash: RwLock::new(
+                parent
+                    .lthash
+                    .read()
+                    .expect("parent lthash lock poisoned")
+                    .clone(),
+            ),
             signature_count: AtomicU64::new(0),
             last_blockhash: RwLock::new(parent_hash),
-            blockhash_queue: RwLock::new(parent.blockhash_queue.read().unwrap().clone()),
+            blockhash_queue: RwLock::new(
+                parent
+                    .blockhash_queue
+                    .read()
+                    .expect("parent blockhash_queue lock poisoned")
+                    .clone(),
+            ),
             transaction_cache: parent.transaction_cache.clone(),
             signature_status_cache: parent.signature_status_cache.clone(),
             cost_tracker: Arc::new(crate::cost_tracker::CostTracker::new()),
@@ -393,7 +405,13 @@ impl Bank {
             stake_history: parent.stake_history.clone(),
             feature_set: parent.feature_set.clone(),
             vote_account_cache: parent.vote_account_cache.clone(),
-            rewards_distributor: RwLock::new(parent.rewards_distributor.read().unwrap().clone()),
+            rewards_distributor: RwLock::new(
+                parent
+                    .rewards_distributor
+                    .read()
+                    .expect("parent rewards_distributor lock poisoned")
+                    .clone(),
+            ),
             notifier: parent.notifier.clone(),
         }
     }
@@ -568,7 +586,7 @@ impl Bank {
             None => return fallback(),
         };
 
-        let cache = cache_lock.read().unwrap();
+        let cache = cache_lock.read().expect("vote_cache lock poisoned");
         let total_stake = cache.total_epoch_stake();
         if total_stake == 0 {
             return fallback();
@@ -613,7 +631,7 @@ impl Bank {
 
         // Snapshot active feature gate IDs for the execution layer.
         let active_features = if let Some(ref fs_lock) = self.feature_set {
-            let fs = fs_lock.read().unwrap();
+            let fs = fs_lock.read().expect("feature_set lock poisoned");
             fs.active_features().map(|(id, _)| *id.as_bytes()).collect()
         } else {
             std::collections::HashSet::new()
@@ -631,7 +649,7 @@ impl Bank {
 
         // Snapshot epoch stake per vote account for sol_get_epoch_stake syscall.
         let epoch_stake = if let Some(ref tracker_lock) = self.stake_tracker {
-            let tracker = tracker_lock.read().unwrap();
+            let tracker = tracker_lock.read().expect("stake_tracker lock poisoned");
             tracker
                 .stake_by_vote_account()
                 .into_iter()
@@ -656,7 +674,7 @@ impl Bank {
             exemption_threshold: self.rent.exemption_threshold,
             burn_percent: self.rent.burn_percent,
             last_restart_slot: 0,
-            recent_blockhash: *self.last_blockhash.read().unwrap(),
+            recent_blockhash: *self.last_blockhash.read().expect("blockhash lock poisoned"),
             lamports_per_signature: self.lamports_per_signature(),
             epoch_rewards_active,
             sysvar_data,
@@ -696,7 +714,7 @@ impl Bank {
             new_account.data.as_ref(),
         );
 
-        let mut accumulator = self.lthash.write().unwrap();
+        let mut accumulator = self.lthash.write().expect("lthash lock poisoned");
         accumulator.subtract(&old_hash);
         accumulator.add(&new_hash);
     }
@@ -728,7 +746,7 @@ impl Bank {
             Ok(())
         });
 
-        *self.lthash.write().unwrap() = accumulator;
+        *self.lthash.write().expect("lthash lock poisoned") = accumulator;
         count
     }
 
@@ -749,18 +767,24 @@ impl Bank {
 
     /// Get the last PoH blockhash for this slot.
     pub fn last_blockhash(&self) -> [u8; 32] {
-        *self.last_blockhash.read().unwrap()
+        *self.last_blockhash.read().expect("blockhash lock poisoned")
     }
 
     /// Set the last PoH blockhash for this slot.
     pub fn set_last_blockhash(&self, hash: [u8; 32]) {
-        *self.last_blockhash.write().unwrap() = hash;
+        *self
+            .last_blockhash
+            .write()
+            .expect("blockhash lock poisoned") = hash;
     }
 
     /// Check if a blockhash is in the recent blockhash queue.
     pub fn is_blockhash_valid(&self, blockhash: &[u8; 32]) -> bool {
         let hash = Pubkey::from(*blockhash);
-        self.blockhash_queue.read().unwrap().is_hash_valid(&hash)
+        self.blockhash_queue
+            .read()
+            .expect("blockhash_queue lock poisoned")
+            .is_hash_valid(&hash)
     }
 
     /// Get a reference to the blockhash queue lock.
@@ -812,14 +836,14 @@ impl Bank {
 
     /// Get a clone of the current lattice hash accumulator.
     pub fn lthash(&self) -> LatticeHashValue {
-        self.lthash.read().unwrap().clone()
+        self.lthash.read().expect("lthash lock poisoned").clone()
     }
 
     /// Check whether there is a pending rewards distributor.
     pub fn has_pending_rewards(&self) -> bool {
         self.rewards_distributor
             .read()
-            .unwrap()
+            .expect("rewards_distributor lock poisoned")
             .as_ref()
             .is_some_and(|d| !d.is_complete())
     }
@@ -830,7 +854,10 @@ impl Bank {
     /// credits the corresponding accounts and marks the slot distributed.
     /// When all partitions are complete, clears the EpochRewards sysvar.
     pub fn distribute_slot_rewards(&self) -> u64 {
-        let mut guard = self.rewards_distributor.write().unwrap();
+        let mut guard = self
+            .rewards_distributor
+            .write()
+            .expect("rewards_distributor lock poisoned");
         if let Some(ref mut distributor) = *guard {
             let result = RewardApplicator::apply_partition(
                 &self.accounts,
@@ -928,7 +955,10 @@ impl Bank {
         }
 
         self.tick_height.fetch_add(1, Ordering::Relaxed);
-        *self.last_blockhash.write().unwrap() = poh_hash;
+        *self
+            .last_blockhash
+            .write()
+            .expect("blockhash lock poisoned") = poh_hash;
 
         Ok(())
     }
@@ -951,12 +981,15 @@ impl Bank {
 
         // Derive a deterministic placeholder from previous blockhash and tick height.
         use paradencer_crypto::sha256::Sha256Hasher;
-        let prev = *self.last_blockhash.read().unwrap();
+        let prev = *self.last_blockhash.read().expect("blockhash lock poisoned");
         let mut data = [0u8; 40]; // 32 bytes hash + 8 bytes tick height
         data[..32].copy_from_slice(&prev);
         data[32..40].copy_from_slice(&new_height.to_le_bytes());
         let new_blockhash = Sha256Hasher::hash(&data);
-        *self.last_blockhash.write().unwrap() = new_blockhash;
+        *self
+            .last_blockhash
+            .write()
+            .expect("blockhash lock poisoned") = new_blockhash;
 
         Ok(())
     }
@@ -1011,7 +1044,7 @@ impl Bank {
         let blockhash_info = BlockhashInfo::new(Pubkey::from(bank_hash), fee_rate, self.slot);
         self.blockhash_queue
             .write()
-            .unwrap()
+            .expect("blockhash_queue lock poisoned")
             .register_hash(blockhash_info);
 
         // Delete incinerator account: zero its lamports and reduce capitalization.
@@ -1077,10 +1110,10 @@ impl Bank {
             _ => return,
         };
 
-        let tracker = tracker_lock.read().unwrap();
+        let tracker = tracker_lock.read().expect("stake_tracker lock poisoned");
         let stake_by_voter = tracker.stake_by_vote_account();
 
-        let mut cache = cache_lock.write().unwrap();
+        let mut cache = cache_lock.write().expect("vote_cache lock poisoned");
 
         // Rotate: current → prev → prev_prev, then zero current
         cache.rotate_epoch();
@@ -1163,7 +1196,7 @@ impl Bank {
     /// Scan feature accounts and activate any newly created ones.
     fn activate_pending_features(&self) {
         if let Some(ref features_lock) = self.feature_set {
-            let mut features = features_lock.write().unwrap();
+            let mut features = features_lock.write().expect("feature_set lock poisoned");
             let accounts = &self.accounts;
             process_feature_activations(&mut features, self.slot, &|pubkey| {
                 accounts.get_published_account(pubkey).is_some()
@@ -1180,8 +1213,8 @@ impl Bank {
     fn calculate_and_prepare_rewards(&self) {
         let (tracker, mut history) = match (&self.stake_tracker, &self.stake_history) {
             (Some(t), Some(h)) => {
-                let tracker = t.read().unwrap().clone();
-                let history = h.read().unwrap().clone();
+                let tracker = t.read().expect("stake_tracker lock poisoned").clone();
+                let history = h.read().expect("stake_history lock poisoned").clone();
                 (tracker, history)
             }
             _ => return,
@@ -1197,7 +1230,7 @@ impl Bank {
 
         // Write back updated stake history to internal tracker
         if let Some(ref h) = self.stake_history {
-            *h.write().unwrap() = history;
+            *h.write().expect("stake_history lock poisoned") = history;
         }
 
         if let Ok(ctx) = result {
@@ -1247,7 +1280,10 @@ impl Bank {
                         foundation_rate: 0.0,
                     });
                 }
-                *self.rewards_distributor.write().unwrap() = Some(distributor);
+                *self
+                    .rewards_distributor
+                    .write()
+                    .expect("rewards_distributor lock poisoned") = Some(distributor);
             }
         }
     }
@@ -1263,7 +1299,7 @@ impl Bank {
     /// `new_from_parent` can propagate it to child banks in the next epoch.
     fn regenerate_leader_schedule(&self) {
         if let Some(ref tracker_lock) = self.stake_tracker {
-            let tracker = tracker_lock.read().unwrap();
+            let tracker = tracker_lock.read().expect("stake_tracker lock poisoned");
             let stakes = tracker.stake_by_vote_account();
 
             // Map vote account stakes to node identities via the vote cache.
@@ -1271,7 +1307,7 @@ impl Bank {
                 std::collections::HashMap::new();
 
             if let Some(ref cache_lock) = self.vote_account_cache {
-                let cache = cache_lock.read().unwrap();
+                let cache = cache_lock.read().expect("vote_cache lock poisoned");
                 for (vote_pubkey, stake) in &stakes {
                     let node = cache
                         .node_pubkey(vote_pubkey)
@@ -1291,7 +1327,10 @@ impl Bank {
             if !validators.is_empty() {
                 let next_epoch = self.epoch + 1;
                 if let Ok(schedule) = LeaderSchedule::new(next_epoch, &validators) {
-                    *self.next_leader_schedule.write().unwrap() = Some(Arc::new(schedule));
+                    *self
+                        .next_leader_schedule
+                        .write()
+                        .expect("leader_schedule lock poisoned") = Some(Arc::new(schedule));
                 }
             }
         }
@@ -1299,7 +1338,10 @@ impl Bank {
 
     /// Get the leader schedule computed for the next epoch, if available.
     pub fn next_leader_schedule(&self) -> Option<Arc<LeaderSchedule>> {
-        self.next_leader_schedule.read().unwrap().clone()
+        self.next_leader_schedule
+            .read()
+            .expect("leader_schedule lock poisoned")
+            .clone()
     }
 
     pub fn freeze(&self) -> Result<(), BankFreezeError> {
@@ -1522,7 +1564,10 @@ impl Bank {
             DEFAULT_HASHES_PER_TICK, DEFAULT_TICK_DURATION_NS, TICKS_PER_SLOT,
         };
 
-        let bh_queue = self.blockhash_queue.read().unwrap();
+        let bh_queue = self
+            .blockhash_queue
+            .read()
+            .expect("blockhash_queue lock poisoned");
         let recent_blockhashes: Vec<RecentBlockhash> = bh_queue
             .entries()
             .enumerate()
@@ -1653,8 +1698,8 @@ impl Bank {
     pub fn hash(&self) -> [u8; 32] {
         use paradencer_crypto::sha256::Sha256StreamingHasher;
 
-        let lthash = self.lthash.read().unwrap();
-        let blockhash = self.last_blockhash.read().unwrap();
+        let lthash = self.lthash.read().expect("lthash lock poisoned");
+        let blockhash = self.last_blockhash.read().expect("blockhash lock poisoned");
         let sig_count = self.signature_count.load(Ordering::Relaxed);
 
         // inner = SHA256(prev_bank_hash || sig_count || last_blockhash)

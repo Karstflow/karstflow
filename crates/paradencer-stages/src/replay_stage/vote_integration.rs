@@ -386,7 +386,7 @@ impl VoteIntegration {
             });
         }
 
-        let last_vote = tower.last_vote_slot().unwrap();
+        let last_vote = tower.last_vote_slot().expect("checked non-empty above");
         let same_fork = is_ancestor(last_vote, best_slot) || is_ancestor(best_slot, last_vote);
 
         let decision = if same_fork {

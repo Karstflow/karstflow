@@ -2350,7 +2350,7 @@ impl Bank {
             return;
         }
 
-        let mut cache = cache_lock.write().unwrap();
+        let mut cache = cache_lock.write().expect("vote_cache lock poisoned");
 
         for (pubkey, account) in accounts {
             if account.meta.owner != VOTE_PROGRAM_ID {
@@ -2409,7 +2409,7 @@ impl Bank {
             return;
         }
 
-        let mut tracker = tracker_lock.write().unwrap();
+        let mut tracker = tracker_lock.write().expect("stake_tracker lock poisoned");
 
         for (pubkey, account) in accounts {
             if account.meta.owner != STAKE_PROGRAM_ID {

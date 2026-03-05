@@ -169,13 +169,13 @@ impl FileDurableStore {
             match op {
                 WalOp::Put { cf, key, value } => {
                     if let Some(mutex) = families.get(cf.as_str()) {
-                        let mut state = mutex.lock().unwrap();
+                        let mut state = mutex.lock().expect("cf state lock poisoned");
                         Self::append_record(&mut state, RECORD_STATUS_ACTIVE, key, value)?;
                     }
                 }
                 WalOp::Delete { cf, key } => {
                     if let Some(mutex) = families.get(cf.as_str()) {
-                        let mut state = mutex.lock().unwrap();
+                        let mut state = mutex.lock().expect("cf state lock poisoned");
                         if state.index.contains_key(key.as_slice()) {
                             Self::append_record(&mut state, RECORD_STATUS_DELETED, key, &[])?;
                         }
@@ -186,7 +186,7 @@ impl FileDurableStore {
 
         // Fsync all affected CFs after replay.
         for mutex in families.values() {
-            let state = mutex.lock().unwrap();
+            let state = mutex.lock().expect("cf state lock poisoned");
             state
                 .file
                 .sync_data()
@@ -519,7 +519,7 @@ impl FileDurableStore {
     /// Dead space ratio for a column family (0.0–1.0).
     pub fn dead_ratio(&self, cf: &str) -> Result<f64, StorageError> {
         let mutex = self.cf(cf)?;
-        let state = mutex.lock().unwrap();
+        let state = mutex.lock().expect("cf state lock poisoned");
         Ok(state.dead_ratio())
     }
 
@@ -527,13 +527,13 @@ impl FileDurableStore {
     pub fn total_dead_bytes(&self) -> u64 {
         self.families
             .values()
-            .map(|m| m.lock().unwrap().dead_bytes)
+            .map(|m| m.lock().expect("cf state lock poisoned").dead_bytes)
             .sum()
     }
 
     /// Read cache statistics snapshot.
     pub fn cache_stats(&self) -> CacheStats {
-        self.cache.lock().unwrap().stats()
+        self.cache.lock().expect("read cache lock poisoned").stats()
     }
 
     /// Storage operation metrics snapshot.
@@ -557,7 +557,7 @@ impl FileDurableStore {
         for cf_name in cf_names {
             let (ratio, dead_bytes) = {
                 let mutex = self.cf(&cf_name)?;
-                let state = mutex.lock().unwrap();
+                let state = mutex.lock().expect("cf state lock poisoned");
                 (state.dead_ratio(), state.dead_bytes)
             };
 
@@ -580,7 +580,7 @@ impl FileDurableStore {
     /// overwrites and deletes. Returns the number of bytes reclaimed.
     pub fn compact_cf(&self, cf: &str) -> Result<CfCompactionStats, StorageError> {
         let mutex = self.cf(cf)?;
-        let mut state = mutex.lock().unwrap();
+        let mut state = mutex.lock().expect("cf state lock poisoned");
 
         let original_size = state.file_end;
         let _original_dead = state.dead_bytes;
@@ -699,7 +699,10 @@ impl FileDurableStore {
         Self::refresh_mmap(&mut state);
 
         // Invalidate cache for this CF — record offsets have all changed.
-        self.cache.lock().unwrap().invalidate_cf(cf);
+        self.cache
+            .lock()
+            .expect("read cache lock poisoned")
+            .invalidate_cf(cf);
 
         let bytes_reclaimed = original_size.saturating_sub(write_offset);
 
@@ -755,7 +758,7 @@ impl DurableStore for FileDurableStore {
     fn get(&self, cf: &str, key: &[u8]) -> Result<Option<Vec<u8>>, StorageError> {
         // Check cache first.
         {
-            let mut cache = self.cache.lock().unwrap();
+            let mut cache = self.cache.lock().expect("read cache lock poisoned");
             if let Some(value) = cache.get(cf, key) {
                 self.metrics.record_read(value.len() as u64);
                 return Ok(Some(value));
@@ -763,13 +766,16 @@ impl DurableStore for FileDurableStore {
         }
 
         let mutex = self.cf(cf)?;
-        let state = mutex.lock().unwrap();
+        let state = mutex.lock().expect("cf state lock poisoned");
         match state.index.get(key) {
             Some(loc) => {
                 let value = Self::read_value_from_state(&state, loc)?;
                 self.metrics.record_read(value.len() as u64);
                 // Populate cache on miss.
-                self.cache.lock().unwrap().insert(cf, key, &value);
+                self.cache
+                    .lock()
+                    .expect("read cache lock poisoned")
+                    .insert(cf, key, &value);
                 Ok(Some(value))
             }
             None => {
@@ -781,22 +787,28 @@ impl DurableStore for FileDurableStore {
 
     fn put(&self, cf: &str, key: &[u8], value: &[u8]) -> Result<(), StorageError> {
         let mutex = self.cf(cf)?;
-        let mut state = mutex.lock().unwrap();
+        let mut state = mutex.lock().expect("cf state lock poisoned");
         Self::append_record(&mut state, RECORD_STATUS_ACTIVE, key, value)?;
         self.metrics.record_write((key.len() + value.len()) as u64);
         // Update cache with the new value.
-        self.cache.lock().unwrap().insert(cf, key, value);
+        self.cache
+            .lock()
+            .expect("read cache lock poisoned")
+            .insert(cf, key, value);
         Ok(())
     }
 
     fn delete(&self, cf: &str, key: &[u8]) -> Result<(), StorageError> {
         let mutex = self.cf(cf)?;
-        let mut state = mutex.lock().unwrap();
+        let mut state = mutex.lock().expect("cf state lock poisoned");
         // Only write tombstone if key actually exists.
         if state.index.contains_key(key) {
             Self::append_record(&mut state, RECORD_STATUS_DELETED, key, &[])?;
             self.metrics.record_delete();
-            self.cache.lock().unwrap().invalidate(cf, key);
+            self.cache
+                .lock()
+                .expect("read cache lock poisoned")
+                .invalidate(cf, key);
         }
         Ok(())
     }
@@ -817,7 +829,7 @@ impl DurableStore for FileDurableStore {
 
         // Phase 1: Write intent to WAL and fsync.
         {
-            let mut wal = self.wal.lock().unwrap();
+            let mut wal = self.wal.lock().expect("wal lock poisoned");
             wal.write_batch(batch)?;
         }
 
@@ -833,7 +845,7 @@ impl DurableStore for FileDurableStore {
 
         for (cf_name, ops) in by_cf {
             let mutex = self.cf(cf_name)?;
-            let mut state = mutex.lock().unwrap();
+            let mut state = mutex.lock().expect("cf state lock poisoned");
             for op in ops {
                 match op {
                     WriteOp::Put { key, value, .. } => {
@@ -857,7 +869,7 @@ impl DurableStore for FileDurableStore {
 
         // Phase 3: Clear WAL after successful application.
         {
-            let mut wal = self.wal.lock().unwrap();
+            let mut wal = self.wal.lock().expect("wal lock poisoned");
             wal.clear()?;
         }
 
@@ -865,7 +877,7 @@ impl DurableStore for FileDurableStore {
         let op_count = batch.ops().len() as u64;
         self.metrics.record_batch(op_count);
         {
-            let mut cache = self.cache.lock().unwrap();
+            let mut cache = self.cache.lock().expect("read cache lock poisoned");
             for op in batch.ops() {
                 match op {
                     WriteOp::Put { cf, key, value } => {
@@ -883,13 +895,13 @@ impl DurableStore for FileDurableStore {
 
     fn contains(&self, cf: &str, key: &[u8]) -> Result<bool, StorageError> {
         let mutex = self.cf(cf)?;
-        let state = mutex.lock().unwrap();
+        let state = mutex.lock().expect("cf state lock poisoned");
         Ok(state.index.contains_key(key))
     }
 
     fn prefix_scan(&self, cf: &str, prefix: &[u8]) -> Result<Vec<ScanEntry>, StorageError> {
         let mutex = self.cf(cf)?;
-        let state = mutex.lock().unwrap();
+        let state = mutex.lock().expect("cf state lock poisoned");
         let mut results = Vec::new();
         for (key, loc) in &state.index {
             if key.starts_with(prefix) {
@@ -908,7 +920,7 @@ impl DurableStore for FileDurableStore {
         end: &[u8],
     ) -> Result<Vec<ScanEntry>, StorageError> {
         let mutex = self.cf(cf)?;
-        let state = mutex.lock().unwrap();
+        let state = mutex.lock().expect("cf state lock poisoned");
         let mut results = Vec::new();
         for (key, loc) in &state.index {
             if key.as_slice() >= start && key.as_slice() < end {
@@ -922,7 +934,7 @@ impl DurableStore for FileDurableStore {
 
     fn flush(&self) -> Result<(), StorageError> {
         for mutex in self.families.values() {
-            let state = mutex.lock().unwrap();
+            let state = mutex.lock().expect("cf state lock poisoned");
             state
                 .file
                 .sync_all()
@@ -936,7 +948,7 @@ impl DurableStore for FileDurableStore {
     fn disk_usage(&self) -> Result<u64, StorageError> {
         let mut total = 0u64;
         for mutex in self.families.values() {
-            let state = mutex.lock().unwrap();
+            let state = mutex.lock().expect("cf state lock poisoned");
             total += state.file_end;
         }
         Ok(total)
@@ -944,7 +956,7 @@ impl DurableStore for FileDurableStore {
 
     fn count(&self, cf: &str) -> Result<u64, StorageError> {
         let mutex = self.cf(cf)?;
-        let state = mutex.lock().unwrap();
+        let state = mutex.lock().expect("cf state lock poisoned");
         Ok(state.index.len() as u64)
     }
 
@@ -954,7 +966,7 @@ impl DurableStore for FileDurableStore {
         callback: super::ForEachCallback<'_>,
     ) -> Result<u64, StorageError> {
         let mutex = self.cf(cf)?;
-        let state = mutex.lock().unwrap();
+        let state = mutex.lock().expect("cf state lock poisoned");
         let mut count = 0u64;
 
         for (key, loc) in &state.index {
@@ -981,7 +993,7 @@ impl FileDurableStore {
         F: FnMut(&[u8], &[u8]) -> Result<(), StorageError>,
     {
         let mutex = self.cf(cf)?;
-        let state = mutex.lock().unwrap();
+        let state = mutex.lock().expect("cf state lock poisoned");
         let mut count = 0u64;
 
         for (key, loc) in &state.index {
@@ -1007,7 +1019,7 @@ impl FileDurableStore {
         partition_count: usize,
     ) -> Result<Vec<Vec<ScanEntry>>, StorageError> {
         let mutex = self.cf(cf)?;
-        let state = mutex.lock().unwrap();
+        let state = mutex.lock().expect("cf state lock poisoned");
 
         let partition_count = partition_count.max(1);
         let mut partitions: Vec<Vec<ScanEntry>> =
@@ -1862,7 +1874,7 @@ mod tests {
         // Verify the mmap is populated.
         {
             let mutex = store2.cf(cf).unwrap();
-            let state = mutex.lock().unwrap();
+            let state = mutex.lock().expect("cf state lock poisoned");
             assert!(state.mmap.is_some(), "mmap should be created on open");
             assert!(state.mmap_len > 0);
         }
@@ -1886,7 +1898,7 @@ mod tests {
         store2.compact_cf(cf).unwrap();
         {
             let mutex = store2.cf(cf).unwrap();
-            let state = mutex.lock().unwrap();
+            let state = mutex.lock().expect("cf state lock poisoned");
             assert!(
                 state.mmap.is_some(),
                 "mmap should be refreshed after compact"
