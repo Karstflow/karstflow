@@ -240,13 +240,7 @@ impl GossipMessage {
     }
 }
 
-fn current_timestamp_ms() -> u64 {
-    use std::time::SystemTime;
-    SystemTime::now()
-        .duration_since(SystemTime::UNIX_EPOCH)
-        .expect("system clock before UNIX epoch")
-        .as_millis() as u64
-}
+use super::time::current_timestamp_ms;
 
 #[cfg(test)]
 mod tests {
