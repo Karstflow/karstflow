@@ -45,7 +45,7 @@ karstflow-types          (core types: Pubkey, Account, Hash, Shred)
 | Crate | LOC | Tests | Purpose |
 |-------|-----|-------|---------|
 | `karstflow-consensus` | 43,952 | 1,128 | Tower BFT, GHOST fork choice, leader schedule, epoch processing, Bank lifecycle, multi-threshold confirmation |
-| `karstflow-sbpf` | 38,403 | 716 | sBPF interpreter (126 opcodes), 14 builtin programs, ELF loader, CPI, 40+ syscalls, program cache |
+| `karstflow-sbpf` | 38,403 | 716 | sBPF interpreter (126 opcodes), 16 builtin programs, ELF loader, CPI, 40+ syscalls, program cache |
 | `karstflow-net` | 37,913 | 818 | Custom QUIC engine, TLS 1.3, gossip with 14-type CRDS, turbine broadcast, repair, AF_XDP |
 | `karstflow-stages` | 34,925 | 642 | Replay with fork tracking, block production, PoH state machine, pack scheduler, shred pipeline, metrics aggregation |
 | `karstflow-storage` | 25,910 | 660 | Disk-primary account database, blockstore, full+incremental snapshots, persistent backend, LZ4 compression |
@@ -77,7 +77,7 @@ karstflow-types          (core types: Pubkey, Account, Hash, Shred)
 
 ### Execution
 
-- **14 builtin programs**: System, Vote, Stake, Token, Token-2022, Associated Token, Memo, Compute Budget, Config, BPF Loader, Loader v4, Address Lookup Table, Ed25519 precompile, Secp256k1 precompile
+- **16 builtin programs**: System, Vote, Stake, Token, Token-2022, Associated Token, Memo, Compute Budget, Config, BPF Loader, Loader v4, Address Lookup Table, Ed25519 precompile, Secp256k1 precompile, Secp256r1 precompile, ZK ElGamal Proof
 - **sBPF interpreter** with segment-based compute unit accounting (batch CU deduction at control-flow boundaries for reduced per-instruction overhead)
 - **ELF loader** with program caching
 - **Full CPI** support with syscall dispatch (crypto, PDA derivation, logging, memory, sysvar access)
@@ -417,7 +417,7 @@ Current maturity of each subsystem (as of March 2026):
 | Module | Maturity | Notes |
 |--------|----------|-------|
 | Consensus | 95% | Tower BFT, GHOST fork choice, bank lifecycle, epoch processing, rewards, leader schedule, vote processing, optimistic confirmation, commitment tracking, equivocation detection, tower persistence with atomic writes |
-| sBPF VM | 91% | All 126 opcodes, 14 builtins, 40+ syscalls, ELF loader, program cache, CPI depth enforcement (max 4), Poseidon syscall, ALT deactivation guard. Remaining: JIT not planned, segment metering edge cases |
+| sBPF VM | 92% | All 126 opcodes, 14 builtins, 40+ syscalls, ELF loader, program cache, CPI depth enforcement (max 4), Poseidon syscall, ALT deactivation guard, segment-based CU metering with deplete-on-failure. Remaining: JIT not planned, is_signer propagation to builtin programs |
 | Network | 88% | Custom QUIC, TLS 1.3, gossip (14 CRDS types + vote integration), turbine with real stake weights + XDP transport wiring, repair protocol, DNS resolution, AF_XDP kernel-bypass (4K LOC). Remaining: gRPC transport |
 | Pipeline Stages | 94% | Full leader pipeline (verify → resolv → pack → exec → PoH → shred → broadcast) with real account state propagation, shred network with FEC resolver, replay with orphan buffering + cascade, dual-mode IPC, Prometheus metrics for all stages. Real execution engine enforced (no mock fallback) |
 | Storage | 93% | Disk-primary MVCC accounts, file-backed store, full/incremental snapshots with gossip hash publishing, blockstore with transaction/block-height/time indexes, LZ4 compression, lattice hash, auto-scheduled snapshot creation |
