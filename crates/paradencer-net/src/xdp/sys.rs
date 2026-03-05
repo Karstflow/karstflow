@@ -672,8 +672,8 @@ mod tests {
     fn mmap_page_offsets() {
         // Verify mmap offsets are distinct and non-overlapping.
         assert_eq!(XDP_PGOFF_RX_RING, 0);
-        assert!(XDP_PGOFF_TX_RING > XDP_PGOFF_RX_RING);
-        assert!(XDP_UMEM_PGOFF_FILL_RING > XDP_PGOFF_TX_RING);
-        assert!(XDP_UMEM_PGOFF_COMPLETION_RING > XDP_UMEM_PGOFF_FILL_RING);
+        const { assert!(XDP_PGOFF_TX_RING > XDP_PGOFF_RX_RING) };
+        const { assert!(XDP_UMEM_PGOFF_FILL_RING > XDP_PGOFF_TX_RING) };
+        const { assert!(XDP_UMEM_PGOFF_COMPLETION_RING > XDP_UMEM_PGOFF_FILL_RING) };
     }
 }

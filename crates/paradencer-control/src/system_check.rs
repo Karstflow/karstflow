@@ -366,6 +366,7 @@ fn get_available_disk_gb(path: &Path) -> Option<u64> {
         let mut stat: libc::statvfs = unsafe { std::mem::zeroed() };
         let ret = unsafe { libc::statvfs(c_path.as_ptr(), &mut stat) };
         if ret == 0 {
+            #[allow(clippy::unnecessary_cast)]
             let available_bytes = stat.f_bavail as u64 * stat.f_frsize as u64;
             Some(available_bytes / (1024 * 1024 * 1024))
         } else {
