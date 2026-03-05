@@ -556,8 +556,9 @@ pub fn development_faucet_pubkey() -> Pubkey {
 /// and returns the shared consensus infrastructure so other services
 /// (e.g., pipeline, gossip) can interact with consensus state.
 pub fn build_replay_service(config: ReplayServiceConfig, initial_stake: u64) -> ReplayBundle {
-    let consensus = build_consensus_infrastructure(initial_stake, None, None)
-        .expect("in-memory consensus infrastructure should not fail");
+    let consensus = build_consensus_infrastructure(initial_stake, None, None).expect(
+        "failed to build consensus infrastructure — check initial_stake > 0 and leader schedule",
+    );
 
     let channel_depth = config.max_blocks_per_tick.saturating_mul(8).max(64);
     let (block_tx, block_rx) = bounded_link::<paradencer_stages::AssembledBlock>(channel_depth);
@@ -593,8 +594,9 @@ pub fn build_replay_service_with_block_input(
     block_input: DualReceiver<paradencer_stages::AssembledBlock>,
     initial_stake: u64,
 ) -> ReplayBundleWithExternalInput {
-    let consensus = build_consensus_infrastructure(initial_stake, None, None)
-        .expect("in-memory consensus infrastructure should not fail");
+    let consensus = build_consensus_infrastructure(initial_stake, None, None).expect(
+        "failed to build consensus infrastructure — check initial_stake > 0 and leader schedule",
+    );
 
     let backend = Arc::new(SbpfExecutionAdapter::with_defaults());
     let service = ReplayService::with_backend(
@@ -1441,7 +1443,9 @@ pub fn build_repair_service(
     let coordinator = RepairCoordinator::new(root_slot, RepairCoordinatorConfig::default());
 
     // Channel for forwarding outbound repair requests to the I/O thread.
-    let (outbound_tx, outbound_rx) = crossbeam_channel::bounded::<OutboundRepair>(256);
+    let (outbound_tx, outbound_rx) = crossbeam_channel::bounded::<OutboundRepair>(
+        paradencer_constants::repair::REPAIR_OUTBOUND_CHANNEL_DEPTH,
+    );
 
     let atomic_stats = Arc::new(paradencer_stages::AtomicRepairStats::default());
 
@@ -3335,7 +3339,7 @@ struct ConsensusTransactionSubmitter {
 impl ConsensusTransactionSubmitter {
     fn new(bank_forks: Arc<RwLock<BankForks>>, cluster_info: Arc<ClusterInfo>) -> Self {
         let socket = std::net::UdpSocket::bind("0.0.0.0:0")
-            .expect("failed to bind UDP socket for transaction forwarding");
+            .expect("failed to bind ephemeral UDP socket for transaction forwarding — check OS limits (ulimit -n)");
         Self {
             bank_forks,
             cluster_info,

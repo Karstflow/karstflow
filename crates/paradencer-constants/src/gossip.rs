@@ -143,6 +143,12 @@ pub const PRUNE_TIMEOUT_MS: u64 = 30_000;
 /// Prevents unbounded memory growth from excessive prune messages.
 pub const MAX_PRUNE_ENTRIES_PER_DEST: usize = 256;
 
+/// Maximum cluster size for gossip protocol capacity planning.
+pub const MAX_CLUSTER_SIZE: usize = 5_000;
+
+/// Interval for polling gossip CRDS for new vote entries (milliseconds).
+pub const GOSSIP_VOTE_POLL_INTERVAL_MS: u64 = 200;
+
 /// Ping interval (milliseconds).
 pub const PING_INTERVAL_MS: u64 = 5_000;
 

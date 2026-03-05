@@ -1676,6 +1676,7 @@ dependencies = [
  "ed25519-dalek",
  "paradencer-config",
  "paradencer-consensus",
+ "paradencer-constants",
  "paradencer-control",
  "paradencer-mesh",
  "paradencer-net",

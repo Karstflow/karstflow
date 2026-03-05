@@ -528,8 +528,9 @@ impl AccountDatabase {
         if dirty.is_empty() {
             return None;
         }
-        let min = *dirty.keys().min().unwrap();
-        let max = *dirty.keys().max().unwrap();
+        let mut keys = dirty.keys();
+        let first = *keys.next()?;
+        let (min, max) = keys.fold((first, first), |(lo, hi), &k| (lo.min(k), hi.max(k)));
         Some((min, max))
     }
 
@@ -719,7 +720,7 @@ impl AccountDatabase {
         // compared to loading all accounts into memory.
         let mut account_hashes: Vec<([u8; 32], [u8; 32])> = Vec::new();
 
-        let _ = self.for_each_published_account(|pubkey, account| {
+        if let Err(e) = self.for_each_published_account(|pubkey, account| {
             if account.meta.lamports == 0 {
                 return Ok(());
             }
@@ -732,7 +733,9 @@ impl AccountDatabase {
             h.update(pubkey.as_bytes());
             account_hashes.push((*pubkey.as_bytes(), h.finalize()));
             Ok(())
-        });
+        }) {
+            tracing::error!(error = %e, "storage error during accounts hash computation — result may be incorrect");
+        }
 
         // Sort by pubkey bytes for deterministic ordering.
         account_hashes.sort_by(|a, b| a.0.cmp(&b.0));

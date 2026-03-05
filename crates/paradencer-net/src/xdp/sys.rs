@@ -1,9 +1,9 @@
-/// Linux AF_XDP kernel ABI: constants, structures, and syscall wrappers.
-///
-/// All types match the Linux kernel UAPI headers for AF_XDP sockets.
-/// Every struct is `#[repr(C)]` with exact kernel ABI layout.
-///
-/// This module is Linux-only (`#[cfg(target_os = "linux")]`).
+// Linux AF_XDP kernel ABI: constants, structures, and syscall wrappers.
+//
+// All types match the Linux kernel UAPI headers for AF_XDP sockets.
+// Every struct is `#[repr(C)]` with exact kernel ABI layout.
+//
+// This module is Linux-only (`#[cfg(target_os = "linux")]`).
 
 // ---------------------------------------------------------------------------
 // Socket family and protocol

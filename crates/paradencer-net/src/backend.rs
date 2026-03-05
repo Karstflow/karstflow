@@ -153,7 +153,7 @@ enum Backend {
     Udp(UdpSocket),
     /// AF_XDP kernel bypass backend (Linux only).
     #[cfg(target_os = "linux")]
-    Xdp(XdpBackendState),
+    Xdp(Box<XdpBackendState>),
     /// Not yet bound (initial state before `bind()`).
     Unbound,
 }
@@ -238,9 +238,9 @@ impl Transport {
         program: Arc<XdpProgram>,
     ) -> io::Result<()> {
         let socket = LiveXdpSocket::open(xdp_config, xsk_map, program)
-            .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
+            .map_err(|e| io::Error::other(e.to_string()))?;
         let rx_descs = vec![XdpDesc::default(); XDP_RX_BATCH_SIZE];
-        self.backend = Backend::Xdp(XdpBackendState { socket, rx_descs });
+        self.backend = Backend::Xdp(Box::new(XdpBackendState { socket, rx_descs }));
         self.backend_type = BackendType::Xdp;
         Ok(())
     }
@@ -403,9 +403,10 @@ impl Transport {
             }
             #[cfg(target_os = "linux")]
             Backend::Xdp(state) => {
-                let frame_addr = state.socket.allocate_tx_frame().ok_or_else(|| {
-                    io::Error::new(io::ErrorKind::Other, "no UMEM frames available for TX")
-                })?;
+                let frame_addr = state
+                    .socket
+                    .allocate_tx_frame()
+                    .ok_or_else(|| io::Error::other("no UMEM frames available for TX"))?;
 
                 // SAFETY: frame_addr is from a freshly allocated frame.
                 unsafe {

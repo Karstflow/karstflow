@@ -1,22 +1,13 @@
 pub(crate) fn usize_to_u64_saturating(value: usize) -> u64 {
-    match u64::try_from(value) {
-        Ok(value) => value,
-        Err(_) => u64::MAX,
-    }
+    u64::try_from(value).unwrap_or(u64::MAX)
 }
 
 pub(crate) fn usize_to_u128_saturating(value: usize) -> u128 {
-    match u128::try_from(value) {
-        Ok(value) => value,
-        Err(_) => u128::MAX,
-    }
+    u128::try_from(value).unwrap_or(u128::MAX)
 }
 
 pub(crate) fn u128_to_u64_saturating(value: u128) -> u64 {
-    match u64::try_from(value) {
-        Ok(value) => value,
-        Err(_) => u64::MAX,
-    }
+    u64::try_from(value).unwrap_or(u64::MAX)
 }
 
 pub(crate) fn u128_to_usize_saturating(value: u128) -> usize {

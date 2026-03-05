@@ -10,6 +10,7 @@ crossbeam-channel.workspace = true
 ed25519-dalek.workspace = true
 tracing.workspace = true
 paradencer-consensus = { path = "../paradencer-consensus" }
+paradencer-constants = { path = "../paradencer-constants" }
 paradencer-control = { path = "../paradencer-control" }
 paradencer-config = { path = "../paradencer-config" }
 paradencer-mesh = { path = "../paradencer-mesh" }

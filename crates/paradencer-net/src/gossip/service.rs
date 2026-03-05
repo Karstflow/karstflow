@@ -41,8 +41,8 @@ impl Default for GossipConfig {
             push_interval: Duration::from_millis(gossip_const::PUSH_INTERVAL_MS),
             pull_interval: Duration::from_millis(gossip_const::PULL_INTERVAL_MS),
             prune_interval: Duration::from_millis(gossip_const::PRUNE_INTERVAL_MS),
-            prune_timeout: Duration::from_secs(30),
-            max_cluster_size: 5000,
+            prune_timeout: Duration::from_millis(gossip_const::PRUNE_TIMEOUT_MS),
+            max_cluster_size: gossip_const::MAX_CLUSTER_SIZE,
             allow_private_addresses: false,
         }
     }

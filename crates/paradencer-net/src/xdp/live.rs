@@ -75,8 +75,8 @@ pub struct LiveXdpSocket {
     allocator: FrameAllocator,
     /// Shared XSKMAP reference (socket registered at our queue index).
     xsk_map: Arc<XskMap>,
-    /// Shared eBPF program reference (attached to our interface).
-    program: Arc<XdpProgram>,
+    /// Shared eBPF program reference (kept alive for the socket's lifetime).
+    _program: Arc<XdpProgram>,
     /// Runtime statistics.
     stats: LiveXdpStats,
     /// Number of pending TX descriptors not yet flushed.
@@ -112,7 +112,7 @@ impl LiveXdpSocket {
             kernel,
             allocator,
             xsk_map,
-            program,
+            _program: program,
             stats: LiveXdpStats::default(),
             tx_pending: 0,
         };

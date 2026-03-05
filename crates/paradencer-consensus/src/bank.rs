@@ -731,7 +731,7 @@ impl Bank {
         let mut accumulator = LatticeHashValue::zero();
         let mut count = 0usize;
 
-        let _ = self.accounts.for_each_published_account(|pubkey, account| {
+        if let Err(e) = self.accounts.for_each_published_account(|pubkey, account| {
             let h = lthash::hash_account(
                 &pubkey.to_bytes(),
                 &account.meta.owner.to_bytes(),
@@ -744,7 +744,11 @@ impl Bank {
                 count += 1;
             }
             Ok(())
-        });
+        }) {
+            eprintln!(
+                "[ERROR] storage error during lthash initialization — hash may be incorrect: {e}"
+            );
+        }
 
         *self.lthash.write().expect("lthash lock poisoned") = accumulator;
         count

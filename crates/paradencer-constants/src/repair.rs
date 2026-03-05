@@ -48,3 +48,6 @@ pub const MAX_ORPHAN_REPAIR_RESPONSES: usize = 11;
 
 /// Size of the Ed25519 signature in repair request headers.
 pub const REPAIR_SIGNATURE_SIZE: usize = 64;
+
+/// Bounded channel depth for outbound repair requests.
+pub const REPAIR_OUTBOUND_CHANNEL_DEPTH: usize = 256;

@@ -76,10 +76,14 @@ fn shred_produced_entries(
                 // Still process data shreds even if coding fails.
                 for shred in &data_shreds {
                     if let Some(bs) = blockstore {
-                        let _ = bs.insert_shred(shred);
+                        if let Err(e) = bs.insert_shred(shred) {
+                            warn!(slot, error = %e, "blockstore insert failed for produced shred");
+                        }
                     }
                     if let Some(ref mut sender) = direct_shred_sender {
-                        let _ = sender.try_send(shred.clone());
+                        if let Err(e) = sender.try_send(shred.clone()) {
+                            warn!(slot, error = ?e, "self-replay channel full, shred dropped");
+                        }
                     }
                 }
                 total_data += data_shreds.len() as u64;
@@ -93,7 +97,9 @@ fn shred_produced_entries(
         // Store all shreds in blockstore for repair serving.
         if let Some(bs) = blockstore {
             for shred in data_shreds.iter().chain(coding_shreds.iter()) {
-                let _ = bs.insert_shred(shred);
+                if let Err(e) = bs.insert_shred(shred) {
+                    warn!(slot, error = %e, "blockstore insert failed for produced shred");
+                }
             }
         }
 
@@ -101,7 +107,9 @@ fn shred_produced_entries(
         // This closes the loop: leader produces → shreds → block assembled → replay.
         if let Some(ref mut sender) = direct_shred_sender {
             for shred in &data_shreds {
-                let _ = sender.try_send(shred.clone());
+                if let Err(e) = sender.try_send(shred.clone()) {
+                    warn!(slot, error = ?e, "self-replay channel full, shred dropped");
+                }
             }
         }
     }
@@ -351,12 +359,8 @@ fn run_with_node_config(
     // Snapshot creation: periodically create full and incremental snapshots
     // when the root advances. Only runs when persistent storage is available.
     // Publishes snapshot hashes via gossip so peers can discover snapshots.
-    let _snapshot_thread = if node_config.data_dir.is_some() {
-        let snapshot_dir = node_config
-            .data_dir
-            .as_ref()
-            .expect("data_dir required for snapshot creation")
-            .join("snapshots");
+    let _snapshot_thread = if let Some(data_dir) = &node_config.data_dir {
+        let snapshot_dir = data_dir.join("snapshots");
         paradencer_control::spawn_snapshot_thread_with_gossip(
             &replay_bundle.signal_bus,
             consensus.accounts.clone(),
@@ -691,8 +695,9 @@ fn run_with_node_config(
                 let mut cursor: u64 = gv_cluster_info.cursor();
 
                 loop {
-                    // Poll every 200ms for new CRDS entries.
-                    std::thread::sleep(std::time::Duration::from_millis(200));
+                    std::thread::sleep(std::time::Duration::from_millis(
+                        paradencer_constants::gossip::GOSSIP_VOTE_POLL_INTERVAL_MS,
+                    ));
 
                     let (values, new_cursor) = gv_cluster_info.values_since_cursor(cursor);
                     if new_cursor == cursor {
