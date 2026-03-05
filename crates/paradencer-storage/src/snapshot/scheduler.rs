@@ -8,7 +8,6 @@ use std::collections::VecDeque;
 use std::path::PathBuf;
 
 /// Action the validator should take at a given slot.
-#[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SnapshotAction {
     /// No snapshot needed at this slot.
@@ -36,7 +35,6 @@ pub struct SnapshotRecord {
 /// Given a `SnapshotConfig`, determines at each slot whether a full
 /// or incremental snapshot should be taken, and tracks created snapshots
 /// for retention management.
-#[allow(dead_code)]
 pub struct SnapshotScheduler {
     config: SnapshotConfig,
     last_full_slot: Option<u64>,
@@ -45,7 +43,6 @@ pub struct SnapshotScheduler {
     incremental_snapshots: VecDeque<SnapshotRecord>,
 }
 
-#[allow(dead_code)]
 impl SnapshotScheduler {
     pub fn new(config: SnapshotConfig) -> Self {
         Self {

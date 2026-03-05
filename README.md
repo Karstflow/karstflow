@@ -4,7 +4,7 @@
 
 Paradencer is a ground-up Solana validator built for maximum throughput and minimal latency. It features a custom network stack, pre-allocated data structures, zero-copy I/O patterns, and a modular tile-based architecture designed for predictable performance at scale.
 
-**251K+ lines of Rust | 5,240+ tests | 20 crates**
+**255K+ lines of Rust | 5,300+ tests | 20 crates**
 
 ## Design Principles
 
@@ -126,11 +126,77 @@ All pipeline stages communicate through dual-mode IPC (`DualSender`/`DualReceive
 - **Transaction simulation** engine
 - **Account caching** with LRU eviction
 
-### Plugin System
+### Plugin System (Geyser-compatible)
+
+Paradencer includes a streaming notification system analogous to Solana's Geyser plugin interface. External shared libraries (.so/.dylib) receive real-time account updates, transaction notifications, slot status changes, and block metadata from the validator.
 
 - **Dynamic loading**: Load/unload shared libraries at runtime via C FFI
-- **RPC control**: Register, unregister, and query plugins through RPC interface
+- **RPC control**: Register, unregister, and query plugins through RPC interface (`pluginRegister`, `pluginUnregister`, `pluginList`, `pluginReload`)
 - **Lifecycle management**: Plugin start/stop/reload with graceful handling
+- **Notification types**: `AccountUpdate`, `TransactionNotification`, `SlotStatus`, `BlockMetadata`
+
+#### Writing a Plugin
+
+Plugins implement the `PluginInterface` trait and export a C constructor:
+
+```rust
+use paradencer_plugin::{PluginInterface, PluginResult, AccountUpdate};
+
+#[derive(Debug)]
+struct MyGeyserPlugin;
+
+impl PluginInterface for MyGeyserPlugin {
+    fn name(&self) -> &'static str { "my-geyser-plugin" }
+
+    fn notify_account_update(
+        &self,
+        account: &AccountUpdate<'_>,
+        slot: u64,
+        _is_startup: bool,
+    ) -> PluginResult<()> {
+        // Stream account updates to your database, indexer, etc.
+        Ok(())
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn _create_plugin() -> *mut dyn PluginInterface {
+    Box::into_raw(Box::new(MyGeyserPlugin))
+}
+```
+
+#### Plugin Configuration
+
+Each plugin is configured via a JSON file:
+
+```json
+{
+    "libpath": "/path/to/libmy_geyser_plugin.so",
+    "name": "my-geyser-plugin",
+    "accounts_selector": { "owners": ["TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"] }
+}
+```
+
+#### Loading Plugins
+
+```bash
+# Via environment variable at startup
+PARADENCER_PLUGIN_CONFIG=/path/to/plugin-config.json cargo run -p paradencer-node
+
+# Via RPC at runtime
+curl -X POST http://localhost:8899 -H "Content-Type: application/json" \
+  -d '{"jsonrpc":"2.0","id":1,"method":"pluginRegister","params":["/path/to/plugin-config.json"]}'
+
+# List loaded plugins
+curl -X POST http://localhost:8899 -H "Content-Type: application/json" \
+  -d '{"jsonrpc":"2.0","id":1,"method":"pluginList","params":[]}'
+
+# Reload a plugin (hot-swap)
+curl -X POST http://localhost:8899 -H "Content-Type: application/json" \
+  -d '{"jsonrpc":"2.0","id":1,"method":"pluginReload","params":["my-geyser-plugin"]}'
+```
+
+**Note**: The gRPC transport layer (HTTP/2 + protobuf service definitions) for full Geyser protocol compatibility is planned as a separate .so plugin.
 
 ## Quick Start
 
@@ -350,36 +416,40 @@ Current maturity of each subsystem (as of March 2026):
 
 | Module | Maturity | Notes |
 |--------|----------|-------|
-| Consensus | 93% | Tower BFT, GHOST fork choice, bank lifecycle, epoch processing, rewards, leader schedule, vote processing, optimistic confirmation, commitment tracking |
+| Consensus | 94% | Tower BFT, GHOST fork choice, bank lifecycle, epoch processing, rewards, leader schedule, vote processing, optimistic confirmation, commitment tracking, equivocation detection |
 | sBPF VM | 88% | All 126 opcodes, 14 builtins, 40+ syscalls, ELF loader, program cache, CPI. Remaining: JIT not planned, segment metering edge cases |
-| Network | 80% | Custom QUIC, TLS 1.3, gossip (14 CRDS types + vote integration), turbine with real stake weights, repair protocol. Remaining: IGMP/DNS discovery |
-| Pipeline Stages | 78% | Full leader pipeline (verify → resolv → pack → exec → PoH), shred network with FEC resolver, replay with orphan buffering, dual-mode IPC for all stages. Remaining: conformance testing |
-| Storage | 82% | Disk-primary MVCC accounts, file-backed store, full/incremental snapshots, blockstore with transaction index, LZ4 compression. Remaining: snapshot GC tuning |
-| IPC / Mesh | 100% | Dual-mode SPSC (channels + shared memory), 9 FragmentCodec implementations, tile links, bounded channels with backpressure stats |
-| RPC | 78% | 60+ methods with real bank data via BankAccessProvider trait, WebSocket subscriptions. Remaining: historical queries from blockstore |
-| Execution | 85% | SVM adapter, batch orchestration, retry policies, execution bridge |
-| Crypto | 90% | Ed25519 batch verify, Blake3/SHA-256/Keccak, secp256k1/r1, BN254 pairing, Reed-Solomon FEC, LtHash, ZK ElGamal proofs |
-| Config | 95% | TOML with env override, live-mode preflight, schema migration |
-| Control | 90% | Bootstrap, materialization, consensus wiring, shred store service, snapshot scheduling |
+| Network | 83% | Custom QUIC, TLS 1.3, gossip (14 CRDS types + vote integration), turbine with real stake weights, repair protocol, DNS resolution. Remaining: gRPC transport |
+| Pipeline Stages | 93% | Full leader pipeline (verify → resolv → pack → exec → PoH → shred → broadcast), shred network with FEC resolver, replay with orphan buffering, dual-mode IPC, Prometheus metrics for all stages. Real execution engine enforced (no mock fallback) |
+| Storage | 93% | Disk-primary MVCC accounts, file-backed store, full/incremental snapshots with gossip hash publishing, blockstore with transaction/block-height/time indexes, LZ4 compression, lattice hash, auto-scheduled snapshot creation |
+| IPC / Mesh | 95% | Dual-mode SPSC (channels + shared memory), 9 FragmentCodec implementations, tile links, bounded channels with backpressure stats |
+| RPC | 95% | 52 JSON-RPC methods with real bank data via BankAccessProvider, WebSocket subscriptions, getHealth wired to real health check |
+| Execution | 92% | SVM adapter with real BankExecutionEngine enforced in production, batch orchestration, retry policies |
+| Crypto | 88% | Ed25519 batch verify, Blake3/SHA-256/Keccak, secp256k1/r1, BN254 pairing, Reed-Solomon FEC, LtHash, ChaCha RNG, ZK ElGamal proofs |
+| Config | 91% | TOML with env override, live-mode preflight, schema migration, cluster profiles (devnet/testnet/mainnet/local) |
+| Control | 93% | Bootstrap, materialization, consensus wiring, shred store service, snapshot scheduling, configure/monitor CLI commands |
 | Runtime | 95% | Tokio/pinned/tile modes, CnC supervisor, heartbeat, stuck detection, graceful shutdown |
+
+### Overall Readiness: 92%
+
+Weighted readiness score across all subsystems (consensus 15%, networking 12%, stages 15%, storage 10%, execution 10%, native programs 10%, crypto 10%, IPC 5%, RPC 5%, config 5%, runtime 3%).
 
 ### Devnet Readiness: 9/10
 
-The validator can boot from genesis or snapshot, sync via gossip and turbine, participate in consensus (voting, fork choice, root advancement), serve real account/block data through RPC, produce blocks during leader slots, create and restore snapshots, and publish metrics to Prometheus.
+The validator can boot from genesis or snapshot, sync via gossip and turbine, participate in consensus (voting, fork choice, root advancement), serve real account/block data through RPC, produce blocks during leader slots (entries → shreds → broadcast → self-replay), create and restore snapshots, and publish metrics to Prometheus.
 
-**Operational**: Gossip discovery, turbine shred reception, FEC reconstruction, block replay, vote submission, snapshot auto-scheduling, leader pipeline, shred store persistence, repair protocol.
+**Operational**: Gossip discovery, turbine shred reception, FEC reconstruction, block replay, vote submission, snapshot auto-scheduling with gossip hash publishing, leader pipeline with real execution, shred store persistence, repair protocol, blockstore GC with retention policies.
 
 **Remaining for full devnet operation**: TPU forwarding resilience (fallback leader chain), expanded conformance testing against reference implementations.
 
-### Mainnet Readiness: 5/10
+### Mainnet Readiness: 6/10
 
-Core consensus, execution, and storage logic is functionally complete. Gaps are in operational hardening:
+Core consensus, execution, and storage logic is functionally complete. All P0 and P1 blockers resolved. Gaps are in operational hardening:
 
-- Performance optimization: crypto ASM paths, zero-copy critical paths
+- Performance optimization: crypto ASM paths, zero-copy critical paths, shared memory IPC tuning
 - Security: formal audit, fuzzing coverage
-- Observability: expanded metrics for operational monitoring
+- Observability: Prometheus metrics wired for all major stages, remaining: per-account I/O tracking
 - Resilience: network partition handling, disk I/O backpressure, memory budget enforcement
-- Production tooling: ledger-tool equivalent, snapshot export/import CLI
+- Production tooling: gRPC plugin transport (HTTP/2 + protobuf), ledger-tool equivalent
 
 ## Code Quality
 
@@ -387,7 +457,8 @@ Core consensus, execution, and storage logic is functionally complete. Gaps are 
 - **Formatting**: `rustfmt` with custom rules (`rustfmt.toml`)
 - **CI**: `just ci` runs format check + clippy + all tests
 - **Constants discipline**: All protocol constants in `paradencer-constants` crate (single source of truth)
-- **TODO tracking**: Only 1 outstanding across 246K LOC
+- **Zero warnings**: Clean `cargo check --workspace` with no dead code or unused imports
+- **TODO tracking**: Zero outstanding TODOs in production code
 
 ## License
 

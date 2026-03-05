@@ -139,12 +139,11 @@ impl<'a> Iterator for AppendVecIter<'a> {
 }
 
 /// Parse all accounts from an AppendVec byte buffer.
-#[allow(dead_code)]
+#[cfg(test)]
 pub fn parse_append_vec(buf: &[u8]) -> Result<Vec<AppendVecAccount>, AppendVecError> {
     AppendVecIter::new(buf).collect()
 }
 
-#[allow(dead_code)]
 /// Serialize a single account into AppendVec binary format.
 ///
 /// Produces a 136-byte header followed by account data, padded to
@@ -179,7 +178,6 @@ pub fn serialize_append_vec_record(account: &AppendVecAccount) -> Vec<u8> {
     buf
 }
 
-#[allow(dead_code)]
 /// Serialize multiple accounts into a single AppendVec buffer.
 pub fn serialize_append_vec(accounts: &[AppendVecAccount]) -> Vec<u8> {
     let mut buf = Vec::new();
@@ -189,7 +187,6 @@ pub fn serialize_append_vec(accounts: &[AppendVecAccount]) -> Vec<u8> {
     buf
 }
 
-#[allow(dead_code)]
 /// Convert an internal Account into an AppendVecAccount for serialization.
 ///
 /// The hash is computed as SHA-256 over the canonical account fields

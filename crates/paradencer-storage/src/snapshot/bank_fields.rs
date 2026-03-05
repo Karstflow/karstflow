@@ -165,13 +165,12 @@ pub struct StakeHistoryRecord {
 ///
 /// Writes fields in the exact layout expected by Solana validators.
 /// Bincode 1.x uses fixed-size little-endian encoding with u64 lengths.
-#[allow(dead_code)]
 pub(crate) struct BincodeWriter {
     buf: Vec<u8>,
 }
 
-#[allow(dead_code)]
 impl BincodeWriter {
+    #[cfg(test)]
     pub fn new() -> Self {
         Self { buf: Vec::new() }
     }
@@ -220,6 +219,7 @@ impl BincodeWriter {
         }
     }
 
+    #[cfg(test)]
     pub fn write_byte_vec(&mut self, data: &[u8]) {
         self.write_u64(data.len() as u64);
         self.buf.extend_from_slice(data);
@@ -755,7 +755,6 @@ pub fn parse_bank_state(data: &[u8]) -> Result<SnapshotBankState, StorageError> 
 /// omitted from the stakes section — only stake history and epoch are
 /// preserved. The trailing AccountsDbFields and ExtraFields are NOT
 /// written by this function.
-#[allow(dead_code)]
 pub fn serialize_bank_state(state: &SnapshotBankState) -> Vec<u8> {
     let mut w = BincodeWriter::with_capacity(4096);
 
@@ -931,7 +930,6 @@ fn write_stakes_summary(w: &mut BincodeWriter, ss: &StakeSummary) {
 // ---------------------------------------------------------------------------
 
 /// Describes a single AppendVec storage entry in the snapshot.
-#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub struct StorageEntry {
     /// Storage identifier (matches `<slot>.<id>` in the archive path).
@@ -944,7 +942,6 @@ pub struct StorageEntry {
 ///
 /// This section follows the bank state in the snapshot manifest and tells
 /// the loader which AppendVec files exist and their sizes.
-#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub struct AccountsDbLayout {
     /// Mapping from slot to the AppendVec storage entries at that slot.
@@ -962,7 +959,6 @@ pub struct AccountsDbLayout {
 /// This produces the full binary content for `snapshots/<slot>/<slot>` in
 /// a Solana-compatible snapshot archive. The output can be parsed by any
 /// Solana validator.
-#[allow(dead_code)]
 pub fn serialize_full_manifest(state: &SnapshotBankState, layout: &AccountsDbLayout) -> Vec<u8> {
     let mut w = BincodeWriter::with_capacity(8192);
 

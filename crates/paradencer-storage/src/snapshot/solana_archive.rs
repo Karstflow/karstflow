@@ -168,12 +168,10 @@ impl SnapshotArchive {
 /// - `accounts/<slot>.<id>` — AppendVec account files
 ///
 /// Returns the uncompressed tar bytes. Caller can compress with zstd.
-#[allow(dead_code)]
 pub struct SnapshotArchiveBuilder {
     entries: Vec<(String, Vec<u8>)>,
 }
 
-#[allow(dead_code)]
 impl SnapshotArchiveBuilder {
     pub fn new() -> Self {
         Self {
@@ -196,6 +194,7 @@ impl SnapshotArchiveBuilder {
     }
 
     /// Add the status cache.
+    #[cfg(test)]
     pub fn set_status_cache(&mut self, data: Vec<u8>) -> &mut Self {
         self.entries
             .push(("snapshots/status_cache".to_string(), data));
