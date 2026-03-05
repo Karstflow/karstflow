@@ -5,6 +5,7 @@ pub enum RpcMethodError {
     MethodNotFound,
     MinimumContextSlotNotReached,
     TransactionSubmissionFailed,
+    NodeUnhealthy,
     Internal,
 }
 
@@ -16,6 +17,7 @@ impl RpcMethodError {
             Self::MethodNotFound => -32601,
             Self::MinimumContextSlotNotReached => -32016,
             Self::TransactionSubmissionFailed => -32002,
+            Self::NodeUnhealthy => -32005,
             Self::Internal => -32603,
         }
     }
@@ -27,6 +29,7 @@ impl RpcMethodError {
             Self::MethodNotFound => format!("Method not found: {method}"),
             Self::MinimumContextSlotNotReached => "Minimum context slot not reached".to_string(),
             Self::TransactionSubmissionFailed => "Transaction submission failed".to_string(),
+            Self::NodeUnhealthy => "Node is behind by too many slots".to_string(),
             Self::Internal => "Internal error".to_string(),
         }
     }

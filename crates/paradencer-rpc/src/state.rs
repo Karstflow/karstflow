@@ -301,6 +301,23 @@ pub trait BankAccessProvider: Send + Sync {
     ) -> std::result::Result<[u8; 64], String> {
         Err("airdrop not available in this mode".to_string())
     }
+
+    /// Check whether the node is healthy (synced within acceptable lag).
+    ///
+    /// Returns `true` if health monitoring is not configured (optimistic)
+    /// or if the node is within the acceptable slot lag threshold.
+    fn is_healthy(&self) -> bool {
+        true
+    }
+
+    /// Get a health report as a JSON string.
+    ///
+    /// Returns a detailed health report including slot, block height,
+    /// heartbeat, uptime, and sync status. Returns `None` if health
+    /// monitoring is not configured.
+    fn get_health_report(&self) -> Option<String> {
+        None
+    }
 }
 
 /// Parsed block data returned by `get_block_data`.

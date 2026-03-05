@@ -2396,7 +2396,7 @@ pub fn maybe_spawn_quic_bridge(
 
 #[cfg(test)]
 pub(crate) fn maybe_start_rpc_http_server(node_config: &NodeConfig) -> Result<()> {
-    maybe_start_rpc_http_server_with_consensus(node_config, None, None, None, [0u8; 32], None)
+    maybe_start_rpc_http_server_with_consensus(node_config, None, None, None, [0u8; 32], None, None)
 }
 
 /// Start the RPC HTTP server with optional live consensus data.
@@ -2418,6 +2418,7 @@ pub fn maybe_start_rpc_http_server_with_consensus(
     cluster_info: Option<Arc<ClusterInfo>>,
     identity_pubkey: [u8; 32],
     blockstore: Option<Arc<Blockstore>>,
+    health_status: Option<SharedHealthStatus>,
 ) -> Result<()> {
     if !node_config.rpc_enabled {
         return Ok(());
@@ -2438,6 +2439,7 @@ pub fn maybe_start_rpc_http_server_with_consensus(
                     cluster_info.clone(),
                     blockstore,
                     node_config.expected_genesis_hash.clone(),
+                    health_status,
                 )));
             let submitter: Option<Arc<dyn TransactionSubmitter>> =
                 cluster_info.map(|ci| -> Arc<dyn TransactionSubmitter> {
@@ -2511,6 +2513,7 @@ struct ConsensusBankAccessProvider {
     cluster_info: Option<Arc<ClusterInfo>>,
     blockstore: Option<Arc<Blockstore>>,
     genesis_hash: Option<String>,
+    health_status: Option<SharedHealthStatus>,
 }
 
 impl ConsensusBankAccessProvider {
@@ -2521,6 +2524,7 @@ impl ConsensusBankAccessProvider {
         cluster_info: Option<Arc<ClusterInfo>>,
         blockstore: Option<Arc<Blockstore>>,
         genesis_hash: Option<String>,
+        health_status: Option<SharedHealthStatus>,
     ) -> Self {
         Self {
             bank_forks,
@@ -2530,6 +2534,7 @@ impl ConsensusBankAccessProvider {
             cluster_info,
             blockstore,
             genesis_hash,
+            health_status,
         }
     }
 
@@ -3263,6 +3268,17 @@ impl BankAccessProvider for ConsensusBankAccessProvider {
         sig[40..48].copy_from_slice(&slot.to_le_bytes());
         Ok(sig)
     }
+
+    fn is_healthy(&self) -> bool {
+        match &self.health_status {
+            Some(h) => h.is_ready(128),
+            None => true,
+        }
+    }
+
+    fn get_health_report(&self) -> Option<String> {
+        self.health_status.as_ref().map(|h| h.to_json())
+    }
 }
 
 /// Provides leader pubkey lookups for shred signature verification.
@@ -3508,6 +3524,7 @@ pub fn run_runtime_phase_with_consensus(
         cluster_info,
         identity_pubkey,
         blockstore,
+        runtime_bundle.health_status.clone(),
     )?;
     println!(
         "{}",

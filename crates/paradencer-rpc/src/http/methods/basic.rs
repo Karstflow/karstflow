@@ -24,7 +24,14 @@ pub(super) fn handle(
     bank_access: Option<&Arc<dyn BankAccessProvider>>,
 ) -> Result<serde_json::Value, RpcMethodError> {
     match method {
-        RpcMethod::GetHealth => Ok(types::to_value(&"ok")),
+        RpcMethod::GetHealth => {
+            let healthy = bank_access.is_none_or(|b| b.is_healthy());
+            if healthy {
+                Ok(types::to_value(&"ok"))
+            } else {
+                Err(RpcMethodError::NodeUnhealthy)
+            }
+        }
         RpcMethod::GetVersion => {
             let response = GetVersionResponse {
                 paradencer_core: env!("CARGO_PKG_VERSION").to_string(),
