@@ -1,0 +1,58 @@
+[package]
+name = "karstflow-net"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "High-performance networking stack for Karstflow validator"
+
+[dependencies]
+karstflow-constants = { workspace = true }
+karstflow-crypto = { path = "../karstflow-crypto" }
+karstflow-mesh = { path = "../karstflow-mesh" }
+karstflow-types = { path = "../karstflow-types" }
+
+# Low-level system interfaces
+libc = "0.2"
+
+# Cryptography (TLS 1.3 primitives)
+sha2 = { workspace = true }
+hmac = { workspace = true }
+aes = { workspace = true }
+aes-gcm = "0.10"
+x25519-dalek = { version = "2.0", features = ["static_secrets"] }
+ed25519-dalek = { workspace = true }
+
+# Serialization (gossip/repair protocol)
+serde = { workspace = true }
+bincode = { workspace = true }
+bs58 = { workspace = true }
+bytes = { workspace = true }
+bv = { workspace = true }
+serde-big-array = { workspace = true }
+
+# Concurrency
+parking_lot = { workspace = true }
+crossbeam-channel = { workspace = true }
+
+# Async runtime (for gossip/repair service loops)
+tokio = { workspace = true, features = ["net", "sync", "time"] }
+
+# HTTP client (snapshot download)
+ureq = { workspace = true }
+
+# Utilities
+thiserror = { workspace = true }
+tracing = { workspace = true }
+rand = { workspace = true }
+rand_chacha = { workspace = true }
+tempfile = { workspace = true }
+
+[dev-dependencies]
+hex = "0.4"
+tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
+
+[features]
+default = []
+# Enable AF_XDP kernel-bypass networking (Linux only, requires CAP_SYS_ADMIN)
+xdp = []

@@ -1,25 +1,25 @@
 [workspace]
 members = [
-  "crates/paradencer-core",
-  "crates/paradencer-runtime",
-  "crates/paradencer-mesh",
-  "crates/paradencer-execution",
-  "crates/paradencer-storage",
-  "crates/paradencer-constants",
-  "crates/paradencer-stages",
-  "crates/paradencer-config",
-  "crates/paradencer-observability",
-  "crates/paradencer-rpc",
-  "crates/paradencer-control",
-  "crates/paradencer-topology",
-  "crates/paradencer-node",
-  "crates/paradencer-consensus",
-  "crates/paradencer-sbpf",
-  "crates/paradencer-types",
-  "crates/paradencer-ids",
-  "crates/paradencer-crypto",
-  "crates/paradencer-net",
-  "crates/paradencer-plugin",
+  "crates/karstflow-core",
+  "crates/karstflow-runtime",
+  "crates/karstflow-mesh",
+  "crates/karstflow-execution",
+  "crates/karstflow-storage",
+  "crates/karstflow-constants",
+  "crates/karstflow-stages",
+  "crates/karstflow-config",
+  "crates/karstflow-observability",
+  "crates/karstflow-rpc",
+  "crates/karstflow-control",
+  "crates/karstflow-topology",
+  "crates/karstflow-node",
+  "crates/karstflow-consensus",
+  "crates/karstflow-sbpf",
+  "crates/karstflow-types",
+  "crates/karstflow-ids",
+  "crates/karstflow-crypto",
+  "crates/karstflow-net",
+  "crates/karstflow-plugin",
 ]
 resolver = "2"
 
@@ -93,9 +93,9 @@ memmap2 = "0.9"
 
 # Internal crates
 libloading = "0.8"
-paradencer-constants = { path = "crates/paradencer-constants" }
-paradencer-types = { path = "crates/paradencer-types" }
-paradencer-crypto = { path = "crates/paradencer-crypto" }
+karstflow-constants = { path = "crates/karstflow-constants" }
+karstflow-types = { path = "crates/karstflow-types" }
+karstflow-crypto = { path = "crates/karstflow-crypto" }
 
 [profile.release]
 lto = "thin"
