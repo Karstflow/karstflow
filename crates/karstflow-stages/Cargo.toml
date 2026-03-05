@@ -1,0 +1,33 @@
+[package]
+name = "karstflow-stages"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[dependencies]
+thiserror.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+bincode.workspace = true
+karstflow-consensus = { path = "../karstflow-consensus" }
+karstflow-net = { path = "../karstflow-net" }
+karstflow-execution = { path = "../karstflow-execution" }
+karstflow-storage = { path = "../karstflow-storage" }
+karstflow-runtime = { path = "../karstflow-runtime" }
+karstflow-mesh = { path = "../karstflow-mesh" }
+karstflow-types = { path = "../karstflow-types" }
+karstflow-crypto = { path = "../karstflow-crypto" }
+karstflow-sbpf = { path = "../karstflow-sbpf" }
+karstflow-constants = { path = "../karstflow-constants" }
+karstflow-ids = { path = "../karstflow-ids" }
+crossbeam-channel = { workspace = true }
+tracing.workspace = true
+reed-solomon-erasure = "6.0"
+ed25519-dalek = { version = "2.1", features = ["rand_core"] }
+blake3.workspace = true
+bs58.workspace = true
+sha2.workspace = true
+
+[dev-dependencies]
+rand = "0.8"

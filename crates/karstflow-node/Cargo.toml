@@ -1,0 +1,23 @@
+[package]
+name = "karstflow-node"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[dependencies]
+crossbeam-channel.workspace = true
+ed25519-dalek.workspace = true
+tracing.workspace = true
+karstflow-consensus = { path = "../karstflow-consensus" }
+karstflow-constants = { path = "../karstflow-constants" }
+karstflow-control = { path = "../karstflow-control" }
+karstflow-config = { path = "../karstflow-config" }
+karstflow-mesh = { path = "../karstflow-mesh" }
+karstflow-net = { path = "../karstflow-net" }
+karstflow-observability = { path = "../karstflow-observability" }
+karstflow-plugin = { path = "../karstflow-plugin" }
+karstflow-stages = { path = "../karstflow-stages" }
+karstflow-storage = { path = "../karstflow-storage" }
+karstflow-topology = { path = "../karstflow-topology" }
+karstflow-types = { path = "../karstflow-types" }

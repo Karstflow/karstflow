@@ -1,0 +1,17 @@
+[package]
+name = "karstflow-execution"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[dependencies]
+thiserror.workspace = true
+karstflow-storage = { path = "../karstflow-storage" }
+karstflow-consensus = { path = "../karstflow-consensus" }
+karstflow-sbpf = { path = "../karstflow-sbpf" }
+karstflow-types = { path = "../karstflow-types" }
+dashmap = "6.1"
+
+[dev-dependencies]
+karstflow-ids = { path = "../karstflow-ids" }

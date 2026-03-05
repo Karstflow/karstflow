@@ -1,0 +1,358 @@
+/// eBPF program loader and XSKMAP management for AF_XDP.
+///
+/// Handles loading dynamically generated eBPF XDP programs into the kernel,
+/// creating XSKMAP dispatch tables, and attaching programs to network
+/// interfaces. No libbpf or libxdp dependency — uses raw `bpf()` syscalls.
+///
+/// This module is Linux-only (`#[cfg(target_os = "linux")]`).
+use std::os::unix::io::RawFd;
+
+use super::ebpf::{GeneratedProgram, XdpFilterConfig};
+use super::kernel::XdpError;
+use super::sys::*;
+
+// ---------------------------------------------------------------------------
+// XskMap — BPF map for XSK socket dispatch
+// ---------------------------------------------------------------------------
+
+/// BPF XSKMAP: maps NIC queue indices to AF_XDP socket file descriptors.
+///
+/// The eBPF XDP program uses this map to redirect matching packets to the
+/// correct AF_XDP socket based on the packet's RX queue index.
+pub struct XskMap {
+    /// BPF map file descriptor.
+    map_fd: RawFd,
+    /// Maximum number of entries (queue indices).
+    max_entries: u32,
+}
+
+impl XskMap {
+    /// Create a new XSKMAP via `bpf(BPF_MAP_CREATE)`.
+    ///
+    /// `max_entries` is the maximum number of NIC queues supported.
+    pub fn create(max_entries: u32) -> Result<Self, XdpError> {
+        let mut attr = BpfMapCreateAttr {
+            map_type: BPF_MAP_TYPE_XSKMAP,
+            key_size: 4,   // u32 queue index
+            value_size: 4, // u32 XSK fd
+            max_entries,
+            map_flags: 0,
+            inner_map_fd: 0,
+            numa_node: 0,
+            map_name: [0u8; 16],
+        };
+
+        // Set map name for debugfs visibility.
+        let name = b"xdp_xsk_map";
+        attr.map_name[..name.len()].copy_from_slice(name);
+
+        let fd = unsafe {
+            bpf_syscall(
+                BPF_MAP_CREATE,
+                &attr as *const BpfMapCreateAttr as *const u8,
+                std::mem::size_of::<BpfMapCreateAttr>() as u32,
+            )
+        }
+        .map_err(|errno| XdpError::BpfSyscall {
+            cmd: BPF_MAP_CREATE,
+            errno,
+        })?;
+
+        Ok(Self {
+            map_fd: fd,
+            max_entries,
+        })
+    }
+
+    /// Insert an XSK socket into the map at the given queue index.
+    ///
+    /// This activates the socket for receiving redirected packets on
+    /// the specified NIC queue.
+    pub fn insert(&self, queue_id: u32, xsk_fd: RawFd) -> Result<(), XdpError> {
+        let attr = BpfMapUpdateAttr {
+            map_fd: self.map_fd as u32,
+            _pad0: 0,
+            key: &queue_id as *const u32 as u64,
+            value: &xsk_fd as *const RawFd as u64,
+            flags: BPF_ANY,
+        };
+
+        unsafe {
+            bpf_syscall(
+                BPF_MAP_UPDATE_ELEM,
+                &attr as *const BpfMapUpdateAttr as *const u8,
+                std::mem::size_of::<BpfMapUpdateAttr>() as u32,
+            )
+        }
+        .map_err(|errno| XdpError::BpfSyscall {
+            cmd: BPF_MAP_UPDATE_ELEM,
+            errno,
+        })?;
+
+        Ok(())
+    }
+
+    /// Remove an XSK socket from the map at the given queue index.
+    ///
+    /// This deactivates packet redirection for the specified queue.
+    pub fn remove(&self, queue_id: u32) -> Result<(), XdpError> {
+        let attr = BpfMapDeleteAttr {
+            map_fd: self.map_fd as u32,
+            _pad0: 0,
+            key: &queue_id as *const u32 as u64,
+        };
+
+        unsafe {
+            bpf_syscall(
+                BPF_MAP_DELETE_ELEM,
+                &attr as *const BpfMapDeleteAttr as *const u8,
+                std::mem::size_of::<BpfMapDeleteAttr>() as u32,
+            )
+        }
+        .map_err(|errno| XdpError::BpfSyscall {
+            cmd: BPF_MAP_DELETE_ELEM,
+            errno,
+        })?;
+
+        Ok(())
+    }
+
+    /// Get the BPF map file descriptor.
+    pub fn fd(&self) -> RawFd {
+        self.map_fd
+    }
+
+    /// Maximum entries in this map.
+    pub fn max_entries(&self) -> u32 {
+        self.max_entries
+    }
+}
+
+impl Drop for XskMap {
+    fn drop(&mut self) {
+        if self.map_fd >= 0 {
+            // SAFETY: map_fd is a valid BPF map fd obtained from bpf().
+            unsafe { libc::close(self.map_fd) };
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// XdpProgram — loaded eBPF XDP program
+// ---------------------------------------------------------------------------
+
+/// A loaded eBPF XDP program attached to a network interface.
+///
+/// The program redirects matching packets to AF_XDP sockets via XSKMAP.
+/// Manages both the program fd and the BPF link fd for cleanup.
+pub struct XdpProgram {
+    /// BPF program file descriptor.
+    prog_fd: RawFd,
+    /// BPF link file descriptor (for `BPF_LINK_CREATE` attachment).
+    link_fd: Option<RawFd>,
+}
+
+impl XdpProgram {
+    /// Load an eBPF XDP program into the kernel.
+    ///
+    /// The `program` contains the generated bytecode. The XSKMAP fd is
+    /// patched into the program's `lddw` instructions that reference the
+    /// map (the eBPF generator uses `xsk_map_fd` in `XdpFilterConfig`).
+    ///
+    /// Returns the loaded program (not yet attached to any interface).
+    pub fn load(program: &GeneratedProgram) -> Result<Self, XdpError> {
+        // GPL license required for XDP programs that call bpf_redirect_map.
+        let license = b"GPL\0";
+
+        // Kernel verifier log buffer for debugging load failures.
+        let mut log_buf = vec![0u8; 4096];
+
+        let attr = BpfProgLoadAttr {
+            prog_type: BPF_PROG_TYPE_XDP,
+            insn_cnt: program.insn_count as u32,
+            insns: program.instructions.as_ptr() as u64,
+            license: license.as_ptr() as u64,
+            log_level: 0, // Set to 6 for debugging verifier issues
+            log_size: log_buf.len() as u32,
+            log_buf: log_buf.as_mut_ptr() as u64,
+            kern_version: 0,
+            prog_flags: 0,
+            prog_name: {
+                let mut name = [0u8; 16];
+                let n = b"xdp_redirect";
+                name[..n.len()].copy_from_slice(n);
+                name
+            },
+            expected_attach_type: BPF_XDP,
+            _pad: 0,
+        };
+
+        let fd = unsafe {
+            bpf_syscall(
+                BPF_PROG_LOAD,
+                &attr as *const BpfProgLoadAttr as *const u8,
+                std::mem::size_of::<BpfProgLoadAttr>() as u32,
+            )
+        }
+        .map_err(|errno| XdpError::BpfSyscall {
+            cmd: BPF_PROG_LOAD,
+            errno,
+        })?;
+
+        Ok(Self {
+            prog_fd: fd,
+            link_fd: None,
+        })
+    }
+
+    /// Attach the loaded program to a network interface.
+    ///
+    /// Uses `BPF_LINK_CREATE` for modern kernels (5.9+). The `flags`
+    /// parameter selects the XDP mode (driver, SKB, or hardware).
+    pub fn attach(&mut self, if_index: u32, flags: u32) -> Result<(), XdpError> {
+        let attr = BpfLinkCreateAttr {
+            prog_fd: self.prog_fd as u32,
+            target_fd: if_index,
+            attach_type: BPF_XDP,
+            flags,
+        };
+
+        let link_fd = unsafe {
+            bpf_syscall(
+                BPF_LINK_CREATE,
+                &attr as *const BpfLinkCreateAttr as *const u8,
+                std::mem::size_of::<BpfLinkCreateAttr>() as u32,
+            )
+        }
+        .map_err(|errno| XdpError::BpfSyscall {
+            cmd: BPF_LINK_CREATE,
+            errno,
+        })?;
+
+        self.link_fd = Some(link_fd);
+        Ok(())
+    }
+
+    /// Detach the program from its interface.
+    pub fn detach(&mut self) {
+        if let Some(fd) = self.link_fd.take() {
+            // SAFETY: link_fd was obtained from bpf(BPF_LINK_CREATE).
+            unsafe { libc::close(fd) };
+        }
+    }
+
+    /// Get the BPF program file descriptor.
+    pub fn fd(&self) -> RawFd {
+        self.prog_fd
+    }
+
+    /// Whether the program is currently attached to an interface.
+    pub fn is_attached(&self) -> bool {
+        self.link_fd.is_some()
+    }
+}
+
+impl Drop for XdpProgram {
+    fn drop(&mut self) {
+        // Detach first (closes link fd).
+        self.detach();
+
+        // Close program fd.
+        if self.prog_fd >= 0 {
+            // SAFETY: prog_fd was obtained from bpf(BPF_PROG_LOAD).
+            unsafe { libc::close(self.prog_fd) };
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// High-level installation
+// ---------------------------------------------------------------------------
+
+/// Install an XDP packet steering program on a network interface.
+///
+/// Performs the complete installation sequence:
+/// 1. Generate eBPF bytecode from the filter config
+/// 2. Create an XSKMAP for socket dispatch
+/// 3. Load the program into the kernel
+/// 4. Attach the program to the interface
+///
+/// Returns the XSKMAP and program handles for subsequent socket registration.
+///
+/// `max_queues` specifies the maximum number of NIC queues the XSKMAP
+/// should support. `flags` selects the XDP mode (e.g., `XDP_FLAGS_DRV_MODE`).
+pub fn install_xdp(
+    config: &XdpFilterConfig,
+    if_index: u32,
+    max_queues: u32,
+    flags: u32,
+) -> Result<(XskMap, XdpProgram), XdpError> {
+    // Step 1: Create XSKMAP.
+    let xsk_map = XskMap::create(max_queues)?;
+
+    // Step 2: Generate eBPF program with the XSKMAP fd patched in.
+    let mut patched_config = config.clone();
+    patched_config.xsk_map_fd = xsk_map.fd();
+
+    let program = super::ebpf::generate_xdp_program(&patched_config).ok_or(
+        XdpError::InvalidConfig("failed to generate eBPF program (invalid filter config)"),
+    )?;
+
+    // Step 3: Load program into kernel.
+    let mut xdp_prog = XdpProgram::load(&program)?;
+
+    // Step 4: Attach to interface.
+    xdp_prog.attach(if_index, flags)?;
+
+    Ok((xsk_map, xdp_prog))
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::xdp::ebpf::{generate_xdp_program, XdpFilterConfig};
+
+    #[test]
+    fn install_xdp_generates_program() {
+        // Verify the installation function generates valid bytecode
+        // before reaching kernel syscalls.
+        let config = XdpFilterConfig {
+            xsk_map_fd: 42,
+            listen_ip4_addr: 0,
+            ports: vec![8000, 8001],
+        };
+
+        let prog = generate_xdp_program(&config).unwrap();
+        assert!(prog.insn_count > 0);
+
+        // Verify bytecode is well-formed.
+        let bytes = prog.as_bytes();
+        assert_eq!(bytes.len(), prog.insn_count * 8);
+    }
+
+    #[test]
+    fn install_xdp_rejects_empty_ports() {
+        let config = XdpFilterConfig {
+            xsk_map_fd: -1,
+            listen_ip4_addr: 0,
+            ports: vec![],
+        };
+        // generate_xdp_program returns None for empty ports.
+        assert!(generate_xdp_program(&config).is_none());
+    }
+
+    #[test]
+    fn xdp_error_bpf_display() {
+        let err = XdpError::BpfSyscall {
+            cmd: BPF_PROG_LOAD,
+            errno: 1,
+        };
+        let msg = err.to_string();
+        assert!(msg.contains("bpf syscall"));
+        assert!(msg.contains("cmd=5"));
+    }
+}

@@ -1,0 +1,47 @@
+schema_version = 1
+
+[cluster]
+mode = "live"
+expected_genesis_hash = "5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d"
+expected_shred_version = 50093
+gossip_bind_addr = "0.0.0.0:8001"
+gossip_allow_private_addresses = false
+snapshot_download = false
+ipc_mode = "shared_memory"
+quic_enabled = true
+entrypoints = [
+    "entrypoint.mainnet-beta.solana.com:8001",
+    "entrypoint2.mainnet-beta.solana.com:8001",
+    "entrypoint3.mainnet-beta.solana.com:8001",
+    "entrypoint4.mainnet-beta.solana.com:8001",
+    "entrypoint5.mainnet-beta.solana.com:8001",
+]
+
+[runtime]
+mode = "tile"
+workers = 16
+
+[ingress_policy]
+ingress_mode = "udp"
+udp_bind_address = "0.0.0.0:8001"
+max_payload_bytes = 1232
+allow_quic_source = true
+allow_gossip_source = true
+
+[storage]
+startup_policy = "restore_latest_if_available"
+snapshot_interval = 432
+
+[rpc]
+enabled = true
+bind = "127.0.0.1:8899"
+private = true
+full_api = false
+
+[metrics]
+output_format = "prometheus"
+output_target = "http"
+http_bind = "127.0.0.1:9090"
+
+[logging]
+stderr_level = "warn"

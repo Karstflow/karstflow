@@ -1,0 +1,13 @@
+[package]
+name = "karstflow-mesh"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[dependencies]
+crossbeam-channel.workspace = true
+karstflow-constants = { path = "../karstflow-constants" }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+libc = "0.2"

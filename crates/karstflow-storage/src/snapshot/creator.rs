@@ -1,0 +1,1279 @@
+use super::append_vec::{account_to_append_vec, serialize_append_vec};
+use super::bank_fields::{
+    serialize_full_manifest, AccountsDbLayout, SnapshotBankState, StorageEntry,
+};
+use super::metadata::{CompressionType, SnapshotConfig, SnapshotManifest, SnapshotMetadata};
+use super::solana_archive::SnapshotArchiveBuilder;
+use crate::accounts::{Account, AccountDatabase, Pubkey};
+use crate::StorageError;
+use rayon::prelude::*;
+use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
+use std::path::Path;
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::Arc;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SerializedAccount {
+    pub pubkey: Pubkey,
+    pub lamports: u64,
+    pub owner: Pubkey,
+    pub executable: bool,
+    pub rent_epoch: u64,
+    pub data: Vec<u8>,
+}
+
+impl SerializedAccount {
+    pub fn from_account(pubkey: Pubkey, account: &Account) -> Self {
+        Self {
+            pubkey,
+            lamports: account.meta.lamports,
+            owner: account.meta.owner,
+            executable: account.meta.executable,
+            rent_epoch: account.meta.rent_epoch,
+            data: account.data.to_vec(),
+        }
+    }
+
+    pub fn to_account(&self) -> Account {
+        Account {
+            meta: crate::accounts::AccountMeta {
+                lamports: self.lamports,
+                owner: self.owner,
+                executable: self.executable,
+                rent_epoch: self.rent_epoch,
+            },
+            data: crate::accounts::AccountData::new(self.data.clone()),
+        }
+    }
+
+    pub fn data_size(&self) -> usize {
+        self.data.len()
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SnapshotData {
+    pub accounts: Vec<SerializedAccount>,
+    pub slot: u64,
+}
+
+impl SnapshotData {
+    pub fn new(slot: u64) -> Self {
+        Self {
+            accounts: Vec::new(),
+            slot,
+        }
+    }
+
+    pub fn add_account(&mut self, account: SerializedAccount) {
+        self.accounts.push(account);
+    }
+
+    pub fn total_lamports(&self) -> u64 {
+        self.accounts.iter().map(|a| a.lamports).sum()
+    }
+
+    pub fn total_data_size(&self) -> u64 {
+        self.accounts.iter().map(|a| a.data_size() as u64).sum()
+    }
+}
+
+/// Statistics from creating an incremental snapshot via the dirty-set path.
+#[derive(Debug, Clone)]
+pub struct IncrementalStats {
+    /// Number of unique pubkeys tracked as dirty since the base slot.
+    pub dirty_pubkeys_tracked: usize,
+    /// Number of accounts actually included in the snapshot (still exist in DB).
+    pub accounts_included: usize,
+    /// The base slot for this incremental snapshot.
+    pub base_slot: u64,
+    /// The snapshot slot.
+    pub snapshot_slot: u64,
+}
+
+/// Statistics from creating a Solana-compatible snapshot archive.
+#[derive(Debug, Clone)]
+pub struct SolanaArchiveStats {
+    /// Snapshot slot.
+    pub slot: u64,
+    /// Total accounts written.
+    pub total_accounts: usize,
+    /// Total lamports across all accounts.
+    pub total_lamports: u64,
+    /// Number of AppendVec files in the archive.
+    pub append_vec_count: usize,
+    /// Compressed archive size in bytes.
+    pub compressed_size: usize,
+    /// Path to the written archive file.
+    pub archive_path: std::path::PathBuf,
+}
+
+/// Short hex hash for archive filenames (first 8 bytes of SHA-256).
+fn hex_hash(data: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    let hash = Sha256::digest(data);
+    hash[..8]
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect::<String>()
+}
+
+pub struct SnapshotCreator {
+    config: SnapshotConfig,
+    progress: Arc<SnapshotProgress>,
+}
+
+#[derive(Debug)]
+pub struct SnapshotProgress {
+    total_accounts: AtomicU64,
+    processed_accounts: AtomicU64,
+    total_bytes: AtomicU64,
+    processed_bytes: AtomicU64,
+    chunks_written: AtomicUsize,
+}
+
+impl Default for SnapshotProgress {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl SnapshotProgress {
+    pub fn new() -> Self {
+        Self {
+            total_accounts: AtomicU64::new(0),
+            processed_accounts: AtomicU64::new(0),
+            total_bytes: AtomicU64::new(0),
+            processed_bytes: AtomicU64::new(0),
+            chunks_written: AtomicUsize::new(0),
+        }
+    }
+
+    pub fn set_total(&self, accounts: u64, bytes: u64) {
+        self.total_accounts.store(accounts, Ordering::Relaxed);
+        self.total_bytes.store(bytes, Ordering::Relaxed);
+    }
+
+    pub fn increment_processed(&self, accounts: u64, bytes: u64) {
+        self.processed_accounts
+            .fetch_add(accounts, Ordering::Relaxed);
+        self.processed_bytes.fetch_add(bytes, Ordering::Relaxed);
+    }
+
+    pub fn increment_chunks(&self) {
+        self.chunks_written.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn get_progress(&self) -> SnapshotProgressInfo {
+        SnapshotProgressInfo {
+            total_accounts: self.total_accounts.load(Ordering::Relaxed),
+            processed_accounts: self.processed_accounts.load(Ordering::Relaxed),
+            total_bytes: self.total_bytes.load(Ordering::Relaxed),
+            processed_bytes: self.processed_bytes.load(Ordering::Relaxed),
+            chunks_written: self.chunks_written.load(Ordering::Relaxed),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct SnapshotProgressInfo {
+    pub total_accounts: u64,
+    pub processed_accounts: u64,
+    pub total_bytes: u64,
+    pub processed_bytes: u64,
+    pub chunks_written: usize,
+}
+
+impl SnapshotProgressInfo {
+    pub fn percentage(&self) -> f64 {
+        if self.total_accounts == 0 {
+            0.0
+        } else {
+            (self.processed_accounts as f64 / self.total_accounts as f64) * 100.0
+        }
+    }
+
+    pub fn bytes_percentage(&self) -> f64 {
+        if self.total_bytes == 0 {
+            0.0
+        } else {
+            (self.processed_bytes as f64 / self.total_bytes as f64) * 100.0
+        }
+    }
+}
+
+impl SnapshotCreator {
+    pub fn new(config: SnapshotConfig) -> Self {
+        Self {
+            config,
+            progress: Arc::new(SnapshotProgress::new()),
+        }
+    }
+
+    pub fn get_progress(&self) -> SnapshotProgressInfo {
+        self.progress.get_progress()
+    }
+
+    pub fn create_full_snapshot(
+        &self,
+        db: &AccountDatabase,
+        slot: u64,
+        output_dir: &Path,
+    ) -> Result<SnapshotManifest, StorageError> {
+        let accounts = self.collect_all_accounts(db)?;
+        let accounts_hash = db.compute_accounts_hash().0;
+        let snapshot_data = self.serialize_accounts(accounts, slot)?;
+        self.write_snapshot(snapshot_data, None, output_dir, accounts_hash)
+    }
+
+    pub fn create_incremental_snapshot(
+        &self,
+        db: &AccountDatabase,
+        slot: u64,
+        base_slot: u64,
+        base_accounts: &HashMap<Pubkey, Account>,
+        output_dir: &Path,
+    ) -> Result<SnapshotManifest, StorageError> {
+        let current_accounts = self.collect_all_accounts(db)?;
+        // Accounts hash covers the full state at this slot.
+        let accounts_hash = db.compute_accounts_hash().0;
+        let delta_accounts = self.compute_delta(current_accounts, base_accounts);
+        let snapshot_data = self.serialize_accounts(delta_accounts, slot)?;
+        self.write_snapshot(snapshot_data, Some(base_slot), output_dir, accounts_hash)
+    }
+
+    /// Create an incremental snapshot using the dirty-set tracker.
+    ///
+    /// Instead of diffing all accounts against a base snapshot, this method
+    /// only includes accounts that were modified since `base_slot`, using
+    /// the AccountDatabase's built-in dirty-set tracking. This is much more
+    /// efficient for large account sets with small deltas.
+    ///
+    /// After creation, dirty slots through `slot` are drained from the tracker.
+    pub fn create_incremental_from_dirty_set(
+        &self,
+        db: &AccountDatabase,
+        slot: u64,
+        base_slot: u64,
+        output_dir: &Path,
+    ) -> Result<(SnapshotManifest, IncrementalStats), StorageError> {
+        let dirty_pubkeys = db.drain_dirty_slots_through(slot);
+        let dirty_count = dirty_pubkeys.len();
+
+        let mut delta_accounts = HashMap::with_capacity(dirty_count);
+        for pubkey in &dirty_pubkeys {
+            if let Some(account) = db.get_published_account(pubkey) {
+                delta_accounts.insert(*pubkey, account);
+            }
+            // If account was deleted (not found), we skip it.
+            // A full snapshot will capture the correct final state.
+        }
+
+        // Accounts hash covers the full state at this slot.
+        let accounts_hash = db.compute_accounts_hash().0;
+        let accounts_included = delta_accounts.len();
+        let snapshot_data = self.serialize_accounts(delta_accounts, slot)?;
+        let manifest =
+            self.write_snapshot(snapshot_data, Some(base_slot), output_dir, accounts_hash)?;
+
+        let stats = IncrementalStats {
+            dirty_pubkeys_tracked: dirty_count,
+            accounts_included,
+            base_slot,
+            snapshot_slot: slot,
+        };
+
+        Ok((manifest, stats))
+    }
+
+    /// Create a Solana-compatible snapshot archive (tar.zst with AppendVec format).
+    ///
+    /// Produces an archive that can be consumed by any Solana validator:
+    /// - `version` — protocol version string
+    /// - `snapshots/<slot>/<slot>` — bank state manifest (bincode-encoded)
+    /// - `accounts/<slot>.<id>` — accounts in AppendVec binary format
+    ///
+    /// If `bank_state` is provided, it is serialized as the manifest.
+    /// Otherwise an empty manifest placeholder is used.
+    ///
+    /// Accounts are split into chunks of `max_accounts_per_vec` to keep
+    /// individual AppendVec files at manageable sizes.
+    pub fn create_solana_archive(
+        &self,
+        db: &AccountDatabase,
+        slot: u64,
+        output_dir: &Path,
+        max_accounts_per_vec: usize,
+    ) -> Result<SolanaArchiveStats, StorageError> {
+        let accounts_hash = db.compute_accounts_hash().0;
+        self.create_solana_archive_inner(
+            db,
+            slot,
+            output_dir,
+            max_accounts_per_vec,
+            None,
+            accounts_hash,
+        )
+    }
+
+    /// Create a Solana-compatible snapshot archive with an explicit bank state manifest.
+    pub fn create_solana_archive_with_state(
+        &self,
+        db: &AccountDatabase,
+        slot: u64,
+        output_dir: &Path,
+        max_accounts_per_vec: usize,
+        bank_state: Option<&SnapshotBankState>,
+    ) -> Result<SolanaArchiveStats, StorageError> {
+        let accounts_hash = db.compute_accounts_hash().0;
+        self.create_solana_archive_inner(
+            db,
+            slot,
+            output_dir,
+            max_accounts_per_vec,
+            bank_state,
+            accounts_hash,
+        )
+    }
+
+    fn create_solana_archive_inner(
+        &self,
+        db: &AccountDatabase,
+        slot: u64,
+        output_dir: &Path,
+        max_accounts_per_vec: usize,
+        bank_state: Option<&SnapshotBankState>,
+        accounts_hash: [u8; 32],
+    ) -> Result<SolanaArchiveStats, StorageError> {
+        let accounts = self.collect_all_accounts(db)?;
+        self.build_solana_archive(
+            accounts,
+            slot,
+            None,
+            output_dir,
+            max_accounts_per_vec,
+            bank_state,
+            accounts_hash,
+        )
+    }
+
+    /// Create an incremental Solana-compatible snapshot archive using dirty-set tracking.
+    ///
+    /// Only includes accounts modified since `base_slot`. The archive filename
+    /// encodes both the incremental slot and the base slot for identification.
+    /// Dirty slots through `snapshot_slot` are drained after creation.
+    pub fn create_incremental_solana_archive(
+        &self,
+        db: &AccountDatabase,
+        snapshot_slot: u64,
+        base_slot: u64,
+        output_dir: &Path,
+        max_accounts_per_vec: usize,
+        bank_state: Option<&SnapshotBankState>,
+    ) -> Result<(SolanaArchiveStats, IncrementalStats), StorageError> {
+        let dirty_pubkeys = db.drain_dirty_slots_through(snapshot_slot);
+        let dirty_count = dirty_pubkeys.len();
+
+        let mut delta_accounts = HashMap::with_capacity(dirty_count);
+        for pubkey in &dirty_pubkeys {
+            if let Some(account) = db.get_published_account(pubkey) {
+                delta_accounts.insert(*pubkey, account);
+            }
+        }
+
+        // Accounts hash covers the full state at this slot.
+        let accounts_hash = db.compute_accounts_hash().0;
+        let accounts_included = delta_accounts.len();
+        let archive_stats = self.build_solana_archive(
+            delta_accounts,
+            snapshot_slot,
+            Some(base_slot),
+            output_dir,
+            max_accounts_per_vec,
+            bank_state,
+            accounts_hash,
+        )?;
+
+        let incr_stats = IncrementalStats {
+            dirty_pubkeys_tracked: dirty_count,
+            accounts_included,
+            base_slot,
+            snapshot_slot,
+        };
+
+        Ok((archive_stats, incr_stats))
+    }
+
+    /// Internal: build a Solana-compatible tar.zst archive from a set of accounts.
+    ///
+    /// Used by both full and incremental archive creation. When `base_slot` is
+    /// `Some`, the filename includes both snapshot and base slot.
+    #[allow(clippy::too_many_arguments)]
+    fn build_solana_archive(
+        &self,
+        accounts: HashMap<Pubkey, Account>,
+        slot: u64,
+        base_slot: Option<u64>,
+        output_dir: &Path,
+        max_accounts_per_vec: usize,
+        bank_state: Option<&SnapshotBankState>,
+        accounts_hash: [u8; 32],
+    ) -> Result<SolanaArchiveStats, StorageError> {
+        let total_accounts = accounts.len();
+        let total_lamports: u64 = accounts.values().map(|a| a.meta.lamports).sum();
+
+        // Convert to AppendVec format, sorted by pubkey for deterministic output.
+        let mut sorted: Vec<_> = accounts.iter().collect();
+        sorted.sort_by_key(|(pk, _)| *pk.as_bytes());
+
+        let av_accounts: Vec<_> = sorted
+            .iter()
+            .map(|(pk, acc)| account_to_append_vec(pk, acc))
+            .collect();
+
+        // Split accounts into AppendVec chunks and track their sizes.
+        let chunk_size = max_accounts_per_vec.max(1);
+        let mut vec_count = 0u64;
+        let mut storage_entries = Vec::new();
+
+        // Build the archive.
+        let mut builder = SnapshotArchiveBuilder::new();
+        builder.set_version("1.18.26");
+
+        for chunk in av_accounts.chunks(chunk_size) {
+            let data = serialize_append_vec(chunk);
+            storage_entries.push(StorageEntry {
+                id: vec_count,
+                stored_bytes: data.len() as u64,
+            });
+            builder.add_account_vec(slot, vec_count, data);
+            vec_count += 1;
+        }
+
+        // Build the manifest: bank state + AccountsDbFields.
+        let manifest_data = match bank_state {
+            Some(state) => {
+                let layout = AccountsDbLayout {
+                    storage_map: if storage_entries.is_empty() {
+                        vec![]
+                    } else {
+                        vec![(slot, storage_entries)]
+                    },
+                    slot,
+                    bank_hash: accounts_hash,
+                    lamports_per_signature: state.fee_rate_governor.target_lamports_per_signature,
+                };
+                serialize_full_manifest(state, &layout)
+            }
+            None => Vec::new(),
+        };
+        builder.set_manifest(slot, manifest_data);
+
+        // Compress and write.
+        let compressed = builder
+            .build_compressed(self.config.compression_level)
+            .map_err(|e| StorageError::AccountDatabaseError {
+                details: format!("Failed to build Solana archive: {e}"),
+            })?;
+
+        std::fs::create_dir_all(output_dir).map_err(|e| StorageError::AccountDatabaseError {
+            details: format!("Failed to create output directory: {e}"),
+        })?;
+
+        let hash_suffix = hex_hash(&compressed);
+        let filename = match base_slot {
+            Some(base) => {
+                format!("incremental-snapshot-{base}-{slot}-{hash_suffix}.tar.zst")
+            }
+            None => format!("snapshot-{slot}-{hash_suffix}.tar.zst"),
+        };
+        let archive_path = output_dir.join(&filename);
+        std::fs::write(&archive_path, &compressed).map_err(|e| {
+            StorageError::AccountDatabaseError {
+                details: format!("Failed to write archive: {e}"),
+            }
+        })?;
+
+        Ok(SolanaArchiveStats {
+            slot,
+            total_accounts,
+            total_lamports,
+            append_vec_count: vec_count as usize,
+            compressed_size: compressed.len(),
+            archive_path: archive_path.to_path_buf(),
+        })
+    }
+
+    fn collect_all_accounts(
+        &self,
+        db: &AccountDatabase,
+    ) -> Result<HashMap<Pubkey, Account>, StorageError> {
+        Ok(db.iter_published_accounts().into_iter().collect())
+    }
+
+    fn compute_delta(
+        &self,
+        current: HashMap<Pubkey, Account>,
+        base: &HashMap<Pubkey, Account>,
+    ) -> HashMap<Pubkey, Account> {
+        let mut delta = HashMap::new();
+
+        for (pubkey, account) in current {
+            if let Some(base_account) = base.get(&pubkey) {
+                if &account != base_account {
+                    delta.insert(pubkey, account);
+                }
+            } else {
+                delta.insert(pubkey, account);
+            }
+        }
+
+        delta
+    }
+
+    fn serialize_accounts(
+        &self,
+        accounts: HashMap<Pubkey, Account>,
+        slot: u64,
+    ) -> Result<SnapshotData, StorageError> {
+        let total_accounts = accounts.len() as u64;
+        let total_bytes: u64 = accounts.values().map(|a| a.data_len() as u64).sum();
+
+        self.progress.set_total(total_accounts, total_bytes);
+
+        let mut snapshot_data = SnapshotData::new(slot);
+
+        let chunk_size = self.config.parallel_workers.max(1);
+        let account_vec: Vec<_> = accounts.into_iter().collect();
+
+        let serialized: Vec<_> = account_vec
+            .par_chunks(chunk_size)
+            .flat_map(|chunk| {
+                let mut local_serialized = Vec::new();
+                for (pubkey, account) in chunk {
+                    let serialized = SerializedAccount::from_account(*pubkey, account);
+                    let data_size = serialized.data_size() as u64;
+                    self.progress.increment_processed(1, data_size);
+                    local_serialized.push(serialized);
+                }
+                local_serialized
+            })
+            .collect();
+
+        snapshot_data.accounts = serialized;
+
+        Ok(snapshot_data)
+    }
+
+    fn write_snapshot(
+        &self,
+        snapshot_data: SnapshotData,
+        base_slot: Option<u64>,
+        output_dir: &Path,
+        accounts_hash: [u8; 32],
+    ) -> Result<SnapshotManifest, StorageError> {
+        std::fs::create_dir_all(output_dir).map_err(|e| StorageError::AccountDatabaseError {
+            details: format!("Failed to create snapshot directory: {}", e),
+        })?;
+
+        let total_accounts = snapshot_data.accounts.len() as u64;
+        let total_lamports = snapshot_data.total_lamports();
+        let account_data_size = snapshot_data.total_data_size();
+
+        let mut metadata = SnapshotMetadata::new(
+            snapshot_data.slot,
+            total_accounts,
+            total_lamports,
+            base_slot,
+            CompressionType::Zstd,
+            account_data_size,
+        );
+
+        let serialized =
+            bincode::serialize(&snapshot_data).map_err(|e| StorageError::AccountDatabaseError {
+                details: format!("Failed to serialize snapshot: {}", e),
+            })?;
+
+        let compressed = self.compress_data(&serialized)?;
+
+        let hash = SnapshotMetadata::compute_content_hash(&compressed);
+        metadata.update_hash(hash);
+        metadata.update_accounts_hash(accounts_hash);
+
+        let mut manifest = SnapshotManifest::new(metadata.clone());
+
+        let snapshot_filename = if base_slot.is_some() {
+            format!("incremental-{}.snapshot", snapshot_data.slot)
+        } else {
+            format!("full-{}.snapshot", snapshot_data.slot)
+        };
+
+        let snapshot_path = output_dir.join(&snapshot_filename);
+        std::fs::write(&snapshot_path, &compressed).map_err(|e| {
+            StorageError::AccountDatabaseError {
+                details: format!("Failed to write snapshot file: {}", e),
+            }
+        })?;
+
+        manifest.add_chunk(hash);
+        self.progress.increment_chunks();
+
+        let manifest_path = output_dir.join(format!("{}.manifest", snapshot_filename));
+        let manifest_json = serde_json::to_string_pretty(&manifest).map_err(|e| {
+            StorageError::AccountDatabaseError {
+                details: format!("Failed to serialize manifest: {}", e),
+            }
+        })?;
+
+        std::fs::write(&manifest_path, manifest_json).map_err(|e| {
+            StorageError::AccountDatabaseError {
+                details: format!("Failed to write manifest file: {}", e),
+            }
+        })?;
+
+        Ok(manifest)
+    }
+
+    fn compress_data(&self, data: &[u8]) -> Result<Vec<u8>, StorageError> {
+        zstd::encode_all(data, self.config.compression_level).map_err(|e| {
+            StorageError::AccountDatabaseError {
+                details: format!("Failed to compress data: {}", e),
+            }
+        })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::accounts::primitives::{AccountData, AccountMeta};
+
+    #[test]
+    fn test_serialized_account_roundtrip() {
+        let pubkey = Pubkey::zeroed();
+        let account = Account {
+            meta: AccountMeta {
+                lamports: 1000,
+                owner: Pubkey::zeroed(),
+                executable: false,
+                rent_epoch: 0,
+            },
+            data: AccountData::new(vec![1, 2, 3, 4]),
+        };
+
+        let serialized = SerializedAccount::from_account(pubkey, &account);
+        let deserialized = serialized.to_account();
+
+        assert_eq!(account, deserialized);
+    }
+
+    #[test]
+    fn test_snapshot_data_creation() {
+        let mut snapshot_data = SnapshotData::new(100);
+        assert_eq!(snapshot_data.slot, 100);
+        assert_eq!(snapshot_data.accounts.len(), 0);
+
+        let account = SerializedAccount {
+            pubkey: Pubkey::zeroed(),
+            lamports: 1000,
+            owner: Pubkey::zeroed(),
+            executable: false,
+            rent_epoch: 0,
+            data: vec![1, 2, 3],
+        };
+
+        snapshot_data.add_account(account);
+        assert_eq!(snapshot_data.accounts.len(), 1);
+        assert_eq!(snapshot_data.total_lamports(), 1000);
+        assert_eq!(snapshot_data.total_data_size(), 3);
+    }
+
+    #[test]
+    fn test_progress_tracking() {
+        let progress = SnapshotProgress::new();
+        progress.set_total(100, 1000);
+
+        let info = progress.get_progress();
+        assert_eq!(info.total_accounts, 100);
+        assert_eq!(info.total_bytes, 1000);
+
+        progress.increment_processed(10, 100);
+        let info = progress.get_progress();
+        assert_eq!(info.processed_accounts, 10);
+        assert_eq!(info.processed_bytes, 100);
+        assert_eq!(info.percentage(), 10.0);
+    }
+
+    #[test]
+    fn test_compute_delta() {
+        let config = SnapshotConfig::new();
+        let creator = SnapshotCreator::new(config);
+
+        let mut base = HashMap::new();
+        let mut current = HashMap::new();
+
+        let pubkey1 = Pubkey::zeroed();
+        let account1 = Account {
+            meta: AccountMeta {
+                lamports: 1000,
+                owner: Pubkey::zeroed(),
+                executable: false,
+                rent_epoch: 0,
+            },
+            data: AccountData::new(vec![1, 2, 3]),
+        };
+
+        base.insert(pubkey1, account1.clone());
+        current.insert(pubkey1, account1.clone());
+
+        let delta = creator.compute_delta(current, &base);
+        assert_eq!(delta.len(), 0);
+    }
+
+    #[test]
+    fn incremental_from_dirty_set_captures_modified_accounts() {
+        let db = AccountDatabase::new();
+        let config = SnapshotConfig::new();
+        let creator = SnapshotCreator::new(config);
+
+        // Store some initial accounts.
+        let pk1 = Pubkey::new_unique();
+        let pk2 = Pubkey::new_unique();
+        db.store_published_account_at_slot(pk1, Account::new(1_000, vec![], Pubkey::zeroed()), 10);
+        db.store_published_account_at_slot(pk2, Account::new(2_000, vec![], Pubkey::zeroed()), 11);
+
+        let dir = tempfile::tempdir().unwrap();
+        let (manifest, stats) = creator
+            .create_incremental_from_dirty_set(&db, 11, 0, dir.path())
+            .unwrap();
+
+        assert_eq!(stats.dirty_pubkeys_tracked, 2);
+        assert_eq!(stats.accounts_included, 2);
+        assert_eq!(stats.base_slot, 0);
+        assert_eq!(stats.snapshot_slot, 11);
+        assert!(manifest.metadata.incremental_base.is_some());
+        assert_eq!(manifest.metadata.incremental_base, Some(0));
+    }
+
+    #[test]
+    fn incremental_from_dirty_set_drains_dirty_tracking() {
+        let db = AccountDatabase::new();
+        let config = SnapshotConfig::new();
+        let creator = SnapshotCreator::new(config);
+
+        let pk = Pubkey::new_unique();
+        db.store_published_account_at_slot(pk, Account::new(1_000, vec![], Pubkey::zeroed()), 5);
+
+        assert_eq!(db.dirty_account_count(), 1);
+
+        let dir = tempfile::tempdir().unwrap();
+        creator
+            .create_incremental_from_dirty_set(&db, 5, 0, dir.path())
+            .unwrap();
+
+        // Dirty set should be drained after incremental snapshot.
+        assert_eq!(db.dirty_account_count(), 0);
+    }
+
+    #[test]
+    fn incremental_from_dirty_set_only_includes_modified_slots() {
+        let db = AccountDatabase::new();
+        let config = SnapshotConfig::new();
+        let creator = SnapshotCreator::new(config);
+
+        let pk1 = Pubkey::new_unique();
+        let pk2 = Pubkey::new_unique();
+        let pk3 = Pubkey::new_unique();
+
+        db.store_published_account_at_slot(pk1, Account::new(100, vec![], Pubkey::zeroed()), 10);
+        db.store_published_account_at_slot(pk2, Account::new(200, vec![], Pubkey::zeroed()), 20);
+        db.store_published_account_at_slot(pk3, Account::new(300, vec![], Pubkey::zeroed()), 30);
+
+        // Create incremental through slot 20 — should only include pk1 and pk2.
+        let dir = tempfile::tempdir().unwrap();
+        let (_, stats) = creator
+            .create_incremental_from_dirty_set(&db, 20, 0, dir.path())
+            .unwrap();
+
+        assert_eq!(stats.dirty_pubkeys_tracked, 2);
+        assert_eq!(stats.accounts_included, 2);
+
+        // pk3 should still be tracked.
+        assert_eq!(db.dirty_account_count(), 1);
+    }
+
+    #[test]
+    fn incremental_from_dirty_set_empty_delta() {
+        let db = AccountDatabase::new();
+        let config = SnapshotConfig::new();
+        let creator = SnapshotCreator::new(config);
+
+        let dir = tempfile::tempdir().unwrap();
+        let (manifest, stats) = creator
+            .create_incremental_from_dirty_set(&db, 100, 50, dir.path())
+            .unwrap();
+
+        assert_eq!(stats.dirty_pubkeys_tracked, 0);
+        assert_eq!(stats.accounts_included, 0);
+        assert_eq!(manifest.metadata.total_accounts, 0);
+    }
+
+    #[test]
+    fn full_then_incremental_snapshot_workflow() {
+        let db = AccountDatabase::new();
+        let config = SnapshotConfig::new();
+        let creator = SnapshotCreator::new(config);
+        let dir = tempfile::tempdir().unwrap();
+
+        // Step 1: Create initial state and take a full snapshot.
+        let pk1 = Pubkey::new_unique();
+        let pk2 = Pubkey::new_unique();
+        db.store_published_account_at_slot(
+            pk1,
+            Account::new(1_000, vec![1], Pubkey::zeroed()),
+            100,
+        );
+        db.store_published_account_at_slot(
+            pk2,
+            Account::new(2_000, vec![2], Pubkey::zeroed()),
+            100,
+        );
+
+        let full_manifest = creator.create_full_snapshot(&db, 100, dir.path()).unwrap();
+        assert_eq!(full_manifest.metadata.total_accounts, 2);
+
+        // Drain dirty set after full snapshot.
+        db.drain_dirty_slots_through(100);
+
+        // Step 2: Modify one account, add a new one.
+        db.store_published_account_at_slot(
+            pk1,
+            Account::new(5_000, vec![1, 2, 3], Pubkey::zeroed()),
+            200,
+        );
+        let pk3 = Pubkey::new_unique();
+        db.store_published_account_at_slot(
+            pk3,
+            Account::new(3_000, vec![3], Pubkey::zeroed()),
+            200,
+        );
+
+        // Step 3: Create incremental snapshot with dirty-set.
+        let (incr_manifest, stats) = creator
+            .create_incremental_from_dirty_set(&db, 200, 100, dir.path())
+            .unwrap();
+
+        assert_eq!(stats.dirty_pubkeys_tracked, 2); // pk1 (modified) + pk3 (new)
+        assert_eq!(stats.accounts_included, 2);
+        assert_eq!(incr_manifest.metadata.incremental_base, Some(100));
+        assert_eq!(incr_manifest.metadata.total_accounts, 2);
+    }
+
+    // -------------------------------------------------------------------
+    // Solana-compatible archive tests
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn solana_archive_creates_valid_tar_zst() {
+        let db = AccountDatabase::new();
+        let config = SnapshotConfig::new();
+        let creator = SnapshotCreator::new(config);
+        let dir = tempfile::tempdir().unwrap();
+
+        let pk1 = Pubkey::new_unique();
+        let pk2 = Pubkey::new_unique();
+        let owner = Pubkey::new([10u8; 32]);
+        db.store_published_account(pk1, Account::new(1_000, vec![1, 2], owner));
+        db.store_published_account(pk2, Account::new(2_000, vec![3, 4, 5], owner));
+
+        let stats = creator
+            .create_solana_archive(&db, 100, dir.path(), 1000)
+            .unwrap();
+
+        assert_eq!(stats.slot, 100);
+        assert_eq!(stats.total_accounts, 2);
+        assert_eq!(stats.total_lamports, 3_000);
+        assert!(stats.compressed_size > 0);
+        assert!(stats.archive_path.exists());
+    }
+
+    #[test]
+    fn solana_archive_roundtrip_via_restorer() {
+        use crate::snapshot::restore::SnapshotRestorer;
+
+        let db = AccountDatabase::new();
+        let config = SnapshotConfig::new();
+        let creator = SnapshotCreator::new(config);
+        let dir = tempfile::tempdir().unwrap();
+
+        let pk1 = Pubkey::new_unique();
+        let pk2 = Pubkey::new_unique();
+        let owner = Pubkey::new([10u8; 32]);
+        db.store_published_account(pk1, Account::new(1_000, vec![1, 2], owner));
+        db.store_published_account(pk2, Account::new(2_000, vec![3], owner));
+
+        let stats = creator
+            .create_solana_archive(&db, 50, dir.path(), 1000)
+            .unwrap();
+
+        // Read back using the SnapshotRestorer (Solana format reader).
+        let db2 = AccountDatabase::new();
+        let restorer = SnapshotRestorer::new();
+        let archive_data = std::fs::read(&stats.archive_path).unwrap();
+        let result = restorer.restore_bytes(&archive_data, &db2).unwrap();
+
+        assert_eq!(result.accounts_loaded, 2);
+
+        // Verify accounts match.
+        let a1 = db2.get_published_account(&pk1).unwrap();
+        assert_eq!(a1.meta.lamports, 1_000);
+        assert_eq!(a1.data.as_slice(), &[1, 2]);
+
+        let a2 = db2.get_published_account(&pk2).unwrap();
+        assert_eq!(a2.meta.lamports, 2_000);
+        assert_eq!(a2.data.as_slice(), &[3]);
+    }
+
+    #[test]
+    fn solana_archive_splits_into_multiple_append_vecs() {
+        let db = AccountDatabase::new();
+        let config = SnapshotConfig::new();
+        let creator = SnapshotCreator::new(config);
+        let dir = tempfile::tempdir().unwrap();
+
+        for i in 0..10u8 {
+            let pk = Pubkey::new_unique();
+            db.store_published_account(pk, Account::new(i as u64 * 100, vec![i], Pubkey::zeroed()));
+        }
+
+        // Max 3 accounts per AppendVec → expect 4 vecs (10 / 3 = 3 full + 1 partial).
+        let stats = creator
+            .create_solana_archive(&db, 200, dir.path(), 3)
+            .unwrap();
+
+        assert_eq!(stats.total_accounts, 10);
+        assert_eq!(stats.append_vec_count, 4);
+    }
+
+    #[test]
+    fn solana_archive_empty_database() {
+        let db = AccountDatabase::new();
+        let config = SnapshotConfig::new();
+        let creator = SnapshotCreator::new(config);
+        let dir = tempfile::tempdir().unwrap();
+
+        let stats = creator
+            .create_solana_archive(&db, 0, dir.path(), 1000)
+            .unwrap();
+
+        assert_eq!(stats.total_accounts, 0);
+        assert_eq!(stats.total_lamports, 0);
+        assert_eq!(stats.append_vec_count, 0);
+        assert!(stats.archive_path.exists());
+    }
+
+    #[test]
+    fn solana_archive_large_account_roundtrip() {
+        use crate::snapshot::restore::SnapshotRestorer;
+
+        let db = AccountDatabase::new();
+        let config = SnapshotConfig::new();
+        let creator = SnapshotCreator::new(config);
+        let dir = tempfile::tempdir().unwrap();
+
+        let pk = Pubkey::new_unique();
+        let big_data = vec![0xAB; 50_000];
+        db.store_published_account(pk, Account::new(42, big_data.clone(), Pubkey::zeroed()));
+
+        let stats = creator
+            .create_solana_archive(&db, 300, dir.path(), 1000)
+            .unwrap();
+
+        let db2 = AccountDatabase::new();
+        let restorer = SnapshotRestorer::new();
+        let archive_data = std::fs::read(&stats.archive_path).unwrap();
+        restorer.restore_bytes(&archive_data, &db2).unwrap();
+
+        let account = db2.get_published_account(&pk).unwrap();
+        assert_eq!(account.data.as_slice(), &big_data);
+        assert_eq!(account.meta.lamports, 42);
+    }
+
+    // -------------------------------------------------------------------
+    // Incremental Solana archive tests
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn incremental_solana_archive_captures_delta() {
+        let db = AccountDatabase::new();
+        let config = SnapshotConfig::new();
+        let creator = SnapshotCreator::new(config);
+        let dir = tempfile::tempdir().unwrap();
+
+        // Initial state at slot 100.
+        let pk1 = Pubkey::new_unique();
+        let pk2 = Pubkey::new_unique();
+        let owner = Pubkey::new([10u8; 32]);
+        db.store_published_account_at_slot(pk1, Account::new(1_000, vec![1], owner), 100);
+        db.store_published_account_at_slot(pk2, Account::new(2_000, vec![2], owner), 100);
+
+        // Drain dirty set to simulate "full snapshot taken at slot 100".
+        db.drain_dirty_slots_through(100);
+
+        // Modify pk1 and add pk3 at slot 200.
+        let pk3 = Pubkey::new_unique();
+        db.store_published_account_at_slot(pk1, Account::new(5_000, vec![1, 2, 3], owner), 200);
+        db.store_published_account_at_slot(pk3, Account::new(3_000, vec![3], owner), 200);
+
+        let (stats, incr) = creator
+            .create_incremental_solana_archive(&db, 200, 100, dir.path(), 1000, None)
+            .unwrap();
+
+        assert_eq!(incr.dirty_pubkeys_tracked, 2);
+        assert_eq!(incr.accounts_included, 2);
+        assert_eq!(incr.base_slot, 100);
+        assert_eq!(incr.snapshot_slot, 200);
+        assert_eq!(stats.total_accounts, 2);
+        assert_eq!(stats.total_lamports, 8_000); // 5000 + 3000
+        assert!(stats.archive_path.exists());
+        // Filename should include "incremental-snapshot".
+        let filename = stats.archive_path.file_name().unwrap().to_str().unwrap();
+        assert!(filename.starts_with("incremental-snapshot-100-200-"));
+    }
+
+    #[test]
+    fn incremental_solana_archive_roundtrip() {
+        use crate::snapshot::restore::SnapshotRestorer;
+
+        let db = AccountDatabase::new();
+        let config = SnapshotConfig::new();
+        let creator = SnapshotCreator::new(config);
+        let dir = tempfile::tempdir().unwrap();
+
+        let pk1 = Pubkey::new_unique();
+        let pk2 = Pubkey::new_unique();
+        let owner = Pubkey::new([10u8; 32]);
+        db.store_published_account_at_slot(pk1, Account::new(1_000, vec![1], owner), 100);
+        db.store_published_account_at_slot(pk2, Account::new(2_000, vec![2], owner), 100);
+        db.drain_dirty_slots_through(100);
+
+        // Modify pk1 at slot 200.
+        db.store_published_account_at_slot(pk1, Account::new(9_999, vec![0xAA, 0xBB], owner), 200);
+
+        let (stats, _) = creator
+            .create_incremental_solana_archive(&db, 200, 100, dir.path(), 1000, None)
+            .unwrap();
+
+        // Restore the incremental archive into a fresh DB.
+        let db2 = AccountDatabase::new();
+        let restorer = SnapshotRestorer::new();
+        let archive_data = std::fs::read(&stats.archive_path).unwrap();
+        let result = restorer.restore_bytes(&archive_data, &db2).unwrap();
+
+        assert_eq!(result.accounts_loaded, 1); // only pk1 was modified
+        let a1 = db2.get_published_account(&pk1).unwrap();
+        assert_eq!(a1.meta.lamports, 9_999);
+        assert_eq!(a1.data.as_slice(), &[0xAA, 0xBB]);
+    }
+
+    #[test]
+    fn incremental_solana_archive_drains_dirty_set() {
+        let db = AccountDatabase::new();
+        let config = SnapshotConfig::new();
+        let creator = SnapshotCreator::new(config);
+        let dir = tempfile::tempdir().unwrap();
+
+        let pk = Pubkey::new_unique();
+        db.store_published_account_at_slot(pk, Account::new(100, vec![], Pubkey::zeroed()), 50);
+        assert_eq!(db.dirty_account_count(), 1);
+
+        creator
+            .create_incremental_solana_archive(&db, 50, 0, dir.path(), 1000, None)
+            .unwrap();
+
+        assert_eq!(db.dirty_account_count(), 0);
+    }
+
+    #[test]
+    fn incremental_solana_archive_empty_delta() {
+        let db = AccountDatabase::new();
+        let config = SnapshotConfig::new();
+        let creator = SnapshotCreator::new(config);
+        let dir = tempfile::tempdir().unwrap();
+
+        let (stats, incr) = creator
+            .create_incremental_solana_archive(&db, 100, 50, dir.path(), 1000, None)
+            .unwrap();
+
+        assert_eq!(incr.dirty_pubkeys_tracked, 0);
+        assert_eq!(incr.accounts_included, 0);
+        assert_eq!(stats.total_accounts, 0);
+        assert!(stats.archive_path.exists());
+    }
+
+    // ── accounts hash in snapshots ──────────────────────────────────
+
+    #[test]
+    fn full_snapshot_stores_accounts_hash() {
+        let db = AccountDatabase::new();
+        let config = SnapshotConfig::new();
+        let creator = SnapshotCreator::new(config);
+        let dir = tempfile::tempdir().unwrap();
+
+        let pk1 = Pubkey::new_unique();
+        let pk2 = Pubkey::new_unique();
+        db.store_published_account(pk1, Account::new(1_000, vec![1], Pubkey::zeroed()));
+        db.store_published_account(pk2, Account::new(2_000, vec![2], Pubkey::zeroed()));
+
+        let manifest = creator.create_full_snapshot(&db, 100, dir.path()).unwrap();
+
+        // Accounts hash should be non-zero.
+        assert_ne!(manifest.metadata.accounts_hash, [0u8; 32]);
+        assert!(manifest.metadata.has_accounts_hash());
+
+        // Should match directly computed hash.
+        let (expected_hash, _) = db.compute_accounts_hash();
+        assert_eq!(manifest.metadata.accounts_hash, expected_hash);
+    }
+
+    #[test]
+    fn incremental_from_dirty_set_stores_full_state_hash() {
+        let db = AccountDatabase::new();
+        let config = SnapshotConfig::new();
+        let creator = SnapshotCreator::new(config);
+        let dir = tempfile::tempdir().unwrap();
+
+        let pk1 = Pubkey::new_unique();
+        let pk2 = Pubkey::new_unique();
+        db.store_published_account_at_slot(pk1, Account::new(1_000, vec![], Pubkey::zeroed()), 10);
+        db.store_published_account_at_slot(pk2, Account::new(2_000, vec![], Pubkey::zeroed()), 11);
+
+        let (manifest, _stats) = creator
+            .create_incremental_from_dirty_set(&db, 11, 0, dir.path())
+            .unwrap();
+
+        // Incremental snapshots also store the full-state accounts hash.
+        let (expected_hash, _) = db.compute_accounts_hash();
+        assert_eq!(manifest.metadata.accounts_hash, expected_hash);
+        assert!(manifest.metadata.has_accounts_hash());
+    }
+
+    #[test]
+    fn snapshot_roundtrip_verifies_accounts_hash() {
+        use crate::snapshot::loader::SnapshotLoader;
+
+        let db = AccountDatabase::new();
+        let config = SnapshotConfig::new();
+        let creator = SnapshotCreator::new(config);
+        let dir = tempfile::tempdir().unwrap();
+
+        let pk1 = Pubkey::new_unique();
+        let pk2 = Pubkey::new_unique();
+        let owner = Pubkey::new([10u8; 32]);
+        db.store_published_account(pk1, Account::new(1_000, vec![1, 2], owner));
+        db.store_published_account(pk2, Account::new(2_000, vec![3], owner));
+
+        creator.create_full_snapshot(&db, 50, dir.path()).unwrap();
+
+        // Load into fresh DB — should compute and verify hash.
+        let db2 = AccountDatabase::new();
+        let loader = SnapshotLoader::new();
+        let result = loader
+            .load_snapshot(
+                &dir.path().join("full-50.snapshot"),
+                &dir.path().join("full-50.snapshot.manifest"),
+                &db2,
+            )
+            .unwrap();
+
+        // Hash should match the one computed from restored state.
+        assert_ne!(result.accounts_hash, [0u8; 32]);
+
+        let (recomputed, _) = db2.compute_accounts_hash();
+        assert_eq!(result.accounts_hash, recomputed);
+    }
+
+    #[test]
+    fn incremental_solana_archive_preserves_unmodified_dirty_slots() {
+        let db = AccountDatabase::new();
+        let config = SnapshotConfig::new();
+        let creator = SnapshotCreator::new(config);
+        let dir = tempfile::tempdir().unwrap();
+
+        let pk1 = Pubkey::new_unique();
+        let pk2 = Pubkey::new_unique();
+        db.store_published_account_at_slot(pk1, Account::new(100, vec![], Pubkey::zeroed()), 10);
+        db.store_published_account_at_slot(pk2, Account::new(200, vec![], Pubkey::zeroed()), 30);
+
+        // Only drain through slot 20 — pk2 (slot 30) should survive.
+        let (_, incr) = creator
+            .create_incremental_solana_archive(&db, 20, 0, dir.path(), 1000, None)
+            .unwrap();
+
+        assert_eq!(incr.dirty_pubkeys_tracked, 1); // only pk1
+        assert_eq!(db.dirty_account_count(), 1); // pk2 survives
+    }
+
+    #[test]
+    fn full_then_incremental_solana_archive_workflow() {
+        use crate::snapshot::restore::SnapshotRestorer;
+
+        let db = AccountDatabase::new();
+        let config = SnapshotConfig::new();
+        let creator = SnapshotCreator::new(config);
+        let dir = tempfile::tempdir().unwrap();
+
+        // Initial state.
+        let pk1 = Pubkey::new_unique();
+        let pk2 = Pubkey::new_unique();
+        let owner = Pubkey::new([10u8; 32]);
+        db.store_published_account_at_slot(pk1, Account::new(1_000, vec![1], owner), 100);
+        db.store_published_account_at_slot(pk2, Account::new(2_000, vec![2], owner), 100);
+
+        // Full archive at slot 100.
+        let full_stats = creator
+            .create_solana_archive(&db, 100, dir.path(), 1000)
+            .unwrap();
+        assert_eq!(full_stats.total_accounts, 2);
+
+        // Drain dirty set (simulates: full snapshot completed).
+        db.drain_dirty_slots_through(100);
+
+        // Modifications at slot 200.
+        db.store_published_account_at_slot(pk1, Account::new(5_000, vec![1, 2, 3], owner), 200);
+        let pk3 = Pubkey::new_unique();
+        db.store_published_account_at_slot(pk3, Account::new(3_000, vec![3], owner), 200);
+
+        // Incremental archive at slot 200.
+        let (incr_stats, _) = creator
+            .create_incremental_solana_archive(&db, 200, 100, dir.path(), 1000, None)
+            .unwrap();
+        assert_eq!(incr_stats.total_accounts, 2); // pk1 modified + pk3 new
+
+        // Restore full → then apply incremental → verify final state.
+        let restore_db = AccountDatabase::new();
+        let restorer = SnapshotRestorer::new();
+
+        let full_data = std::fs::read(&full_stats.archive_path).unwrap();
+        restorer.restore_bytes(&full_data, &restore_db).unwrap();
+
+        let incr_data = std::fs::read(&incr_stats.archive_path).unwrap();
+        restorer.restore_bytes(&incr_data, &restore_db).unwrap();
+
+        // pk1: should be updated to 5000.
+        let a1 = restore_db.get_published_account(&pk1).unwrap();
+        assert_eq!(a1.meta.lamports, 5_000);
+        assert_eq!(a1.data.as_slice(), &[1, 2, 3]);
+
+        // pk2: unchanged from full snapshot.
+        let a2 = restore_db.get_published_account(&pk2).unwrap();
+        assert_eq!(a2.meta.lamports, 2_000);
+        assert_eq!(a2.data.as_slice(), &[2]);
+
+        // pk3: new account from incremental.
+        let a3 = restore_db.get_published_account(&pk3).unwrap();
+        assert_eq!(a3.meta.lamports, 3_000);
+        assert_eq!(a3.data.as_slice(), &[3]);
+    }
+}
