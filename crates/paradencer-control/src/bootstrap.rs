@@ -93,6 +93,18 @@ pub fn build_pipeline_service(
     }
     if let Some(engine) = execution_engine {
         builder = builder.with_execution_engine(engine);
+    } else {
+        // In test mode, fall back to mock. Production callers must always provide an engine.
+        #[cfg(test)]
+        {
+            builder = builder.with_execution_engine(Box::new(
+                paradencer_stages::MockExecutionEngine::new(200_000),
+            ));
+        }
+        #[cfg(not(test))]
+        {
+            panic!("ExecutionEngine is required in production — pass Some(engine) to build_pipeline_service()");
+        }
     }
     let (service, handle) = builder.build();
     PipelineBundle {

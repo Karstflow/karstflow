@@ -16,7 +16,7 @@
 /// `register_blockhash()` to activate block production. Produced entries
 /// accumulate until `end_slot()` collects them for shredding.
 use crate::block_producer::{Entry, PohEntry, PohService};
-use crate::exec_stage::{ExecConfig, ExecStage, ExecStats, ExecutionEngine, MockExecutionEngine};
+use crate::exec_stage::{ExecConfig, ExecStage, ExecStats, ExecutionEngine};
 use crate::leader_pipeline::LeaderPipeline;
 use crate::pack_stage::{PackConfig, PackScheduler, PackStats};
 use crate::resolv_stage::{Blockhash, ResolvStats};
@@ -270,7 +270,7 @@ impl PipelineServiceBuilder {
 
     /// Set a custom execution engine (e.g., SbpfBackend adapter).
     ///
-    /// If not set, defaults to `MockExecutionEngine` for testing.
+    /// Required — `build()` will panic if not set.
     pub fn with_execution_engine(mut self, engine: Box<dyn ExecutionEngine>) -> Self {
         self.engine = Some(engine);
         self
@@ -284,7 +284,7 @@ impl PipelineServiceBuilder {
         let pack = PackScheduler::with_config(self.config.pack);
         let engine: Box<dyn ExecutionEngine> = self
             .engine
-            .unwrap_or_else(|| Box::new(MockExecutionEngine::new(200_000)));
+            .expect("ExecutionEngine must be provided via with_execution_engine()");
         let exec = ExecStage::with_config(engine, self.config.exec);
         let poh = PohService::new(paradencer_types::Hash::default());
 
@@ -421,8 +421,13 @@ impl Service for PipelineService {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::exec_stage::MockExecutionEngine;
     use paradencer_mesh::bounded_link;
     use paradencer_runtime::ShutdownSwitch;
+
+    fn mock_engine() -> Box<dyn ExecutionEngine> {
+        Box::new(MockExecutionEngine::new(200_000))
+    }
 
     fn make_raw_tx(payload: Vec<u8>) -> RawTransaction {
         RawTransaction {
@@ -435,6 +440,7 @@ mod tests {
     fn builder_constructs_service() {
         let (_tx, rx) = bounded_link::<RawTransaction>(16);
         let (service, handle) = PipelineServiceBuilder::new()
+            .with_execution_engine(mock_engine())
             .add_input(DualReceiver::Channel(rx))
             .build();
 
@@ -446,6 +452,7 @@ mod tests {
     fn service_drains_input_channel() {
         let (tx, rx) = bounded_link::<RawTransaction>(16);
         let (mut service, handle) = PipelineServiceBuilder::new()
+            .with_execution_engine(mock_engine())
             .add_input(DualReceiver::Channel(rx))
             .build();
 
@@ -464,7 +471,9 @@ mod tests {
 
     #[test]
     fn handle_begin_end_slot() {
-        let (mut service, handle) = PipelineServiceBuilder::new().build();
+        let (mut service, handle) = PipelineServiceBuilder::new()
+            .with_execution_engine(mock_engine())
+            .build();
 
         // Begin a leader slot.
         handle.begin_slot(42);
@@ -488,7 +497,9 @@ mod tests {
 
     #[test]
     fn handle_register_blockhash() {
-        let (mut service, handle) = PipelineServiceBuilder::new().build();
+        let (mut service, handle) = PipelineServiceBuilder::new()
+            .with_execution_engine(mock_engine())
+            .build();
 
         handle.register_blockhash([0xCC; 32], 100);
         handle.advance_slot(100);
@@ -506,6 +517,7 @@ mod tests {
 
         let (tx, rx) = bounded_link::<RawTransaction>(32);
         let (mut service, handle) = PipelineServiceBuilder::new()
+            .with_execution_engine(mock_engine())
             .with_config(config)
             .add_input(DualReceiver::Channel(rx))
             .build();
@@ -538,6 +550,7 @@ mod tests {
 
         let (tx, rx) = bounded_link::<RawTransaction>(64);
         let (mut service, handle) = PipelineServiceBuilder::new()
+            .with_execution_engine(mock_engine())
             .add_input(DualReceiver::Channel(rx))
             .build();
 

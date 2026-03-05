@@ -15,7 +15,7 @@ use paradencer_mesh::tile::Tile;
 use std::sync::Arc;
 
 use crate::dedup_stage::TransactionCache;
-use crate::exec_stage::{ExecStage, ExecutionEngine, MockExecutionEngine};
+use crate::exec_stage::{ExecStage, ExecutionEngine};
 use crate::pack_stage::{PackScheduler, PackedTransaction};
 use crate::resolv_stage::{
     Blockhash, ResolvOutcome, ResolvStage, ResolvStats, ResolvedTransaction,

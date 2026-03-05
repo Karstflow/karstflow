@@ -106,7 +106,7 @@ impl AccountDatabase {
     fn mark_dirty(&self, pubkey: Pubkey, slot: u64) {
         self.dirty_set
             .write()
-            .unwrap()
+            .expect("dirty_set lock poisoned")
             .entry(slot)
             .or_default()
             .insert(pubkey);
@@ -489,7 +489,7 @@ impl AccountDatabase {
     pub fn dirty_accounts_at_slot(&self, slot: u64) -> HashSet<Pubkey> {
         self.dirty_set
             .read()
-            .unwrap()
+            .expect("dirty_set lock poisoned")
             .get(&slot)
             .cloned()
             .unwrap_or_default()
@@ -499,7 +499,7 @@ impl AccountDatabase {
     pub fn dirty_account_count(&self) -> usize {
         self.dirty_set
             .read()
-            .unwrap()
+            .expect("dirty_set lock poisoned")
             .values()
             .map(|set| set.len())
             .sum()

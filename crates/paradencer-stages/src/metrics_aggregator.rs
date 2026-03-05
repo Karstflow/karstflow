@@ -17,7 +17,9 @@ use crate::exec_stage::{ExecStats, ExecStatsSnapshot};
 use crate::fec_resolver::AtomicFecResolverStats;
 use crate::pack_stage::{PackStats, PackStatsSnapshot};
 use crate::resolv_stage::{ResolvStats, ResolvStatsSnapshot};
+use crate::shred_collector::ShredCollectorStats;
 use crate::shred_network::{ShredNetworkStats, ShredNetworkStatsSnapshot};
+use crate::sign_service::SignServiceStats;
 use crate::verify_stage::{VerifyStats, VerifyStatsSnapshot};
 use paradencer_storage::blockstore::{BlockstoreStats, BlockstoreStatsSnapshot};
 
@@ -41,6 +43,8 @@ pub struct MetricsAggregator {
     repair: Option<Arc<AtomicRepairStats>>,
     consensus: Option<Arc<AtomicConsensusStats>>,
     blockstore: Option<Arc<BlockstoreStats>>,
+    shred_collector: Option<ShredCollectorStats>,
+    sign_service: Option<SignServiceStats>,
 }
 
 /// Builder and snapshot methods for MetricsAggregator.
@@ -63,6 +67,8 @@ impl MetricsAggregator {
             repair: None,
             consensus: None,
             blockstore: None,
+            shred_collector: None,
+            sign_service: None,
         }
     }
 
@@ -156,6 +162,18 @@ impl MetricsAggregator {
         self
     }
 
+    /// Set initial shred collector snapshot.
+    pub fn with_shred_collector(mut self, snapshot: ShredCollectorStats) -> Self {
+        self.shred_collector = Some(snapshot);
+        self
+    }
+
+    /// Set initial sign service snapshot.
+    pub fn with_sign_service(mut self, snapshot: SignServiceStats) -> Self {
+        self.sign_service = Some(snapshot);
+        self
+    }
+
     /// Update dedup stats snapshot (call before `snapshot()` for fresh data).
     pub fn update_dedup(&mut self, snapshot: DedupSnapshot) {
         self.dedup = Some(snapshot);
@@ -179,6 +197,16 @@ impl MetricsAggregator {
     /// Update replay stats snapshot (call before `snapshot()` for fresh data).
     pub fn update_replay(&mut self, snapshot: ReplaySnapshot) {
         self.replay = Some(snapshot);
+    }
+
+    /// Update shred collector stats snapshot (call before `snapshot()` for fresh data).
+    pub fn update_shred_collector(&mut self, snapshot: ShredCollectorStats) {
+        self.shred_collector = Some(snapshot);
+    }
+
+    /// Update sign service stats snapshot (call before `snapshot()` for fresh data).
+    pub fn update_sign_service(&mut self, snapshot: SignServiceStats) {
+        self.sign_service = Some(snapshot);
     }
 
     /// Collect a point-in-time snapshot from all registered stats sources.
@@ -208,6 +236,8 @@ impl MetricsAggregator {
             repair: self.repair.as_ref().map(|s| s.snapshot()),
             consensus: self.consensus.as_ref().map(|s| s.snapshot()),
             blockstore: self.blockstore.as_ref().map(|s| s.snapshot()),
+            shred_collector: self.shred_collector.clone(),
+            sign_service: self.sign_service.clone(),
         }
     }
 }
@@ -494,6 +524,8 @@ pub struct AggregatedSnapshot {
     pub repair: Option<RepairSnapshot>,
     pub consensus: Option<ConsensusSnapshot>,
     pub blockstore: Option<BlockstoreStatsSnapshot>,
+    pub shred_collector: Option<ShredCollectorStats>,
+    pub sign_service: Option<SignServiceStats>,
 }
 
 impl AggregatedSnapshot {
@@ -916,6 +948,72 @@ impl AggregatedSnapshot {
             lines.push(format!(
                 "paradencer_blockstore_slots_purged {}",
                 b.slots_purged
+            ));
+        }
+
+        if let Some(ref sc) = self.shred_collector {
+            lines.push(format!(
+                "paradencer_shred_collector_shreds_received {}",
+                sc.shreds_received
+            ));
+            lines.push(format!(
+                "paradencer_shred_collector_fec_sets_received {}",
+                sc.fec_sets_received
+            ));
+            lines.push(format!(
+                "paradencer_shred_collector_blocks_emitted {}",
+                sc.blocks_emitted
+            ));
+            lines.push(format!(
+                "paradencer_shred_collector_slots_evicted_age {}",
+                sc.slots_evicted_age
+            ));
+            lines.push(format!(
+                "paradencer_shred_collector_slots_evicted_overflow {}",
+                sc.slots_evicted_overflow
+            ));
+            lines.push(format!(
+                "paradencer_shred_collector_assembly_failures {}",
+                sc.assembly_failures
+            ));
+            lines.push(format!(
+                "paradencer_shred_collector_downstream_backpressure {}",
+                sc.downstream_backpressure
+            ));
+            lines.push(format!(
+                "paradencer_shred_collector_blockstore_writes {}",
+                sc.blockstore_writes
+            ));
+            lines.push(format!(
+                "paradencer_shred_collector_blockstore_write_errors {}",
+                sc.blockstore_write_errors
+            ));
+        }
+
+        if let Some(ref ss) = self.sign_service {
+            lines.push(format!(
+                "paradencer_sign_service_total_signs {}",
+                ss.total_signs
+            ));
+            lines.push(format!(
+                "paradencer_sign_service_shred_signs {}",
+                ss.shred_signs
+            ));
+            lines.push(format!(
+                "paradencer_sign_service_vote_signs {}",
+                ss.vote_signs
+            ));
+            lines.push(format!(
+                "paradencer_sign_service_gossip_signs {}",
+                ss.gossip_signs
+            ));
+            lines.push(format!(
+                "paradencer_sign_service_repair_signs {}",
+                ss.repair_signs
+            ));
+            lines.push(format!(
+                "paradencer_sign_service_sign_errors {}",
+                ss.sign_errors
             ));
         }
 
