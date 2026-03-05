@@ -126,7 +126,7 @@ impl AccountDatabase {
         parent: TransactionId,
         child: TransactionId,
     ) -> Result<(), StorageError> {
-        let mut tree = self.fork_tree.write().unwrap();
+        let mut tree = self.fork_tree.write().expect("fork_tree lock poisoned");
         tree.prepare(parent, child)
             .map_err(|e| StorageError::AccountDatabaseError {
                 details: e.to_string(),
@@ -157,7 +157,7 @@ impl AccountDatabase {
         let ancestors = if let Some(cached) = self.ancestor_cache.get(&xid) {
             cached.clone()
         } else {
-            let tree = self.fork_tree.read().unwrap();
+            let tree = self.fork_tree.read().expect("fork_tree lock poisoned");
             let chain = tree.ancestors(xid);
             drop(tree);
             self.ancestor_cache.insert(xid, chain.clone());
@@ -190,7 +190,7 @@ impl AccountDatabase {
         }
 
         // Check frozen status (transactions with children are immutable).
-        let tree = self.fork_tree.read().unwrap();
+        let tree = self.fork_tree.read().expect("fork_tree lock poisoned");
         if tree.is_frozen(xid) {
             return Err(StorageError::TransactionFrozen);
         }
@@ -224,7 +224,7 @@ impl AccountDatabase {
             return Err(StorageError::CannotPublishRoot);
         }
 
-        let mut tree = self.fork_tree.write().unwrap();
+        let mut tree = self.fork_tree.write().expect("fork_tree lock poisoned");
 
         // Get ancestor chain (xid first, then parent, grandparent, ...).
         let chain = tree.ancestors(xid);
@@ -264,7 +264,7 @@ impl AccountDatabase {
 
         // Mark all published pubkeys as dirty at this slot.
         {
-            let mut dirty = self.dirty_set.write().unwrap();
+            let mut dirty = self.dirty_set.write().expect("dirty_set lock poisoned");
             let set = dirty.entry(slot).or_default();
             for pubkey in published_updates.keys() {
                 set.insert(*pubkey);
@@ -307,7 +307,7 @@ impl AccountDatabase {
             return Err(StorageError::CannotCancelRoot);
         }
 
-        let mut tree = self.fork_tree.write().unwrap();
+        let mut tree = self.fork_tree.write().expect("fork_tree lock poisoned");
         let descendants = tree.descendants(xid);
 
         // Collect all xids to remove: xid + descendants.
@@ -334,17 +334,26 @@ impl AccountDatabase {
 
     /// Number of in-preparation transactions in the fork tree.
     pub fn fork_count(&self) -> usize {
-        self.fork_tree.read().unwrap().transaction_count()
+        self.fork_tree
+            .read()
+            .expect("fork_tree lock poisoned")
+            .transaction_count()
     }
 
     /// Check if a transaction exists in the fork tree.
     pub fn has_fork(&self, xid: TransactionId) -> bool {
-        self.fork_tree.read().unwrap().contains(xid)
+        self.fork_tree
+            .read()
+            .expect("fork_tree lock poisoned")
+            .contains(xid)
     }
 
     /// Check if a transaction is frozen (has children).
     pub fn is_frozen(&self, xid: TransactionId) -> bool {
-        self.fork_tree.read().unwrap().is_frozen(xid)
+        self.fork_tree
+            .read()
+            .expect("fork_tree lock poisoned")
+            .is_frozen(xid)
     }
 
     // -----------------------------------------------------------------------
@@ -453,7 +462,7 @@ impl AccountDatabase {
 
         // Mark all inserted pubkeys as dirty at this slot.
         {
-            let mut dirty = self.dirty_set.write().unwrap();
+            let mut dirty = self.dirty_set.write().expect("dirty_set lock poisoned");
             let set = dirty.entry(slot).or_default();
             for pubkey in accounts.keys() {
                 set.insert(*pubkey);
@@ -466,9 +475,12 @@ impl AccountDatabase {
     pub fn clear_all_accounts(&self) {
         self.records.clear();
         self.published.lock().clear_all();
-        *self.fork_tree.write().unwrap() = ForkTree::new();
+        *self.fork_tree.write().expect("fork_tree lock poisoned") = ForkTree::new();
         self.owner_index.clear();
-        self.dirty_set.write().unwrap().clear();
+        self.dirty_set
+            .write()
+            .expect("dirty_set lock poisoned")
+            .clear();
         self.txn_records.clear();
         self.ancestor_cache.clear();
     }
@@ -499,7 +511,7 @@ impl AccountDatabase {
     /// those slots from tracking. Used after an incremental snapshot
     /// captures the delta.
     pub fn drain_dirty_slots_through(&self, max_slot: u64) -> HashSet<Pubkey> {
-        let mut dirty = self.dirty_set.write().unwrap();
+        let mut dirty = self.dirty_set.write().expect("dirty_set lock poisoned");
         let mut result = HashSet::new();
         let slots_to_drain: Vec<u64> = dirty.keys().filter(|&&s| s <= max_slot).copied().collect();
         for slot in slots_to_drain {
@@ -512,7 +524,7 @@ impl AccountDatabase {
 
     /// Get the range of slots with dirty tracking data.
     pub fn dirty_slot_range(&self) -> Option<(u64, u64)> {
-        let dirty = self.dirty_set.read().unwrap();
+        let dirty = self.dirty_set.read().expect("dirty_set lock poisoned");
         if dirty.is_empty() {
             return None;
         }
