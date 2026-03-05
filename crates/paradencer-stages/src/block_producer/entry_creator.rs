@@ -86,7 +86,7 @@ impl EntryCreator {
         let transactions = std::mem::take(&mut self.tx_buffer);
         self.buffered_bytes = 0;
 
-        let mut poh = self.poh.lock().unwrap();
+        let mut poh = self.poh.lock().expect("poh lock poisoned");
         let entry = poh.record(transactions);
         drop(poh);
 
@@ -96,7 +96,7 @@ impl EntryCreator {
 
     /// Create an entry from specific transactions (bypasses buffer)
     pub fn create_entry_from(&mut self, transactions: Vec<Vec<u8>>) -> PohEntry {
-        let mut poh = self.poh.lock().unwrap();
+        let mut poh = self.poh.lock().expect("poh lock poisoned");
         let entry = poh.record(transactions);
         drop(poh);
 
@@ -106,7 +106,7 @@ impl EntryCreator {
 
     /// Create a tick entry
     pub fn create_tick_entry(&mut self) -> PohEntry {
-        let mut poh = self.poh.lock().unwrap();
+        let mut poh = self.poh.lock().expect("poh lock poisoned");
         let entry = poh.tick();
         drop(poh);
 

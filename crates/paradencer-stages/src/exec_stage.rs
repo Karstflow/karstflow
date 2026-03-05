@@ -447,7 +447,7 @@ impl BankExecutionEngine {
 
 impl ExecutionEngine for BankExecutionEngine {
     fn execute(&self, tx: &PackedTransaction) -> TransactionExecResult {
-        let bank_forks = self.bank_forks.read().unwrap();
+        let bank_forks = self.bank_forks.read().expect("bank_forks lock poisoned");
         let bank = bank_forks.working_bank();
         self.execute_with_bank(tx, &bank)
     }

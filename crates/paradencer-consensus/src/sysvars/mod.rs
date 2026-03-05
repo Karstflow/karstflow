@@ -81,7 +81,7 @@ impl SysvarCache {
     /// Called once per slot by the runtime. Advances the slot counter, updates
     /// epoch boundaries, and sets the estimated network timestamp.
     pub fn update_clock(&self, slot: u64, epoch: u64, timestamp: i64) {
-        let mut guard = self.clock.write().unwrap();
+        let mut guard = self.clock.write().expect("clock sysvar lock poisoned");
         guard.clock.slot = slot;
         guard.clock.unix_timestamp = timestamp;
         if epoch > guard.clock.epoch {
@@ -93,7 +93,7 @@ impl SysvarCache {
 
     /// Read a snapshot of the current clock state.
     pub fn clock(&self) -> Clock {
-        self.clock.read().unwrap().clock
+        self.clock.read().expect("clock sysvar lock poisoned").clock
     }
 
     // -----------------------------------------------------------------------
@@ -102,7 +102,10 @@ impl SysvarCache {
 
     /// Read the epoch schedule configuration.
     pub fn epoch_schedule(&self) -> EpochSchedule {
-        self.epoch_schedule.read().unwrap().schedule
+        self.epoch_schedule
+            .read()
+            .expect("epoch_schedule sysvar lock poisoned")
+            .schedule
     }
 
     // -----------------------------------------------------------------------
@@ -111,7 +114,7 @@ impl SysvarCache {
 
     /// Read the rent configuration.
     pub fn rent(&self) -> Rent {
-        self.rent.read().unwrap().rent
+        self.rent.read().expect("rent sysvar lock poisoned").rent
     }
 
     // -----------------------------------------------------------------------
@@ -122,12 +125,18 @@ impl SysvarCache {
     ///
     /// Called once per slot after the bank hash is computed.
     pub fn update_slot_hashes(&self, slot: u64, hash: [u8; 32]) {
-        self.slot_hashes.write().unwrap().add(slot, hash);
+        self.slot_hashes
+            .write()
+            .expect("slot_hashes sysvar lock poisoned")
+            .add(slot, hash);
     }
 
     /// Read the slot hashes sysvar.
     pub fn slot_hashes(&self) -> SlotHashesSysvar {
-        self.slot_hashes.read().unwrap().clone()
+        self.slot_hashes
+            .read()
+            .expect("slot_hashes sysvar lock poisoned")
+            .clone()
     }
 
     // -----------------------------------------------------------------------
@@ -136,12 +145,18 @@ impl SysvarCache {
 
     /// Mark a slot as processed in the slot history bitvector.
     pub fn update_slot_history(&self, slot: u64) {
-        self.slot_history.write().unwrap().set(slot);
+        self.slot_history
+            .write()
+            .expect("slot_history sysvar lock poisoned")
+            .set(slot);
     }
 
     /// Read the slot history sysvar.
     pub fn slot_history(&self) -> SlotHistorySysvar {
-        self.slot_history.read().unwrap().clone()
+        self.slot_history
+            .read()
+            .expect("slot_history sysvar lock poisoned")
+            .clone()
     }
 
     // -----------------------------------------------------------------------
@@ -150,7 +165,11 @@ impl SysvarCache {
 
     /// Read the stake history sysvar.
     pub fn stake_history(&self) -> StakeHistory {
-        self.stake_history.read().unwrap().history.clone()
+        self.stake_history
+            .read()
+            .expect("stake_history sysvar lock poisoned")
+            .history
+            .clone()
     }
 
     // -----------------------------------------------------------------------
@@ -161,13 +180,16 @@ impl SysvarCache {
     pub fn update_recent_blockhashes(&self, blockhash: [u8; 32], lamports_per_signature: u64) {
         self.recent_blockhashes
             .write()
-            .unwrap()
+            .expect("recent_blockhashes sysvar lock poisoned")
             .add(blockhash, lamports_per_signature);
     }
 
     /// Read the recent blockhashes sysvar.
     pub fn recent_blockhashes(&self) -> RecentBlockhashesSysvar {
-        self.recent_blockhashes.read().unwrap().clone()
+        self.recent_blockhashes
+            .read()
+            .expect("recent_blockhashes sysvar lock poisoned")
+            .clone()
     }
 
     // -----------------------------------------------------------------------
@@ -176,17 +198,26 @@ impl SysvarCache {
 
     /// Activate epoch rewards distribution with the given reward summary.
     pub fn set_epoch_rewards(&self, rewards: EpochRewards) {
-        *self.epoch_rewards.write().unwrap() = EpochRewardsSysvar::active(rewards);
+        *self
+            .epoch_rewards
+            .write()
+            .expect("epoch_rewards sysvar lock poisoned") = EpochRewardsSysvar::active(rewards);
     }
 
     /// Clear epoch rewards after distribution completes.
     pub fn clear_epoch_rewards(&self) {
-        *self.epoch_rewards.write().unwrap() = EpochRewardsSysvar::inactive();
+        *self
+            .epoch_rewards
+            .write()
+            .expect("epoch_rewards sysvar lock poisoned") = EpochRewardsSysvar::inactive();
     }
 
     /// Check whether epoch rewards distribution is currently active.
     pub fn is_epoch_rewards_active(&self) -> bool {
-        self.epoch_rewards.read().unwrap().is_active()
+        self.epoch_rewards
+            .read()
+            .expect("epoch_rewards sysvar lock poisoned")
+            .is_active()
     }
 
     // -----------------------------------------------------------------------
@@ -195,12 +226,18 @@ impl SysvarCache {
 
     /// Record the slot of the most recent cluster restart.
     pub fn set_last_restart_slot(&self, slot: u64) {
-        *self.last_restart_slot.write().unwrap() = LastRestartSlotSysvar::new(slot);
+        *self
+            .last_restart_slot
+            .write()
+            .expect("last_restart_slot sysvar lock poisoned") = LastRestartSlotSysvar::new(slot);
     }
 
     /// Read the last restart slot value.
     pub fn last_restart_slot(&self) -> u64 {
-        self.last_restart_slot.read().unwrap().slot
+        self.last_restart_slot
+            .read()
+            .expect("last_restart_slot sysvar lock poisoned")
+            .slot
     }
 
     // -----------------------------------------------------------------------
@@ -214,7 +251,7 @@ impl SysvarCache {
     pub fn on_epoch_boundary(&self, new_epoch: u64, entry: StakeHistoryEntry) {
         self.stake_history
             .write()
-            .unwrap()
+            .expect("stake_history sysvar lock poisoned")
             .history
             .add(new_epoch, entry);
     }
@@ -268,23 +305,68 @@ impl SysvarCache {
     /// Serialize just the data portion of the requested sysvar.
     fn serialize_sysvar(&self, pubkey: &Pubkey) -> Option<Vec<u8>> {
         if *pubkey == CLOCK_SYSVAR_ID {
-            Some(self.clock.read().unwrap().to_bytes())
+            Some(
+                self.clock
+                    .read()
+                    .expect("clock sysvar lock poisoned")
+                    .to_bytes(),
+            )
         } else if *pubkey == EPOCH_SCHEDULE_SYSVAR_ID {
-            Some(self.epoch_schedule.read().unwrap().to_bytes())
+            Some(
+                self.epoch_schedule
+                    .read()
+                    .expect("epoch_schedule sysvar lock poisoned")
+                    .to_bytes(),
+            )
         } else if *pubkey == RENT_SYSVAR_ID {
-            Some(self.rent.read().unwrap().to_bytes())
+            Some(
+                self.rent
+                    .read()
+                    .expect("rent sysvar lock poisoned")
+                    .to_bytes(),
+            )
         } else if *pubkey == SLOT_HASHES_SYSVAR_ID {
-            Some(self.slot_hashes.read().unwrap().to_bytes())
+            Some(
+                self.slot_hashes
+                    .read()
+                    .expect("slot_hashes sysvar lock poisoned")
+                    .to_bytes(),
+            )
         } else if *pubkey == SLOT_HISTORY_SYSVAR_ID {
-            Some(self.slot_history.read().unwrap().to_bytes())
+            Some(
+                self.slot_history
+                    .read()
+                    .expect("slot_history sysvar lock poisoned")
+                    .to_bytes(),
+            )
         } else if *pubkey == STAKE_HISTORY_SYSVAR_ID {
-            Some(self.stake_history.read().unwrap().to_bytes())
+            Some(
+                self.stake_history
+                    .read()
+                    .expect("stake_history sysvar lock poisoned")
+                    .to_bytes(),
+            )
         } else if *pubkey == RECENT_BLOCKHASHES_SYSVAR_ID {
-            Some(self.recent_blockhashes.read().unwrap().to_bytes())
+            Some(
+                self.recent_blockhashes
+                    .read()
+                    .expect("recent_blockhashes sysvar lock poisoned")
+                    .to_bytes(),
+            )
         } else if *pubkey == EPOCH_REWARDS_SYSVAR_ID {
-            Some(self.epoch_rewards.read().unwrap().to_bytes())
+            Some(
+                self.epoch_rewards
+                    .read()
+                    .expect("epoch_rewards sysvar lock poisoned")
+                    .to_bytes(),
+            )
         } else if *pubkey == LAST_RESTART_SLOT_SYSVAR_ID {
-            Some(self.last_restart_slot.read().unwrap().to_bytes())
+            Some(
+                self.last_restart_slot
+                    .read()
+                    .expect("last_restart_slot sysvar lock poisoned")
+                    .to_bytes(),
+            )
         } else {
             None
         }

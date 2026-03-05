@@ -193,11 +193,11 @@ impl BytecodeVm {
     /// loaded, it receives an effective visibility delay of
     /// `DELAY_VISIBILITY_SLOT_OFFSET` slots.
     pub fn invalidate_program(&self, program_id: &Pubkey, deployment_slot: u64) {
-        let mut cache = self.cache.lock().unwrap();
+        let mut cache = self.cache.lock().expect("program_cache lock poisoned");
         cache.invalidate(program_id);
         drop(cache);
 
-        let mut deployed = self.deployed_at.lock().unwrap();
+        let mut deployed = self.deployed_at.lock().expect("deployed_at lock poisoned");
         deployed.insert(*program_id, deployment_slot);
     }
 
@@ -431,7 +431,7 @@ impl SbpfVm for BytecodeVm {
 
         // Try cache first
         {
-            let mut cache = self.cache.lock().unwrap();
+            let mut cache = self.cache.lock().expect("program_cache lock poisoned");
             if let Some(program) = cache.get(&context.program_id, current_slot) {
                 let program = program.clone();
                 drop(cache);
@@ -445,7 +445,7 @@ impl SbpfVm for BytecodeVm {
         // Compute effective_slot: if this program was recently deployed,
         // apply DELAY_VISIBILITY_SLOT_OFFSET; otherwise it's always visible.
         let effective_slot = {
-            let mut deployed = self.deployed_at.lock().unwrap();
+            let mut deployed = self.deployed_at.lock().expect("deployed_at lock poisoned");
             if let Some(deploy_slot) = deployed.remove(&context.program_id) {
                 deploy_slot.saturating_add(
                     paradencer_constants::program_cache::DELAY_VISIBILITY_SLOT_OFFSET,
@@ -461,7 +461,7 @@ impl SbpfVm for BytecodeVm {
         }
 
         {
-            let mut cache = self.cache.lock().unwrap();
+            let mut cache = self.cache.lock().expect("program_cache lock poisoned");
             cache.insert(
                 context.program_id,
                 program.clone(),

@@ -47,7 +47,7 @@ impl DeferredLeaderLookup {
 
     /// Set the real leader lookup provider. Called once after consensus boot.
     pub fn set(&self, lookup: std::sync::Arc<dyn LeaderLookup>) {
-        *self.inner.write().unwrap() = Some(lookup);
+        *self.inner.write().expect("leader_lookup lock poisoned") = Some(lookup);
     }
 }
 

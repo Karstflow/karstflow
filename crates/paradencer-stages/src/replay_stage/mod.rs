@@ -249,7 +249,7 @@ impl ReplayStage {
 
     /// Get a shared reference to the signal bus.
     ///
-    /// Use `signal_bus().lock().unwrap().subscribe()` to register a
+    /// Use `signal_bus().lock().expect("...").subscribe()` to register a
     /// new consumer of replay signals.
     pub fn signal_bus(&self) -> Arc<Mutex<SignalBus>> {
         Arc::clone(&self.signal_bus)
@@ -257,7 +257,11 @@ impl ReplayStage {
 
     /// Emit a replay signal and log when subscribers drop messages.
     fn emit_signal(&self, signal: ReplaySignal) {
-        let drops = self.signal_bus.lock().unwrap().emit(signal);
+        let drops = self
+            .signal_bus
+            .lock()
+            .expect("signal_bus lock poisoned")
+            .emit(signal);
         if drops > 0 {
             warn!(
                 signal_drops = drops,
@@ -277,7 +281,10 @@ impl ReplayStage {
                 .create_child_bank(block.parent_slot, block.slot)
                 .map_err(|e| StageError::ReplayError(format!("Bank creation failed: {:?}", e)))?;
 
-            self.stats.lock().unwrap().record_bank_transition();
+            self.stats
+                .lock()
+                .expect("replay_stats lock poisoned")
+                .record_bank_transition();
 
             self.bank_transition
                 .get_working_bank(block.slot)
@@ -295,7 +302,10 @@ impl ReplayStage {
                 // Vote processing failures are non-fatal
                 warn!(slot = block.slot, error = ?e, "vote processing warning");
             } else {
-                self.stats.lock().unwrap().record_vote_processed();
+                self.stats
+                    .lock()
+                    .expect("replay_stats lock poisoned")
+                    .record_vote_processed();
             }
         }
 
@@ -384,7 +394,10 @@ impl ReplayStage {
                 }
             };
 
-            self.stats.lock().unwrap().record_bank_transition();
+            self.stats
+                .lock()
+                .expect("replay_stats lock poisoned")
+                .record_bank_transition();
 
             if finalization.epoch_boundary {
                 info!(
@@ -403,7 +416,7 @@ impl ReplayStage {
                 .bank_transition
                 .bank_forks
                 .read()
-                .unwrap()
+                .expect("bank_forks lock poisoned")
                 .get(block.parent_slot)
                 .map(|parent_bank| parent_bank.last_blockhash())
                 .unwrap_or([0u8; 32]);
@@ -461,7 +474,7 @@ impl ReplayStage {
         if self.config.process_votes {
             let bank_forks = self.bank_transition.bank_forks.clone();
             let is_ancestor = |a: u64, b: u64| {
-                let bf = bank_forks.read().unwrap();
+                let bf = bank_forks.read().expect("bank_forks lock poisoned");
                 bf.is_ancestor(a, b)
             };
 
@@ -471,13 +484,20 @@ impl ReplayStage {
             {
                 Ok(decision) => {
                     if decision.vote_slot.is_some() {
-                        self.stats.lock().unwrap().record_vote_processed();
+                        self.stats
+                            .lock()
+                            .expect("replay_stats lock poisoned")
+                            .record_vote_processed();
                     }
 
                     // Handle root progression
                     if let Some(new_root) = decision.new_root {
                         if self.config.enable_root_progression {
-                            let mut bank_forks = self.bank_transition.bank_forks.write().unwrap();
+                            let mut bank_forks = self
+                                .bank_transition
+                                .bank_forks
+                                .write()
+                                .expect("bank_forks lock poisoned");
                             if new_root > bank_forks.root_slot() {
                                 let previous_root = bank_forks.root_slot();
                                 match bank_forks.set_root(new_root) {
@@ -488,20 +508,26 @@ impl ReplayStage {
                                         let pruned_count = eviction_report.total_evicted() as u64;
                                         drop(bank_forks);
                                         // Prune old vote data
-                                        let mut vote_processor =
-                                            self.vote_integration.vote_processor.lock().unwrap();
+                                        let mut vote_processor = self
+                                            .vote_integration
+                                            .vote_processor
+                                            .lock()
+                                            .expect("vote_processor lock poisoned");
                                         vote_processor.prune_below_root(new_root);
 
                                         self.block_processor
                                             .commitment_tracker
                                             .lock()
-                                            .unwrap()
+                                            .expect("commitment_tracker lock poisoned")
                                             .update_root(new_root);
 
                                         // Flush account storage at root boundary for
                                         // crash-consistent durability checkpoint.
-                                        let bank_forks_r =
-                                            self.bank_transition.bank_forks.read().unwrap();
+                                        let bank_forks_r = self
+                                            .bank_transition
+                                            .bank_forks
+                                            .read()
+                                            .expect("bank_forks lock poisoned");
                                         if let Some(root_bank) = bank_forks_r.root_bank() {
                                             if let Err(e) =
                                                 root_bank.accounts().notify_root_advanced(new_root)
@@ -511,7 +537,10 @@ impl ReplayStage {
                                         }
                                         drop(bank_forks_r);
 
-                                        self.stats.lock().unwrap().record_root_progression();
+                                        self.stats
+                                            .lock()
+                                            .expect("replay_stats lock poisoned")
+                                            .record_root_progression();
 
                                         // Emit RootAdvanced signal.
                                         self.emit_signal(ReplaySignal::RootAdvanced(
@@ -539,7 +568,7 @@ impl ReplayStage {
         let success = outcome.executed_count > 0 || outcome.transactions.is_empty();
         self.stats
             .lock()
-            .unwrap()
+            .expect("replay_stats lock poisoned")
             .record_block_replay(outcome.transactions.len(), success);
 
         Ok(outcome)
@@ -572,12 +601,15 @@ impl ReplayStage {
 
     /// Get current statistics
     pub fn stats(&self) -> ReplayStats {
-        self.stats.lock().unwrap().clone()
+        self.stats
+            .lock()
+            .expect("replay_stats lock poisoned")
+            .clone()
     }
 
     /// Reset statistics
     pub fn reset_stats(&mut self) {
-        *self.stats.lock().unwrap() = ReplayStats::new();
+        *self.stats.lock().expect("replay_stats lock poisoned") = ReplayStats::new();
     }
 
     /// Get configuration
