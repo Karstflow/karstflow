@@ -623,6 +623,7 @@ fn run_with_node_config(
         node_id,
         cluster_info.clone(),
         consensus.vote_processor.clone(),
+        &node_config.network_config,
     )?;
     let retransmit_service = turbine_bundle.retransmit;
 

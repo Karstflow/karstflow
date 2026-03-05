@@ -49,6 +49,6 @@ pub use turbine::{
     BroadcastManager, BroadcastShred, BroadcastStats, Neighborhood, NetworkProximity,
     PropagationMetrics, ProximityEstimator, ProximityScore, RetransmitRequest, RetransmitService,
     RetransmitShred, RetransmitStats, ShredBroadcaster, TurbineConfig, TurbineNode, TurbineResult,
-    TurbineStats, TurbineTree, TurbineTreeBuilder, UdpShredTransport, DEFAULT_FANOUT,
-    DEFAULT_NEIGHBORHOOD_SIZE,
+    ShredTransport, TurbineStats, TurbineTree, TurbineTreeBuilder, UdpShredTransport,
+    DEFAULT_FANOUT, DEFAULT_NEIGHBORHOOD_SIZE,
 };
