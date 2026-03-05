@@ -146,7 +146,7 @@ impl PipelineHandle {
         self.current_slot.store(slot, Ordering::Relaxed);
         self.commands
             .lock()
-            .unwrap()
+            .expect("pipeline commands lock poisoned")
             .push(PipelineCommand::BeginSlot(slot));
     }
 
@@ -154,7 +154,7 @@ impl PipelineHandle {
     pub fn register_blockhash(&self, hash: Blockhash, slot: u64) {
         self.commands
             .lock()
-            .unwrap()
+            .expect("pipeline commands lock poisoned")
             .push(PipelineCommand::RegisterBlockhash(hash, slot));
     }
 
@@ -162,14 +162,17 @@ impl PipelineHandle {
     pub fn advance_slot(&self, slot: u64) {
         self.commands
             .lock()
-            .unwrap()
+            .expect("pipeline commands lock poisoned")
             .push(PipelineCommand::AdvanceSlot(slot));
     }
 
     /// Signal the end of a leader slot.
     pub fn end_slot(&self) {
         self.is_leading.store(false, Ordering::Relaxed);
-        self.commands.lock().unwrap().push(PipelineCommand::EndSlot);
+        self.commands
+            .lock()
+            .expect("pipeline commands lock poisoned")
+            .push(PipelineCommand::EndSlot);
     }
 
     /// Whether the pipeline is currently in a leader slot.
@@ -191,7 +194,7 @@ impl PipelineHandle {
         let (tx, rx) = std::sync::mpsc::sync_channel(1);
         self.commands
             .lock()
-            .unwrap()
+            .expect("pipeline commands lock poisoned")
             .push(PipelineCommand::TakeEntries(tx));
         // Block until the service processes the command. The service ticks
         // every 2ms so this should return quickly.
@@ -340,7 +343,11 @@ impl Service for PipelineService {
 
         // Process queued commands from the handle.
         {
-            let mut commands = self.handle.commands.lock().unwrap();
+            let mut commands = self
+                .handle
+                .commands
+                .lock()
+                .expect("pipeline commands lock poisoned");
             for cmd in commands.drain(..) {
                 match cmd {
                     PipelineCommand::BeginSlot(slot) => {

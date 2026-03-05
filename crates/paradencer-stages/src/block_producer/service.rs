@@ -209,7 +209,10 @@ impl BlockProducer {
             return Err(BlockProducerError::AlreadyRunning);
         }
 
-        *self.current_slot.lock().unwrap() = starting_slot;
+        *self
+            .current_slot
+            .lock()
+            .expect("current_slot lock poisoned") = starting_slot;
         self.running.store(true, Ordering::Relaxed);
 
         let running = self.running.clone();
@@ -279,11 +282,11 @@ impl BlockProducer {
         let mut tick_count_in_slot = 0u64;
 
         while running.load(Ordering::Relaxed) {
-            let slot = *current_slot.lock().unwrap();
+            let slot = *current_slot.lock().expect("current_slot lock poisoned");
 
             // Update stats
             {
-                let mut stats = stats.lock().unwrap();
+                let mut stats = stats.lock().expect("stats lock poisoned");
                 stats.current_slot = slot;
             }
 
@@ -371,7 +374,7 @@ impl BlockProducer {
 
             if !tx_batch.is_empty() {
                 // Add transactions to entry creator
-                let mut creator = entry_creator.lock().unwrap();
+                let mut creator = entry_creator.lock().expect("entry_creator lock poisoned");
                 for tx in tx_batch {
                     creator.add_transaction(tx);
                 }
@@ -388,7 +391,7 @@ impl BlockProducer {
 
             // Generate tick if enough time has passed
             if last_tick_time.elapsed() >= config.tick_duration {
-                let mut creator = entry_creator.lock().unwrap();
+                let mut creator = entry_creator.lock().expect("entry_creator lock poisoned");
 
                 // Flush any pending transactions first
                 if let Some(entry) = creator.flush() {
@@ -405,7 +408,7 @@ impl BlockProducer {
                 *last_tick_time = Instant::now();
 
                 // Update stats
-                let mut stats = stats.lock().unwrap();
+                let mut stats = stats.lock().expect("stats lock poisoned");
                 stats.total_ticks += 1;
                 drop(stats);
             }
@@ -426,7 +429,7 @@ impl BlockProducer {
 
         // Ensure we have exactly ticks_per_slot ticks
         while *tick_count_in_slot < config.ticks_per_slot {
-            let mut creator = entry_creator.lock().unwrap();
+            let mut creator = entry_creator.lock().expect("entry_creator lock poisoned");
 
             // Flush any pending transactions
             if let Some(entry) = creator.flush() {
@@ -441,7 +444,7 @@ impl BlockProducer {
 
             *tick_count_in_slot += 1;
 
-            let mut stats = stats.lock().unwrap();
+            let mut stats = stats.lock().expect("stats lock poisoned");
             stats.total_ticks += 1;
             drop(stats);
         }
@@ -453,7 +456,7 @@ impl BlockProducer {
 
         // Update final stats
         let slot_duration = slot_start.elapsed();
-        let mut stats = stats.lock().unwrap();
+        let mut stats = stats.lock().expect("stats lock poisoned");
         stats.slots_produced += 1;
         stats.total_transactions += transactions_in_slot;
         stats.production_time_ms += slot_duration.as_millis() as u64;
@@ -500,7 +503,7 @@ impl BlockProducer {
         }
 
         // Update stats
-        let mut stats = stats.lock().unwrap();
+        let mut stats = stats.lock().expect("stats lock poisoned");
         stats.total_entries += entries.len() as u64;
         stats.total_data_shreds += data_count as u64;
         stats.total_coding_shreds += coding_count as u64;
@@ -514,14 +517,17 @@ impl BlockProducer {
 
     /// Advance to the next slot
     fn advance_slot(current_slot: &Arc<Mutex<u64>>, tick_count: &mut u64) {
-        let mut slot = current_slot.lock().unwrap();
+        let mut slot = current_slot.lock().expect("current_slot lock poisoned");
         *slot += 1;
         *tick_count = 0;
     }
 
     /// Get current slot
     pub fn current_slot(&self) -> u64 {
-        *self.current_slot.lock().unwrap()
+        *self
+            .current_slot
+            .lock()
+            .expect("current_slot lock poisoned")
     }
 
     /// Check if currently running
@@ -531,12 +537,12 @@ impl BlockProducer {
 
     /// Get statistics
     pub fn stats(&self) -> BlockProducerStats {
-        self.stats.lock().unwrap().clone()
+        self.stats.lock().expect("stats lock poisoned").clone()
     }
 
     /// Reset statistics
     pub fn reset_stats(&self) {
-        let mut stats = self.stats.lock().unwrap();
+        let mut stats = self.stats.lock().expect("stats lock poisoned");
         *stats = BlockProducerStats::default();
     }
 

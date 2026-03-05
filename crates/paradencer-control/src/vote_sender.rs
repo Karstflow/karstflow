@@ -122,7 +122,7 @@ impl paradencer_runtime::Service for VoteSenderService {
             return Ok(());
         }
 
-        let vote_slot = current_vote_slot.unwrap();
+        let vote_slot = current_vote_slot.expect("checked is_none above");
 
         // Get bank hash for the voted slot.
         let bank_hash = {
