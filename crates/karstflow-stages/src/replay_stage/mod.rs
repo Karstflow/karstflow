@@ -1,3 +1,4 @@
+pub mod alut_resolver;
 mod ancestry_verifier;
 mod bank_transition;
 mod block_processor;
