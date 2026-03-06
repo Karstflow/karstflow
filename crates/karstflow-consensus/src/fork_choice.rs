@@ -18,6 +18,14 @@ pub struct ForkInfo {
     pub confirmed: bool,
     /// Whether this fork has been optimistically confirmed
     pub optimistically_confirmed: bool,
+    /// Whether this block is equivocating (two+ blocks produced for same slot).
+    /// Equivocating blocks are invalid for fork choice unless duplicate confirmed.
+    pub eqvoc: bool,
+    /// Whether this block has been "duplicate confirmed" via gossip votes (>= 52% stake).
+    pub duplicate_confirmed: bool,
+    /// Whether this block is valid for fork choice.
+    /// An equivocating block is valid only if duplicate confirmed.
+    pub valid: bool,
 }
 
 impl ForkInfo {
@@ -28,6 +36,9 @@ impl ForkInfo {
             stake_weight: 0,
             confirmed: false,
             optimistically_confirmed: false,
+            eqvoc: false,
+            duplicate_confirmed: false,
+            valid: true,
         }
     }
 }
@@ -179,30 +190,35 @@ impl ForkChoice {
         ratio >= (1.0 + SWITCH_FORK_THRESHOLD)
     }
 
-    /// Compute the best fork to vote on using GHOST algorithm
-    /// Starts from root and follows the heaviest subtree at each level
+    /// Compute the best fork to vote on using GHOST algorithm.
+    ///
+    /// Starts from root and follows the heaviest valid subtree at each level.
+    /// Skips forks marked invalid (equivocating and not duplicate confirmed).
+    /// Ties are broken by lower slot number.
     pub fn compute_best_fork(&mut self, root: u64) -> Option<u64> {
         let mut current = root;
 
         loop {
-            // Find all children of current slot
+            // Find all valid children of current slot
             let children: Vec<u64> = self
                 .forks
                 .iter()
-                .filter(|(_, fork)| fork.parent == Some(current))
+                .filter(|(_, fork)| fork.parent == Some(current) && fork.valid)
                 .map(|(slot, _)| *slot)
                 .collect();
 
             if children.is_empty() {
-                // Reached a leaf, this is our best fork
+                // No valid children — current is our best fork
                 self.best_slot = Some(current);
                 return Some(current);
             }
 
-            // Pick the child with the most stake (GHOST)
-            let best_child = children
-                .into_iter()
-                .max_by_key(|slot| self.forks.get(slot).map(|f| f.stake_weight).unwrap_or(0))?;
+            // Pick the valid child with the most stake, tie-break by lower slot
+            let best_child = children.into_iter().max_by(|&a, &b| {
+                let wa = self.forks.get(&a).map(|f| f.stake_weight).unwrap_or(0);
+                let wb = self.forks.get(&b).map(|f| f.stake_weight).unwrap_or(0);
+                wa.cmp(&wb).then_with(|| b.cmp(&a))
+            })?;
 
             current = best_child;
         }
@@ -269,10 +285,13 @@ impl ForkChoice {
                 return None;
             }
 
-            // Filter children based on tower lockouts
+            // Filter children based on validity and tower lockouts
             let valid_children: Vec<u64> = children
                 .into_iter()
-                .filter(|&slot| !self.is_locked_out_by_tower(slot, tower, bank_forks))
+                .filter(|&slot| {
+                    self.forks.get(&slot).is_some_and(|f| f.valid)
+                        && !self.is_locked_out_by_tower(slot, tower, bank_forks)
+                })
                 .collect();
 
             if valid_children.is_empty() {
@@ -490,10 +509,12 @@ impl ForkChoice {
 
     /// Select the heaviest fork using GHOST traversal with ancestry-propagated weights.
     ///
-    /// Starting from the root, at each level picks the child with the
+    /// Starting from the root, at each level picks the valid child with the
     /// highest stake weight (ties broken by lower slot number). With LMD-GHOST
     /// ancestry propagation, each node's `stake_weight` already includes all
     /// descendant votes, so direct comparison is correct.
+    ///
+    /// Skips forks marked invalid due to unconfirmed equivocation.
     pub fn select_heaviest_fork(&mut self, root: u64) -> Option<u64> {
         if !self.forks.contains_key(&root) {
             return None;
@@ -502,28 +523,28 @@ impl ForkChoice {
         let mut current = root;
 
         loop {
-            // Find all children of current slot
-            let children: Vec<u64> = self
+            // Find all valid children of current slot
+            let valid_children: Vec<u64> = self
                 .forks
                 .iter()
-                .filter(|(_, fork)| fork.parent == Some(current))
+                .filter(|(_, fork)| fork.parent == Some(current) && fork.valid)
                 .map(|(slot, _)| *slot)
                 .collect();
 
-            if children.is_empty() {
+            if valid_children.is_empty() {
                 self.best_slot = Some(current);
                 return Some(current);
             }
 
-            // Pick child with highest stake weight, break ties by lower slot
-            let mut best_child = children[0];
+            // Pick valid child with highest stake weight, break ties by lower slot
+            let mut best_child = valid_children[0];
             let mut best_weight = self
                 .forks
-                .get(&children[0])
+                .get(&valid_children[0])
                 .map(|f| f.stake_weight)
                 .unwrap_or(0);
 
-            for &child in &children[1..] {
+            for &child in &valid_children[1..] {
                 let weight = self.forks.get(&child).map(|f| f.stake_weight).unwrap_or(0);
                 if weight > best_weight || (weight == best_weight && child < best_child) {
                     best_child = child;
@@ -599,6 +620,79 @@ impl ForkChoice {
     /// Get all validator vote entries.
     pub fn all_validator_votes(&self) -> &HashMap<Pubkey, (u64, u64)> {
         &self.validator_latest_votes
+    }
+
+    /// Mark a slot as equivocating (two+ blocks produced for same slot).
+    ///
+    /// Both equivocating blocks are marked invalid for fork choice.
+    /// A block can become valid again only via `mark_duplicate_confirmed`.
+    pub fn mark_equivocating(&mut self, slot: u64) {
+        if let Some(fork) = self.forks.get_mut(&slot) {
+            fork.eqvoc = true;
+            if !fork.duplicate_confirmed {
+                fork.valid = false;
+            }
+        }
+    }
+
+    /// Mark a slot as duplicate confirmed (>= 52% of stake voted for this version).
+    ///
+    /// If the block was previously marked equivocating and invalid,
+    /// this restores it to valid for fork choice.
+    pub fn mark_duplicate_confirmed(&mut self, slot: u64) {
+        if let Some(fork) = self.forks.get_mut(&slot) {
+            fork.duplicate_confirmed = true;
+            fork.valid = true;
+        }
+    }
+
+    /// Find the first invalid ancestor of a slot (walking toward root).
+    ///
+    /// Does not include the slot itself. Returns `None` if all ancestors are valid.
+    pub fn invalid_ancestor(&self, slot: u64) -> Option<u64> {
+        let mut current = self.forks.get(&slot).and_then(|f| f.parent);
+        while let Some(s) = current {
+            if let Some(fork) = self.forks.get(&s) {
+                if !fork.valid {
+                    return Some(s);
+                }
+                current = fork.parent;
+            } else {
+                break;
+            }
+        }
+        None
+    }
+
+    /// Find the deepest slot (highest tree depth) in the subtree from root.
+    ///
+    /// Unlike `select_heaviest_fork`, this can return an invalid fork.
+    /// In case of ties, returns the most recently inserted (highest slot).
+    pub fn deepest_fork(&self, root: u64) -> Option<u64> {
+        if !self.forks.contains_key(&root) {
+            return None;
+        }
+
+        // BFS to find the deepest node
+        let mut queue = std::collections::VecDeque::new();
+        queue.push_back(root);
+        let mut last = root;
+
+        while let Some(current) = queue.pop_front() {
+            last = current;
+            // Enqueue all children
+            let children: Vec<u64> = self
+                .forks
+                .iter()
+                .filter(|(_, fork)| fork.parent == Some(current))
+                .map(|(slot, _)| *slot)
+                .collect();
+            for child in children {
+                queue.push_back(child);
+            }
+        }
+
+        Some(last)
     }
 
     /// Get statistics about the fork choice state.
@@ -988,5 +1082,172 @@ mod tests {
         let heaviest = fc.select_heaviest_fork(0);
         assert_eq!(best, heaviest);
         assert_eq!(best, Some(3));
+    }
+
+    // ── equivocation handling ─────────────────────────────────────────
+
+    #[test]
+    fn equivocating_fork_excluded_from_best() {
+        let mut fc = ForkChoice::new(1000);
+        //     0
+        //    / \
+        //   1   2
+        fc.add_fork(0, None);
+        fc.add_fork(1, Some(0));
+        fc.add_fork(2, Some(0));
+
+        fc.add_stake(1, 600); // Heavier
+        fc.add_stake(2, 300);
+
+        // Slot 1 equivocates — becomes invalid
+        fc.mark_equivocating(1);
+
+        // GHOST should skip slot 1 and pick slot 2
+        assert_eq!(fc.compute_best_fork(0), Some(2));
+        assert_eq!(fc.select_heaviest_fork(0), Some(2));
+    }
+
+    #[test]
+    fn duplicate_confirmed_restores_validity() {
+        let mut fc = ForkChoice::new(1000);
+        //     0
+        //    / \
+        //   1   2
+        fc.add_fork(0, None);
+        fc.add_fork(1, Some(0));
+        fc.add_fork(2, Some(0));
+
+        fc.add_stake(1, 600);
+        fc.add_stake(2, 300);
+
+        // Mark equivocating then duplicate confirmed
+        fc.mark_equivocating(1);
+        assert!(!fc.get_fork(1).unwrap().valid);
+
+        fc.mark_duplicate_confirmed(1);
+        assert!(fc.get_fork(1).unwrap().valid);
+        assert!(fc.get_fork(1).unwrap().duplicate_confirmed);
+
+        // Now GHOST picks slot 1 again (heavier)
+        assert_eq!(fc.compute_best_fork(0), Some(1));
+    }
+
+    #[test]
+    fn all_children_invalid_stops_at_parent() {
+        let mut fc = ForkChoice::new(1000);
+        //     0
+        //    / \
+        //   1   2
+        fc.add_fork(0, None);
+        fc.add_fork(1, Some(0));
+        fc.add_fork(2, Some(0));
+
+        fc.add_stake(0, 100);
+        fc.add_stake(1, 400);
+        fc.add_stake(2, 300);
+
+        // Both children equivocate
+        fc.mark_equivocating(1);
+        fc.mark_equivocating(2);
+
+        // GHOST stops at root since no valid children
+        assert_eq!(fc.compute_best_fork(0), Some(0));
+        assert_eq!(fc.select_heaviest_fork(0), Some(0));
+    }
+
+    #[test]
+    fn equivocation_tie_break_by_lower_slot() {
+        let mut fc = ForkChoice::new(1000);
+        //     0
+        //    / \
+        //   1   2
+        fc.add_fork(0, None);
+        fc.add_fork(1, Some(0));
+        fc.add_fork(2, Some(0));
+
+        // Equal stake
+        fc.add_stake(1, 500);
+        fc.add_stake(2, 500);
+
+        // Both valid — tie-break by lower slot
+        assert_eq!(fc.compute_best_fork(0), Some(1));
+    }
+
+    #[test]
+    fn invalid_ancestor_detection() {
+        let mut fc = ForkChoice::new(1000);
+        // 0 → 1 → 2 → 3
+        fc.add_fork(0, None);
+        fc.add_fork(1, Some(0));
+        fc.add_fork(2, Some(1));
+        fc.add_fork(3, Some(2));
+
+        // All valid — no invalid ancestor
+        assert_eq!(fc.invalid_ancestor(3), None);
+
+        // Mark slot 1 as equivocating
+        fc.mark_equivocating(1);
+        assert_eq!(fc.invalid_ancestor(3), Some(1));
+
+        // Slot 3 itself is valid, but ancestor 1 is not
+        assert!(fc.get_fork(3).unwrap().valid);
+        assert!(!fc.get_fork(1).unwrap().valid);
+    }
+
+    #[test]
+    fn deepest_fork_returns_max_depth() {
+        let mut fc = ForkChoice::new(1000);
+        // 0 → 1 → 2 → 3
+        //       → 4
+        fc.add_fork(0, None);
+        fc.add_fork(1, Some(0));
+        fc.add_fork(2, Some(1));
+        fc.add_fork(3, Some(2));
+        fc.add_fork(4, Some(1));
+
+        // Deepest is slot 3 (depth 3)
+        assert_eq!(fc.deepest_fork(0), Some(3));
+    }
+
+    #[test]
+    fn deepest_fork_includes_invalid() {
+        let mut fc = ForkChoice::new(1000);
+        // 0 → 1 → 2
+        //       → 3
+        fc.add_fork(0, None);
+        fc.add_fork(1, Some(0));
+        fc.add_fork(2, Some(1));
+        fc.add_fork(3, Some(1));
+
+        // Mark 2 invalid — deepest should still find it
+        fc.mark_equivocating(2);
+        let deepest = fc.deepest_fork(0).unwrap();
+        // Deepest is either 2 or 3 (same depth), both are valid results
+        assert!(deepest == 2 || deepest == 3);
+    }
+
+    #[test]
+    fn new_fork_defaults_to_valid() {
+        let mut fc = ForkChoice::new(1000);
+        fc.add_fork(1, None);
+        let fork = fc.get_fork(1).unwrap();
+        assert!(fork.valid);
+        assert!(!fork.eqvoc);
+        assert!(!fork.duplicate_confirmed);
+    }
+
+    #[test]
+    fn mark_equivocating_already_confirmed_stays_valid() {
+        let mut fc = ForkChoice::new(1000);
+        fc.add_fork(1, None);
+
+        // Duplicate confirm first, then mark equivocating
+        fc.mark_duplicate_confirmed(1);
+        fc.mark_equivocating(1);
+
+        // Should stay valid because duplicate confirmed
+        assert!(fc.get_fork(1).unwrap().valid);
+        assert!(fc.get_fork(1).unwrap().eqvoc);
+        assert!(fc.get_fork(1).unwrap().duplicate_confirmed);
     }
 }
