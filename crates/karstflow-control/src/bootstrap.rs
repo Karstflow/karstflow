@@ -21,9 +21,9 @@ use karstflow_net::tile::{BridgeConfig, BridgeHandle};
 use karstflow_net::{
     ClusterInfo, ContactInfo, GossipConfig, GossipService, GossipServiceStats, InMemoryShredStore,
     IngressMode, NodeId, OutboundRepair, RepairCoordinator, RepairCoordinatorConfig, RepairRequest,
-    RepairService, RepairServiceConfig, RepairTarget, RetransmitService, RetransmitStats,
-    ShredData, ShredIndex, ShredProvider, Slot, TurbineConfig, TurbineStats, TurbineTreeBuilder,
-    UdpShredTransport, ValidatorInfo,
+    RepairServerConfig, RepairService, RepairServiceConfig, RepairTarget, RetransmitService,
+    RetransmitStats, ShredData, ShredIndex, ShredProvider, Slot, TurbineConfig, TurbineStats,
+    TurbineTreeBuilder, UdpShredTransport, ValidatorInfo,
 };
 use karstflow_observability::spawn_metrics_http_bridge;
 use karstflow_rpc::{
@@ -1536,6 +1536,7 @@ pub fn build_repair_service(
     bank_forks: Arc<RwLock<BankForks>>,
     shred_provider: Option<Arc<dyn ShredProvider>>,
     shred_arrival_rx: crossbeam_channel::Receiver<ShredArrival>,
+    repair_bind_addr: std::net::SocketAddr,
 ) -> Result<RepairBundle> {
     let root_slot = bank_forks
         .read()
@@ -1578,7 +1579,13 @@ pub fn build_repair_service(
                 .expect("failed to build repair tokio runtime");
 
             rt.block_on(async move {
-                let config = RepairServiceConfig::default();
+                let config = RepairServiceConfig {
+                    server_config: RepairServerConfig {
+                        bind_addr: repair_bind_addr,
+                        ..RepairServerConfig::default()
+                    },
+                    ..RepairServiceConfig::default()
+                };
 
                 let mut service = match RepairService::new(
                     node_id,
