@@ -396,3 +396,284 @@ fn to_link_metrics(snapshot: &ChannelSnapshot) -> LinkMetrics {
         closed_receives: snapshot.closed_receives,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn zero_channel() -> ChannelSnapshot {
+        ChannelSnapshot {
+            queue_depth: 0,
+            queue_capacity: None,
+            enqueued_messages: 0,
+            dequeued_messages: 0,
+            blocked_sends: 0,
+            closed_sends: 0,
+            empty_receives: 0,
+            closed_receives: 0,
+        }
+    }
+
+    fn zero_ingress() -> IngressFilterMetrics {
+        IngressFilterMetrics {
+            accepted_transactions: 0,
+            accepted_quic_source: 0,
+            accepted_gossip_source: 0,
+            accepted_bundle_source: 0,
+            accepted_rpc_source: 0,
+            duplicate_transactions: 0,
+            duplicate_quic_source: 0,
+            duplicate_gossip_source: 0,
+            duplicate_bundle_source: 0,
+            duplicate_rpc_source: 0,
+            dropped_empty_payload: 0,
+            dropped_oversized_payload: 0,
+            dropped_disallowed_source: 0,
+            dropped_rate_limited_source: 0,
+            dropped_cost_budget_source: 0,
+            dropped_downstream_backpressure: 0,
+        }
+    }
+
+    fn zero_shred() -> ShredFilterMetrics {
+        ShredFilterMetrics {
+            accepted_shreds: 0,
+            duplicate_shreds: 0,
+            dropped_empty_payload: 0,
+            dropped_oversized_payload: 0,
+            dropped_disallowed_source: 0,
+            parse_failures: 0,
+        }
+    }
+
+    fn zero_block_assembly() -> BlockAssemblyMetrics {
+        BlockAssemblyMetrics {
+            deferred_retries: 0,
+            dropped_fragments: 0,
+            committed_fragments: 0,
+            pending_retries: 0,
+            execution_error_total: 0,
+            execution_error_empty_batch: 0,
+            execution_error_cost_overflow: 0,
+            execution_error_adapter_apply: 0,
+            execution_error_adapter_rollback: 0,
+            execution_error_adapter_state_conflict: 0,
+            execution_error_adapter_contract_violation: 0,
+            execution_error_adapter_receipt_missing: 0,
+            execution_error_adapter_mutex_poisoned: 0,
+            execution_error_fail_open_continue: 0,
+            execution_error_fail_fast_halt: 0,
+            execution_error_fail_open_circuit_breaker_halt: 0,
+            execution_error_consecutive_current: 0,
+            retry_scheduled_replay_conflict: 0,
+            retry_scheduled_transient_pressure: 0,
+            retry_scheduled_resource_exhaustion: 0,
+            retry_scheduled_fallback: 0,
+            dropped_replay_conflict: 0,
+            dropped_deterministic: 0,
+            dropped_transient_pressure: 0,
+            dropped_resource_exhaustion: 0,
+            dropped_fallback: 0,
+            dropped_reorg_retry_exhausted: 0,
+            leader_gate_permit: 0,
+            leader_gate_hold: 0,
+            fork_choice_keep: 0,
+            fork_choice_reorg: 0,
+            execution_health_cooldown_entries: 0,
+            execution_health_cooldown_skipped_ticks: 0,
+            replay_safety_hold_entries: 0,
+            replay_safety_hold_skipped_ticks: 0,
+            fork_choice_quarantine_entries: 0,
+            fork_choice_quarantine_skipped_ticks: 0,
+            slot_transition_committed: 0,
+            slot_transition_dropped: 0,
+            slot_transition_reorg_pending: 0,
+            replay_controller_holds: 0,
+            replay_controller_confirmed_candidates: 0,
+            replay_controller_candidate_switches: 0,
+            replay_controller_stale_candidates_pruned: 0,
+            replay_controller_switch_suppressed: 0,
+            replay_controller_active_candidate_failed_ratio_bps: 0,
+            replay_controller_tracked_candidates: 0,
+            replay_window_checkpoint_depth: 0,
+            replay_window_rewinds: 0,
+            replay_window_catalog_snapshots_pruned: 0,
+            execution_state_rewind_failures: 0,
+        }
+    }
+
+    #[test]
+    fn build_json_line_returns_valid_json() {
+        let json = build_json_line(
+            1000,
+            &zero_channel(),
+            &zero_channel(),
+            &zero_channel(),
+            zero_ingress(),
+            zero_shred(),
+            zero_block_assembly(),
+        )
+        .unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed["event"], "mesh_metrics");
+        assert_eq!(parsed["uptime_millis"], 1000);
+    }
+
+    #[test]
+    fn build_json_line_includes_link_metrics() {
+        let pkt = ChannelSnapshot {
+            enqueued_messages: 42,
+            dequeued_messages: 37,
+            blocked_sends: 5,
+            ..zero_channel()
+        };
+        let json = build_json_line(
+            500,
+            &pkt,
+            &zero_channel(),
+            &zero_channel(),
+            zero_ingress(),
+            zero_shred(),
+            zero_block_assembly(),
+        )
+        .unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed["packet_link"]["enqueued_messages"], 42);
+        assert_eq!(parsed["packet_link"]["dequeued_messages"], 37);
+        assert_eq!(parsed["packet_link"]["blocked_sends"], 5);
+    }
+
+    #[test]
+    fn build_prometheus_lines_contains_uptime() {
+        let lines = build_prometheus_lines(
+            12345,
+            &zero_channel(),
+            &zero_channel(),
+            &zero_channel(),
+            zero_ingress(),
+            zero_shred(),
+            zero_block_assembly(),
+        );
+        assert!(lines
+            .iter()
+            .any(|l| l == "karstflow_uptime_millis 12345"));
+    }
+
+    #[test]
+    fn build_prometheus_lines_contains_packet_metrics() {
+        let pkt = ChannelSnapshot {
+            enqueued_messages: 100,
+            dequeued_messages: 80,
+            blocked_sends: 3,
+            ..zero_channel()
+        };
+        let lines = build_prometheus_lines(
+            0,
+            &pkt,
+            &zero_channel(),
+            &zero_channel(),
+            zero_ingress(),
+            zero_shred(),
+            zero_block_assembly(),
+        );
+        assert!(lines
+            .iter()
+            .any(|l| l == "karstflow_mesh_packet_enqueued_messages 100"));
+        assert!(lines
+            .iter()
+            .any(|l| l == "karstflow_mesh_packet_dequeued_messages 80"));
+        assert!(lines
+            .iter()
+            .any(|l| l == "karstflow_mesh_packet_blocked_sends 3"));
+    }
+
+    #[test]
+    fn build_prometheus_lines_contains_ingress_metrics() {
+        let ingress = IngressFilterMetrics {
+            accepted_transactions: 77,
+            dropped_empty_payload: 2,
+            ..zero_ingress()
+        };
+        let lines = build_prometheus_lines(
+            0,
+            &zero_channel(),
+            &zero_channel(),
+            &zero_channel(),
+            ingress,
+            zero_shred(),
+            zero_block_assembly(),
+        );
+        assert!(lines
+            .iter()
+            .any(|l| l == "karstflow_ingress_accepted_transactions 77"));
+        assert!(lines
+            .iter()
+            .any(|l| l == "karstflow_ingress_dropped_empty_payload 2"));
+    }
+
+    #[test]
+    fn build_prometheus_lines_contains_shred_metrics() {
+        let shred = ShredFilterMetrics {
+            accepted_shreds: 999,
+            parse_failures: 5,
+            ..zero_shred()
+        };
+        let lines = build_prometheus_lines(
+            0,
+            &zero_channel(),
+            &zero_channel(),
+            &zero_channel(),
+            zero_ingress(),
+            shred,
+            zero_block_assembly(),
+        );
+        assert!(lines
+            .iter()
+            .any(|l| l == "karstflow_shred_accepted 999"));
+    }
+
+    #[test]
+    fn build_prometheus_lines_contains_block_assembly_metrics() {
+        let ba = BlockAssemblyMetrics {
+            committed_fragments: 50,
+            dropped_fragments: 3,
+            ..zero_block_assembly()
+        };
+        let lines = build_prometheus_lines(
+            0,
+            &zero_channel(),
+            &zero_channel(),
+            &zero_channel(),
+            zero_ingress(),
+            zero_shred(),
+            ba,
+        );
+        assert!(lines
+            .iter()
+            .any(|l| l == "karstflow_block_assembly_committed_fragments_total 50"));
+        assert!(lines
+            .iter()
+            .any(|l| l == "karstflow_block_assembly_dropped_fragments_total 3"));
+    }
+
+    #[test]
+    fn to_link_metrics_copies_all_fields() {
+        let snapshot = ChannelSnapshot {
+            queue_depth: 10,
+            queue_capacity: Some(100),
+            enqueued_messages: 1,
+            dequeued_messages: 2,
+            blocked_sends: 3,
+            closed_sends: 4,
+            empty_receives: 5,
+            closed_receives: 6,
+        };
+        let lm = to_link_metrics(&snapshot);
+        assert_eq!(lm.enqueued_messages, 1);
+        assert_eq!(lm.dequeued_messages, 2);
+        assert_eq!(lm.blocked_sends, 3);
+        assert_eq!(lm.closed_sends, 4);
+        assert_eq!(lm.empty_receives, 5);
+        assert_eq!(lm.closed_receives, 6);
+    }
+}

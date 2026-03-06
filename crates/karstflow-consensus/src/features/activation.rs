@@ -44,3 +44,79 @@ pub fn process_feature_activations(
         feature_set.activate(feature_id, slot);
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use karstflow_types::Pubkey;
+
+    fn test_pubkey(byte: u8) -> Pubkey {
+        Pubkey::new_from_array([byte; 32])
+    }
+
+    #[test]
+    fn activates_features_whose_accounts_exist() {
+        let mut fs = FeatureSet::new();
+        let f1 = test_pubkey(1);
+        let f2 = test_pubkey(2);
+        fs.inactive.insert(f1);
+        fs.inactive.insert(f2);
+
+        let existing = [f1];
+        process_feature_activations(&mut fs, 100, &|id| existing.contains(id));
+
+        assert!(fs.is_active(&f1));
+        assert_eq!(fs.activated_slot(&f1), Some(100));
+        assert!(!fs.is_active(&f2));
+        assert_eq!(fs.inactive_count(), 1);
+    }
+
+    #[test]
+    fn noop_when_no_features_match() {
+        let mut fs = FeatureSet::new();
+        let f1 = test_pubkey(1);
+        fs.inactive.insert(f1);
+
+        process_feature_activations(&mut fs, 50, &|_| false);
+
+        assert!(!fs.is_active(&f1));
+        assert_eq!(fs.inactive_count(), 1);
+    }
+
+    #[test]
+    fn activates_all_when_all_accounts_exist() {
+        let mut fs = FeatureSet::new();
+        let f1 = test_pubkey(1);
+        let f2 = test_pubkey(2);
+        let f3 = test_pubkey(3);
+        fs.inactive.insert(f1);
+        fs.inactive.insert(f2);
+        fs.inactive.insert(f3);
+
+        process_feature_activations(&mut fs, 200, &|_| true);
+
+        assert!(fs.is_active(&f1));
+        assert!(fs.is_active(&f2));
+        assert!(fs.is_active(&f3));
+        assert_eq!(fs.inactive_count(), 0);
+        assert_eq!(fs.active_count(), 3);
+    }
+
+    #[test]
+    fn does_not_reactivate_already_active_features() {
+        let mut fs = FeatureSet::new();
+        let f1 = test_pubkey(1);
+        fs.activate(f1, 10);
+
+        process_feature_activations(&mut fs, 50, &|_| true);
+
+        assert_eq!(fs.activated_slot(&f1), Some(10));
+    }
+
+    #[test]
+    fn empty_inactive_set_is_noop() {
+        let mut fs = FeatureSet::new();
+        process_feature_activations(&mut fs, 100, &|_| true);
+        assert_eq!(fs.active_count(), 0);
+    }
+}

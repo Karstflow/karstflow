@@ -289,3 +289,129 @@ pub struct AssembledBlockFragment {
     pub fragment_id: u64,
     pub transaction_count: usize,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn assembly_policy_default_values() {
+        let p = AssemblyPolicy::default();
+        assert_eq!(p.max_fragment_transactions, 64);
+        assert_eq!(p.max_fragment_cost_units, 256_000);
+        assert_eq!(p.max_fragment_wait_ticks, 8);
+    }
+
+    #[test]
+    fn leader_schedule_policy_default_is_disabled() {
+        let p = LeaderSchedulePolicy::default();
+        assert!(!p.enabled);
+        assert!(p.slot_cycle_length > 0);
+        assert!(p.leader_slots_per_cycle > 0);
+    }
+
+    #[test]
+    fn scheduler_runtime_policy_default_is_disabled() {
+        let p = SchedulerRuntimePolicy::default();
+        assert!(!p.enabled);
+        assert!(p.slot_duration_millis > 0);
+        assert!(p.priority_penalty_class_3_millis > p.priority_penalty_class_2_millis);
+    }
+
+    #[test]
+    fn fork_choice_runtime_policy_default_is_disabled() {
+        let p = ForkChoiceRuntimePolicy::default();
+        assert!(!p.enabled);
+        assert!(p.reorg_retry_delay_millis > 0);
+        assert!(p.max_reorg_retry_attempts > 0);
+    }
+
+    #[test]
+    fn fork_choice_quarantine_policy_default_is_disabled() {
+        let p = ForkChoiceQuarantinePolicy::default();
+        assert!(!p.enabled);
+        assert!(p.consecutive_reorg_threshold > 0);
+        assert!(p.quarantine_ticks > 0);
+    }
+
+    #[test]
+    fn execution_health_policy_default_is_disabled() {
+        let p = ExecutionHealthPolicy::default();
+        assert!(!p.enabled);
+        assert!(p.transient_failure_threshold > 0);
+        assert!(p.cooldown_ticks > 0);
+    }
+
+    #[test]
+    fn replay_safety_policy_default_is_disabled() {
+        let p = ReplaySafetyPolicy::default();
+        assert!(!p.enabled);
+        assert!(p.replay_conflict_threshold > 0);
+        assert!(p.hold_ticks > 0);
+    }
+
+    #[test]
+    fn replay_controller_policy_default_values() {
+        let p = ReplayControllerPolicy::default();
+        assert!(p.candidate_confirmation_threshold > 0);
+        assert!(p.max_candidates > 0);
+        assert!(p.reorg_signal_weight > 0);
+        assert!(p.candidate_switch_min_score_delta > 0);
+    }
+
+    #[test]
+    fn replay_window_policy_default_values() {
+        let p = ReplayWindowPolicy::default();
+        assert!(p.max_checkpoints > 0);
+        assert!(!p.rewind_on_confirmed_reorg);
+    }
+
+    #[test]
+    fn snapshot_retention_policy_default_has_positive_limit() {
+        let p = SnapshotRetentionPolicy::default();
+        assert!(p.max_catalog_snapshots > 0);
+    }
+
+    #[test]
+    fn storage_runtime_policy_default_assembles_from_sub_policies() {
+        let p = StorageRuntimePolicy::default();
+        assert_eq!(p.snapshot_interval, 256);
+        assert_eq!(p.max_retry_attempts, 3);
+        assert_eq!(p.retry_backoff_cap_millis, 2_000);
+        assert!(matches!(
+            p.execution_engine_policy,
+            ExecutionEnginePolicy::Heuristic
+        ));
+        assert!(matches!(
+            p.execution_error_handling_policy,
+            ExecutionErrorHandlingPolicy::FailOpen
+        ));
+        assert!(matches!(
+            p.startup_policy,
+            StorageStartupPolicy::SkipRestore
+        ));
+    }
+
+    #[test]
+    fn metrics_output_format_equality() {
+        assert_eq!(MetricsOutputFormat::JsonLines, MetricsOutputFormat::JsonLines);
+        assert_ne!(
+            MetricsOutputFormat::JsonLines,
+            MetricsOutputFormat::PrometheusText
+        );
+    }
+
+    #[test]
+    fn metrics_output_target_variants() {
+        let stdout = MetricsOutputTarget::Stdout;
+        let http = MetricsOutputTarget::Http;
+        assert_ne!(stdout, http);
+    }
+
+    #[test]
+    fn storage_startup_strict_restore_policy_default() {
+        let p = StorageStartupStrictRestorePolicy::default();
+        assert!(!p.restore_latest_requires_snapshot);
+        assert!(!p.restore_specific_requires_snapshot);
+    }
+}
