@@ -4,7 +4,7 @@
 
 Karstflow is a ground-up Solana validator built for maximum throughput and minimal latency. It features a custom network stack, pre-allocated data structures, zero-copy I/O patterns, and a modular tile-based architecture designed for predictable performance at scale.
 
-**255K+ lines of Rust | 5,621 tests | 20 crates**
+**255K+ lines of Rust | 5,636 tests | 20 crates**
 
 ## Design Principles
 
@@ -47,11 +47,11 @@ karstflow-types          (core types: Pubkey, Account, Hash, Shred)
 | `karstflow-consensus` | 43,952 | 1,158 | Tower BFT, GHOST fork choice, leader schedule, epoch processing, Bank lifecycle, multi-threshold confirmation |
 | `karstflow-sbpf` | 42,695 | 789 | sBPF interpreter (126 opcodes), 16 builtin programs, ELF loader, CPI, 40+ syscalls, program cache |
 | `karstflow-net` | 37,913 | 904 | Custom QUIC engine, TLS 1.3, gossip with 14-type CRDS, turbine broadcast, repair, AF_XDP |
-| `karstflow-stages` | 34,925 | 716 | Replay with fork tracking, block production, PoH state machine, pack scheduler, shred pipeline, metrics aggregation |
+| `karstflow-stages` | 34,925 | 725 | Replay with fork tracking, block production, PoH state machine, pack scheduler, shred pipeline, metrics aggregation |
 | `karstflow-storage` | 25,910 | 720 | Disk-primary account database, blockstore, full+incremental snapshots, persistent backend, LZ4 compression |
 | `karstflow-rpc` | 13,857 | 441 | 60+ JSON-RPC methods, 9 WebSocket subscription types, transaction simulation |
 | `karstflow-config` | 6,081 | 152 | TOML configuration with env override, live-mode preflight checks, schema migration |
-| `karstflow-execution` | 5,337 | 104 | SVM backend adapter, batch execution orchestration, retry policies |
+| `karstflow-execution` | 5,337 | 110 | SVM backend adapter, batch execution orchestration, retry policies |
 | `karstflow-control` | 4,606 | 128 | Control plane: bootstrap, preflight validation, diagnostics, service materialization |
 | `karstflow-types` | 3,512 | 85 | Core types: Account, Pubkey, Hash, Transaction, Shred, compact-u16 codec |
 | `karstflow-crypto` | 3,329 | 149 | Ed25519 batch verification, Blake3/SHA-256/Keccak, secp256k1/r1, BN254, Reed-Solomon FEC, LtHash |
