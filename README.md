@@ -452,6 +452,91 @@ Core consensus, execution, and storage logic is functionally complete at 99% ref
 - Resilience: network partition handling, disk I/O backpressure, memory budget enforcement
 - Production tooling: gRPC plugin transport (HTTP/2 + protobuf), ledger-tool equivalent
 
+## Hardware Requirements
+
+### Local Development (1 node, `just dev`)
+
+| Resource | Minimum | Recommended |
+|----------|---------|-------------|
+| CPU | 4 cores | 8 cores |
+| RAM | 8 GB | 16 GB |
+| Disk | SSD 50 GB | NVMe 100 GB |
+| OS | macOS / Linux | Linux (for AF_XDP) |
+
+Sufficient for: dev genesis, RPC transactions, program testing, integration tests.
+
+### Local Cluster (3 nodes, single machine)
+
+| Resource | Minimum | Recommended |
+|----------|---------|-------------|
+| CPU | 8 cores | 16 cores |
+| RAM | 16 GB | 32 GB |
+| Disk | NVMe 100 GB | NVMe 200 GB |
+
+Each node uses ~2–4 GB RAM in tokio mode. Pinned/tile mode requires 3–4 dedicated cores per node.
+
+```bash
+just cluster-init 3    # generates 3-node cluster configs
+just cluster-start     # starts all nodes
+```
+
+### Multi-Server Cluster (3 separate machines)
+
+| Resource (each) | Minimum | Recommended |
+|-----------------|---------|-------------|
+| CPU | 4 cores | 8+ cores |
+| RAM | 8 GB | 16 GB |
+| Disk | NVMe 50 GB | NVMe 100 GB |
+| Network | 1 Gbps | 10 Gbps |
+
+### Execution Mode Impact on Resources
+
+| Mode | CPU per Node | Use Case |
+|------|-------------|----------|
+| `tokio` | 2–4 cores (shared) | Development, testing |
+| `pinned` | 8–12 dedicated cores | Pre-production |
+| `tile` | 16+ dedicated cores | Production (CnC supervisor, heartbeat) |
+
+AF_XDP kernel-bypass requires Linux with root or `CAP_NET_RAW`.
+
+## Testing
+
+### Unit Tests
+
+```bash
+just test              # 6,000+ tests across 20 crates
+just ci                # fmt-check + clippy + test
+```
+
+### Integration Tests
+
+Bank-level transaction execution tests (bootstrap, SOL transfers, signature verification). Excluded from `cargo test --workspace` via `#[ignore]`.
+
+```bash
+just integration       # run all integration tests
+```
+
+Tests cover:
+- Dev genesis bootstrap and bank state verification
+- SOL transfer via `process_transaction` (unsigned + Ed25519 signed)
+- Multiple sequential transfers with balance accumulation
+- Insufficient funds rejection
+- Airdrop → transfer end-to-end flow
+
+### Smoke Test
+
+```bash
+just smoke             # 2-second node startup/shutdown cycle
+```
+
+### Local Cluster Test
+
+```bash
+just dev               # single-node test-validator with auto-genesis
+just dev-tile          # same with tile executor (production runtime)
+just cluster-init 3    # multi-node local cluster
+```
+
 ## Code Quality
 
 - **Linting**: `clippy` with `-D warnings` (zero warnings policy)
