@@ -11,9 +11,8 @@
 
 /// Compute Budget Program ID bytes.
 pub const COMPUTE_BUDGET_PROGRAM_ID: [u8; 32] = [
-    0x03, 0x06, 0x46, 0x6f, 0xe5, 0x21, 0x17, 0x32, 0xff, 0xec, 0xad, 0xba, 0x72, 0xc3, 0x9b,
-    0xe7, 0xbc, 0x8c, 0xe5, 0xbb, 0xc5, 0xf7, 0x12, 0x6b, 0x2c, 0x43, 0x9b, 0x3a, 0x40, 0x00,
-    0x00, 0x00,
+    0x03, 0x06, 0x46, 0x6f, 0xe5, 0x21, 0x17, 0x32, 0xff, 0xec, 0xad, 0xba, 0x72, 0xc3, 0x9b, 0xe7,
+    0xbc, 0x8c, 0xe5, 0xbb, 0xc5, 0xf7, 0x12, 0x6b, 0x2c, 0x43, 0x9b, 0x3a, 0x40, 0x00, 0x00, 0x00,
 ];
 
 // Consensus-critical constants.
@@ -134,13 +133,11 @@ impl ComputeBudgetState {
                 if self.flags & FLAG_SET_LOADED_DATA_SZ != 0 {
                     return false;
                 }
-                self.loaded_acct_data_sz =
-                    u32::from_le_bytes([data[1], data[2], data[3], data[4]]);
+                self.loaded_acct_data_sz = u32::from_le_bytes([data[1], data[2], data[3], data[4]]);
                 if self.loaded_acct_data_sz == 0 {
                     return false;
                 }
-                self.loaded_acct_data_sz =
-                    self.loaded_acct_data_sz.min(MAX_LOADED_DATA_SZ as u32);
+                self.loaded_acct_data_sz = self.loaded_acct_data_sz.min(MAX_LOADED_DATA_SZ as u32);
                 self.flags |= FLAG_SET_LOADED_DATA_SZ;
                 self.compute_budget_instr_cnt += 1;
                 true
@@ -158,11 +155,7 @@ impl ComputeBudgetState {
     ///
     /// `instr_cnt` is the total number of instructions in the transaction.
     /// `builtin_instr_cnt` is the number of builtin program instructions.
-    pub fn finalize(
-        &self,
-        instr_cnt: u64,
-        builtin_instr_cnt: u64,
-    ) -> ComputeBudgetResult {
+    pub fn finalize(&self, instr_cnt: u64, builtin_instr_cnt: u64) -> ComputeBudgetResult {
         // Compute CU limit
         let cu_limit = if self.flags & FLAG_SET_CU == 0 {
             let non_builtin = instr_cnt.saturating_sub(builtin_instr_cnt);
@@ -178,8 +171,8 @@ impl ComputeBudgetState {
         } else {
             self.loaded_acct_data_sz as u64
         };
-        let loaded_accounts_data_cost =
-            HEAP_COST * ((loaded_data_sz + ACCOUNT_DATA_COST_PAGE_SIZE - 1) / ACCOUNT_DATA_COST_PAGE_SIZE);
+        let loaded_accounts_data_cost = HEAP_COST
+            * ((loaded_data_sz + ACCOUNT_DATA_COST_PAGE_SIZE - 1) / ACCOUNT_DATA_COST_PAGE_SIZE);
 
         // Compute priority fee using careful overflow-safe arithmetic.
         // cu_limit * micro_lamports_per_cu can overflow u64.

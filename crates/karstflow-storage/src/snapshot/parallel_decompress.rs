@@ -119,8 +119,7 @@ pub fn parallel_decompress<R: Read>(
 pub fn decompress_buffer_parallel(compressed: &[u8], frame_size: usize) -> io::Result<Vec<u8>> {
     if compressed.len() <= frame_size {
         // Single frame — just decompress directly
-        return zstd::decode_all(compressed)
-            .map_err(|e| io::Error::new(io::ErrorKind::Other, e));
+        return zstd::decode_all(compressed).map_err(|e| io::Error::new(io::ErrorKind::Other, e));
     }
 
     // Split into chunks and try to decompress each as independent zstd stream

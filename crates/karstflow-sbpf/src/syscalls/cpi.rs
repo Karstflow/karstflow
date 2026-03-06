@@ -360,12 +360,24 @@ mod tests {
         Pubkey::new([byte; 32])
     }
 
-    fn make_instruction(program_id: Pubkey, accounts: Vec<CpiAccountMeta>, data: Vec<u8>) -> CpiInstruction {
-        CpiInstruction { program_id, accounts, data }
+    fn make_instruction(
+        program_id: Pubkey,
+        accounts: Vec<CpiAccountMeta>,
+        data: Vec<u8>,
+    ) -> CpiInstruction {
+        CpiInstruction {
+            program_id,
+            accounts,
+            data,
+        }
     }
 
     fn make_meta(pubkey: Pubkey, is_signer: bool, is_writable: bool) -> CpiAccountMeta {
-        CpiAccountMeta { pubkey, is_signer, is_writable }
+        CpiAccountMeta {
+            pubkey,
+            is_signer,
+            is_writable,
+        }
     }
 
     fn make_info(pubkey: Pubkey, executable: bool) -> CpiAccountInfo {
@@ -407,10 +419,7 @@ mod tests {
         let pk = test_pubkey(10);
         let ix = make_instruction(
             test_pubkey(99),
-            vec![
-                make_meta(pk, true, false),
-                make_meta(pk, false, true),
-            ],
+            vec![make_meta(pk, true, false), make_meta(pk, false, true)],
             vec![],
         );
         let deduped = deduplicate_accounts(&ix).unwrap();
@@ -506,7 +515,10 @@ mod tests {
             vec![0u8; MAX_CPI_INSTRUCTION_SIZE + 1],
         );
         let result = invoke_signed(&mut ctx, &ix, &[], &[]);
-        assert!(matches!(result, Err(SyscallError::MaxInstructionSizeExceeded)));
+        assert!(matches!(
+            result,
+            Err(SyscallError::MaxInstructionSizeExceeded)
+        ));
     }
 
     #[test]
@@ -524,11 +536,7 @@ mod tests {
     fn invoke_rejects_missing_account() {
         let mut ctx = test_ctx();
         let pk = test_pubkey(10);
-        let ix = make_instruction(
-            test_pubkey(99),
-            vec![make_meta(pk, false, false)],
-            vec![],
-        );
+        let ix = make_instruction(test_pubkey(99), vec![make_meta(pk, false, false)], vec![]);
         let result = invoke_signed(&mut ctx, &ix, &[], &[]);
         assert!(matches!(result, Err(SyscallError::MissingAccount(_))));
     }
@@ -539,19 +547,15 @@ mod tests {
         let target = test_pubkey(99);
         let acct_pk = test_pubkey(10);
         // Add account to ctx so privilege check passes
-        ctx.accounts.insert(acct_pk, karstflow_types::Account {
-            meta: karstflow_types::AccountMeta::new(1000, test_pubkey(0xFF), false, 0),
-            data: karstflow_types::AccountData::new(vec![]),
-        });
-        let ix = make_instruction(
-            target,
-            vec![make_meta(acct_pk, false, true)],
-            vec![],
+        ctx.accounts.insert(
+            acct_pk,
+            karstflow_types::Account {
+                meta: karstflow_types::AccountMeta::new(1000, test_pubkey(0xFF), false, 0),
+                data: karstflow_types::AccountData::new(vec![]),
+            },
         );
-        let infos = vec![
-            make_info(target, true),
-            make_info(acct_pk, false),
-        ];
+        let ix = make_instruction(target, vec![make_meta(acct_pk, false, true)], vec![]);
+        let infos = vec![make_info(target, true), make_info(acct_pk, false)];
         let result = invoke_signed(&mut ctx, &ix, &infos, &[]);
         assert!(result.is_ok());
         assert_eq!(ctx.stack_depth, 0); // depth restored after invoke

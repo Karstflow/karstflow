@@ -132,7 +132,8 @@ impl PeerSelector {
             }
             // Throughput bonus (bytes per second).
             if state.download_duration.as_secs_f64() > 0.0 {
-                score += state.bytes_downloaded as f64 / state.download_duration.as_secs_f64()
+                score += state.bytes_downloaded as f64
+                    / state.download_duration.as_secs_f64()
                     / 1_000_000.0;
             }
             // Healthy bonus.
@@ -249,10 +250,7 @@ mod tests {
         selector.add_peer(make_peer("peer1", 100));
 
         selector.report_failure("peer1");
-        assert_eq!(
-            selector.peer_health("peer1"),
-            Some(PeerHealth::Degraded)
-        );
+        assert_eq!(selector.peer_health("peer1"), Some(PeerHealth::Degraded));
     }
 
     #[test]
@@ -265,10 +263,7 @@ mod tests {
 
         selector.report_failure("peer1");
         selector.report_failure("peer1");
-        assert_eq!(
-            selector.peer_health("peer1"),
-            Some(PeerHealth::Blacklisted)
-        );
+        assert_eq!(selector.peer_health("peer1"), Some(PeerHealth::Blacklisted));
     }
 
     #[test]

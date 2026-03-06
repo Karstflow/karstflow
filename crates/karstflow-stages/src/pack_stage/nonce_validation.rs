@@ -141,7 +141,10 @@ mod tests {
             num_required_signatures: 2, // fee_payer + authority
             instructions: &instructions,
         };
-        assert_eq!(validate_durable_nonce(&txn), NonceValidation::ValidDurableNonce);
+        assert_eq!(
+            validate_durable_nonce(&txn),
+            NonceValidation::ValidDurableNonce
+        );
     }
 
     #[test]
@@ -153,7 +156,10 @@ mod tests {
             instructions: &instructions,
         };
         // authority_idx=2, but only 1 signer, so authority is NOT a signer
-        assert_eq!(validate_durable_nonce(&txn), NonceValidation::InvalidDurableNonce);
+        assert_eq!(
+            validate_durable_nonce(&txn),
+            NonceValidation::InvalidDurableNonce
+        );
     }
 
     #[test]
@@ -169,7 +175,10 @@ mod tests {
             num_required_signatures: 1,
             instructions: &[ix],
         };
-        assert_eq!(validate_durable_nonce(&txn), NonceValidation::NotDurableNonce);
+        assert_eq!(
+            validate_durable_nonce(&txn),
+            NonceValidation::NotDurableNonce
+        );
     }
 
     #[test]
@@ -185,7 +194,10 @@ mod tests {
             num_required_signatures: 1,
             instructions: &[ix],
         };
-        assert_eq!(validate_durable_nonce(&txn), NonceValidation::NotDurableNonce);
+        assert_eq!(
+            validate_durable_nonce(&txn),
+            NonceValidation::NotDurableNonce
+        );
     }
 
     #[test]
@@ -201,7 +213,10 @@ mod tests {
             num_required_signatures: 1,
             instructions: &[ix],
         };
-        assert_eq!(validate_durable_nonce(&txn), NonceValidation::NotDurableNonce);
+        assert_eq!(
+            validate_durable_nonce(&txn),
+            NonceValidation::NotDurableNonce
+        );
     }
 
     #[test]
@@ -217,7 +232,10 @@ mod tests {
             num_required_signatures: 1,
             instructions: &[ix],
         };
-        assert_eq!(validate_durable_nonce(&txn), NonceValidation::NotDurableNonce);
+        assert_eq!(
+            validate_durable_nonce(&txn),
+            NonceValidation::NotDurableNonce
+        );
     }
 
     #[test]
@@ -228,7 +246,10 @@ mod tests {
             num_required_signatures: 1,
             instructions: &[],
         };
-        assert_eq!(validate_durable_nonce(&txn), NonceValidation::NotDurableNonce);
+        assert_eq!(
+            validate_durable_nonce(&txn),
+            NonceValidation::NotDurableNonce
+        );
     }
 
     #[test]
@@ -251,6 +272,9 @@ mod tests {
             num_required_signatures: 1,
             instructions: &[ix],
         };
-        assert_eq!(validate_durable_nonce(&txn), NonceValidation::ValidDurableNonce);
+        assert_eq!(
+            validate_durable_nonce(&txn),
+            NonceValidation::ValidDurableNonce
+        );
     }
 }

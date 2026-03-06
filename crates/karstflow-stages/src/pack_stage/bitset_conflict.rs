@@ -227,7 +227,10 @@ mod tests {
                 break;
             }
         }
-        assert!(found_disjoint, "Should find at least one non-colliding pair");
+        assert!(
+            found_disjoint,
+            "Should find at least one non-colliding pair"
+        );
     }
 
     #[test]

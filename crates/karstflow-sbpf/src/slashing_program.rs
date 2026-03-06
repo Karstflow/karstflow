@@ -161,10 +161,7 @@ mod tests {
         Pubkey::new([byte; 32])
     }
 
-    fn make_context(
-        accounts: Vec<(Pubkey, Account, bool)>,
-        data: Vec<u8>,
-    ) -> ExecutionContext {
+    fn make_context(accounts: Vec<(Pubkey, Account, bool)>, data: Vec<u8>) -> ExecutionContext {
         ExecutionContext::new(test_pubkey(0xAA), accounts, data)
     }
 

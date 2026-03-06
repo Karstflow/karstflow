@@ -98,9 +98,7 @@ pub fn parallel_hash_accounts(
 }
 
 /// Compute the bank hash: Merkle root of all account hashes.
-pub fn compute_bank_hash(
-    accounts: &[(u64, [u8; 32], bool, u64, Vec<u8>, [u8; 32])],
-) -> [u8; 32] {
+pub fn compute_bank_hash(accounts: &[(u64, [u8; 32], bool, u64, Vec<u8>, [u8; 32])]) -> [u8; 32] {
     let hashes = parallel_hash_accounts(accounts);
     parallel_merkle_root(&hashes)
 }
@@ -186,8 +184,22 @@ mod tests {
     #[test]
     fn parallel_hash_batch() {
         let accounts = vec![
-            (1000u64, [1u8; 32], false, 0u64, b"data1".to_vec(), [10u8; 32]),
-            (2000u64, [1u8; 32], false, 0u64, b"data2".to_vec(), [11u8; 32]),
+            (
+                1000u64,
+                [1u8; 32],
+                false,
+                0u64,
+                b"data1".to_vec(),
+                [10u8; 32],
+            ),
+            (
+                2000u64,
+                [1u8; 32],
+                false,
+                0u64,
+                b"data2".to_vec(),
+                [11u8; 32],
+            ),
         ];
 
         let hashes = parallel_hash_accounts(&accounts);
@@ -198,8 +210,22 @@ mod tests {
     #[test]
     fn compute_bank_hash_works() {
         let accounts = vec![
-            (1000u64, [1u8; 32], false, 0u64, b"data1".to_vec(), [10u8; 32]),
-            (2000u64, [1u8; 32], true, 0u64, b"data2".to_vec(), [11u8; 32]),
+            (
+                1000u64,
+                [1u8; 32],
+                false,
+                0u64,
+                b"data1".to_vec(),
+                [10u8; 32],
+            ),
+            (
+                2000u64,
+                [1u8; 32],
+                true,
+                0u64,
+                b"data2".to_vec(),
+                [11u8; 32],
+            ),
         ];
 
         let bank_hash = compute_bank_hash(&accounts);

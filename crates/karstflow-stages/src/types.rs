@@ -394,7 +394,10 @@ mod tests {
 
     #[test]
     fn metrics_output_format_equality() {
-        assert_eq!(MetricsOutputFormat::JsonLines, MetricsOutputFormat::JsonLines);
+        assert_eq!(
+            MetricsOutputFormat::JsonLines,
+            MetricsOutputFormat::JsonLines
+        );
         assert_ne!(
             MetricsOutputFormat::JsonLines,
             MetricsOutputFormat::PrometheusText

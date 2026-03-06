@@ -1031,7 +1031,8 @@ mod tests {
         let mut ctx = test_ctx();
         let input = vec![0u8; 128]; // two zero points (identity)
         let mut output = vec![0u8; 64];
-        let result = alt_bn128::group_op(&mut ctx, ALT_BN128_G1_ADD_BE, &input, &mut output).unwrap();
+        let result =
+            alt_bn128::group_op(&mut ctx, ALT_BN128_G1_ADD_BE, &input, &mut output).unwrap();
         assert_eq!(result, 0);
         assert!(output.iter().all(|&b| b == 0)); // identity + identity = identity
     }
@@ -1042,7 +1043,8 @@ mod tests {
         let mut ctx = test_ctx();
         let input = vec![0u8; 128];
         let mut output = vec![0u8; 64];
-        let result = alt_bn128::group_op(&mut ctx, ALT_BN128_G1_SUB_BE, &input, &mut output).unwrap();
+        let result =
+            alt_bn128::group_op(&mut ctx, ALT_BN128_G1_SUB_BE, &input, &mut output).unwrap();
         assert_eq!(result, 0);
         assert!(output.iter().all(|&b| b == 0));
     }
@@ -1055,9 +1057,10 @@ mod tests {
         let mut input = vec![0u8; 96];
         input[31] = 1; // x = 1
         input[63] = 2; // y = 2
-        // scalar = 0 (last 32 bytes already zero)
+                       // scalar = 0 (last 32 bytes already zero)
         let mut output = vec![0u8; 64];
-        let result = alt_bn128::group_op(&mut ctx, ALT_BN128_G1_MUL_BE, &input, &mut output).unwrap();
+        let result =
+            alt_bn128::group_op(&mut ctx, ALT_BN128_G1_MUL_BE, &input, &mut output).unwrap();
         assert_eq!(result, 0);
         assert!(output.iter().all(|&b| b == 0)); // 0 * G = identity
     }
@@ -1072,7 +1075,8 @@ mod tests {
         input[63] = 2; // y = 2
         input[95] = 1; // scalar = 1
         let mut output = vec![0u8; 64];
-        let result = alt_bn128::group_op(&mut ctx, ALT_BN128_G1_MUL_BE, &input, &mut output).unwrap();
+        let result =
+            alt_bn128::group_op(&mut ctx, ALT_BN128_G1_MUL_BE, &input, &mut output).unwrap();
         assert_eq!(result, 0);
         assert_eq!(output[31], 1); // x = 1
         assert_eq!(output[63], 2); // y = 2
@@ -1093,7 +1097,8 @@ mod tests {
         let mut ctx = test_ctx();
         let input = vec![0u8; 128];
         let mut output = vec![0u8; 10]; // too short
-        let result = alt_bn128::group_op(&mut ctx, ALT_BN128_G1_ADD_BE, &input, &mut output).unwrap();
+        let result =
+            alt_bn128::group_op(&mut ctx, ALT_BN128_G1_ADD_BE, &input, &mut output).unwrap();
         assert_eq!(result, 1); // soft error
     }
 
@@ -1103,7 +1108,8 @@ mod tests {
         let mut ctx = test_ctx();
         let input = vec![]; // empty = trivially true
         let mut output = vec![0u8; 32];
-        let result = alt_bn128::group_op(&mut ctx, ALT_BN128_PAIRING_BE, &input, &mut output).unwrap();
+        let result =
+            alt_bn128::group_op(&mut ctx, ALT_BN128_PAIRING_BE, &input, &mut output).unwrap();
         assert_eq!(result, 0);
         assert_eq!(output[31], 1); // trivially true
     }
@@ -1123,7 +1129,9 @@ mod tests {
         let mut ctx = test_ctx();
         let input = vec![0u8; 64]; // identity
         let mut output = vec![0u8; 32];
-        let result = alt_bn128::compression(&mut ctx, ALT_BN128_G1_COMPRESS_BE, &input, &mut output).unwrap();
+        let result =
+            alt_bn128::compression(&mut ctx, ALT_BN128_G1_COMPRESS_BE, &input, &mut output)
+                .unwrap();
         assert_eq!(result, 0);
         assert!(output.iter().all(|&b| b == 0)); // compressed identity = zeros
     }
@@ -1137,11 +1145,19 @@ mod tests {
         point[31] = 1;
         point[63] = 2;
         let mut compressed = vec![0u8; 32];
-        let r1 = alt_bn128::compression(&mut ctx, ALT_BN128_G1_COMPRESS_BE, &point, &mut compressed).unwrap();
+        let r1 =
+            alt_bn128::compression(&mut ctx, ALT_BN128_G1_COMPRESS_BE, &point, &mut compressed)
+                .unwrap();
         assert_eq!(r1, 0);
 
         let mut decompressed = vec![0u8; 64];
-        let r2 = alt_bn128::compression(&mut ctx, ALT_BN128_G1_DECOMPRESS_BE, &compressed, &mut decompressed).unwrap();
+        let r2 = alt_bn128::compression(
+            &mut ctx,
+            ALT_BN128_G1_DECOMPRESS_BE,
+            &compressed,
+            &mut decompressed,
+        )
+        .unwrap();
         assert_eq!(r2, 0);
         assert_eq!(point, decompressed);
     }
@@ -1157,7 +1173,8 @@ mod tests {
             ALT_BN128_G1_ADD_BE | ALT_BN128_LITTLE_ENDIAN_FLAG,
             &input,
             &mut output,
-        ).unwrap();
+        )
+        .unwrap();
         assert_eq!(result, 0);
     }
 
@@ -1168,7 +1185,12 @@ mod tests {
         use curve25519_dalek::constants::ED25519_BASEPOINT_COMPRESSED;
         use karstflow_constants::syscalls::*;
         let mut ctx = test_ctx();
-        let result = curve25519::validate_point(&mut ctx, CURVE_ID_ED25519, &ED25519_BASEPOINT_COMPRESSED.to_bytes()).unwrap();
+        let result = curve25519::validate_point(
+            &mut ctx,
+            CURVE_ID_ED25519,
+            &ED25519_BASEPOINT_COMPRESSED.to_bytes(),
+        )
+        .unwrap();
         assert!(result);
     }
 
@@ -1177,7 +1199,12 @@ mod tests {
         use curve25519_dalek::constants::RISTRETTO_BASEPOINT_COMPRESSED;
         use karstflow_constants::syscalls::*;
         let mut ctx = test_ctx();
-        let result = curve25519::validate_point(&mut ctx, CURVE_ID_RISTRETTO255, &RISTRETTO_BASEPOINT_COMPRESSED.to_bytes()).unwrap();
+        let result = curve25519::validate_point(
+            &mut ctx,
+            CURVE_ID_RISTRETTO255,
+            &RISTRETTO_BASEPOINT_COMPRESSED.to_bytes(),
+        )
+        .unwrap();
         assert!(result);
     }
 
@@ -1187,7 +1214,8 @@ mod tests {
         let mut ctx = test_ctx();
         // Ristretto rejects most random byte strings
         let bad_point = [0xFFu8; 32];
-        let result = curve25519::validate_point(&mut ctx, CURVE_ID_RISTRETTO255, &bad_point).unwrap();
+        let result =
+            curve25519::validate_point(&mut ctx, CURVE_ID_RISTRETTO255, &bad_point).unwrap();
         assert!(!result);
     }
 
@@ -1208,7 +1236,10 @@ mod tests {
         let mut ctx = test_ctx();
         let base = ED25519_BASEPOINT_COMPRESSED.to_bytes();
         let identity = EdwardsPoint::identity().compress().to_bytes();
-        let result = curve25519::group_op(&mut ctx, CURVE_ID_ED25519, CURVE_OP_ADD, &base, &identity).unwrap().unwrap();
+        let result =
+            curve25519::group_op(&mut ctx, CURVE_ID_ED25519, CURVE_OP_ADD, &base, &identity)
+                .unwrap()
+                .unwrap();
         assert_eq!(result, base); // G + 0 = G
     }
 
@@ -1220,7 +1251,9 @@ mod tests {
         use karstflow_constants::syscalls::*;
         let mut ctx = test_ctx();
         let base = ED25519_BASEPOINT_COMPRESSED.to_bytes();
-        let result = curve25519::group_op(&mut ctx, CURVE_ID_ED25519, CURVE_OP_SUB, &base, &base).unwrap().unwrap();
+        let result = curve25519::group_op(&mut ctx, CURVE_ID_ED25519, CURVE_OP_SUB, &base, &base)
+            .unwrap()
+            .unwrap();
         let identity = EdwardsPoint::identity().compress().to_bytes();
         assert_eq!(result, identity); // G - G = 0
     }
@@ -1233,7 +1266,9 @@ mod tests {
         let mut ctx = test_ctx();
         let one = Scalar::ONE.to_bytes();
         let base = ED25519_BASEPOINT_COMPRESSED.to_bytes();
-        let result = curve25519::group_op(&mut ctx, CURVE_ID_ED25519, CURVE_OP_MUL, &one, &base).unwrap().unwrap();
+        let result = curve25519::group_op(&mut ctx, CURVE_ID_ED25519, CURVE_OP_MUL, &one, &base)
+            .unwrap()
+            .unwrap();
         assert_eq!(result, base); // 1 * G = G
     }
 
@@ -1243,8 +1278,19 @@ mod tests {
         use karstflow_constants::syscalls::*;
         let mut ctx = test_ctx();
         let base = RISTRETTO_BASEPOINT_COMPRESSED.to_bytes();
-        let doubled = curve25519::group_op(&mut ctx, CURVE_ID_RISTRETTO255, CURVE_OP_ADD, &base, &base).unwrap().unwrap();
-        let back = curve25519::group_op(&mut ctx, CURVE_ID_RISTRETTO255, CURVE_OP_SUB, &doubled, &base).unwrap().unwrap();
+        let doubled =
+            curve25519::group_op(&mut ctx, CURVE_ID_RISTRETTO255, CURVE_OP_ADD, &base, &base)
+                .unwrap()
+                .unwrap();
+        let back = curve25519::group_op(
+            &mut ctx,
+            CURVE_ID_RISTRETTO255,
+            CURVE_OP_SUB,
+            &doubled,
+            &base,
+        )
+        .unwrap()
+        .unwrap();
         assert_eq!(back, base); // (G+G) - G = G
     }
 
@@ -1256,7 +1302,9 @@ mod tests {
         let mut ctx = test_ctx();
         let scalars = [Scalar::ONE.to_bytes()];
         let points = [ED25519_BASEPOINT_COMPRESSED.to_bytes()];
-        let result = curve25519::multiscalar_mul(&mut ctx, CURVE_ID_ED25519, &scalars, &points).unwrap().unwrap();
+        let result = curve25519::multiscalar_mul(&mut ctx, CURVE_ID_ED25519, &scalars, &points)
+            .unwrap()
+            .unwrap();
         assert_eq!(result, ED25519_BASEPOINT_COMPRESSED.to_bytes());
     }
 
@@ -1292,8 +1340,9 @@ mod tests {
         use karstflow_constants::syscalls::*;
         let mut ctx = test_ctx();
         let bad = [0xFFu8; 32];
-        let result = curve25519::group_op(&mut ctx, CURVE_ID_RISTRETTO255, CURVE_OP_ADD, &bad, &bad).unwrap();
+        let result =
+            curve25519::group_op(&mut ctx, CURVE_ID_RISTRETTO255, CURVE_OP_ADD, &bad, &bad)
+                .unwrap();
         assert!(result.is_none());
     }
-
 }

@@ -50,7 +50,10 @@ impl EstimationTable {
     /// # Panics
     /// Panics if `bin_cnt` is 0 or not a power of 2, or `history` is 0.
     pub fn new(bin_cnt: usize, history: usize, default_val: u32) -> Self {
-        assert!(bin_cnt > 0 && bin_cnt.is_power_of_two(), "bin_cnt must be a power of 2");
+        assert!(
+            bin_cnt > 0 && bin_cnt.is_power_of_two(),
+            "bin_cnt must be a power of 2"
+        );
         assert!(history > 0, "history must be positive");
 
         Self {
@@ -76,7 +79,11 @@ impl EstimationTable {
         let denom = bin.d * bin.d - bin.d2;
         let var = if denom > 0.0 {
             let v = (bin.d * bin.x2 - bin.x * bin.x) / denom;
-            if v > 0.0 { v } else { 0.0 }
+            if v > 0.0 {
+                v
+            } else {
+                0.0
+            }
         } else {
             0.0
         };
@@ -95,8 +102,17 @@ impl EstimationTable {
         let bin = &mut self.bins[tag as usize & self.bin_mask];
         let v = value as f64;
 
-        bin.x = v + if c * bin.x > f64::MIN_POSITIVE { c * bin.x } else { 0.0 };
-        bin.x2 = v * v + if c * bin.x2 > f64::MIN_POSITIVE { c * bin.x2 } else { 0.0 };
+        bin.x = v + if c * bin.x > f64::MIN_POSITIVE {
+            c * bin.x
+        } else {
+            0.0
+        };
+        bin.x2 = v * v
+            + if c * bin.x2 > f64::MIN_POSITIVE {
+                c * bin.x2
+            } else {
+                0.0
+            };
         bin.d = 1.0 + c * bin.d;
         bin.d2 = 1.0 + c * c * bin.d2;
     }
@@ -171,7 +187,10 @@ mod tests {
             tbl.update(1, 200_000);
         }
         let (mean2, _) = tbl.estimate(1);
-        assert!((mean2 - 200_000.0).abs() < 100.0, "mean should converge near 200k: {mean2}");
+        assert!(
+            (mean2 - 200_000.0).abs() < 100.0,
+            "mean should converge near 200k: {mean2}"
+        );
     }
 
     #[test]
@@ -191,7 +210,10 @@ mod tests {
             tbl.update(5, 100_000);
         }
         let (_, var) = tbl.estimate(5);
-        assert!(var < 1.0, "variance should be near zero for constant input: {var}");
+        assert!(
+            var < 1.0,
+            "variance should be near zero for constant input: {var}"
+        );
     }
 
     #[test]

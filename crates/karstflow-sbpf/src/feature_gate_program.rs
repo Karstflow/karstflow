@@ -74,8 +74,8 @@ impl FeatureGateProgramExecutor {
         }
 
         // Feature account data should be uninitialized (all zeros or empty)
-        let is_uninitialized = account.data.is_empty()
-            || account.data.as_ref().iter().all(|&b| b == 0);
+        let is_uninitialized =
+            account.data.is_empty() || account.data.as_ref().iter().all(|&b| b == 0);
 
         if !is_uninitialized {
             return Ok(ExecutionOutcome::failure(
@@ -145,7 +145,10 @@ impl FeatureGateProgramExecutor {
         // Close feature account: transfer lamports to destination
         let mut modified_dest = dest_acct.clone();
         modified_dest.meta = AccountMeta::new(
-            dest_acct.meta.lamports.saturating_add(feature_acct.meta.lamports),
+            dest_acct
+                .meta
+                .lamports
+                .saturating_add(feature_acct.meta.lamports),
             dest_acct.meta.owner,
             dest_acct.meta.executable,
             dest_acct.meta.rent_epoch,
@@ -176,10 +179,7 @@ mod tests {
         test_pubkey(0xFE)
     }
 
-    fn make_context(
-        accounts: Vec<(Pubkey, Account, bool)>,
-        data: Vec<u8>,
-    ) -> ExecutionContext {
+    fn make_context(accounts: Vec<(Pubkey, Account, bool)>, data: Vec<u8>) -> ExecutionContext {
         ExecutionContext::new(feature_program_id(), accounts, data)
     }
 

@@ -215,8 +215,7 @@ impl CuPacer {
         }
 
         let elapsed_ns = self.slot_start.elapsed().as_nanos() as u64;
-        let elapsed_fraction =
-            (elapsed_ns as f64) / (self.slot_duration_ns as f64);
+        let elapsed_fraction = (elapsed_ns as f64) / (self.slot_duration_ns as f64);
         let elapsed_fraction = elapsed_fraction.clamp(0.001, 1.0);
 
         // Expected CU consumption at this point in the slot

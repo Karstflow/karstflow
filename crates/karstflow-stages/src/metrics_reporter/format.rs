@@ -554,9 +554,7 @@ mod tests {
             zero_shred(),
             zero_block_assembly(),
         );
-        assert!(lines
-            .iter()
-            .any(|l| l == "karstflow_uptime_millis 12345"));
+        assert!(lines.iter().any(|l| l == "karstflow_uptime_millis 12345"));
     }
 
     #[test]
@@ -627,9 +625,7 @@ mod tests {
             shred,
             zero_block_assembly(),
         );
-        assert!(lines
-            .iter()
-            .any(|l| l == "karstflow_shred_accepted 999"));
+        assert!(lines.iter().any(|l| l == "karstflow_shred_accepted 999"));
     }
 
     #[test]

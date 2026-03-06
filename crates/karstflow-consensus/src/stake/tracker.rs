@@ -345,8 +345,20 @@ mod tests {
         tracker.add_delegation(stake_key(12), delegation_to(voter_b(), 500, 5));
 
         tracker.refresh_vote_account_stakes();
-        assert_eq!(tracker.get_vote_account(&voter_a()).unwrap().activated_stake, 3000);
-        assert_eq!(tracker.get_vote_account(&voter_b()).unwrap().activated_stake, 500);
+        assert_eq!(
+            tracker
+                .get_vote_account(&voter_a())
+                .unwrap()
+                .activated_stake,
+            3000
+        );
+        assert_eq!(
+            tracker
+                .get_vote_account(&voter_b())
+                .unwrap()
+                .activated_stake,
+            500
+        );
     }
 
     #[test]
@@ -360,7 +372,13 @@ mod tests {
         let removed = tracker.refresh_after_snapshot();
         assert_eq!(removed, 1); // voter_b delegation removed
         assert_eq!(tracker.delegation_count(), 1);
-        assert_eq!(tracker.get_vote_account(&voter_a()).unwrap().activated_stake, 1000);
+        assert_eq!(
+            tracker
+                .get_vote_account(&voter_a())
+                .unwrap()
+                .activated_stake,
+            1000
+        );
     }
 
     #[test]

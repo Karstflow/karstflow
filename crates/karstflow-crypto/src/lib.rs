@@ -34,12 +34,12 @@
 //! ```
 
 pub mod blake3;
-pub mod poh;
 pub mod bmtree;
 pub mod bn254;
 pub mod ed25519_batch;
 pub mod keccak256;
 pub mod lthash;
+pub mod poh;
 pub mod reed_solomon;
 pub mod secp256k1;
 pub mod secp256r1;

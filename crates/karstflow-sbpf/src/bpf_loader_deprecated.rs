@@ -180,21 +180,13 @@ mod tests {
         Pubkey::new([byte; 32])
     }
 
-    fn make_context(
-        accounts: Vec<(Pubkey, Account, bool)>,
-        data: Vec<u8>,
-    ) -> ExecutionContext {
+    fn make_context(accounts: Vec<(Pubkey, Account, bool)>, data: Vec<u8>) -> ExecutionContext {
         ExecutionContext::new(BPF_LOADER_DEPRECATED_PROGRAM_ID, accounts, data)
     }
 
     fn program_account(data: Vec<u8>, executable: bool) -> Account {
         Account {
-            meta: AccountMeta::new(
-                1_000_000,
-                BPF_LOADER_DEPRECATED_PROGRAM_ID,
-                executable,
-                0,
-            ),
+            meta: AccountMeta::new(1_000_000, BPF_LOADER_DEPRECATED_PROGRAM_ID, executable, 0),
             data: AccountData::new(data),
         }
     }

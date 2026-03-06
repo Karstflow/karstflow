@@ -166,8 +166,8 @@ where
         let addresses = if let Some(cached) = cache.get(&req.table_key) {
             cached
         } else {
-            let data = read_account(&req.table_key)
-                .ok_or(AlutError::TableNotFound(req.table_key))?;
+            let data =
+                read_account(&req.table_key).ok_or(AlutError::TableNotFound(req.table_key))?;
 
             let parsed = parse_lookup_table(&data)
                 .map_err(|_| AlutError::InvalidTableData(req.table_key))?;
