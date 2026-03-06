@@ -1174,7 +1174,7 @@ fn try_build_xdp_transport(
     };
 
     // Install XDP program on the interface.
-    let filter = XdpFilterConfig::default();
+    let filter = XdpFilterConfig::new(&[network_config.quic_port]);
     let (xsk_map, xdp_prog) =
         install_xdp(&filter, if_index, 1, 0).map_err(|e| format!("install_xdp failed: {e}"))?;
 

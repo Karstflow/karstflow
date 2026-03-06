@@ -2,6 +2,7 @@ schema_version = 1
 
 [cluster]
 mode = "dev"
+data_dir = "/tmp/karstflow-local"
 gossip_bind_addr = "0.0.0.0:8001"
 gossip_allow_private_addresses = true
 
