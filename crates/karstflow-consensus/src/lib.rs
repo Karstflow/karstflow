@@ -27,6 +27,7 @@ pub mod rewards_distribution;
 pub mod signature_status;
 mod snapshot_bootstrap;
 mod stake;
+mod stake_rewards;
 mod stake_history;
 pub mod sysvars;
 #[cfg(test)]
@@ -81,6 +82,7 @@ pub use rewards_calculator::{
     DelegatorReward, EpochRewardsSummary, RewardsCalculator, ValidatorReward, VoteAccountInfo,
 };
 pub use rewards_distribution::{PendingReward, RewardsDistributor};
+pub use stake_rewards::{StakeRewardEntry, StakeRewardForkId, StakeRewards};
 pub use stake::{
     calculate_points_and_credits, calculate_stake_rewards, calculate_total_points,
     deserialize_stake_state, serialize_stake_state, split_commission, warmup_cooldown_rate,
