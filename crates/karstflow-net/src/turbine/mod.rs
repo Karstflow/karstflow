@@ -19,9 +19,9 @@ pub use destination::{
 pub use neighborhood::{Neighborhood, NetworkProximity, ProximityEstimator, ProximityScore};
 pub use retransmit::{RetransmitRequest, RetransmitService, RetransmitShred};
 pub use stats::{BroadcastStats, PropagationMetrics, RetransmitStats, TurbineStats};
-pub use transport::{NullTransport, ShredTransport, TransportError, UdpShredTransport};
 #[cfg(target_os = "linux")]
 pub use transport::XdpShredTransport;
+pub use transport::{NullTransport, ShredTransport, TransportError, UdpShredTransport};
 pub use tree::{TurbineNode, TurbineTree, TurbineTreeBuilder};
 
 use crate::IngressError;

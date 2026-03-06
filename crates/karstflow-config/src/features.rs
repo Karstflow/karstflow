@@ -119,7 +119,7 @@ mod tests {
         let profile = FeaturesProfileToml {
             override_mode: Some("all_enabled".to_string()),
             enabled: Some(vec![
-                "Feature111111111111111111111111111111111111111".to_string(),
+                "Feature111111111111111111111111111111111111111".to_string()
             ]),
             disabled: None,
         };

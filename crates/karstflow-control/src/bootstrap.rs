@@ -1175,8 +1175,8 @@ fn try_build_xdp_transport(
 
     // Install XDP program on the interface.
     let filter = XdpFilterConfig::default();
-    let (xsk_map, xdp_prog) = install_xdp(&filter, if_index, 1, 0)
-        .map_err(|e| format!("install_xdp failed: {e}"))?;
+    let (xsk_map, xdp_prog) =
+        install_xdp(&filter, if_index, 1, 0).map_err(|e| format!("install_xdp failed: {e}"))?;
 
     let xsk_map = Arc::new(xsk_map);
     let xdp_prog = Arc::new(xdp_prog);
