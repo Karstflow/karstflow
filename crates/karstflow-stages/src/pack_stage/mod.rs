@@ -10,9 +10,11 @@
 pub mod bitset_conflict;
 pub mod bundle;
 pub mod chkdup;
+pub mod compute_budget;
 mod conflict_detector;
 pub mod cost_model;
 pub mod estimation_table;
+pub mod nonce_validation;
 pub mod penalty;
 mod priority_queue;
 mod scheduler;
@@ -31,4 +33,6 @@ pub use scheduler::{
     PackStats, PackStatsSnapshot,
 };
 pub use tip_blacklist::{check_tip_blacklist, TipBlacklistResult};
+pub use compute_budget::{ComputeBudgetResult, ComputeBudgetState};
+pub use nonce_validation::{validate_durable_nonce, NonceValidation};
 pub use unwritable::is_unwritable;
