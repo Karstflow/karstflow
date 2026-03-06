@@ -149,3 +149,95 @@ pub struct TopologySpec {
     pub stages: Vec<StageSpec>,
     pub links: Vec<LinkSpec>,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ipc_mode_from_env() {
+        assert_eq!(IpcMode::from_env("channel"), Some(IpcMode::Channel));
+        assert_eq!(IpcMode::from_env("channels"), Some(IpcMode::Channel));
+        assert_eq!(IpcMode::from_env("CHANNEL"), Some(IpcMode::Channel));
+        assert_eq!(
+            IpcMode::from_env("shared_memory"),
+            Some(IpcMode::SharedMemory)
+        );
+        assert_eq!(IpcMode::from_env("shm"), Some(IpcMode::SharedMemory));
+        assert_eq!(IpcMode::from_env("SHM"), Some(IpcMode::SharedMemory));
+        assert_eq!(IpcMode::from_env("unknown"), None);
+    }
+
+    #[test]
+    fn ipc_mode_display() {
+        assert_eq!(IpcMode::Channel.to_string(), "channel");
+        assert_eq!(IpcMode::SharedMemory.to_string(), "shared_memory");
+    }
+
+    #[test]
+    fn execution_mode_from_env() {
+        assert_eq!(ExecutionMode::from_env("tokio"), Some(ExecutionMode::Tokio));
+        assert_eq!(ExecutionMode::from_env("TOKIO"), Some(ExecutionMode::Tokio));
+        assert_eq!(
+            ExecutionMode::from_env("pinned"),
+            Some(ExecutionMode::Pinned)
+        );
+        assert_eq!(ExecutionMode::from_env("tile"), Some(ExecutionMode::Tile));
+        assert_eq!(ExecutionMode::from_env("invalid"), None);
+    }
+
+    #[test]
+    fn execution_mode_display() {
+        assert_eq!(ExecutionMode::Tokio.to_string(), "tokio");
+        assert_eq!(ExecutionMode::Pinned.to_string(), "pinned");
+        assert_eq!(ExecutionMode::Tile.to_string(), "tile");
+    }
+
+    #[test]
+    fn pinned_core_policy_from_env() {
+        assert_eq!(
+            PinnedCorePolicy::from_env("strict"),
+            Some(PinnedCorePolicy::Strict)
+        );
+        assert_eq!(
+            PinnedCorePolicy::from_env("SHARED"),
+            Some(PinnedCorePolicy::Shared)
+        );
+        assert_eq!(
+            PinnedCorePolicy::from_env("adaptive"),
+            Some(PinnedCorePolicy::Adaptive)
+        );
+        assert_eq!(PinnedCorePolicy::from_env("none"), None);
+    }
+
+    #[test]
+    fn pinned_core_policy_display() {
+        assert_eq!(PinnedCorePolicy::Strict.to_string(), "strict");
+        assert_eq!(PinnedCorePolicy::Shared.to_string(), "shared");
+        assert_eq!(PinnedCorePolicy::Adaptive.to_string(), "adaptive");
+    }
+
+    #[test]
+    fn from_env_display_roundtrip() {
+        for mode in [IpcMode::Channel, IpcMode::SharedMemory] {
+            let s = mode.to_string();
+            assert_eq!(IpcMode::from_env(&s), Some(mode));
+        }
+        for mode in [
+            ExecutionMode::Tokio,
+            ExecutionMode::Pinned,
+            ExecutionMode::Tile,
+        ] {
+            let s = mode.to_string();
+            assert_eq!(ExecutionMode::from_env(&s), Some(mode));
+        }
+        for policy in [
+            PinnedCorePolicy::Strict,
+            PinnedCorePolicy::Shared,
+            PinnedCorePolicy::Adaptive,
+        ] {
+            let s = policy.to_string();
+            assert_eq!(PinnedCorePolicy::from_env(&s), Some(policy));
+        }
+    }
+}
