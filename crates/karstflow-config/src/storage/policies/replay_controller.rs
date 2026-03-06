@@ -119,3 +119,87 @@ pub(crate) fn apply_replay_controller_policy_env(
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn toml_noop_when_all_none() {
+        let mut policy = ReplayControllerPolicy::default();
+        let original = policy;
+        let profile = StorageProfileToml::default();
+        apply_replay_controller_policy_toml(&mut policy, &profile).unwrap();
+        assert_eq!(policy, original);
+    }
+
+    #[test]
+    fn toml_applies_values() {
+        let mut policy = ReplayControllerPolicy::default();
+        let profile = StorageProfileToml {
+            replay_controller_candidate_confirmation_threshold: Some(4),
+            replay_controller_candidate_confirmation_max_failed_ratio_bps: Some(8_000),
+            replay_controller_max_candidates: Some(16),
+            replay_controller_reorg_signal_weight: Some(2_000_000),
+            replay_controller_fragment_recency_weight: Some(5),
+            replay_controller_failed_transaction_ratio_penalty_weight: Some(100),
+            replay_controller_candidate_stale_fragment_lag: Some(256),
+            replay_controller_candidate_switch_min_score_delta: Some(50_000),
+            ..Default::default()
+        };
+        apply_replay_controller_policy_toml(&mut policy, &profile).unwrap();
+        assert_eq!(policy.candidate_confirmation_threshold, 4);
+        assert_eq!(policy.candidate_confirmation_max_failed_ratio_bps, 8_000);
+        assert_eq!(policy.max_candidates, 16);
+        assert_eq!(policy.reorg_signal_weight, 2_000_000);
+        assert_eq!(policy.fragment_recency_weight, 5);
+        assert_eq!(policy.failed_transaction_ratio_penalty_weight, 100);
+        assert_eq!(policy.candidate_stale_fragment_lag, 256);
+        assert_eq!(policy.candidate_switch_min_score_delta, 50_000);
+    }
+
+    #[test]
+    fn toml_rejects_zero_confirmation_threshold() {
+        let mut policy = ReplayControllerPolicy::default();
+        let profile = StorageProfileToml {
+            replay_controller_candidate_confirmation_threshold: Some(0),
+            ..Default::default()
+        };
+        assert!(apply_replay_controller_policy_toml(&mut policy, &profile).is_err());
+    }
+
+    #[test]
+    fn toml_rejects_zero_max_candidates() {
+        let mut policy = ReplayControllerPolicy::default();
+        let profile = StorageProfileToml {
+            replay_controller_max_candidates: Some(0),
+            ..Default::default()
+        };
+        assert!(apply_replay_controller_policy_toml(&mut policy, &profile).is_err());
+    }
+
+    #[test]
+    fn env_applies_values() {
+        let mut policy = ReplayControllerPolicy::default();
+        let env = StorageEnvOverrides {
+            replay_controller_candidate_confirmation_threshold: Some(3),
+            replay_controller_max_candidates: Some(12),
+            replay_controller_reorg_signal_weight: Some(500_000),
+            ..Default::default()
+        };
+        apply_replay_controller_policy_env(&mut policy, &env).unwrap();
+        assert_eq!(policy.candidate_confirmation_threshold, 3);
+        assert_eq!(policy.max_candidates, 12);
+        assert_eq!(policy.reorg_signal_weight, 500_000);
+    }
+
+    #[test]
+    fn env_rejects_zero_reorg_signal_weight() {
+        let mut policy = ReplayControllerPolicy::default();
+        let env = StorageEnvOverrides {
+            replay_controller_reorg_signal_weight: Some(0),
+            ..Default::default()
+        };
+        assert!(apply_replay_controller_policy_env(&mut policy, &env).is_err());
+    }
+}
