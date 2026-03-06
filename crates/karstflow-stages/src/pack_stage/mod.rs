@@ -29,8 +29,8 @@ pub use cost_model::{compute_cost, CostInput, CostResult};
 pub use estimation_table::EstimationTable;
 pub use priority_queue::{PackedTransaction, TransactionQueue};
 pub use scheduler::{
-    Microblock, MicroblockRebate, PackConfig, PackLimits, PackOutcome, PackPacer, PackScheduler,
-    PackStats, PackStatsSnapshot,
+    CuPacer, Microblock, MicroblockRebate, PackConfig, PackLimits, PackOutcome, PackPacer,
+    PackScheduler, PackStats, PackStatsSnapshot, ScheduleMetrics, SmallestPending,
 };
 pub use tip_blacklist::{check_tip_blacklist, TipBlacklistResult};
 pub use compute_budget::{ComputeBudgetResult, ComputeBudgetState};

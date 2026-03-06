@@ -168,6 +168,170 @@ impl PackPacer {
     }
 }
 
+/// CU-aware pacing model for slot production.
+///
+/// Tracks cumulative CU consumption and adjusts the number of enabled
+/// execution tiles to spread work evenly across the slot time window.
+/// This prevents bursty CU consumption that could leave the end of a
+/// slot underutilized.
+#[derive(Debug)]
+pub struct CuPacer {
+    /// Total CU budget for the slot.
+    total_cu_budget: u64,
+    /// Slot duration in nanoseconds.
+    slot_duration_ns: u64,
+    /// CUs consumed so far this slot.
+    cus_consumed: u64,
+    /// Slot start time.
+    slot_start: Instant,
+    /// Total execution tiles available.
+    total_tiles: usize,
+}
+
+impl CuPacer {
+    /// Create a new CU-aware pacer.
+    pub fn new(total_cu_budget: u64, slot_duration_ns: u64, total_tiles: usize) -> Self {
+        Self {
+            total_cu_budget,
+            slot_duration_ns,
+            cus_consumed: 0,
+            slot_start: Instant::now(),
+            total_tiles: total_tiles.max(1),
+        }
+    }
+
+    /// Report CU consumption from an executed microblock.
+    pub fn report_consumed(&mut self, cus: u64) {
+        self.cus_consumed += cus;
+    }
+
+    /// Get the number of execution tiles that should be enabled right now.
+    ///
+    /// If we're ahead of schedule (consumed more CU than expected for
+    /// elapsed time), reduce enabled tiles. If behind, enable more.
+    pub fn enabled_tiles(&self) -> usize {
+        if self.total_cu_budget == 0 || self.slot_duration_ns == 0 {
+            return self.total_tiles;
+        }
+
+        let elapsed_ns = self.slot_start.elapsed().as_nanos() as u64;
+        let elapsed_fraction =
+            (elapsed_ns as f64) / (self.slot_duration_ns as f64);
+        let elapsed_fraction = elapsed_fraction.clamp(0.001, 1.0);
+
+        // Expected CU consumption at this point in the slot
+        let expected_cus = (self.total_cu_budget as f64 * elapsed_fraction) as u64;
+
+        if self.cus_consumed > expected_cus {
+            // Ahead of schedule — reduce tiles
+            let ratio = expected_cus as f64 / self.cus_consumed.max(1) as f64;
+            let tiles = (self.total_tiles as f64 * ratio).ceil() as usize;
+            tiles.clamp(1, self.total_tiles)
+        } else {
+            // Behind or on schedule — all tiles enabled
+            self.total_tiles
+        }
+    }
+
+    /// Remaining CU budget for this slot.
+    pub fn remaining_cus(&self) -> u64 {
+        self.total_cu_budget.saturating_sub(self.cus_consumed)
+    }
+
+    /// Fraction of slot time elapsed (0.0 to 1.0+).
+    pub fn elapsed_fraction(&self) -> f64 {
+        let elapsed_ns = self.slot_start.elapsed().as_nanos() as u64;
+        elapsed_ns as f64 / self.slot_duration_ns.max(1) as f64
+    }
+
+    /// Reset for a new slot.
+    pub fn new_slot(&mut self) {
+        self.cus_consumed = 0;
+        self.slot_start = Instant::now();
+    }
+}
+
+/// Conservative estimate of the smallest pending transaction.
+///
+/// Tracks the minimum CU cost and minimum byte size across all pending
+/// transactions. Used for quick rejection: if the smallest transaction
+/// in the queue exceeds the remaining block budget, no scheduling
+/// attempt is needed.
+#[derive(Debug, Clone, Copy)]
+pub struct SmallestPending {
+    /// Minimum CU cost among pending transactions (u64::MAX = unknown/empty).
+    pub cus: u64,
+    /// Minimum byte size among pending transactions (u64::MAX = unknown/empty).
+    pub bytes: u64,
+}
+
+impl SmallestPending {
+    pub fn new() -> Self {
+        Self {
+            cus: u64::MAX,
+            bytes: u64::MAX,
+        }
+    }
+
+    /// Observe a transaction's cost/size and update minimums.
+    pub fn observe(&mut self, cus: u64, bytes: u64) {
+        self.cus = self.cus.min(cus);
+        self.bytes = self.bytes.min(bytes);
+    }
+
+    /// Reset to unknown state (e.g. on new block or after full drain).
+    pub fn reset(&mut self) {
+        *self = Self::new();
+    }
+}
+
+impl Default for SmallestPending {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Granular schedule outcome metrics matching reference counters.
+///
+/// Tracks why transactions were or were not scheduled during
+/// microblock production, enabling fine-grained observability
+/// into pack scheduler behavior.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct ScheduleMetrics {
+    /// Transactions successfully scheduled.
+    pub taken: u64,
+    /// Transactions skipped due to per-microblock CU limit.
+    pub cu_limit: u64,
+    /// Transactions skipped due to per-microblock byte limit.
+    pub byte_limit: u64,
+    /// Transactions skipped due to per-account write cost limit.
+    pub write_cost_limit: u64,
+    /// Transactions scheduled via fast path (no conflicts).
+    pub fast_path: u64,
+    /// Transactions scheduled via slow path (conflict resolution needed).
+    pub slow_path: u64,
+    /// Transactions deferred/skipped due to pacing or ordering.
+    pub defer_skip: u64,
+}
+
+impl ScheduleMetrics {
+    /// Total events across all categories.
+    pub fn total(&self) -> u64 {
+        self.taken
+            + self.cu_limit
+            + self.byte_limit
+            + self.write_cost_limit
+            + self.fast_path
+            + self.slow_path
+            + self.defer_skip
+    }
+
+    /// Reset all counters to zero.
+    pub fn reset(&mut self) {
+        *self = Self::default();
+    }
+}
+
 /// Outcome of a schedule attempt.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PackOutcome {
@@ -1113,5 +1277,141 @@ mod tests {
 
         scheduler.complete_microblock(mb2.id);
         assert_eq!(scheduler.per_tile_inflight_cus()[1], 0);
+    }
+
+    // -----------------------------------------------------------------------
+    // CuPacer tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn cu_pacer_initial_state() {
+        let pacer = CuPacer::new(48_000_000, 400_000_000, 4);
+        assert_eq!(pacer.remaining_cus(), 48_000_000);
+        // All tiles should be enabled initially (no consumption yet).
+        assert_eq!(pacer.enabled_tiles(), 4);
+    }
+
+    #[test]
+    fn cu_pacer_report_consumed() {
+        let mut pacer = CuPacer::new(48_000_000, 400_000_000, 4);
+        pacer.report_consumed(10_000_000);
+        assert_eq!(pacer.remaining_cus(), 38_000_000);
+        pacer.report_consumed(8_000_000);
+        assert_eq!(pacer.remaining_cus(), 30_000_000);
+    }
+
+    #[test]
+    fn cu_pacer_remaining_saturates_at_zero() {
+        let mut pacer = CuPacer::new(1_000, 400_000_000, 2);
+        pacer.report_consumed(5_000);
+        assert_eq!(pacer.remaining_cus(), 0);
+    }
+
+    #[test]
+    fn cu_pacer_new_slot_resets() {
+        let mut pacer = CuPacer::new(48_000_000, 400_000_000, 4);
+        pacer.report_consumed(48_000_000);
+        assert_eq!(pacer.remaining_cus(), 0);
+        pacer.new_slot();
+        assert_eq!(pacer.remaining_cus(), 48_000_000);
+    }
+
+    #[test]
+    fn cu_pacer_zero_budget_enables_all_tiles() {
+        let pacer = CuPacer::new(0, 400_000_000, 4);
+        assert_eq!(pacer.enabled_tiles(), 4);
+    }
+
+    #[test]
+    fn cu_pacer_zero_duration_enables_all_tiles() {
+        let pacer = CuPacer::new(48_000_000, 0, 4);
+        assert_eq!(pacer.enabled_tiles(), 4);
+    }
+
+    #[test]
+    fn cu_pacer_min_one_tile() {
+        // Even with zero tiles passed, should clamp to at least 1.
+        let pacer = CuPacer::new(48_000_000, 400_000_000, 0);
+        assert_eq!(pacer.enabled_tiles(), 1);
+    }
+
+    #[test]
+    fn cu_pacer_elapsed_fraction_starts_near_zero() {
+        let pacer = CuPacer::new(48_000_000, 10_000_000_000, 4); // 10 seconds
+        let frac = pacer.elapsed_fraction();
+        // Should be very close to 0.0 (just created).
+        assert!(frac < 0.01, "elapsed_fraction={frac}, expected near 0.0");
+    }
+
+    // -----------------------------------------------------------------------
+    // SmallestPending tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn smallest_pending_initial() {
+        let s = SmallestPending::new();
+        assert_eq!(s.cus, u64::MAX);
+        assert_eq!(s.bytes, u64::MAX);
+    }
+
+    #[test]
+    fn smallest_pending_observe() {
+        let mut s = SmallestPending::new();
+        s.observe(50_000, 400);
+        assert_eq!(s.cus, 50_000);
+        assert_eq!(s.bytes, 400);
+        s.observe(100_000, 200);
+        assert_eq!(s.cus, 50_000); // unchanged
+        assert_eq!(s.bytes, 200); // updated
+        s.observe(30_000, 500);
+        assert_eq!(s.cus, 30_000); // updated
+        assert_eq!(s.bytes, 200); // unchanged
+    }
+
+    #[test]
+    fn smallest_pending_reset() {
+        let mut s = SmallestPending::new();
+        s.observe(10_000, 100);
+        s.reset();
+        assert_eq!(s.cus, u64::MAX);
+        assert_eq!(s.bytes, u64::MAX);
+    }
+
+    // -----------------------------------------------------------------------
+    // ScheduleMetrics tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn schedule_metrics_default() {
+        let m = ScheduleMetrics::default();
+        assert_eq!(m.taken, 0);
+        assert_eq!(m.cu_limit, 0);
+        assert_eq!(m.byte_limit, 0);
+        assert_eq!(m.write_cost_limit, 0);
+        assert_eq!(m.fast_path, 0);
+        assert_eq!(m.slow_path, 0);
+        assert_eq!(m.defer_skip, 0);
+    }
+
+    #[test]
+    fn schedule_metrics_increment() {
+        let mut m = ScheduleMetrics::default();
+        m.taken += 5;
+        m.cu_limit += 2;
+        m.byte_limit += 1;
+        m.write_cost_limit += 3;
+        m.fast_path += 10;
+        m.slow_path += 7;
+        m.defer_skip += 4;
+        assert_eq!(m.total(), 32);
+    }
+
+    #[test]
+    fn schedule_metrics_reset() {
+        let mut m = ScheduleMetrics::default();
+        m.taken = 100;
+        m.slow_path = 50;
+        m.reset();
+        assert_eq!(m.total(), 0);
     }
 }
