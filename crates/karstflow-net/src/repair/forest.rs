@@ -33,6 +33,8 @@ pub struct SlotRepairState {
     fec_sets: HashSet<ShredIndex>,
     /// Bitset of FEC sets completed (all shreds recovered).
     fec_completed: HashSet<ShredIndex>,
+    /// Whether this slot has been confirmed (>=52% stake duplicate-confirmed).
+    pub confirmed: bool,
     /// Shreds received via turbine.
     pub turbine_count: u32,
     /// Shreds received via repair.
@@ -56,6 +58,7 @@ impl SlotRepairState {
             received: ShredBitset::new(),
             fec_sets: HashSet::new(),
             fec_completed: HashSet::new(),
+            confirmed: false,
             turbine_count: 0,
             repair_count: 0,
             recovered_count: 0,
@@ -334,9 +337,16 @@ impl RepairForest {
             return InsertOutcome::BelowRoot;
         }
 
-        // Capacity check.
+        // Capacity check — try eviction if full.
+        let mut evicted_slot = None;
         if !self.slots.contains_key(&slot) && self.slots.len() >= self.max_slots {
-            return InsertOutcome::Full;
+            match self.find_eviction_candidate(parent_slot) {
+                Some(victim) => {
+                    self.remove_slot(victim);
+                    evicted_slot = Some(victim);
+                }
+                None => return InsertOutcome::Full,
+            }
         }
 
         // Create or update slot state.
@@ -381,7 +391,12 @@ impl RepairForest {
             _ => {}
         }
 
-        InsertOutcome::Inserted(category)
+        match evicted_slot {
+            Some(victim) => InsertOutcome::Evicted {
+                evicted_slot: victim,
+            },
+            None => InsertOutcome::Inserted(category),
+        }
     }
 
     /// Record a received shred for a slot.
@@ -573,7 +588,100 @@ impl RepairForest {
         self.completed.len()
     }
 
+    /// Mark a slot as confirmed (>=52% stake duplicate-confirmed).
+    pub fn mark_confirmed(&mut self, slot: Slot) {
+        if let Some(state) = self.slots.get_mut(&slot) {
+            state.confirmed = true;
+        }
+    }
+
+    /// Whether a slot is a leaf (has no children in the forest).
+    pub fn is_leaf(&self, slot: Slot) -> bool {
+        self.children
+            .get(&slot)
+            .map_or(true, |children| children.is_empty())
+    }
+
     // --- Internal methods ---
+
+    /// Find the best eviction candidate using 4-tier priority:
+    ///
+    /// 1. Highest-slot unconfirmed orphan/subtree leaf
+    /// 2. Highest-slot unconfirmed frontier leaf
+    /// 3. Highest-slot confirmed orphan/subtree leaf
+    /// 4. Confirmed frontier leaves are never evicted
+    ///
+    /// Cannot evict the parent of the slot being inserted.
+    fn find_eviction_candidate(&self, inserting_parent: Slot) -> Option<Slot> {
+        let is_eligible = |&s: &Slot| -> bool {
+            // Must be a leaf (no children).
+            if !self.is_leaf(s) {
+                return false;
+            }
+            // Cannot evict the parent of the slot being inserted.
+            if s == inserting_parent {
+                return false;
+            }
+            // Cannot evict root.
+            if s == self.root_slot {
+                return false;
+            }
+            true
+        };
+
+        // Tier 1: Highest unconfirmed orphan/subtree leaf.
+        let tier1 = self
+            .orphaned
+            .iter()
+            .chain(self.subtrees.iter())
+            .filter(|s| {
+                is_eligible(s)
+                    && self
+                        .slots
+                        .get(s)
+                        .is_some_and(|state| !state.confirmed)
+            })
+            .max();
+        if let Some(&victim) = tier1 {
+            return Some(victim);
+        }
+
+        // Tier 2: Highest unconfirmed frontier leaf.
+        let tier2 = self
+            .frontier
+            .iter()
+            .filter(|s| {
+                is_eligible(s)
+                    && self
+                        .slots
+                        .get(s)
+                        .is_some_and(|state| !state.confirmed)
+            })
+            .max();
+        if let Some(&victim) = tier2 {
+            return Some(victim);
+        }
+
+        // Tier 3: Highest confirmed orphan/subtree leaf.
+        let tier3 = self
+            .orphaned
+            .iter()
+            .chain(self.subtrees.iter())
+            .filter(|s| {
+                is_eligible(s)
+                    && self
+                        .slots
+                        .get(s)
+                        .is_some_and(|state| state.confirmed)
+            })
+            .max();
+        if let Some(&victim) = tier3 {
+            return Some(victim);
+        }
+
+        // Tier 4: Confirmed frontier leaves are never evicted.
+        None
+    }
 
     /// Generate repair requests for a single frontier slot.
     fn generate_slot_repairs(&self, slot: Slot, max_count: usize) -> Vec<RepairTarget> {
@@ -647,6 +755,9 @@ impl RepairForest {
 
     /// Remove a slot entirely from the forest.
     fn remove_slot(&mut self, slot: Slot) {
+        // Read parent before removing state.
+        let parent = self.slots.get(&slot).map(|s| s.parent_slot);
+
         if let Some(cat) = self.categories.remove(&slot) {
             self.remove_from_category(slot, cat);
         }
@@ -655,12 +766,15 @@ impl RepairForest {
         self.children.remove(&slot);
 
         // Remove from parent's children list.
-        if let Some(state) = self.slots.get(&slot) {
-            let parent = state.parent_slot;
+        if let Some(parent) = parent {
             if let Some(siblings) = self.children.get_mut(&parent) {
                 siblings.retain(|&s| s != slot);
             }
         }
+
+        // Clean up repair queues.
+        self.repair_queue.retain(|&s| s != slot);
+        self.orphan_queue.retain(|&s| s != slot);
     }
 
     /// Check if any subtree roots have this slot as their parent and
@@ -766,8 +880,13 @@ pub enum InsertOutcome {
     Updated,
     /// Slot is below the current root and was rejected.
     BelowRoot,
-    /// Forest is at capacity.
+    /// Forest is at capacity and no eviction candidate was found.
     Full,
+    /// Slot was inserted after evicting another slot.
+    Evicted {
+        /// The slot that was evicted to make room.
+        evicted_slot: Slot,
+    },
 }
 
 /// Current time in milliseconds (monotonic-ish).
@@ -970,14 +1089,150 @@ mod tests {
     }
 
     #[test]
-    fn capacity_limit() {
+    fn capacity_limit_evicts_unconfirmed_orphan() {
+        let mut forest = RepairForest::with_capacity(0, 4);
+        forest.insert_slot(0, 0);
+        forest.insert_slot(1, 0);
+        forest.insert_slot(2, 1);
+        // Slot 10 with unknown parent → subtree (leaf, unconfirmed).
+        forest.insert_slot(10, 8);
+        assert_eq!(forest.slot_count(), 4);
+
+        // Insert slot 3 → should evict slot 10 (tier 1: unconfirmed orphan/subtree leaf).
+        let r = forest.insert_slot(3, 2);
+        assert!(
+            matches!(r, InsertOutcome::Evicted { evicted_slot: 10 }),
+            "expected eviction of slot 10, got {:?}",
+            r
+        );
+        assert!(forest.get_slot(10).is_none());
+        assert!(forest.get_slot(3).is_some());
+    }
+
+    #[test]
+    fn eviction_prefers_highest_slot() {
+        let mut forest = RepairForest::with_capacity(0, 5);
+        forest.insert_slot(0, 0);
+        forest.insert_slot(1, 0);
+        // Two orphan/subtree leaves.
+        forest.insert_slot(20, 18);
+        forest.insert_slot(30, 28);
+        forest.insert_slot(2, 1);
+        // At capacity=5, but we already have 5. Actually let me re-check...
+        // 0, 1, 20, 30, 2 = 5 slots.
+        assert_eq!(forest.slot_count(), 5);
+
+        // Insert slot 3 → should evict slot 30 (highest unconfirmed orphan leaf).
+        let r = forest.insert_slot(3, 2);
+        assert!(
+            matches!(r, InsertOutcome::Evicted { evicted_slot: 30 }),
+            "expected eviction of slot 30, got {:?}",
+            r
+        );
+    }
+
+    #[test]
+    fn eviction_tier2_unconfirmed_frontier_leaf() {
+        let mut forest = RepairForest::with_capacity(0, 4);
+        forest.insert_slot(0, 0);
+        forest.insert_slot(1, 0);
+        forest.insert_slot(2, 0);
+        forest.insert_slot(3, 1);
+        // Now: 0=ancestry, 1=ancestry, 2=frontier(leaf), 3=frontier(leaf)
+        assert_eq!(forest.slot_count(), 4);
+
+        // Insert slot 4 with parent 2 → should evict slot 3 (tier 2: highest unconfirmed frontier leaf).
+        let r = forest.insert_slot(4, 2);
+        assert!(
+            matches!(r, InsertOutcome::Evicted { evicted_slot: 3 }),
+            "expected eviction of slot 3, got {:?}",
+            r
+        );
+    }
+
+    #[test]
+    fn eviction_tier3_confirmed_orphan_leaf() {
+        let mut forest = RepairForest::with_capacity(0, 4);
+        forest.insert_slot(0, 0);
+        forest.insert_slot(1, 0);
+        // Two confirmed orphan leaves — no unconfirmed leaves anywhere.
+        forest.insert_slot(20, 18);
+        forest.mark_confirmed(20);
+        forest.insert_slot(30, 28);
+        forest.mark_confirmed(30);
+        assert_eq!(forest.slot_count(), 4);
+
+        // All frontier leaves (slot 1) are confirmed too.
+        forest.mark_confirmed(1);
+
+        // Insert slot 2 → should evict slot 30 (tier 3: highest confirmed orphan leaf).
+        let r = forest.insert_slot(2, 1);
+        assert!(
+            matches!(r, InsertOutcome::Evicted { evicted_slot: 30 }),
+            "expected eviction of slot 30, got {:?}",
+            r
+        );
+    }
+
+    #[test]
+    fn eviction_full_when_only_confirmed_frontier_leaves() {
         let mut forest = RepairForest::with_capacity(0, 3);
+        forest.insert_slot(0, 0);
+        forest.insert_slot(1, 0);
+        forest.insert_slot(2, 0);
+        // Mark all frontier leaves as confirmed.
+        forest.mark_confirmed(1);
+        forest.mark_confirmed(2);
+        assert_eq!(forest.slot_count(), 3);
+
+        // Insert slot 3 → no eviction candidate → Full.
+        let r = forest.insert_slot(3, 1);
+        assert_eq!(r, InsertOutcome::Full);
+    }
+
+    #[test]
+    fn eviction_does_not_evict_parent_of_inserting_slot() {
+        let mut forest = RepairForest::with_capacity(0, 3);
+        forest.insert_slot(0, 0);
+        forest.insert_slot(1, 0);
+        // Slot 5 is an orphan leaf (parent 3).
+        forest.insert_slot(5, 3);
+        assert_eq!(forest.slot_count(), 3);
+
+        // Insert slot 6 with parent 5 → cannot evict 5 (its parent),
+        // should evict slot 1 instead (unconfirmed frontier leaf).
+        let r = forest.insert_slot(6, 5);
+        assert!(
+            matches!(r, InsertOutcome::Evicted { evicted_slot: 1 }),
+            "expected eviction of slot 1, got {:?}",
+            r
+        );
+    }
+
+    #[test]
+    fn mark_confirmed_persists() {
+        let mut forest = RepairForest::new(0);
+        forest.insert_slot(0, 0);
+        forest.insert_slot(1, 0);
+
+        assert!(!forest.get_slot(1).unwrap().confirmed);
+        forest.mark_confirmed(1);
+        assert!(forest.get_slot(1).unwrap().confirmed);
+    }
+
+    #[test]
+    fn is_leaf_detection() {
+        let mut forest = RepairForest::new(0);
         forest.insert_slot(0, 0);
         forest.insert_slot(1, 0);
         forest.insert_slot(2, 1);
 
-        let r = forest.insert_slot(3, 2);
-        assert_eq!(r, InsertOutcome::Full);
+        // Slot 0 has child 1 → not a leaf.
+        assert!(!forest.is_leaf(0));
+        // Slot 1 has child 2 → not a leaf.
+        assert!(!forest.is_leaf(1));
+        // Slot 2 has no children → leaf.
+        assert!(forest.is_leaf(2));
     }
 
     #[test]
