@@ -125,3 +125,62 @@ impl Default for RetryPolicy {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn execution_batch_new() {
+        let batch = ExecutionBatch::new(42, 10, 5000);
+        assert_eq!(batch.fragment_id, 42);
+        assert_eq!(batch.transaction_count, 10);
+        assert_eq!(batch.estimated_total_cost_units, 5000);
+        assert!(batch.transactions.is_none());
+    }
+
+    #[test]
+    fn retry_policy_default_values() {
+        let policy = RetryPolicy::default();
+        assert_eq!(policy.replay_conflict_delay_millis, 25);
+        assert_eq!(policy.transient_cap_millis, 250);
+        assert_eq!(policy.resource_cap_millis, 2_000);
+        assert_eq!(policy.max_retries_replay_conflict, 3);
+        assert_eq!(policy.max_retries_fallback, 2);
+    }
+
+    #[test]
+    fn retry_policy_transient_cap_greater_than_base() {
+        let policy = RetryPolicy::default();
+        assert!(policy.transient_cap_millis > policy.transient_base_delay_millis);
+    }
+
+    #[test]
+    fn retry_policy_resource_cap_greater_than_base() {
+        let policy = RetryPolicy::default();
+        assert!(policy.resource_cap_millis > policy.resource_base_delay_millis);
+    }
+
+    #[test]
+    fn execution_outcome_equality() {
+        let a = ExecutionOutcome {
+            fragment_id: 1,
+            executed_transactions: 10,
+            failed_transactions: 2,
+            total_cost_units: 5000,
+            failure_class: Some(ExecutionFailureClass::ReplayConflict),
+        };
+        let b = a.clone();
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn replay_boundary_state_default() {
+        let state = ReplayBoundaryState {
+            last_applied_fragment_id: 0,
+            total_executed_transactions: 0,
+        };
+        assert_eq!(state.last_applied_fragment_id, 0);
+        assert_eq!(state.total_executed_transactions, 0);
+    }
+}
