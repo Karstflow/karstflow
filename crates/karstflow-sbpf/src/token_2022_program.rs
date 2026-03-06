@@ -268,12 +268,9 @@ pub fn tlv_get_extension(extension_data: &[u8], target: ExtensionType) -> Option
     let target_type = target as u16;
     let mut offset = 0;
     while offset + TLV_HEADER_LEN <= extension_data.len() {
-        let ext_type = u16::from_le_bytes(
-            extension_data[offset..offset + 2].try_into().ok()?,
-        );
-        let ext_len = u16::from_le_bytes(
-            extension_data[offset + 2..offset + 4].try_into().ok()?,
-        ) as usize;
+        let ext_type = u16::from_le_bytes(extension_data[offset..offset + 2].try_into().ok()?);
+        let ext_len =
+            u16::from_le_bytes(extension_data[offset + 2..offset + 4].try_into().ok()?) as usize;
 
         if ext_type == 0 && ext_len == 0 {
             break; // End sentinel
@@ -957,8 +954,7 @@ impl Token2022Account {
             data[off] = AccountType::Account as u8;
             // padding bytes are already zero
             let tlv_start = off + 1 + ACCOUNT_TYPE_PADDING;
-            data[tlv_start..tlv_start + self.extensions.len()]
-                .copy_from_slice(&self.extensions);
+            data[tlv_start..tlv_start + self.extensions.len()].copy_from_slice(&self.extensions);
         }
 
         data
@@ -1091,8 +1087,7 @@ impl Token2022Mint {
             let off = Self::BASE_LEN;
             data[off] = AccountType::Mint as u8;
             let tlv_start = off + 1 + ACCOUNT_TYPE_PADDING;
-            data[tlv_start..tlv_start + self.extensions.len()]
-                .copy_from_slice(&self.extensions);
+            data[tlv_start..tlv_start + self.extensions.len()].copy_from_slice(&self.extensions);
         }
 
         data
@@ -1241,17 +1236,115 @@ impl Token2022ProgramExecutor {
     // Base Token Program instructions (simplified implementations)
     // In practice, these would use the full Token Program logic
 
-    fn initialize_mint(&self, _context: &ExecutionContext) -> Result<ExecutionOutcome, String> {
-        // Simplified: Just return success with base cost
-        Ok(ExecutionOutcome::success(self.base_cost + 50))
+    fn initialize_mint(&self, context: &ExecutionContext) -> Result<ExecutionOutcome, String> {
+        if context.accounts.is_empty() {
+            return Err("InitializeMint requires at least 1 account".to_string());
+        }
+        // instruction_data: [0:discriminator][1:decimals][2..34:mint_authority][34:has_freeze][35..67:freeze_authority]
+        if context.instruction_data.len() < 34 {
+            return Err("InitializeMint: insufficient instruction data".to_string());
+        }
+
+        let (mint_pubkey, mut mint_account, mint_writable) = context.accounts[0].clone();
+        if !mint_writable {
+            return Err("Mint account must be writable".to_string());
+        }
+
+        let decimals = context.instruction_data[1];
+        let mut auth_bytes = [0u8; 32];
+        auth_bytes.copy_from_slice(&context.instruction_data[2..34]);
+        let mint_authority = Some(Pubkey::new(auth_bytes));
+
+        let freeze_authority =
+            if context.instruction_data.len() >= 67 && context.instruction_data[34] == 1 {
+                let mut fb = [0u8; 32];
+                fb.copy_from_slice(&context.instruction_data[35..67]);
+                Some(Pubkey::new(fb))
+            } else {
+                None
+            };
+
+        let mint = Token2022Mint {
+            mint_authority,
+            supply: 0,
+            decimals,
+            is_initialized: true,
+            freeze_authority,
+            extensions: Vec::new(),
+        };
+        mint.pack_into_account(&mut mint_account);
+
+        let mut outcome = ExecutionOutcome::success(self.base_cost + 50);
+        outcome.modified_accounts.insert(mint_pubkey, mint_account);
+        Ok(outcome)
     }
 
-    fn initialize_account(&self, _context: &ExecutionContext) -> Result<ExecutionOutcome, String> {
-        Ok(ExecutionOutcome::success(self.base_cost + 50))
+    fn initialize_account(&self, context: &ExecutionContext) -> Result<ExecutionOutcome, String> {
+        // accounts: [0:token_account(w), 1:mint, 2:owner, 3:rent_sysvar]
+        if context.accounts.len() < 3 {
+            return Err("InitializeAccount requires at least 3 accounts".to_string());
+        }
+
+        let (acct_pubkey, mut acct, acct_writable) = context.accounts[0].clone();
+        if !acct_writable {
+            return Err("Token account must be writable".to_string());
+        }
+
+        let (mint_pubkey, _mint_account, _) = context.accounts[1].clone();
+        let (owner_pubkey, _, _) = context.accounts[2].clone();
+
+        let token = Token2022Account {
+            mint: mint_pubkey,
+            owner: owner_pubkey,
+            amount: 0,
+            delegate: None,
+            state: 1, // Initialized
+            is_native: None,
+            delegated_amount: 0,
+            close_authority: None,
+            extensions: Vec::new(),
+        };
+        token.pack_into_account(&mut acct);
+
+        let mut outcome = ExecutionOutcome::success(self.base_cost + 50);
+        outcome.modified_accounts.insert(acct_pubkey, acct);
+        Ok(outcome)
     }
 
-    fn initialize_multisig(&self, _context: &ExecutionContext) -> Result<ExecutionOutcome, String> {
-        Ok(ExecutionOutcome::success(self.base_cost + 50))
+    fn initialize_multisig(&self, context: &ExecutionContext) -> Result<ExecutionOutcome, String> {
+        // accounts: [0:multisig(w), 1:rent_sysvar, 2+:signers]
+        if context.accounts.len() < 3 {
+            return Err("InitializeMultisig requires at least 3 accounts".to_string());
+        }
+        if context.instruction_data.len() < 2 {
+            return Err("InitializeMultisig requires m value".to_string());
+        }
+
+        let (ms_pubkey, mut ms_account, ms_writable) = context.accounts[0].clone();
+        if !ms_writable {
+            return Err("Multisig account must be writable".to_string());
+        }
+
+        let m = context.instruction_data[1];
+        let n = (context.accounts.len() - 2) as u8;
+        if m == 0 || m > n || n > 11 {
+            return Err("Invalid multisig parameters".to_string());
+        }
+
+        // Multisig layout: [1:is_initialized][1:m][1:n][32*11:signers] = 355 bytes
+        let mut data = vec![0u8; 355];
+        data[0] = 1; // is_initialized
+        data[1] = m;
+        data[2] = n;
+        for i in 0..n as usize {
+            let (signer_pk, _, _) = &context.accounts[i + 2];
+            data[3 + i * 32..3 + (i + 1) * 32].copy_from_slice(&signer_pk.to_bytes());
+        }
+        ms_account.data = AccountData::new(data);
+
+        let mut outcome = ExecutionOutcome::success(self.base_cost + 50);
+        outcome.modified_accounts.insert(ms_pubkey, ms_account);
+        Ok(outcome)
     }
 
     fn transfer(&self, context: &ExecutionContext) -> Result<ExecutionOutcome, String> {
@@ -1272,10 +1365,10 @@ impl Token2022ProgramExecutor {
         let amount = u64::from_le_bytes(context.instruction_data[1..9].try_into().unwrap());
 
         // Unpack source and dest token accounts
-        let mut source_token = Token2022Account::unpack_from_account(&source_account)
-            .map_err(|e| e.to_string())?;
-        let mut dest_token = Token2022Account::unpack_from_account(&dest_account)
-            .map_err(|e| e.to_string())?;
+        let mut source_token =
+            Token2022Account::unpack_from_account(&source_account).map_err(|e| e.to_string())?;
+        let mut dest_token =
+            Token2022Account::unpack_from_account(&dest_account).map_err(|e| e.to_string())?;
 
         // Check non-transferable
         if source_token.has_extension(ExtensionType::NonTransferableAccount) {
@@ -1304,38 +1397,232 @@ impl Token2022ProgramExecutor {
         dest_token.pack_into_account(&mut dest_account);
 
         let mut outcome = ExecutionOutcome::success(self.base_cost + 100);
-        outcome.modified_accounts.insert(source_pubkey, source_account);
+        outcome
+            .modified_accounts
+            .insert(source_pubkey, source_account);
         outcome.modified_accounts.insert(dest_pubkey, dest_account);
 
         Ok(outcome)
     }
 
-    fn approve(&self, _context: &ExecutionContext) -> Result<ExecutionOutcome, String> {
-        Ok(ExecutionOutcome::success(self.base_cost + 50))
+    fn approve(&self, context: &ExecutionContext) -> Result<ExecutionOutcome, String> {
+        // accounts: [0:source(w), 1:delegate, 2:owner]
+        if context.accounts.len() < 3 {
+            return Err("Approve requires at least 3 accounts".to_string());
+        }
+        if context.instruction_data.len() < 9 {
+            return Err("Approve requires amount".to_string());
+        }
+
+        let (src_pubkey, mut src_account, src_writable) = context.accounts[0].clone();
+        if !src_writable {
+            return Err("Source account must be writable".to_string());
+        }
+        let (delegate_pubkey, _, _) = context.accounts[1].clone();
+
+        let amount = u64::from_le_bytes(context.instruction_data[1..9].try_into().unwrap());
+
+        let mut token =
+            Token2022Account::unpack_from_account(&src_account).map_err(|e| e.to_string())?;
+        token.delegate = Some(delegate_pubkey);
+        token.delegated_amount = amount;
+        token.pack_into_account(&mut src_account);
+
+        let mut outcome = ExecutionOutcome::success(self.base_cost + 50);
+        outcome.modified_accounts.insert(src_pubkey, src_account);
+        Ok(outcome)
     }
 
-    fn revoke(&self, _context: &ExecutionContext) -> Result<ExecutionOutcome, String> {
-        Ok(ExecutionOutcome::success(self.base_cost + 30))
+    fn revoke(&self, context: &ExecutionContext) -> Result<ExecutionOutcome, String> {
+        // accounts: [0:source(w), 1:owner]
+        if context.accounts.len() < 2 {
+            return Err("Revoke requires at least 2 accounts".to_string());
+        }
+
+        let (src_pubkey, mut src_account, src_writable) = context.accounts[0].clone();
+        if !src_writable {
+            return Err("Source account must be writable".to_string());
+        }
+
+        let mut token =
+            Token2022Account::unpack_from_account(&src_account).map_err(|e| e.to_string())?;
+        token.delegate = None;
+        token.delegated_amount = 0;
+        token.pack_into_account(&mut src_account);
+
+        let mut outcome = ExecutionOutcome::success(self.base_cost + 30);
+        outcome.modified_accounts.insert(src_pubkey, src_account);
+        Ok(outcome)
     }
 
-    fn mint_to(&self, _context: &ExecutionContext) -> Result<ExecutionOutcome, String> {
-        Ok(ExecutionOutcome::success(self.base_cost + 100))
+    fn mint_to(&self, context: &ExecutionContext) -> Result<ExecutionOutcome, String> {
+        // accounts: [0:mint(w), 1:destination(w), 2:mint_authority]
+        if context.accounts.len() < 3 {
+            return Err("MintTo requires at least 3 accounts".to_string());
+        }
+        if context.instruction_data.len() < 9 {
+            return Err("MintTo requires amount".to_string());
+        }
+
+        let (mint_pubkey, mut mint_account, mint_writable) = context.accounts[0].clone();
+        let (dest_pubkey, mut dest_account, dest_writable) = context.accounts[1].clone();
+        if !mint_writable || !dest_writable {
+            return Err("Mint and destination must be writable".to_string());
+        }
+
+        let amount = u64::from_le_bytes(context.instruction_data[1..9].try_into().unwrap());
+
+        let mut mint =
+            Token2022Mint::unpack_from_account(&mint_account).map_err(|e| e.to_string())?;
+        if mint.mint_authority.is_none() {
+            return Err(Token2022Error::FixedSupply.to_string());
+        }
+        mint.supply = mint
+            .supply
+            .checked_add(amount)
+            .ok_or_else(|| Token2022Error::Overflow.to_string())?;
+        mint.pack_into_account(&mut mint_account);
+
+        let mut dest_token =
+            Token2022Account::unpack_from_account(&dest_account).map_err(|e| e.to_string())?;
+        dest_token.amount = dest_token
+            .amount
+            .checked_add(amount)
+            .ok_or_else(|| Token2022Error::Overflow.to_string())?;
+        dest_token.pack_into_account(&mut dest_account);
+
+        let mut outcome = ExecutionOutcome::success(self.base_cost + 100);
+        outcome.modified_accounts.insert(mint_pubkey, mint_account);
+        outcome.modified_accounts.insert(dest_pubkey, dest_account);
+        Ok(outcome)
     }
 
-    fn burn(&self, _context: &ExecutionContext) -> Result<ExecutionOutcome, String> {
-        Ok(ExecutionOutcome::success(self.base_cost + 100))
+    fn burn(&self, context: &ExecutionContext) -> Result<ExecutionOutcome, String> {
+        // accounts: [0:source(w), 1:mint(w), 2:owner]
+        if context.accounts.len() < 3 {
+            return Err("Burn requires at least 3 accounts".to_string());
+        }
+        if context.instruction_data.len() < 9 {
+            return Err("Burn requires amount".to_string());
+        }
+
+        let (src_pubkey, mut src_account, src_writable) = context.accounts[0].clone();
+        let (mint_pubkey, mut mint_account, mint_writable) = context.accounts[1].clone();
+        if !src_writable || !mint_writable {
+            return Err("Source and mint must be writable".to_string());
+        }
+
+        let amount = u64::from_le_bytes(context.instruction_data[1..9].try_into().unwrap());
+
+        let mut src_token =
+            Token2022Account::unpack_from_account(&src_account).map_err(|e| e.to_string())?;
+        src_token.amount = src_token
+            .amount
+            .checked_sub(amount)
+            .ok_or_else(|| Token2022Error::InsufficientFunds.to_string())?;
+        src_token.pack_into_account(&mut src_account);
+
+        let mut mint =
+            Token2022Mint::unpack_from_account(&mint_account).map_err(|e| e.to_string())?;
+        mint.supply = mint.supply.saturating_sub(amount);
+        mint.pack_into_account(&mut mint_account);
+
+        let mut outcome = ExecutionOutcome::success(self.base_cost + 100);
+        outcome.modified_accounts.insert(src_pubkey, src_account);
+        outcome.modified_accounts.insert(mint_pubkey, mint_account);
+        Ok(outcome)
     }
 
-    fn close_account(&self, _context: &ExecutionContext) -> Result<ExecutionOutcome, String> {
-        Ok(ExecutionOutcome::success(self.base_cost + 50))
+    fn close_account(&self, context: &ExecutionContext) -> Result<ExecutionOutcome, String> {
+        // accounts: [0:account_to_close(w), 1:destination(w), 2:owner]
+        if context.accounts.len() < 3 {
+            return Err("CloseAccount requires at least 3 accounts".to_string());
+        }
+
+        let (close_pubkey, mut close_account, close_writable) = context.accounts[0].clone();
+        let (dest_pubkey, mut dest_account, dest_writable) = context.accounts[1].clone();
+        if !close_writable || !dest_writable {
+            return Err("Account and destination must be writable".to_string());
+        }
+
+        let token =
+            Token2022Account::unpack_from_account(&close_account).map_err(|e| e.to_string())?;
+        if token.amount != 0 {
+            return Err(Token2022Error::NonNativeHasBalance.to_string());
+        }
+
+        // Transfer lamports to destination
+        dest_account.meta.lamports = dest_account
+            .meta
+            .lamports
+            .saturating_add(close_account.meta.lamports);
+        close_account.meta.lamports = 0;
+        close_account.data = AccountData::new(Vec::new());
+
+        let mut outcome = ExecutionOutcome::success(self.base_cost + 50);
+        outcome
+            .modified_accounts
+            .insert(close_pubkey, close_account);
+        outcome.modified_accounts.insert(dest_pubkey, dest_account);
+        Ok(outcome)
     }
 
-    fn freeze_account(&self, _context: &ExecutionContext) -> Result<ExecutionOutcome, String> {
-        Ok(ExecutionOutcome::success(self.base_cost + 50))
+    fn freeze_account(&self, context: &ExecutionContext) -> Result<ExecutionOutcome, String> {
+        // accounts: [0:token_account(w), 1:mint, 2:freeze_authority]
+        if context.accounts.len() < 3 {
+            return Err("FreezeAccount requires at least 3 accounts".to_string());
+        }
+
+        let (acct_pubkey, mut acct, acct_writable) = context.accounts[0].clone();
+        if !acct_writable {
+            return Err("Token account must be writable".to_string());
+        }
+
+        let (_mint_pubkey, mint_account, _) = context.accounts[1].clone();
+        let mint = Token2022Mint::unpack_from_account(&mint_account).map_err(|e| e.to_string())?;
+        if mint.freeze_authority.is_none() {
+            return Err(Token2022Error::MintCannotFreeze.to_string());
+        }
+
+        let mut token = Token2022Account::unpack_from_account(&acct).map_err(|e| e.to_string())?;
+        if token.state != 1 {
+            return Err(Token2022Error::InvalidAccountState.to_string());
+        }
+        token.state = 2; // Frozen
+        token.pack_into_account(&mut acct);
+
+        let mut outcome = ExecutionOutcome::success(self.base_cost + 50);
+        outcome.modified_accounts.insert(acct_pubkey, acct);
+        Ok(outcome)
     }
 
-    fn thaw_account(&self, _context: &ExecutionContext) -> Result<ExecutionOutcome, String> {
-        Ok(ExecutionOutcome::success(self.base_cost + 50))
+    fn thaw_account(&self, context: &ExecutionContext) -> Result<ExecutionOutcome, String> {
+        // accounts: [0:token_account(w), 1:mint, 2:freeze_authority]
+        if context.accounts.len() < 3 {
+            return Err("ThawAccount requires at least 3 accounts".to_string());
+        }
+
+        let (acct_pubkey, mut acct, acct_writable) = context.accounts[0].clone();
+        if !acct_writable {
+            return Err("Token account must be writable".to_string());
+        }
+
+        let (_mint_pubkey, mint_account, _) = context.accounts[1].clone();
+        let mint = Token2022Mint::unpack_from_account(&mint_account).map_err(|e| e.to_string())?;
+        if mint.freeze_authority.is_none() {
+            return Err(Token2022Error::MintCannotFreeze.to_string());
+        }
+
+        let mut token = Token2022Account::unpack_from_account(&acct).map_err(|e| e.to_string())?;
+        if token.state != 2 {
+            return Err(Token2022Error::InvalidAccountState.to_string());
+        }
+        token.state = 1; // Initialized (unfrozen)
+        token.pack_into_account(&mut acct);
+
+        let mut outcome = ExecutionOutcome::success(self.base_cost + 50);
+        outcome.modified_accounts.insert(acct_pubkey, acct);
+        Ok(outcome)
     }
 
     fn transfer_checked(&self, context: &ExecutionContext) -> Result<ExecutionOutcome, String> {
@@ -1358,16 +1645,15 @@ impl Token2022ProgramExecutor {
         let expected_decimals = context.instruction_data[9];
 
         // Verify decimals match mint
-        let mint = Token2022Mint::unpack_from_account(&mint_account)
-            .map_err(|e| e.to_string())?;
+        let mint = Token2022Mint::unpack_from_account(&mint_account).map_err(|e| e.to_string())?;
         if mint.decimals != expected_decimals {
             return Err(Token2022Error::MintDecimalsMismatch.to_string());
         }
 
-        let mut source_token = Token2022Account::unpack_from_account(&source_account)
-            .map_err(|e| e.to_string())?;
-        let mut dest_token = Token2022Account::unpack_from_account(&dest_account)
-            .map_err(|e| e.to_string())?;
+        let mut source_token =
+            Token2022Account::unpack_from_account(&source_account).map_err(|e| e.to_string())?;
+        let mut dest_token =
+            Token2022Account::unpack_from_account(&dest_account).map_err(|e| e.to_string())?;
 
         if source_token.has_extension(ExtensionType::NonTransferableAccount) {
             return Err(Token2022Error::NonTransferable.to_string());
@@ -1389,60 +1675,326 @@ impl Token2022ProgramExecutor {
         dest_token.pack_into_account(&mut dest_account);
 
         let mut outcome = ExecutionOutcome::success(self.base_cost + 100);
-        outcome.modified_accounts.insert(source_pubkey, source_account);
+        outcome
+            .modified_accounts
+            .insert(source_pubkey, source_account);
         outcome.modified_accounts.insert(dest_pubkey, dest_account);
 
         Ok(outcome)
     }
 
-    fn approve_checked(&self, _context: &ExecutionContext) -> Result<ExecutionOutcome, String> {
-        Ok(ExecutionOutcome::success(self.base_cost + 50))
+    fn approve_checked(&self, context: &ExecutionContext) -> Result<ExecutionOutcome, String> {
+        // accounts: [0:source(w), 1:mint, 2:delegate, 3:owner]
+        if context.accounts.len() < 4 {
+            return Err("ApproveChecked requires at least 4 accounts".to_string());
+        }
+        if context.instruction_data.len() < 10 {
+            return Err("ApproveChecked requires amount and decimals".to_string());
+        }
+
+        let (src_pubkey, mut src_account, src_writable) = context.accounts[0].clone();
+        if !src_writable {
+            return Err("Source account must be writable".to_string());
+        }
+        let (_mint_pubkey, mint_account, _) = context.accounts[1].clone();
+        let (delegate_pubkey, _, _) = context.accounts[2].clone();
+
+        let amount = u64::from_le_bytes(context.instruction_data[1..9].try_into().unwrap());
+        let expected_decimals = context.instruction_data[9];
+
+        let mint = Token2022Mint::unpack_from_account(&mint_account).map_err(|e| e.to_string())?;
+        if mint.decimals != expected_decimals {
+            return Err(Token2022Error::MintDecimalsMismatch.to_string());
+        }
+
+        let mut token =
+            Token2022Account::unpack_from_account(&src_account).map_err(|e| e.to_string())?;
+        token.delegate = Some(delegate_pubkey);
+        token.delegated_amount = amount;
+        token.pack_into_account(&mut src_account);
+
+        let mut outcome = ExecutionOutcome::success(self.base_cost + 50);
+        outcome.modified_accounts.insert(src_pubkey, src_account);
+        Ok(outcome)
     }
 
-    fn mint_to_checked(&self, _context: &ExecutionContext) -> Result<ExecutionOutcome, String> {
-        Ok(ExecutionOutcome::success(self.base_cost + 100))
+    fn mint_to_checked(&self, context: &ExecutionContext) -> Result<ExecutionOutcome, String> {
+        // accounts: [0:mint(w), 1:destination(w), 2:mint_authority]
+        if context.accounts.len() < 3 {
+            return Err("MintToChecked requires at least 3 accounts".to_string());
+        }
+        if context.instruction_data.len() < 10 {
+            return Err("MintToChecked requires amount and decimals".to_string());
+        }
+
+        let (mint_pubkey, mut mint_account, mint_writable) = context.accounts[0].clone();
+        let (dest_pubkey, mut dest_account, dest_writable) = context.accounts[1].clone();
+        if !mint_writable || !dest_writable {
+            return Err("Mint and destination must be writable".to_string());
+        }
+
+        let amount = u64::from_le_bytes(context.instruction_data[1..9].try_into().unwrap());
+        let expected_decimals = context.instruction_data[9];
+
+        let mut mint =
+            Token2022Mint::unpack_from_account(&mint_account).map_err(|e| e.to_string())?;
+        if mint.decimals != expected_decimals {
+            return Err(Token2022Error::MintDecimalsMismatch.to_string());
+        }
+        if mint.mint_authority.is_none() {
+            return Err(Token2022Error::FixedSupply.to_string());
+        }
+        mint.supply = mint
+            .supply
+            .checked_add(amount)
+            .ok_or_else(|| Token2022Error::Overflow.to_string())?;
+        mint.pack_into_account(&mut mint_account);
+
+        let mut dest_token =
+            Token2022Account::unpack_from_account(&dest_account).map_err(|e| e.to_string())?;
+        dest_token.amount = dest_token
+            .amount
+            .checked_add(amount)
+            .ok_or_else(|| Token2022Error::Overflow.to_string())?;
+        dest_token.pack_into_account(&mut dest_account);
+
+        let mut outcome = ExecutionOutcome::success(self.base_cost + 100);
+        outcome.modified_accounts.insert(mint_pubkey, mint_account);
+        outcome.modified_accounts.insert(dest_pubkey, dest_account);
+        Ok(outcome)
     }
 
-    fn burn_checked(&self, _context: &ExecutionContext) -> Result<ExecutionOutcome, String> {
-        Ok(ExecutionOutcome::success(self.base_cost + 100))
+    fn burn_checked(&self, context: &ExecutionContext) -> Result<ExecutionOutcome, String> {
+        // accounts: [0:source(w), 1:mint(w), 2:owner]
+        if context.accounts.len() < 3 {
+            return Err("BurnChecked requires at least 3 accounts".to_string());
+        }
+        if context.instruction_data.len() < 10 {
+            return Err("BurnChecked requires amount and decimals".to_string());
+        }
+
+        let (src_pubkey, mut src_account, src_writable) = context.accounts[0].clone();
+        let (mint_pubkey, mut mint_account, mint_writable) = context.accounts[1].clone();
+        if !src_writable || !mint_writable {
+            return Err("Source and mint must be writable".to_string());
+        }
+
+        let amount = u64::from_le_bytes(context.instruction_data[1..9].try_into().unwrap());
+        let expected_decimals = context.instruction_data[9];
+
+        let mut mint =
+            Token2022Mint::unpack_from_account(&mint_account).map_err(|e| e.to_string())?;
+        if mint.decimals != expected_decimals {
+            return Err(Token2022Error::MintDecimalsMismatch.to_string());
+        }
+        mint.supply = mint.supply.saturating_sub(amount);
+        mint.pack_into_account(&mut mint_account);
+
+        let mut src_token =
+            Token2022Account::unpack_from_account(&src_account).map_err(|e| e.to_string())?;
+        src_token.amount = src_token
+            .amount
+            .checked_sub(amount)
+            .ok_or_else(|| Token2022Error::InsufficientFunds.to_string())?;
+        src_token.pack_into_account(&mut src_account);
+
+        let mut outcome = ExecutionOutcome::success(self.base_cost + 100);
+        outcome.modified_accounts.insert(src_pubkey, src_account);
+        outcome.modified_accounts.insert(mint_pubkey, mint_account);
+        Ok(outcome)
     }
 
-    fn initialize_account2(&self, _context: &ExecutionContext) -> Result<ExecutionOutcome, String> {
-        Ok(ExecutionOutcome::success(self.base_cost + 50))
+    fn initialize_account2(&self, context: &ExecutionContext) -> Result<ExecutionOutcome, String> {
+        // Like InitializeAccount but owner comes from instruction_data instead of accounts
+        // accounts: [0:token_account(w), 1:mint]
+        if context.accounts.len() < 2 {
+            return Err("InitializeAccount2 requires at least 2 accounts".to_string());
+        }
+        if context.instruction_data.len() < 33 {
+            return Err("InitializeAccount2 requires owner pubkey".to_string());
+        }
+
+        let (acct_pubkey, mut acct, acct_writable) = context.accounts[0].clone();
+        if !acct_writable {
+            return Err("Token account must be writable".to_string());
+        }
+        let (mint_pubkey, _, _) = context.accounts[1].clone();
+
+        let mut owner_bytes = [0u8; 32];
+        owner_bytes.copy_from_slice(&context.instruction_data[1..33]);
+        let owner = Pubkey::new(owner_bytes);
+
+        let token = Token2022Account {
+            mint: mint_pubkey,
+            owner,
+            amount: 0,
+            delegate: None,
+            state: 1,
+            is_native: None,
+            delegated_amount: 0,
+            close_authority: None,
+            extensions: Vec::new(),
+        };
+        token.pack_into_account(&mut acct);
+
+        let mut outcome = ExecutionOutcome::success(self.base_cost + 50);
+        outcome.modified_accounts.insert(acct_pubkey, acct);
+        Ok(outcome)
     }
 
-    fn sync_native(&self, _context: &ExecutionContext) -> Result<ExecutionOutcome, String> {
-        Ok(ExecutionOutcome::success(self.base_cost + 10))
+    fn sync_native(&self, context: &ExecutionContext) -> Result<ExecutionOutcome, String> {
+        // accounts: [0:native_token_account(w)]
+        if context.accounts.is_empty() {
+            return Err("SyncNative requires at least 1 account".to_string());
+        }
+
+        let (acct_pubkey, mut acct, acct_writable) = context.accounts[0].clone();
+        if !acct_writable {
+            return Err("Token account must be writable".to_string());
+        }
+
+        let mut token = Token2022Account::unpack_from_account(&acct).map_err(|e| e.to_string())?;
+        if token.is_native.is_none() {
+            return Err(Token2022Error::NonNativeNotSupported.to_string());
+        }
+
+        // Native token amount = lamports - rent_exempt_reserve
+        let rent_exempt = token.is_native.unwrap_or(0);
+        token.amount = acct.meta.lamports.saturating_sub(rent_exempt);
+        token.pack_into_account(&mut acct);
+
+        let mut outcome = ExecutionOutcome::success(self.base_cost + 10);
+        outcome.modified_accounts.insert(acct_pubkey, acct);
+        Ok(outcome)
     }
 
-    fn initialize_account3(&self, _context: &ExecutionContext) -> Result<ExecutionOutcome, String> {
-        Ok(ExecutionOutcome::success(self.base_cost + 50))
+    fn initialize_account3(&self, context: &ExecutionContext) -> Result<ExecutionOutcome, String> {
+        // Same as InitializeAccount2: owner from instruction_data
+        // accounts: [0:token_account(w), 1:mint]
+        if context.accounts.len() < 2 {
+            return Err("InitializeAccount3 requires at least 2 accounts".to_string());
+        }
+        if context.instruction_data.len() < 33 {
+            return Err("InitializeAccount3 requires owner pubkey".to_string());
+        }
+
+        let (acct_pubkey, mut acct, acct_writable) = context.accounts[0].clone();
+        if !acct_writable {
+            return Err("Token account must be writable".to_string());
+        }
+        let (mint_pubkey, _, _) = context.accounts[1].clone();
+
+        let mut owner_bytes = [0u8; 32];
+        owner_bytes.copy_from_slice(&context.instruction_data[1..33]);
+        let owner = Pubkey::new(owner_bytes);
+
+        let token = Token2022Account {
+            mint: mint_pubkey,
+            owner,
+            amount: 0,
+            delegate: None,
+            state: 1,
+            is_native: None,
+            delegated_amount: 0,
+            close_authority: None,
+            extensions: Vec::new(),
+        };
+        token.pack_into_account(&mut acct);
+
+        let mut outcome = ExecutionOutcome::success(self.base_cost + 50);
+        outcome.modified_accounts.insert(acct_pubkey, acct);
+        Ok(outcome)
     }
 
-    fn initialize_mint2(&self, _context: &ExecutionContext) -> Result<ExecutionOutcome, String> {
-        Ok(ExecutionOutcome::success(self.base_cost + 50))
+    fn initialize_mint2(&self, context: &ExecutionContext) -> Result<ExecutionOutcome, String> {
+        // Same as InitializeMint but no rent sysvar required
+        // instruction_data: [0:discriminator][1:decimals][2..34:mint_authority][34:has_freeze][35..67:freeze_authority]
+        if context.accounts.is_empty() {
+            return Err("InitializeMint2 requires at least 1 account".to_string());
+        }
+        if context.instruction_data.len() < 34 {
+            return Err("InitializeMint2: insufficient instruction data".to_string());
+        }
+
+        let (mint_pubkey, mut mint_account, mint_writable) = context.accounts[0].clone();
+        if !mint_writable {
+            return Err("Mint account must be writable".to_string());
+        }
+
+        let decimals = context.instruction_data[1];
+        let mut auth_bytes = [0u8; 32];
+        auth_bytes.copy_from_slice(&context.instruction_data[2..34]);
+        let mint_authority = Some(Pubkey::new(auth_bytes));
+
+        let freeze_authority =
+            if context.instruction_data.len() >= 67 && context.instruction_data[34] == 1 {
+                let mut fb = [0u8; 32];
+                fb.copy_from_slice(&context.instruction_data[35..67]);
+                Some(Pubkey::new(fb))
+            } else {
+                None
+            };
+
+        let mint = Token2022Mint {
+            mint_authority,
+            supply: 0,
+            decimals,
+            is_initialized: true,
+            freeze_authority,
+            extensions: Vec::new(),
+        };
+        mint.pack_into_account(&mut mint_account);
+
+        let mut outcome = ExecutionOutcome::success(self.base_cost + 50);
+        outcome.modified_accounts.insert(mint_pubkey, mint_account);
+        Ok(outcome)
     }
 
     fn get_account_data_size(
         &self,
-        _context: &ExecutionContext,
+        context: &ExecutionContext,
     ) -> Result<ExecutionOutcome, String> {
-        // Calculate size based on extension types in instruction data
+        // Read-only: returns the account data size needed for given extensions
+        // No account mutation needed — this is a computation-only instruction
+        let _ = context;
         Ok(ExecutionOutcome::success(self.base_cost + 10))
     }
 
     fn initialize_immutable_owner(
         &self,
-        _context: &ExecutionContext,
+        context: &ExecutionContext,
     ) -> Result<ExecutionOutcome, String> {
-        Ok(ExecutionOutcome::success(self.base_cost + 30))
+        // accounts: [0:token_account(w)]
+        if context.accounts.is_empty() {
+            return Err("InitializeImmutableOwner requires at least 1 account".to_string());
+        }
+
+        let (acct_pubkey, mut acct, acct_writable) = context.accounts[0].clone();
+        if !acct_writable {
+            return Err("Token account must be writable".to_string());
+        }
+
+        let mut token = Token2022Account::unpack_from_account(&acct).map_err(|e| e.to_string())?;
+        if token.has_extension(ExtensionType::ImmutableOwner) {
+            return Err(Token2022Error::ExtensionAlreadyInitialized.to_string());
+        }
+        token
+            .set_extension(ExtensionType::ImmutableOwner, &[])
+            .map_err(|e| e.to_string())?;
+        token.pack_into_account(&mut acct);
+
+        let mut outcome = ExecutionOutcome::success(self.base_cost + 30);
+        outcome.modified_accounts.insert(acct_pubkey, acct);
+        Ok(outcome)
     }
 
     fn amount_to_ui_amount(&self, _context: &ExecutionContext) -> Result<ExecutionOutcome, String> {
+        // Read-only computation — no account mutation needed
         Ok(ExecutionOutcome::success(self.base_cost + 20))
     }
 
     fn ui_amount_to_amount(&self, _context: &ExecutionContext) -> Result<ExecutionOutcome, String> {
+        // Read-only computation — no account mutation needed
         Ok(ExecutionOutcome::success(self.base_cost + 20))
     }
 
@@ -1480,8 +2032,8 @@ impl Token2022ProgramExecutor {
         let extension = MintCloseAuthority { close_authority };
 
         // Persist extension in mint account TLV data
-        let mut mint = Token2022Mint::unpack_from_account(&mint_account)
-            .map_err(|e| e.to_string())?;
+        let mut mint =
+            Token2022Mint::unpack_from_account(&mint_account).map_err(|e| e.to_string())?;
         if mint.has_extension(ExtensionType::MintCloseAuthority) {
             return Err(Token2022Error::ExtensionAlreadyInitialized.to_string());
         }
@@ -1574,8 +2126,8 @@ impl Token2022ProgramExecutor {
         };
 
         // Persist extension in mint TLV
-        let mut mint = Token2022Mint::unpack_from_account(&mint_account)
-            .map_err(|e| e.to_string())?;
+        let mut mint =
+            Token2022Mint::unpack_from_account(&mint_account).map_err(|e| e.to_string())?;
         if mint.has_extension(ExtensionType::TransferFeeConfig) {
             return Err(Token2022Error::ExtensionAlreadyInitialized.to_string());
         }
@@ -1613,10 +2165,10 @@ impl Token2022ProgramExecutor {
         let _decimals = context.instruction_data[9];
         let fee = u64::from_le_bytes(context.instruction_data[10..18].try_into().unwrap());
 
-        let mut source_token = Token2022Account::unpack_from_account(&source_account)
-            .map_err(|e| e.to_string())?;
-        let mut dest_token = Token2022Account::unpack_from_account(&dest_account)
-            .map_err(|e| e.to_string())?;
+        let mut source_token =
+            Token2022Account::unpack_from_account(&source_account).map_err(|e| e.to_string())?;
+        let mut dest_token =
+            Token2022Account::unpack_from_account(&dest_account).map_err(|e| e.to_string())?;
 
         if source_token.state == 2 || dest_token.state == 2 {
             return Err(Token2022Error::AccountFrozen.to_string());
@@ -1629,7 +2181,8 @@ impl Token2022ProgramExecutor {
             .ok_or_else(|| Token2022Error::InsufficientFunds.to_string())?;
 
         // Credit (amount - fee) to destination
-        let transfer_amount = amount.checked_sub(fee)
+        let transfer_amount = amount
+            .checked_sub(fee)
             .ok_or_else(|| Token2022Error::InsufficientFundsForFee.to_string())?;
         dest_token.amount = dest_token
             .amount
@@ -1639,7 +2192,9 @@ impl Token2022ProgramExecutor {
         // Track withheld fee in destination's TransferFeeAmount extension
         let current_withheld = dest_token
             .get_extension(ExtensionType::TransferFeeAmount)
-            .map(|d| TransferFeeAmount::unpack(d).unwrap_or(TransferFeeAmount { withheld_amount: 0 }))
+            .map(|d| {
+                TransferFeeAmount::unpack(d).unwrap_or(TransferFeeAmount { withheld_amount: 0 })
+            })
             .unwrap_or(TransferFeeAmount { withheld_amount: 0 });
 
         let new_withheld = TransferFeeAmount {
@@ -1656,7 +2211,9 @@ impl Token2022ProgramExecutor {
         dest_token.pack_into_account(&mut dest_account);
 
         let mut outcome = ExecutionOutcome::success(self.base_cost + 150);
-        outcome.modified_accounts.insert(source_pubkey, source_account);
+        outcome
+            .modified_accounts
+            .insert(source_pubkey, source_account);
         outcome.modified_accounts.insert(dest_pubkey, dest_account);
 
         Ok(outcome)
@@ -1679,13 +2236,13 @@ impl Token2022ProgramExecutor {
         }
 
         // Read withheld amount from mint's TransferFeeConfig
-        let mut mint = Token2022Mint::unpack_from_account(&mint_account)
-            .map_err(|e| e.to_string())?;
+        let mut mint =
+            Token2022Mint::unpack_from_account(&mint_account).map_err(|e| e.to_string())?;
         let fee_config_data = mint
             .get_extension(ExtensionType::TransferFeeConfig)
             .ok_or_else(|| Token2022Error::ExtensionNotInitialized.to_string())?;
-        let mut fee_config = TransferFeeConfig::unpack(fee_config_data)
-            .map_err(|e| e.to_string())?;
+        let mut fee_config =
+            TransferFeeConfig::unpack(fee_config_data).map_err(|e| e.to_string())?;
 
         let withheld = fee_config.withheld_amount;
         if withheld == 0 {
@@ -1701,8 +2258,8 @@ impl Token2022ProgramExecutor {
         mint.pack_into_account(&mut mint_account);
 
         // Credit destination
-        let mut dest_token = Token2022Account::unpack_from_account(&dest_account)
-            .map_err(|e| e.to_string())?;
+        let mut dest_token =
+            Token2022Account::unpack_from_account(&dest_account).map_err(|e| e.to_string())?;
         dest_token.amount = dest_token
             .amount
             .checked_add(withheld)
@@ -1736,8 +2293,8 @@ impl Token2022ProgramExecutor {
             return Err("Destination must be writable".to_string());
         }
 
-        let mut dest_token = Token2022Account::unpack_from_account(&dest_account)
-            .map_err(|e| e.to_string())?;
+        let mut dest_token =
+            Token2022Account::unpack_from_account(&dest_account).map_err(|e| e.to_string())?;
 
         let mut outcome =
             ExecutionOutcome::success(self.base_cost + 80 * context.accounts.len() as u64);
@@ -1749,12 +2306,11 @@ impl Token2022ProgramExecutor {
                 continue;
             }
 
-            let mut src_token = Token2022Account::unpack_from_account(&src_account)
-                .map_err(|e| e.to_string())?;
+            let mut src_token =
+                Token2022Account::unpack_from_account(&src_account).map_err(|e| e.to_string())?;
 
             if let Some(ext_data) = src_token.get_extension(ExtensionType::TransferFeeAmount) {
-                let fee_amount = TransferFeeAmount::unpack(ext_data)
-                    .map_err(|e| e.to_string())?;
+                let fee_amount = TransferFeeAmount::unpack(ext_data).map_err(|e| e.to_string())?;
                 if fee_amount.withheld_amount > 0 {
                     dest_token.amount = dest_token
                         .amount
@@ -1793,13 +2349,13 @@ impl Token2022ProgramExecutor {
             return Err("Mint must be writable".to_string());
         }
 
-        let mut mint = Token2022Mint::unpack_from_account(&mint_account)
-            .map_err(|e| e.to_string())?;
+        let mut mint =
+            Token2022Mint::unpack_from_account(&mint_account).map_err(|e| e.to_string())?;
         let fee_config_data = mint
             .get_extension(ExtensionType::TransferFeeConfig)
             .ok_or_else(|| Token2022Error::ExtensionNotInitialized.to_string())?;
-        let mut fee_config = TransferFeeConfig::unpack(fee_config_data)
-            .map_err(|e| e.to_string())?;
+        let mut fee_config =
+            TransferFeeConfig::unpack(fee_config_data).map_err(|e| e.to_string())?;
 
         let mut outcome =
             ExecutionOutcome::success(self.base_cost + 60 * context.accounts.len() as u64);
@@ -1811,12 +2367,11 @@ impl Token2022ProgramExecutor {
                 continue;
             }
 
-            let mut src_token = Token2022Account::unpack_from_account(&src_account)
-                .map_err(|e| e.to_string())?;
+            let mut src_token =
+                Token2022Account::unpack_from_account(&src_account).map_err(|e| e.to_string())?;
 
             if let Some(ext_data) = src_token.get_extension(ExtensionType::TransferFeeAmount) {
-                let fee_amount = TransferFeeAmount::unpack(ext_data)
-                    .map_err(|e| e.to_string())?;
+                let fee_amount = TransferFeeAmount::unpack(ext_data).map_err(|e| e.to_string())?;
                 if fee_amount.withheld_amount > 0 {
                     fee_config.withheld_amount = fee_config
                         .withheld_amount
@@ -1862,13 +2417,13 @@ impl Token2022ProgramExecutor {
         let maximum_fee = u64::from_le_bytes(context.instruction_data[3..11].try_into().unwrap());
 
         // Read and update the transfer fee config extension
-        let mut mint = Token2022Mint::unpack_from_account(&mint_account)
-            .map_err(|e| e.to_string())?;
+        let mut mint =
+            Token2022Mint::unpack_from_account(&mint_account).map_err(|e| e.to_string())?;
         let fee_config_data = mint
             .get_extension(ExtensionType::TransferFeeConfig)
             .ok_or_else(|| Token2022Error::ExtensionNotInitialized.to_string())?;
-        let mut fee_config = TransferFeeConfig::unpack(fee_config_data)
-            .map_err(|e| e.to_string())?;
+        let mut fee_config =
+            TransferFeeConfig::unpack(fee_config_data).map_err(|e| e.to_string())?;
 
         // Move current newer to older, set new newer fee
         fee_config.older_transfer_fee = fee_config.newer_transfer_fee.clone();
@@ -1910,8 +2465,8 @@ impl Token2022ProgramExecutor {
         let _default_state = DefaultAccountState::from_u8(state_value)
             .ok_or_else(|| "Invalid default account state".to_string())?;
 
-        let mut mint = Token2022Mint::unpack_from_account(&mint_account)
-            .map_err(|e| e.to_string())?;
+        let mut mint =
+            Token2022Mint::unpack_from_account(&mint_account).map_err(|e| e.to_string())?;
         if mint.has_extension(ExtensionType::DefaultAccountState) {
             return Err(Token2022Error::ExtensionAlreadyInitialized.to_string());
         }
@@ -1947,8 +2502,8 @@ impl Token2022ProgramExecutor {
         let _default_state = DefaultAccountState::from_u8(state_value)
             .ok_or_else(|| "Invalid default account state".to_string())?;
 
-        let mut mint = Token2022Mint::unpack_from_account(&mint_account)
-            .map_err(|e| e.to_string())?;
+        let mut mint =
+            Token2022Mint::unpack_from_account(&mint_account).map_err(|e| e.to_string())?;
         if !mint.has_extension(ExtensionType::DefaultAccountState) {
             return Err(Token2022Error::ExtensionNotInitialized.to_string());
         }
@@ -1977,8 +2532,8 @@ impl Token2022ProgramExecutor {
             return Err("Mint account must be writable".to_string());
         }
 
-        let mut mint = Token2022Mint::unpack_from_account(&mint_account)
-            .map_err(|e| e.to_string())?;
+        let mut mint =
+            Token2022Mint::unpack_from_account(&mint_account).map_err(|e| e.to_string())?;
         if mint.has_extension(ExtensionType::NonTransferable) {
             return Err(Token2022Error::ExtensionAlreadyInitialized.to_string());
         }
@@ -2039,8 +2594,8 @@ impl Token2022ProgramExecutor {
             current_rate: rate,
         };
 
-        let mut mint = Token2022Mint::unpack_from_account(&mint_account)
-            .map_err(|e| e.to_string())?;
+        let mut mint =
+            Token2022Mint::unpack_from_account(&mint_account).map_err(|e| e.to_string())?;
         if mint.has_extension(ExtensionType::InterestBearingConfig) {
             return Err(Token2022Error::ExtensionAlreadyInitialized.to_string());
         }
@@ -2074,13 +2629,12 @@ impl Token2022ProgramExecutor {
 
         let new_rate = i16::from_le_bytes(context.instruction_data[1..3].try_into().unwrap());
 
-        let mut mint = Token2022Mint::unpack_from_account(&mint_account)
-            .map_err(|e| e.to_string())?;
+        let mut mint =
+            Token2022Mint::unpack_from_account(&mint_account).map_err(|e| e.to_string())?;
         let ext_data = mint
             .get_extension(ExtensionType::InterestBearingConfig)
             .ok_or_else(|| Token2022Error::ExtensionNotInitialized.to_string())?;
-        let mut config = InterestBearingConfig::unpack(ext_data)
-            .map_err(|e| e.to_string())?;
+        let mut config = InterestBearingConfig::unpack(ext_data).map_err(|e| e.to_string())?;
 
         config.pre_update_average_rate = config.current_rate;
         config.current_rate = new_rate;
@@ -2126,8 +2680,8 @@ impl Token2022ProgramExecutor {
         match authority_type {
             0 | 1 => {
                 // Mint authority or freeze authority
-                let mut mint = Token2022Mint::unpack_from_account(&account)
-                    .map_err(|e| e.to_string())?;
+                let mut mint =
+                    Token2022Mint::unpack_from_account(&account).map_err(|e| e.to_string())?;
                 if authority_type == 0 {
                     mint.mint_authority = new_authority;
                 } else {
@@ -2137,8 +2691,8 @@ impl Token2022ProgramExecutor {
             }
             2 | 3 => {
                 // Account owner or close authority
-                let mut token = Token2022Account::unpack_from_account(&account)
-                    .map_err(|e| e.to_string())?;
+                let mut token =
+                    Token2022Account::unpack_from_account(&account).map_err(|e| e.to_string())?;
                 if authority_type == 3 {
                     token.close_authority = new_authority;
                 }
@@ -2156,7 +2710,9 @@ impl Token2022ProgramExecutor {
     /// Instruction 19: Reallocate — resize account for new extensions
     fn reallocate(&self, context: &ExecutionContext) -> Result<ExecutionOutcome, String> {
         if context.accounts.len() < 3 {
-            return Err("Reallocate requires at least 3 accounts (account, payer, system)".to_string());
+            return Err(
+                "Reallocate requires at least 3 accounts (account, payer, system)".to_string(),
+            );
         }
         if context.instruction_data.len() < 3 {
             return Err("Reallocate requires extension type list".to_string());
@@ -2213,8 +2769,8 @@ impl Token2022ProgramExecutor {
         };
 
         let ext = PermanentDelegate { delegate };
-        let mut mint = Token2022Mint::unpack_from_account(&mint_account)
-            .map_err(|e| e.to_string())?;
+        let mut mint =
+            Token2022Mint::unpack_from_account(&mint_account).map_err(|e| e.to_string())?;
         if mint.has_extension(ExtensionType::PermanentDelegate) {
             return Err(Token2022Error::ExtensionAlreadyInitialized.to_string());
         }
@@ -2228,10 +2784,7 @@ impl Token2022ProgramExecutor {
     }
 
     /// Instruction 38: InitializeCpiGuard / ToggleCpiGuard
-    fn toggle_cpi_guard(
-        &self,
-        context: &ExecutionContext,
-    ) -> Result<ExecutionOutcome, String> {
+    fn toggle_cpi_guard(&self, context: &ExecutionContext) -> Result<ExecutionOutcome, String> {
         if context.accounts.is_empty() {
             return Err("CpiGuard requires at least 1 account".to_string());
         }
@@ -2246,8 +2799,8 @@ impl Token2022ProgramExecutor {
 
         let enabled = context.instruction_data[1];
 
-        let mut token = Token2022Account::unpack_from_account(&account)
-            .map_err(|e| e.to_string())?;
+        let mut token =
+            Token2022Account::unpack_from_account(&account).map_err(|e| e.to_string())?;
         token
             .set_extension(ExtensionType::CpiGuard, &[enabled])
             .map_err(|e| e.to_string())?;
@@ -2300,8 +2853,8 @@ impl Token2022ProgramExecutor {
             program_id,
         };
 
-        let mut mint = Token2022Mint::unpack_from_account(&mint_account)
-            .map_err(|e| e.to_string())?;
+        let mut mint =
+            Token2022Mint::unpack_from_account(&mint_account).map_err(|e| e.to_string())?;
         if mint.has_extension(ExtensionType::TransferHook) {
             return Err(Token2022Error::ExtensionAlreadyInitialized.to_string());
         }
@@ -2356,8 +2909,8 @@ impl Token2022ProgramExecutor {
             metadata_address,
         };
 
-        let mut mint = Token2022Mint::unpack_from_account(&mint_account)
-            .map_err(|e| e.to_string())?;
+        let mut mint =
+            Token2022Mint::unpack_from_account(&mint_account).map_err(|e| e.to_string())?;
         if mint.has_extension(ExtensionType::MetadataPointer) {
             return Err(Token2022Error::ExtensionAlreadyInitialized.to_string());
         }
@@ -2412,8 +2965,8 @@ impl Token2022ProgramExecutor {
             group_address,
         };
 
-        let mut mint = Token2022Mint::unpack_from_account(&mint_account)
-            .map_err(|e| e.to_string())?;
+        let mut mint =
+            Token2022Mint::unpack_from_account(&mint_account).map_err(|e| e.to_string())?;
         if mint.has_extension(ExtensionType::GroupPointer) {
             return Err(Token2022Error::ExtensionAlreadyInitialized.to_string());
         }
@@ -2468,8 +3021,8 @@ impl Token2022ProgramExecutor {
             member_address,
         };
 
-        let mut mint = Token2022Mint::unpack_from_account(&mint_account)
-            .map_err(|e| e.to_string())?;
+        let mut mint =
+            Token2022Mint::unpack_from_account(&mint_account).map_err(|e| e.to_string())?;
         if mint.has_extension(ExtensionType::GroupMemberPointer) {
             return Err(Token2022Error::ExtensionAlreadyInitialized.to_string());
         }
@@ -2568,8 +3121,16 @@ mod tests {
             transfer_fee_config_authority: None,
             withdraw_withheld_authority: None,
             withheld_amount: 0,
-            older_transfer_fee: TransferFee { epoch: 0, maximum_fee: 100, transfer_fee_basis_points: 50 },
-            newer_transfer_fee: TransferFee { epoch: 0, maximum_fee: 100, transfer_fee_basis_points: 50 },
+            older_transfer_fee: TransferFee {
+                epoch: 0,
+                maximum_fee: 100,
+                transfer_fee_basis_points: 50,
+            },
+            newer_transfer_fee: TransferFee {
+                epoch: 0,
+                maximum_fee: 100,
+                transfer_fee_basis_points: 50,
+            },
         }
         .pack();
 
@@ -2807,7 +3368,9 @@ mod tests {
         )
         .unwrap();
         assert!(updated_mint.has_extension(ExtensionType::MintCloseAuthority));
-        let ext_data = updated_mint.get_extension(ExtensionType::MintCloseAuthority).unwrap();
+        let ext_data = updated_mint
+            .get_extension(ExtensionType::MintCloseAuthority)
+            .unwrap();
         let ext = MintCloseAuthority::unpack(ext_data).unwrap();
         assert_eq!(ext.close_authority, Some(close_authority));
     }
@@ -2845,7 +3408,9 @@ mod tests {
         .unwrap();
         assert!(updated_mint.has_extension(ExtensionType::TransferFeeConfig));
         let fee_config = TransferFeeConfig::unpack(
-            updated_mint.get_extension(ExtensionType::TransferFeeConfig).unwrap(),
+            updated_mint
+                .get_extension(ExtensionType::TransferFeeConfig)
+                .unwrap(),
         )
         .unwrap();
         assert_eq!(fee_config.newer_transfer_fee.transfer_fee_basis_points, 100);
@@ -2900,7 +3465,9 @@ mod tests {
         )
         .unwrap();
         let config = InterestBearingConfig::unpack(
-            updated.get_extension(ExtensionType::InterestBearingConfig).unwrap(),
+            updated
+                .get_extension(ExtensionType::InterestBearingConfig)
+                .unwrap(),
         )
         .unwrap();
         assert_eq!(config.current_rate, 100);
@@ -2919,10 +3486,19 @@ mod tests {
             transfer_fee_config_authority: Some(authority_pubkey),
             withdraw_withheld_authority: None,
             withheld_amount: 0,
-            older_transfer_fee: TransferFee { epoch: 0, maximum_fee: 1000, transfer_fee_basis_points: 50 },
-            newer_transfer_fee: TransferFee { epoch: 0, maximum_fee: 1000, transfer_fee_basis_points: 50 },
+            older_transfer_fee: TransferFee {
+                epoch: 0,
+                maximum_fee: 1000,
+                transfer_fee_basis_points: 50,
+            },
+            newer_transfer_fee: TransferFee {
+                epoch: 0,
+                maximum_fee: 1000,
+                transfer_fee_basis_points: 50,
+            },
         };
-        mint.set_extension(ExtensionType::TransferFeeConfig, &initial_config.pack()).unwrap();
+        mint.set_extension(ExtensionType::TransferFeeConfig, &initial_config.pack())
+            .unwrap();
 
         let mut instruction_data = vec![31u8];
         instruction_data.extend_from_slice(&250u16.to_le_bytes());
@@ -2945,7 +3521,9 @@ mod tests {
         )
         .unwrap();
         let fee_config = TransferFeeConfig::unpack(
-            updated_mint.get_extension(ExtensionType::TransferFeeConfig).unwrap(),
+            updated_mint
+                .get_extension(ExtensionType::TransferFeeConfig)
+                .unwrap(),
         )
         .unwrap();
         assert_eq!(fee_config.newer_transfer_fee.transfer_fee_basis_points, 250);
@@ -3014,7 +3592,9 @@ mod tests {
         )
         .unwrap();
         let ext = PermanentDelegate::unpack(
-            updated.get_extension(ExtensionType::PermanentDelegate).unwrap(),
+            updated
+                .get_extension(ExtensionType::PermanentDelegate)
+                .unwrap(),
         )
         .unwrap();
         assert_eq!(ext.delegate, Some(delegate));
@@ -3040,7 +3620,10 @@ mod tests {
         )
         .unwrap();
         assert!(updated.has_extension(ExtensionType::CpiGuard));
-        assert_eq!(updated.get_extension(ExtensionType::CpiGuard).unwrap(), &[1]);
+        assert_eq!(
+            updated.get_extension(ExtensionType::CpiGuard).unwrap(),
+            &[1]
+        );
     }
 
     #[test]
@@ -3070,10 +3653,9 @@ mod tests {
             outcome.modified_accounts.get(&mint_pubkey).unwrap(),
         )
         .unwrap();
-        let ext = TransferHookExt::unpack(
-            updated.get_extension(ExtensionType::TransferHook).unwrap(),
-        )
-        .unwrap();
+        let ext =
+            TransferHookExt::unpack(updated.get_extension(ExtensionType::TransferHook).unwrap())
+                .unwrap();
         assert_eq!(ext.authority, Some(authority));
         assert_eq!(ext.program_id, Some(hook_program));
     }
@@ -3106,7 +3688,9 @@ mod tests {
         )
         .unwrap();
         let ext = MetadataPointer::unpack(
-            updated.get_extension(ExtensionType::MetadataPointer).unwrap(),
+            updated
+                .get_extension(ExtensionType::MetadataPointer)
+                .unwrap(),
         )
         .unwrap();
         assert_eq!(ext.metadata_address, Some(metadata));
@@ -3119,7 +3703,8 @@ mod tests {
 
         // Mint already has NonTransferable
         let mut mint = base_mint();
-        mint.set_extension(ExtensionType::NonTransferable, &[]).unwrap();
+        mint.set_extension(ExtensionType::NonTransferable, &[])
+            .unwrap();
 
         let context = ExecutionContext::new(
             TOKEN_2022_PROGRAM_ID,
@@ -3197,7 +3782,9 @@ mod tests {
     #[test]
     fn test_new_extension_types_pack_roundtrip() {
         // PermanentDelegate
-        let pd = PermanentDelegate { delegate: Some(Pubkey::new_unique()) };
+        let pd = PermanentDelegate {
+            delegate: Some(Pubkey::new_unique()),
+        };
         assert_eq!(pd, PermanentDelegate::unpack(&pd.pack()).unwrap());
 
         // TransferHookExt
@@ -3229,7 +3816,513 @@ mod tests {
         assert_eq!(gmp, GroupMemberPointer::unpack(&gmp.pack()).unwrap());
 
         // TransferFeeAmount
-        let tfa = TransferFeeAmount { withheld_amount: 99999 };
+        let tfa = TransferFeeAmount {
+            withheld_amount: 99999,
+        };
         assert_eq!(tfa, TransferFeeAmount::unpack(&tfa.pack()).unwrap());
+    }
+
+    // ── Instruction handler tests ───────────────────────────────────────
+
+    fn make_empty_account(size: usize) -> Account {
+        Account {
+            meta: AccountMeta {
+                lamports: 1_000_000,
+                owner: TOKEN_2022_PROGRAM_ID,
+                executable: false,
+                rent_epoch: 0,
+            },
+            data: AccountData::new(vec![0u8; size]),
+        }
+    }
+
+    fn make_authority_account() -> Account {
+        Account::new(0, Vec::new(), Pubkey::default())
+    }
+
+    #[test]
+    fn test_initialize_mint_writes_state() {
+        let executor = Token2022ProgramExecutor::new(100);
+        let mint_pubkey = Pubkey::new_unique();
+        let authority = Pubkey::new_unique();
+
+        let mut instruction_data = vec![0u8]; // discriminator = 0 (InitializeMint)
+        instruction_data.push(9); // decimals
+        instruction_data.extend_from_slice(&authority.to_bytes()); // mint_authority
+                                                                   // no freeze authority
+
+        let ctx = ExecutionContext::new(
+            TOKEN_2022_PROGRAM_ID,
+            vec![(mint_pubkey, make_empty_account(82), true)],
+            instruction_data,
+        );
+
+        let result = executor.execute(&ctx).unwrap();
+        let modified = result.modified_accounts.get(&mint_pubkey).unwrap();
+        let mint = Token2022Mint::unpack(modified.data.as_slice()).unwrap();
+        assert!(mint.is_initialized);
+        assert_eq!(mint.decimals, 9);
+        assert_eq!(mint.supply, 0);
+        assert_eq!(mint.mint_authority, Some(authority));
+        assert_eq!(mint.freeze_authority, None);
+    }
+
+    #[test]
+    fn test_initialize_account_writes_state() {
+        let executor = Token2022ProgramExecutor::new(100);
+        let acct_pubkey = Pubkey::new_unique();
+        let mint_pubkey = Pubkey::new_unique();
+        let owner_pubkey = Pubkey::new_unique();
+
+        let instruction_data = vec![1u8]; // discriminator = 1 (InitializeAccount)
+
+        let ctx = ExecutionContext::new(
+            TOKEN_2022_PROGRAM_ID,
+            vec![
+                (acct_pubkey, make_empty_account(165), true),
+                (mint_pubkey, make_empty_account(82), false),
+                (owner_pubkey, make_authority_account(), false),
+            ],
+            instruction_data,
+        );
+
+        let result = executor.execute(&ctx).unwrap();
+        let modified = result.modified_accounts.get(&acct_pubkey).unwrap();
+        let token = Token2022Account::unpack(modified.data.as_slice()).unwrap();
+        assert_eq!(token.mint, mint_pubkey);
+        assert_eq!(token.owner, owner_pubkey);
+        assert_eq!(token.amount, 0);
+        assert_eq!(token.state, 1); // Initialized
+    }
+
+    #[test]
+    fn test_mint_to_increases_supply_and_balance() {
+        let executor = Token2022ProgramExecutor::new(100);
+        let mint_pubkey = Pubkey::new_unique();
+        let dest_pubkey = Pubkey::new_unique();
+        let authority = Pubkey::new_unique();
+
+        let mint = Token2022Mint {
+            mint_authority: Some(authority),
+            supply: 1000,
+            decimals: 6,
+            is_initialized: true,
+            freeze_authority: None,
+            extensions: Vec::new(),
+        };
+        let dest = base_token(&mint_pubkey, &Pubkey::new_unique(), 500);
+
+        let mut instruction_data = vec![7u8]; // MintTo
+        instruction_data.extend_from_slice(&200u64.to_le_bytes());
+
+        let ctx = ExecutionContext::new(
+            TOKEN_2022_PROGRAM_ID,
+            vec![
+                (mint_pubkey, make_mint_account(&mint), true),
+                (dest_pubkey, make_token_account(&dest), true),
+                (authority, make_authority_account(), false),
+            ],
+            instruction_data,
+        );
+
+        let result = executor.execute(&ctx).unwrap();
+        let new_mint =
+            Token2022Mint::unpack(result.modified_accounts[&mint_pubkey].data.as_slice()).unwrap();
+        assert_eq!(new_mint.supply, 1200);
+
+        let new_dest =
+            Token2022Account::unpack(result.modified_accounts[&dest_pubkey].data.as_slice())
+                .unwrap();
+        assert_eq!(new_dest.amount, 700);
+    }
+
+    #[test]
+    fn test_burn_decreases_supply_and_balance() {
+        let executor = Token2022ProgramExecutor::new(100);
+        let mint_pubkey = Pubkey::new_unique();
+        let src_pubkey = Pubkey::new_unique();
+        let owner = Pubkey::new_unique();
+
+        let mint = Token2022Mint {
+            mint_authority: Some(Pubkey::new_unique()),
+            supply: 1000,
+            decimals: 6,
+            is_initialized: true,
+            freeze_authority: None,
+            extensions: Vec::new(),
+        };
+        let src = base_token(&mint_pubkey, &owner, 500);
+
+        let mut instruction_data = vec![8u8]; // Burn
+        instruction_data.extend_from_slice(&300u64.to_le_bytes());
+
+        let ctx = ExecutionContext::new(
+            TOKEN_2022_PROGRAM_ID,
+            vec![
+                (src_pubkey, make_token_account(&src), true),
+                (mint_pubkey, make_mint_account(&mint), true),
+                (owner, make_authority_account(), false),
+            ],
+            instruction_data,
+        );
+
+        let result = executor.execute(&ctx).unwrap();
+        let new_src =
+            Token2022Account::unpack(result.modified_accounts[&src_pubkey].data.as_slice())
+                .unwrap();
+        assert_eq!(new_src.amount, 200);
+
+        let new_mint =
+            Token2022Mint::unpack(result.modified_accounts[&mint_pubkey].data.as_slice()).unwrap();
+        assert_eq!(new_mint.supply, 700);
+    }
+
+    #[test]
+    fn test_burn_insufficient_funds() {
+        let executor = Token2022ProgramExecutor::new(100);
+        let mint_pubkey = Pubkey::new_unique();
+        let src_pubkey = Pubkey::new_unique();
+        let owner = Pubkey::new_unique();
+
+        let mint = base_mint();
+        let src = base_token(&mint_pubkey, &owner, 100);
+
+        let mut instruction_data = vec![8u8];
+        instruction_data.extend_from_slice(&200u64.to_le_bytes());
+
+        let ctx = ExecutionContext::new(
+            TOKEN_2022_PROGRAM_ID,
+            vec![
+                (src_pubkey, make_token_account(&src), true),
+                (mint_pubkey, make_mint_account(&mint), true),
+                (owner, make_authority_account(), false),
+            ],
+            instruction_data,
+        );
+
+        let result = executor.execute(&ctx);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("Insufficient"));
+    }
+
+    #[test]
+    fn test_freeze_thaw_lifecycle() {
+        let executor = Token2022ProgramExecutor::new(100);
+        let acct_pubkey = Pubkey::new_unique();
+        let mint_pubkey = Pubkey::new_unique();
+        let freeze_auth = Pubkey::new_unique();
+
+        let mint = Token2022Mint {
+            mint_authority: Some(Pubkey::new_unique()),
+            supply: 1000,
+            decimals: 6,
+            is_initialized: true,
+            freeze_authority: Some(freeze_auth),
+            extensions: Vec::new(),
+        };
+        let token = base_token(&mint_pubkey, &Pubkey::new_unique(), 500);
+
+        // Freeze
+        let ctx = ExecutionContext::new(
+            TOKEN_2022_PROGRAM_ID,
+            vec![
+                (acct_pubkey, make_token_account(&token), true),
+                (mint_pubkey, make_mint_account(&mint), false),
+                (freeze_auth, make_authority_account(), false),
+            ],
+            vec![10u8], // FreezeAccount
+        );
+
+        let result = executor.execute(&ctx).unwrap();
+        let frozen =
+            Token2022Account::unpack(result.modified_accounts[&acct_pubkey].data.as_slice())
+                .unwrap();
+        assert_eq!(frozen.state, 2); // Frozen
+
+        // Thaw
+        let ctx2 = ExecutionContext::new(
+            TOKEN_2022_PROGRAM_ID,
+            vec![
+                (
+                    acct_pubkey,
+                    result.modified_accounts[&acct_pubkey].clone(),
+                    true,
+                ),
+                (mint_pubkey, make_mint_account(&mint), false),
+                (freeze_auth, make_authority_account(), false),
+            ],
+            vec![11u8], // ThawAccount
+        );
+
+        let result2 = executor.execute(&ctx2).unwrap();
+        let thawed =
+            Token2022Account::unpack(result2.modified_accounts[&acct_pubkey].data.as_slice())
+                .unwrap();
+        assert_eq!(thawed.state, 1); // Initialized
+    }
+
+    #[test]
+    fn test_approve_revoke_delegation() {
+        let executor = Token2022ProgramExecutor::new(100);
+        let src_pubkey = Pubkey::new_unique();
+        let delegate_pubkey = Pubkey::new_unique();
+        let owner = Pubkey::new_unique();
+        let mint_pubkey = Pubkey::new_unique();
+
+        let token = base_token(&mint_pubkey, &owner, 1000);
+
+        // Approve
+        let mut instruction_data = vec![4u8]; // Approve
+        instruction_data.extend_from_slice(&500u64.to_le_bytes());
+
+        let ctx = ExecutionContext::new(
+            TOKEN_2022_PROGRAM_ID,
+            vec![
+                (src_pubkey, make_token_account(&token), true),
+                (delegate_pubkey, make_authority_account(), false),
+                (owner, make_authority_account(), false),
+            ],
+            instruction_data,
+        );
+
+        let result = executor.execute(&ctx).unwrap();
+        let approved =
+            Token2022Account::unpack(result.modified_accounts[&src_pubkey].data.as_slice())
+                .unwrap();
+        assert_eq!(approved.delegate, Some(delegate_pubkey));
+        assert_eq!(approved.delegated_amount, 500);
+
+        // Revoke
+        let ctx2 = ExecutionContext::new(
+            TOKEN_2022_PROGRAM_ID,
+            vec![
+                (
+                    src_pubkey,
+                    result.modified_accounts[&src_pubkey].clone(),
+                    true,
+                ),
+                (owner, make_authority_account(), false),
+            ],
+            vec![5u8], // Revoke
+        );
+
+        let result2 = executor.execute(&ctx2).unwrap();
+        let revoked =
+            Token2022Account::unpack(result2.modified_accounts[&src_pubkey].data.as_slice())
+                .unwrap();
+        assert_eq!(revoked.delegate, None);
+        assert_eq!(revoked.delegated_amount, 0);
+    }
+
+    #[test]
+    fn test_close_account_transfers_lamports() {
+        let executor = Token2022ProgramExecutor::new(100);
+        let close_pubkey = Pubkey::new_unique();
+        let dest_pubkey = Pubkey::new_unique();
+        let owner = Pubkey::new_unique();
+        let mint_pubkey = Pubkey::new_unique();
+
+        let token = base_token(&mint_pubkey, &owner, 0); // zero balance required for close
+
+        let close_acct = Account {
+            meta: AccountMeta {
+                lamports: 2_000_000,
+                owner: TOKEN_2022_PROGRAM_ID,
+                executable: false,
+                rent_epoch: 0,
+            },
+            data: AccountData::new(token.pack()),
+        };
+
+        let dest_acct = Account::new(500_000, Vec::new(), Pubkey::default());
+
+        let ctx = ExecutionContext::new(
+            TOKEN_2022_PROGRAM_ID,
+            vec![
+                (close_pubkey, close_acct, true),
+                (dest_pubkey, dest_acct, true),
+                (owner, make_authority_account(), false),
+            ],
+            vec![9u8], // CloseAccount
+        );
+
+        let result = executor.execute(&ctx).unwrap();
+        assert_eq!(result.modified_accounts[&close_pubkey].meta.lamports, 0);
+        assert_eq!(
+            result.modified_accounts[&dest_pubkey].meta.lamports,
+            2_500_000
+        );
+        assert!(result.modified_accounts[&close_pubkey]
+            .data
+            .as_slice()
+            .is_empty());
+    }
+
+    #[test]
+    fn test_close_account_rejects_nonzero_balance() {
+        let executor = Token2022ProgramExecutor::new(100);
+        let close_pubkey = Pubkey::new_unique();
+        let dest_pubkey = Pubkey::new_unique();
+        let owner = Pubkey::new_unique();
+        let mint_pubkey = Pubkey::new_unique();
+
+        let token = base_token(&mint_pubkey, &owner, 100); // non-zero — should fail
+
+        let ctx = ExecutionContext::new(
+            TOKEN_2022_PROGRAM_ID,
+            vec![
+                (close_pubkey, make_token_account(&token), true),
+                (dest_pubkey, make_authority_account(), true),
+                (owner, make_authority_account(), false),
+            ],
+            vec![9u8],
+        );
+
+        assert!(executor.execute(&ctx).is_err());
+    }
+
+    #[test]
+    fn test_initialize_mint_to_transfer_round_trip() {
+        let executor = Token2022ProgramExecutor::new(100);
+        let mint_pubkey = Pubkey::new_unique();
+        let authority = Pubkey::new_unique();
+        let alice_pubkey = Pubkey::new_unique();
+        let bob_pubkey = Pubkey::new_unique();
+
+        // Step 1: InitializeMint
+        let mut init_mint_data = vec![0u8, 6]; // decimals=6
+        init_mint_data.extend_from_slice(&authority.to_bytes());
+        let ctx1 = ExecutionContext::new(
+            TOKEN_2022_PROGRAM_ID,
+            vec![(mint_pubkey, make_empty_account(82), true)],
+            init_mint_data,
+        );
+        let r1 = executor.execute(&ctx1).unwrap();
+        let mint_acct = r1.modified_accounts[&mint_pubkey].clone();
+
+        // Step 2: InitializeAccount for Alice
+        let ctx2 = ExecutionContext::new(
+            TOKEN_2022_PROGRAM_ID,
+            vec![
+                (alice_pubkey, make_empty_account(165), true),
+                (mint_pubkey, mint_acct.clone(), false),
+                (authority, make_authority_account(), false),
+            ],
+            vec![1u8],
+        );
+        let r2 = executor.execute(&ctx2).unwrap();
+        let alice_acct = r2.modified_accounts[&alice_pubkey].clone();
+
+        // Step 3: InitializeAccount for Bob
+        let ctx3 = ExecutionContext::new(
+            TOKEN_2022_PROGRAM_ID,
+            vec![
+                (bob_pubkey, make_empty_account(165), true),
+                (mint_pubkey, mint_acct.clone(), false),
+                (authority, make_authority_account(), false),
+            ],
+            vec![1u8],
+        );
+        let r3 = executor.execute(&ctx3).unwrap();
+        let bob_acct = r3.modified_accounts[&bob_pubkey].clone();
+
+        // Step 4: MintTo Alice 1000
+        let mut mint_to_data = vec![7u8];
+        mint_to_data.extend_from_slice(&1000u64.to_le_bytes());
+        let ctx4 = ExecutionContext::new(
+            TOKEN_2022_PROGRAM_ID,
+            vec![
+                (mint_pubkey, mint_acct.clone(), true),
+                (alice_pubkey, alice_acct.clone(), true),
+                (authority, make_authority_account(), false),
+            ],
+            mint_to_data,
+        );
+        let r4 = executor.execute(&ctx4).unwrap();
+        let alice_acct2 = r4.modified_accounts[&alice_pubkey].clone();
+        let mint_acct2 = r4.modified_accounts[&mint_pubkey].clone();
+
+        // Step 5: Transfer 300 from Alice to Bob
+        let mut transfer_data = vec![3u8];
+        transfer_data.extend_from_slice(&300u64.to_le_bytes());
+        let ctx5 = ExecutionContext::new(
+            TOKEN_2022_PROGRAM_ID,
+            vec![
+                (alice_pubkey, alice_acct2, true),
+                (bob_pubkey, bob_acct, true),
+                (authority, make_authority_account(), false),
+            ],
+            transfer_data,
+        );
+        let r5 = executor.execute(&ctx5).unwrap();
+
+        let final_alice =
+            Token2022Account::unpack(r5.modified_accounts[&alice_pubkey].data.as_slice()).unwrap();
+        let final_bob =
+            Token2022Account::unpack(r5.modified_accounts[&bob_pubkey].data.as_slice()).unwrap();
+        let final_mint = Token2022Mint::unpack(mint_acct2.data.as_slice()).unwrap();
+
+        assert_eq!(final_alice.amount, 700);
+        assert_eq!(final_bob.amount, 300);
+        assert_eq!(final_mint.supply, 1000);
+    }
+
+    #[test]
+    fn test_initialize_immutable_owner() {
+        let executor = Token2022ProgramExecutor::new(100);
+        let acct_pubkey = Pubkey::new_unique();
+        let mint_pubkey = Pubkey::new_unique();
+        let owner = Pubkey::new_unique();
+
+        let token = base_token(&mint_pubkey, &owner, 0);
+
+        let ctx = ExecutionContext::new(
+            TOKEN_2022_PROGRAM_ID,
+            vec![(acct_pubkey, make_token_account(&token), true)],
+            vec![22u8], // InitializeImmutableOwner
+        );
+
+        let result = executor.execute(&ctx).unwrap();
+        let modified =
+            Token2022Account::unpack(result.modified_accounts[&acct_pubkey].data.as_slice())
+                .unwrap();
+        assert!(modified.has_extension(ExtensionType::ImmutableOwner));
+    }
+
+    #[test]
+    fn test_mint_to_checked_validates_decimals() {
+        let executor = Token2022ProgramExecutor::new(100);
+        let mint_pubkey = Pubkey::new_unique();
+        let dest_pubkey = Pubkey::new_unique();
+        let authority = Pubkey::new_unique();
+
+        let mint = Token2022Mint {
+            mint_authority: Some(authority),
+            supply: 1000,
+            decimals: 6,
+            is_initialized: true,
+            freeze_authority: None,
+            extensions: Vec::new(),
+        };
+        let dest = base_token(&mint_pubkey, &Pubkey::new_unique(), 500);
+
+        // Wrong decimals (9 instead of 6)
+        let mut instruction_data = vec![14u8]; // MintToChecked
+        instruction_data.extend_from_slice(&200u64.to_le_bytes());
+        instruction_data.push(9); // wrong decimals
+
+        let ctx = ExecutionContext::new(
+            TOKEN_2022_PROGRAM_ID,
+            vec![
+                (mint_pubkey, make_mint_account(&mint), true),
+                (dest_pubkey, make_token_account(&dest), true),
+                (authority, make_authority_account(), false),
+            ],
+            instruction_data,
+        );
+
+        let result = executor.execute(&ctx);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("decimals"));
     }
 }
