@@ -531,18 +531,14 @@ mod tests {
         (0..n)
             .map(|_| {
                 let identity = Pubkey::new_unique();
-                let bundle =
-                    bootstrap_from_development_genesis(None, Some(&identity)).unwrap();
+                let bundle = bootstrap_from_development_genesis(None, Some(&identity)).unwrap();
                 (identity, bundle)
             })
             .collect()
     }
 
     /// Helper: register a blockhash on the given bank.
-    fn register_blockhash(
-        bank: &karstflow_consensus::Bank,
-        hash: [u8; 32],
-    ) {
+    fn register_blockhash(bank: &karstflow_consensus::Bank, hash: [u8; 32]) {
         let info = BlockhashInfo::new(Pubkey::from(hash), 5000, 1);
         bank.blockhash_queue().write().unwrap().register_hash(info);
     }
@@ -566,7 +562,8 @@ mod tests {
             },
             data: AccountData::new(elf),
         };
-        bank.accounts().store_published_account(*program_id, account);
+        bank.accounts()
+            .store_published_account(*program_id, account);
     }
 
     /// Helper: create a PDA by computing it off-chain (same algorithm as the runtime).
@@ -618,11 +615,11 @@ mod tests {
         // Create 5 user accounts
         let users: Vec<Pubkey> = (0..5).map(|_| Pubkey::new_unique()).collect();
         let airdrop_amounts = [
-            10_000_000_000u64,  // 10 SOL
-            5_000_000_000,      // 5 SOL
-            1_000_000_000,      // 1 SOL
-            500_000_000,        // 0.5 SOL
-            100_000_000,        // 0.1 SOL
+            10_000_000_000u64, // 10 SOL
+            5_000_000_000,     // 5 SOL
+            1_000_000_000,     // 1 SOL
+            500_000_000,       // 0.5 SOL
+            100_000_000,       // 0.1 SOL
         ];
 
         // Airdrop to all users on all 3 nodes
@@ -671,7 +668,9 @@ mod tests {
             // user0 -> user4: 1 SOL
             let transfer_data = system_transfer_data(1_000_000_000);
             let message_bytes = build_message_bytes(
-                1, 0, 1,
+                1,
+                0,
+                1,
                 &[users[0], users[4], SYSTEM_PROGRAM_ID],
                 &blockhash,
                 &[(2, &[0, 1], &transfer_data)],
@@ -684,7 +683,11 @@ mod tests {
                     account_indices: vec![0, 1],
                     data: transfer_data.clone(),
                 }],
-                1, 0, 1, vec![], message_bytes,
+                1,
+                0,
+                1,
+                vec![],
+                message_bytes,
             );
             let result = bank.process_transaction(&tx, &backend, MAX_COMPUTE_UNITS);
             assert!(
@@ -724,9 +727,9 @@ mod tests {
         for (_, bundle) in &cluster {
             let forks = bundle.bank_forks.read().unwrap();
             let bank = forks.working_bank();
-            bank.credit_lamports(&alice, 100_000_000_000);   // 100 SOL
-            bank.credit_lamports(&bob, 50_000_000_000);      // 50 SOL
-            bank.credit_lamports(&charlie, 10_000_000_000);  // 10 SOL
+            bank.credit_lamports(&alice, 100_000_000_000); // 100 SOL
+            bank.credit_lamports(&bob, 50_000_000_000); // 50 SOL
+            bank.credit_lamports(&charlie, 10_000_000_000); // 10 SOL
             register_blockhash(&bank, blockhash);
         }
 
@@ -747,7 +750,9 @@ mod tests {
             for (sender, receiver, amount) in &transfers {
                 let transfer_data = system_transfer_data(*amount);
                 let message_bytes = build_message_bytes(
-                    1, 0, 1,
+                    1,
+                    0,
+                    1,
                     &[*sender, *receiver, SYSTEM_PROGRAM_ID],
                     &blockhash,
                     &[(2, &[0, 1], &transfer_data)],
@@ -760,7 +765,11 @@ mod tests {
                         account_indices: vec![0, 1],
                         data: transfer_data,
                     }],
-                    1, 0, 1, vec![], message_bytes,
+                    1,
+                    0,
+                    1,
+                    vec![],
+                    message_bytes,
                 );
                 let result = bank.process_transaction(&tx, &backend, MAX_COMPUTE_UNITS);
                 assert!(
@@ -783,24 +792,33 @@ mod tests {
             let c = get_balance(&bank, &charlie);
 
             // Check approximate values (fees deducted from senders)
-            assert!(a > 84_000_000_000 && a < 86_000_000_000,
-                "node{node_idx}: alice ~85 SOL, got {a}");
-            assert!(b > 59_000_000_000 && b < 61_000_000_000,
-                "node{node_idx}: bob ~60 SOL, got {b}");
-            assert!(c > 14_000_000_000 && c < 16_000_000_000,
-                "node{node_idx}: charlie ~15 SOL, got {c}");
+            assert!(
+                a > 84_000_000_000 && a < 86_000_000_000,
+                "node{node_idx}: alice ~85 SOL, got {a}"
+            );
+            assert!(
+                b > 59_000_000_000 && b < 61_000_000_000,
+                "node{node_idx}: bob ~60 SOL, got {b}"
+            );
+            assert!(
+                c > 14_000_000_000 && c < 16_000_000_000,
+                "node{node_idx}: charlie ~15 SOL, got {c}"
+            );
         }
 
         // Verify all nodes agree on the same final state
-        let balances: Vec<(u64, u64, u64)> = cluster.iter().map(|(_, bundle)| {
-            let forks = bundle.bank_forks.read().unwrap();
-            let bank = forks.working_bank();
-            (
-                get_balance(&bank, &alice),
-                get_balance(&bank, &bob),
-                get_balance(&bank, &charlie),
-            )
-        }).collect();
+        let balances: Vec<(u64, u64, u64)> = cluster
+            .iter()
+            .map(|(_, bundle)| {
+                let forks = bundle.bank_forks.read().unwrap();
+                let bank = forks.working_bank();
+                (
+                    get_balance(&bank, &alice),
+                    get_balance(&bank, &bob),
+                    get_balance(&bank, &charlie),
+                )
+            })
+            .collect();
 
         assert_eq!(balances[0], balances[1], "node0 and node1 must agree");
         assert_eq!(balances[1], balances[2], "node1 and node2 must agree");
@@ -840,7 +858,9 @@ mod tests {
             // alice sends 5 SOL with real signature
             let transfer_data = system_transfer_data(5_000_000_000);
             let message_bytes = build_message_bytes(
-                1, 0, 1,
+                1,
+                0,
+                1,
                 &[alice, receiver, SYSTEM_PROGRAM_ID],
                 &blockhash,
                 &[(2, &[0, 1], &transfer_data)],
@@ -854,16 +874,25 @@ mod tests {
                     account_indices: vec![0, 1],
                     data: transfer_data,
                 }],
-                1, 0, 1, vec![sig], message_bytes,
+                1,
+                0,
+                1,
+                vec![sig],
+                message_bytes,
             );
             let result = bank.process_transaction(&tx, &backend, MAX_COMPUTE_UNITS);
-            assert!(result.success,
-                "node{node_idx}: alice signed transfer failed: {:?}", result.error);
+            assert!(
+                result.success,
+                "node{node_idx}: alice signed transfer failed: {:?}",
+                result.error
+            );
 
             // bob sends 3 SOL with real signature
             let transfer_data = system_transfer_data(3_000_000_000);
             let message_bytes = build_message_bytes(
-                1, 0, 1,
+                1,
+                0,
+                1,
                 &[bob, receiver, SYSTEM_PROGRAM_ID],
                 &blockhash,
                 &[(2, &[0, 1], &transfer_data)],
@@ -877,11 +906,18 @@ mod tests {
                     account_indices: vec![0, 1],
                     data: transfer_data,
                 }],
-                1, 0, 1, vec![sig], message_bytes,
+                1,
+                0,
+                1,
+                vec![sig],
+                message_bytes,
             );
             let result = bank.process_transaction(&tx, &backend, MAX_COMPUTE_UNITS);
-            assert!(result.success,
-                "node{node_idx}: bob signed transfer failed: {:?}", result.error);
+            assert!(
+                result.success,
+                "node{node_idx}: bob signed transfer failed: {:?}",
+                result.error
+            );
         }
 
         // receiver should have 8 SOL on all nodes
@@ -889,8 +925,10 @@ mod tests {
             let forks = bundle.bank_forks.read().unwrap();
             let bank = forks.working_bank();
             let balance = get_balance(&bank, &receiver);
-            assert_eq!(balance, 8_000_000_000,
-                "node{node_idx}: receiver should have 8 SOL, got {balance}");
+            assert_eq!(
+                balance, 8_000_000_000,
+                "node{node_idx}: receiver should have 8 SOL, got {balance}"
+            );
         }
     }
 
@@ -919,10 +957,15 @@ mod tests {
             let forks = bundle.bank_forks.read().unwrap();
             let bank = forks.working_bank();
             let account = bank.accounts().get_published_account(&program_id).unwrap();
-            assert!(account.meta.executable,
-                "node{node_idx}: program should be executable");
-            assert_eq!(account.meta.owner, karstflow_ids::BPF_LOADER_PROGRAM_ID,
-                "node{node_idx}: program owner should be BPF loader");
+            assert!(
+                account.meta.executable,
+                "node{node_idx}: program should be executable"
+            );
+            assert_eq!(
+                account.meta.owner,
+                karstflow_ids::BPF_LOADER_PROGRAM_ID,
+                "node{node_idx}: program owner should be BPF loader"
+            );
         }
 
         // Execute the program via a transaction on each node
@@ -936,7 +979,9 @@ mod tests {
             register_blockhash(&bank, blockhash);
 
             let message_bytes = build_message_bytes(
-                1, 0, 1,
+                1,
+                0,
+                1,
                 &[caller, program_id],
                 &blockhash,
                 &[(1, &[0], &[])],
@@ -949,13 +994,22 @@ mod tests {
                     account_indices: vec![0],
                     data: vec![],
                 }],
-                1, 0, 1, vec![], message_bytes,
+                1,
+                0,
+                1,
+                vec![],
+                message_bytes,
             );
             let result = bank.process_transaction(&tx, &backend, MAX_COMPUTE_UNITS);
-            assert!(result.success,
-                "node{node_idx}: BPF program execution failed: {:?}", result.error);
-            assert!(result.compute_units_consumed > 0,
-                "node{node_idx}: should consume compute units");
+            assert!(
+                result.success,
+                "node{node_idx}: BPF program execution failed: {:?}",
+                result.error
+            );
+            assert!(
+                result.compute_units_consumed > 0,
+                "node{node_idx}: should consume compute units"
+            );
         }
     }
 
@@ -1004,7 +1058,8 @@ mod tests {
                 },
                 data: AccountData::new(counter_data.clone()),
             };
-            bank.accounts().store_published_account(pda_counter, counter_account);
+            bank.accounts()
+                .store_published_account(pda_counter, counter_account);
 
             // Create user PDA accounts
             let user1_account = Account {
@@ -1016,7 +1071,8 @@ mod tests {
                 },
                 data: AccountData::new(user1_data.clone()),
             };
-            bank.accounts().store_published_account(pda_user1, user1_account);
+            bank.accounts()
+                .store_published_account(pda_user1, user1_account);
 
             let user2_account = Account {
                 meta: AccountMeta {
@@ -1027,14 +1083,20 @@ mod tests {
                 },
                 data: AccountData::new(user2_data.clone()),
             };
-            bank.accounts().store_published_account(pda_user2, user2_account);
+            bank.accounts()
+                .store_published_account(pda_user2, user2_account);
 
             // Verify accounts exist
             let counter = bank.accounts().get_published_account(&pda_counter).unwrap();
-            assert_eq!(counter.meta.owner, program_id,
-                "node{node_idx}: counter PDA owner should be program");
-            assert_eq!(counter.data.as_slice(), &counter_data,
-                "node{node_idx}: counter should be 0");
+            assert_eq!(
+                counter.meta.owner, program_id,
+                "node{node_idx}: counter PDA owner should be program"
+            );
+            assert_eq!(
+                counter.data.as_slice(),
+                &counter_data,
+                "node{node_idx}: counter should be 0"
+            );
 
             let u1 = bank.accounts().get_published_account(&pda_user1).unwrap();
             assert_eq!(u1.meta.owner, program_id);
@@ -1067,12 +1129,16 @@ mod tests {
                 },
                 data: AccountData::new(data),
             };
-            bank.accounts().store_published_account(pda_counter, updated);
+            bank.accounts()
+                .store_published_account(pda_counter, updated);
 
             // Verify incremented
             let after = bank.accounts().get_published_account(&pda_counter).unwrap();
             let after_val = u64::from_le_bytes(after.data.as_slice()[..8].try_into().unwrap());
-            assert_eq!(after_val, 1, "node{node_idx}: counter should be 1 after increment");
+            assert_eq!(
+                after_val, 1,
+                "node{node_idx}: counter should be 1 after increment"
+            );
         }
 
         // Verify all nodes have consistent PDA state
@@ -1117,8 +1183,8 @@ mod tests {
             let bank = forks.working_bank();
 
             // Airdrop
-            bank.credit_lamports(&alice, 100_000_000_000);  // 100 SOL
-            bank.credit_lamports(&bob, 50_000_000_000);     // 50 SOL
+            bank.credit_lamports(&alice, 100_000_000_000); // 100 SOL
+            bank.credit_lamports(&bob, 50_000_000_000); // 50 SOL
             bank.credit_lamports(&treasury, 1_000_000_000); // 1 SOL
 
             // Deploy BPF program
@@ -1135,7 +1201,9 @@ mod tests {
             // alice -> bob: 10 SOL (signed)
             let transfer_data = system_transfer_data(10_000_000_000);
             let message_bytes = build_message_bytes(
-                1, 0, 1,
+                1,
+                0,
+                1,
                 &[alice, bob, SYSTEM_PROGRAM_ID],
                 &blockhash,
                 &[(2, &[0, 1], &transfer_data)],
@@ -1149,11 +1217,18 @@ mod tests {
                     account_indices: vec![0, 1],
                     data: transfer_data,
                 }],
-                1, 0, 1, vec![sig], message_bytes,
+                1,
+                0,
+                1,
+                vec![sig],
+                message_bytes,
             );
             let result = bank.process_transaction(&tx, &backend, MAX_COMPUTE_UNITS);
-            assert!(result.success,
-                "node{node_idx}: phase2 alice->bob failed: {:?}", result.error);
+            assert!(
+                result.success,
+                "node{node_idx}: phase2 alice->bob failed: {:?}",
+                result.error
+            );
         }
 
         // --- Phase 3: Execute BPF program ---
@@ -1164,7 +1239,9 @@ mod tests {
             register_blockhash(&bank, blockhash2);
 
             let message_bytes = build_message_bytes(
-                1, 0, 1,
+                1,
+                0,
+                1,
                 &[alice, program_id],
                 &blockhash2,
                 &[(1, &[0], &[42])], // instruction data: 42
@@ -1177,11 +1254,18 @@ mod tests {
                     account_indices: vec![0],
                     data: vec![42],
                 }],
-                1, 0, 1, vec![], message_bytes,
+                1,
+                0,
+                1,
+                vec![],
+                message_bytes,
             );
             let result = bank.process_transaction(&tx, &backend, MAX_COMPUTE_UNITS);
-            assert!(result.success,
-                "node{node_idx}: BPF program invoke failed: {:?}", result.error);
+            assert!(
+                result.success,
+                "node{node_idx}: BPF program invoke failed: {:?}",
+                result.error
+            );
         }
 
         // --- Phase 4: Create and manage PDA accounts ---
@@ -1203,7 +1287,8 @@ mod tests {
                 },
                 data: AccountData::new(vault_data),
             };
-            bank.accounts().store_published_account(pda_vault, vault_account);
+            bank.accounts()
+                .store_published_account(pda_vault, vault_account);
 
             // Create config PDA
             let mut config_data = vec![0u8; 40];
@@ -1218,7 +1303,8 @@ mod tests {
                 },
                 data: AccountData::new(config_data),
             };
-            bank.accounts().store_published_account(pda_config, config_account);
+            bank.accounts()
+                .store_published_account(pda_config, config_account);
 
             // Simulate deposit: increment vault counter
             let vault = bank.accounts().get_published_account(&pda_vault).unwrap();
@@ -1243,37 +1329,53 @@ mod tests {
 
             // Verify config
             let c = bank.accounts().get_published_account(&pda_config).unwrap();
-            assert_eq!(c.data.as_slice()[0], 1, "node{node_idx}: config initialized");
+            assert_eq!(
+                c.data.as_slice()[0],
+                1,
+                "node{node_idx}: config initialized"
+            );
             let max_dep = u64::from_le_bytes(c.data.as_slice()[8..16].try_into().unwrap());
             assert_eq!(max_dep, 100, "node{node_idx}: config max_deposit = 100");
         }
 
         // --- Phase 5: Final state verification across all nodes ---
-        let final_states: Vec<(u64, u64, u64, u64, u64)> = cluster.iter().map(|(_, bundle)| {
-            let forks = bundle.bank_forks.read().unwrap();
-            let bank = forks.working_bank();
-            (
-                get_balance(&bank, &alice),
-                get_balance(&bank, &bob),
-                get_balance(&bank, &treasury),
-                get_balance(&bank, &pda_vault),
-                get_balance(&bank, &pda_config),
-            )
-        }).collect();
+        let final_states: Vec<(u64, u64, u64, u64, u64)> = cluster
+            .iter()
+            .map(|(_, bundle)| {
+                let forks = bundle.bank_forks.read().unwrap();
+                let bank = forks.working_bank();
+                (
+                    get_balance(&bank, &alice),
+                    get_balance(&bank, &bob),
+                    get_balance(&bank, &treasury),
+                    get_balance(&bank, &pda_vault),
+                    get_balance(&bank, &pda_config),
+                )
+            })
+            .collect();
 
         // All nodes must agree
-        assert_eq!(final_states[0], final_states[1],
-            "node0 and node1 final state mismatch");
-        assert_eq!(final_states[1], final_states[2],
-            "node1 and node2 final state mismatch");
+        assert_eq!(
+            final_states[0], final_states[1],
+            "node0 and node1 final state mismatch"
+        );
+        assert_eq!(
+            final_states[1], final_states[2],
+            "node1 and node2 final state mismatch"
+        );
 
         // Bob should have received 10 SOL
-        assert_eq!(final_states[0].1, 60_000_000_000,
-            "bob should have 60 SOL (50 + 10)");
+        assert_eq!(
+            final_states[0].1, 60_000_000_000,
+            "bob should have 60 SOL (50 + 10)"
+        );
 
         // Vault PDA should have lamports from deposit
-        assert_eq!(final_states[0].3, 51_000_000, // 1M initial + 50M deposit
-            "vault PDA should have 51M lamports");
+        assert_eq!(
+            final_states[0].3,
+            51_000_000, // 1M initial + 50M deposit
+            "vault PDA should have 51M lamports"
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -1303,7 +1405,9 @@ mod tests {
 
             let transfer_data = system_transfer_data(1_000_000_000);
             let message_bytes = build_message_bytes(
-                1, 0, 1,
+                1,
+                0,
+                1,
                 &[poor, rich_target, SYSTEM_PROGRAM_ID],
                 &blockhash,
                 &[(2, &[0, 1], &transfer_data)],
@@ -1316,19 +1420,28 @@ mod tests {
                     account_indices: vec![0, 1],
                     data: transfer_data,
                 }],
-                1, 0, 1, vec![], message_bytes,
+                1,
+                0,
+                1,
+                vec![],
+                message_bytes,
             );
             let result = bank.process_transaction(&tx, &backend, MAX_COMPUTE_UNITS);
-            assert!(!result.success,
-                "node{node_idx}: should reject insufficient funds");
+            assert!(
+                !result.success,
+                "node{node_idx}: should reject insufficient funds"
+            );
         }
 
         // All nodes: poor should still have original balance (minus fee if charged)
-        let final_balances: Vec<u64> = cluster.iter().map(|(_, bundle)| {
-            let forks = bundle.bank_forks.read().unwrap();
-            let bank = forks.working_bank();
-            get_balance(&bank, &poor)
-        }).collect();
+        let final_balances: Vec<u64> = cluster
+            .iter()
+            .map(|(_, bundle)| {
+                let forks = bundle.bank_forks.read().unwrap();
+                let bank = forks.working_bank();
+                get_balance(&bank, &poor)
+            })
+            .collect();
         assert_eq!(final_balances[0], final_balances[1]);
         assert_eq!(final_balances[1], final_balances[2]);
     }
