@@ -725,6 +725,64 @@ mod tests {
     }
 
     #[test]
+    fn test_cache_eviction_under_load() {
+        let root_id = create_node_id(0);
+        let transport: Arc<dyn ShredTransport> = Arc::new(NullTransport);
+        let config = TurbineConfig::default();
+        let stats = RetransmitStats::new(Arc::new(crate::turbine::TurbineStats::new()));
+
+        let service = RetransmitService::new(root_id, transport, config, stats);
+
+        // Insert 500 shreds across 50 slots.
+        for slot in 0..50u64 {
+            for idx in 0..10u32 {
+                let shred = Arc::new(create_test_shred(slot, idx));
+                service.shred_cache.write().insert((slot, idx), shred);
+            }
+        }
+        assert_eq!(service.shred_cache.read().len(), 500);
+
+        // Clear everything before slot 25 — should remove 250 entries.
+        let cleared = service.clear_cache_before_slot(25);
+        assert_eq!(cleared, 250);
+        assert_eq!(service.shred_cache.read().len(), 250);
+
+        // Old shreds should be gone, new ones should remain.
+        assert!(service.get_cached_shred(0, 0).is_none());
+        assert!(service.get_cached_shred(24, 9).is_none());
+        assert!(service.get_cached_shred(25, 0).is_some());
+        assert!(service.get_cached_shred(49, 9).is_some());
+    }
+
+    #[test]
+    fn test_retransmit_request_retry_lifecycle() {
+        let mut request = RetransmitRequest::new(100, 5, vec![create_node_id(1)]);
+        assert_eq!(request.retry_count, 0);
+
+        // Retry 3 times.
+        for expected in 1..=3 {
+            request.retry();
+            assert_eq!(request.retry_count, expected);
+            // After retry, timeout resets — should not be timed out immediately.
+            assert!(!request.is_timed_out(Duration::from_secs(1)));
+        }
+    }
+
+    #[test]
+    fn test_cache_clear_empty_is_noop() {
+        let root_id = create_node_id(0);
+        let transport: Arc<dyn ShredTransport> = Arc::new(NullTransport);
+        let config = TurbineConfig::default();
+        let stats = RetransmitStats::new(Arc::new(crate::turbine::TurbineStats::new()));
+
+        let service = RetransmitService::new(root_id, transport, config, stats);
+
+        // Clear on empty cache should not panic.
+        let cleared = service.clear_cache_before_slot(100);
+        assert_eq!(cleared, 0);
+    }
+
+    #[test]
     fn test_signing_key_set_and_used() {
         let counting = CountingTransport::new();
         let send_count = counting.send_count.clone();

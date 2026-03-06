@@ -323,4 +323,9 @@ impl Service for EdgeIntake {
             IngressMode::Udp => self.tick_udp(context),
         }
     }
+
+    fn on_stop(&mut self, _context: &ServiceContext) -> RuntimeResult<()> {
+        self.udp_socket = None;
+        Ok(())
+    }
 }

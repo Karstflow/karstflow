@@ -1,3 +1,4 @@
+use crate::features::FeaturesProfileToml;
 use crate::ingress::IngressPolicyToml;
 use crate::metrics::MetricsProfileToml;
 use crate::network::NetworkProfileToml;
@@ -20,6 +21,7 @@ pub struct NodeProfileToml {
     pub storage: Option<StorageProfileToml>,
     pub readiness: Option<MainnetReadinessProfileToml>,
     pub network: Option<NetworkProfileToml>,
+    pub features: Option<FeaturesProfileToml>,
     pub logging: Option<LoggingProfileToml>,
 }
 

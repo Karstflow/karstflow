@@ -12,7 +12,6 @@ quic_enabled = true
 entrypoints = [
     "entrypoint.testnet.solana.com:8001",
     "entrypoint2.testnet.solana.com:8001",
-    "entrypoint3.testnet.solana.com:8001",
 ]
 
 [runtime]
@@ -21,7 +20,7 @@ workers = 12
 
 [ingress_policy]
 ingress_mode = "udp"
-udp_bind_address = "0.0.0.0:8001"
+udp_bind_address = "0.0.0.0:8003"
 max_payload_bytes = 1232
 allow_quic_source = true
 allow_gossip_source = true
@@ -32,14 +31,15 @@ snapshot_interval = 432
 
 [rpc]
 enabled = true
-bind = "0.0.0.0:8899"
+bind = "127.0.0.1:8899"
 private = false
 full_api = true
 
 [metrics]
 output_format = "prometheus"
-output_target = "http"
-http_bind = "0.0.0.0:9090"
+output_target = "file"
+file_path = "/var/log/karstflow/metrics.prom"
+http_bind = "127.0.0.1:7999"
 
 [logging]
 stderr_level = "info"

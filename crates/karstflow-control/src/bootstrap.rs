@@ -6,6 +6,7 @@ use crate::output::{
 use crate::{
     ensure_service_startup_probe_ok, run_network_socket_preflight, run_service_startup_probe,
 };
+use karstflow_config::network::{NetworkConfig, NetworkTransport};
 use karstflow_config::{NodeConfig, ValidatorIdentity};
 use karstflow_consensus::{
     bootstrap_from_snapshot, collect_validator_stakes, deserialize_transaction,
@@ -20,9 +21,9 @@ use karstflow_net::tile::{BridgeConfig, BridgeHandle};
 use karstflow_net::{
     ClusterInfo, ContactInfo, GossipConfig, GossipService, GossipServiceStats, InMemoryShredStore,
     IngressMode, NodeId, OutboundRepair, RepairCoordinator, RepairCoordinatorConfig, RepairRequest,
-    RepairService, RepairServiceConfig, RepairTarget, RetransmitService, RetransmitStats,
-    ShredData, ShredIndex, ShredProvider, Slot, TurbineConfig, TurbineStats, TurbineTreeBuilder,
-    UdpShredTransport, ValidatorInfo,
+    RepairServerConfig, RepairService, RepairServiceConfig, RepairTarget, RetransmitService,
+    RetransmitStats, ShredData, ShredIndex, ShredProvider, Slot, TurbineConfig, TurbineStats,
+    TurbineTreeBuilder, UdpShredTransport, ValidatorInfo,
 };
 use karstflow_observability::spawn_metrics_http_bridge;
 use karstflow_rpc::{
@@ -1100,11 +1101,115 @@ impl TurbineServiceAdapter {
     }
 }
 
+/// Create the shred transport based on network configuration.
+///
+/// When XDP is configured on Linux, attempts to create an XDP transport.
+/// Falls back to UDP on failure or on non-Linux platforms.
+fn build_turbine_transport(
+    network_config: &NetworkConfig,
+) -> Result<Arc<dyn karstflow_net::ShredTransport>> {
+    match network_config.transport {
+        NetworkTransport::Xdp => {
+            #[cfg(target_os = "linux")]
+            {
+                match try_build_xdp_transport(network_config) {
+                    Ok(transport) => {
+                        info!(
+                            interface = %network_config.interface,
+                            queue_id = network_config.queue_id,
+                            "turbine using XDP transport"
+                        );
+                        return Ok(transport);
+                    }
+                    Err(e) => {
+                        warn!(
+                            error = %e,
+                            "XDP transport setup failed, falling back to UDP"
+                        );
+                    }
+                }
+            }
+            #[cfg(not(target_os = "linux"))]
+            {
+                warn!("XDP transport requested but not available on this platform, falling back to UDP");
+            }
+            build_udp_transport()
+        }
+        NetworkTransport::Udp => build_udp_transport(),
+    }
+}
+
+fn build_udp_transport() -> Result<Arc<dyn karstflow_net::ShredTransport>> {
+    let transport = UdpShredTransport::new("0.0.0.0:0".parse().expect("valid socket addr literal"))
+        .map_err(|e| ControlPlaneError::GossipServiceStartFailed {
+            detail: format!("failed to bind turbine UDP socket: {e}"),
+        })?;
+    Ok(Arc::new(transport))
+}
+
+#[cfg(target_os = "linux")]
+fn try_build_xdp_transport(
+    network_config: &NetworkConfig,
+) -> std::result::Result<Arc<dyn karstflow_net::ShredTransport>, String> {
+    use karstflow_net::turbine::XdpShredTransport;
+    use karstflow_net::xdp::{install_xdp, LiveXdpSocket, XdpFilterConfig, XdpSocketConfig};
+
+    let iface = &network_config.interface;
+    if iface.is_empty() {
+        return Err("XDP requires network.interface to be set".to_string());
+    }
+
+    // Resolve interface index via libc.
+    let if_index = {
+        let c_name = std::ffi::CString::new(iface.as_str())
+            .map_err(|_| format!("invalid interface name: {iface}"))?;
+        let idx = unsafe { libc::if_nametoindex(c_name.as_ptr()) };
+        if idx == 0 {
+            return Err(format!(
+                "failed to resolve interface '{iface}': {}",
+                std::io::Error::last_os_error()
+            ));
+        }
+        idx
+    };
+
+    // Install XDP program on the interface.
+    let filter = XdpFilterConfig::new(&[network_config.quic_port]);
+    let (xsk_map, xdp_prog) =
+        install_xdp(&filter, if_index, 1, 0).map_err(|e| format!("install_xdp failed: {e}"))?;
+
+    let xsk_map = Arc::new(xsk_map);
+    let xdp_prog = Arc::new(xdp_prog);
+
+    // Open LiveXdpSocket.
+    let socket_config = XdpSocketConfig {
+        if_index,
+        queue_id: network_config.queue_id,
+        ..XdpSocketConfig::default()
+    };
+    let socket = LiveXdpSocket::open(&socket_config, xsk_map, xdp_prog)
+        .map_err(|e| format!("LiveXdpSocket::open failed: {e}"))?;
+
+    // Source address: bind 0.0.0.0 with ephemeral port for now.
+    // In production, this would be resolved from the interface's IP.
+    let src_addr: u32 = 0;
+    let src_port: u16 = 0;
+    let src_mac = [0u8; 6];
+    let dst_mac = [0xff; 6]; // broadcast — resolved via ARP in production
+
+    Ok(Arc::new(XdpShredTransport::new(
+        socket, src_addr, src_port, src_mac, dst_mac,
+    )))
+}
+
 /// Build the turbine retransmit service for shred propagation.
 ///
-/// Creates a UDP transport for sending shreds and wraps the retransmit
-/// service in a Service adapter. The turbine tree is periodically rebuilt
-/// from the gossip ClusterInfo so routing stays current.
+/// Creates a transport for sending shreds (UDP or XDP based on config) and
+/// wraps the retransmit service in a Service adapter. The turbine tree is
+/// periodically rebuilt from the gossip ClusterInfo so routing stays current.
+///
+/// On non-Linux platforms, XDP config gracefully falls back to UDP with a
+/// warning. On Linux, XDP failure also falls back to UDP.
 ///
 /// The returned `TurbineBundle` provides both the runtime Service and
 /// direct access to the retransmit service for cross-service use
@@ -1113,14 +1218,10 @@ pub fn build_turbine_service(
     node_id: NodeId,
     cluster_info: Arc<ClusterInfo>,
     vote_processor: Arc<Mutex<VoteProcessor>>,
+    network_config: &NetworkConfig,
 ) -> Result<TurbineBundle> {
-    let transport = Arc::new(
-        UdpShredTransport::new("0.0.0.0:0".parse().expect("valid socket addr literal")).map_err(
-            |e| ControlPlaneError::GossipServiceStartFailed {
-                detail: format!("failed to bind turbine UDP socket: {e}"),
-            },
-        )?,
-    );
+    let transport: Arc<dyn karstflow_net::ShredTransport> =
+        build_turbine_transport(network_config)?;
 
     let turbine_config = TurbineConfig::default();
     let turbine_stats = Arc::new(TurbineStats::new());
@@ -1435,6 +1536,7 @@ pub fn build_repair_service(
     bank_forks: Arc<RwLock<BankForks>>,
     shred_provider: Option<Arc<dyn ShredProvider>>,
     shred_arrival_rx: crossbeam_channel::Receiver<ShredArrival>,
+    repair_bind_addr: std::net::SocketAddr,
 ) -> Result<RepairBundle> {
     let root_slot = bank_forks
         .read()
@@ -1477,7 +1579,13 @@ pub fn build_repair_service(
                 .expect("failed to build repair tokio runtime");
 
             rt.block_on(async move {
-                let config = RepairServiceConfig::default();
+                let config = RepairServiceConfig {
+                    server_config: RepairServerConfig {
+                        bind_addr: repair_bind_addr,
+                        ..RepairServerConfig::default()
+                    },
+                    ..RepairServiceConfig::default()
+                };
 
                 let mut service = match RepairService::new(
                     node_id,

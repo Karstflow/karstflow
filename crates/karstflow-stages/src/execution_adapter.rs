@@ -46,6 +46,7 @@ fn to_sysvar_snapshot(ctx: &SlotContext) -> SysvarSnapshot {
         last_restart_slot: ctx.last_restart_slot,
         recent_blockhash: ctx.recent_blockhash,
         lamports_per_signature: ctx.lamports_per_signature,
+        epoch_rewards_total_rewards: ctx.epoch_rewards_total_rewards,
         active_features: ctx.active_features.clone(),
         ..SysvarSnapshot::default()
     }

@@ -535,3 +535,116 @@ fn read_runtime_snapshot_from_metrics_file(metrics_file_path: &Path) -> Option<R
 pub fn read_metrics_snapshot_for_test(path: &Path) -> Option<RpcRuntimeSnapshot> {
     read_runtime_snapshot_from_metrics_file(path)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Write;
+
+    fn snapshot(slot: u64) -> RpcRuntimeSnapshot {
+        RpcRuntimeSnapshot {
+            slot,
+            block_height: slot,
+            transaction_count: 0,
+            uptime_millis: 0,
+            latest_blockhash_seed: 42,
+        }
+    }
+
+    #[test]
+    fn slot_for_commitment_processed() {
+        let s = snapshot(100);
+        assert_eq!(s.slot_for_commitment(RpcCommitment::Processed), 100);
+    }
+
+    #[test]
+    fn slot_for_commitment_confirmed() {
+        let s = snapshot(100);
+        assert_eq!(s.slot_for_commitment(RpcCommitment::Confirmed), 99);
+    }
+
+    #[test]
+    fn slot_for_commitment_finalized() {
+        let s = snapshot(100);
+        assert_eq!(s.slot_for_commitment(RpcCommitment::Finalized), 68);
+    }
+
+    #[test]
+    fn slot_for_commitment_saturates_at_zero() {
+        let s = snapshot(5);
+        assert_eq!(s.slot_for_commitment(RpcCommitment::Finalized), 0);
+    }
+
+    #[test]
+    fn block_height_for_commitment_delegates_to_slot() {
+        let s = snapshot(50);
+        assert_eq!(
+            s.block_height_for_commitment(RpcCommitment::Confirmed),
+            s.slot_for_commitment(RpcCommitment::Confirmed)
+        );
+    }
+
+    #[test]
+    fn blockhash_seed_varies_by_commitment() {
+        let s = snapshot(100);
+        let p = s.blockhash_seed_for_commitment(RpcCommitment::Processed);
+        let c = s.blockhash_seed_for_commitment(RpcCommitment::Confirmed);
+        let f = s.blockhash_seed_for_commitment(RpcCommitment::Finalized);
+        // All three should differ since they use different slot values
+        assert_ne!(p, c);
+        assert_ne!(c, f);
+    }
+
+    fn temp_metrics_path(name: &str) -> PathBuf {
+        let mut path = std::env::temp_dir();
+        path.push(format!("karstflow_test_{name}_{}", std::process::id()));
+        path
+    }
+
+    #[test]
+    fn read_metrics_snapshot_from_valid_json() {
+        let path = temp_metrics_path("valid_json");
+        let mut f = std::fs::File::create(&path).unwrap();
+        writeln!(
+            f,
+            r#"{{"block_assembly":{{"committed_fragments":42,"replay_window_rewinds":1}},"ingress_filter":{{"accepted_transactions":100}},"uptime_millis":5000}}"#
+        )
+        .unwrap();
+
+        let snap = read_runtime_snapshot_from_metrics_file(&path).unwrap();
+        let _ = std::fs::remove_file(&path);
+        assert_eq!(snap.slot, 42);
+        assert_eq!(snap.transaction_count, 100);
+        assert_eq!(snap.uptime_millis, 5000);
+    }
+
+    #[test]
+    fn read_metrics_snapshot_returns_none_for_missing_file() {
+        let result = read_runtime_snapshot_from_metrics_file(Path::new(
+            "/tmp/nonexistent_file_xyz_karstflow",
+        ));
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn read_metrics_snapshot_returns_none_for_empty_file() {
+        let path = temp_metrics_path("empty");
+        std::fs::File::create(&path).unwrap();
+
+        let result = read_runtime_snapshot_from_metrics_file(&path);
+        let _ = std::fs::remove_file(&path);
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn read_metrics_snapshot_picks_last_json_line() {
+        let path = temp_metrics_path("multi");
+        let mut f = std::fs::File::create(&path).unwrap();
+        writeln!(f, r#"{{"block_assembly":{{"committed_fragments":10}}}}"#).unwrap();
+        writeln!(f, r#"{{"block_assembly":{{"committed_fragments":20}}}}"#).unwrap();
+
+        let snap = read_runtime_snapshot_from_metrics_file(&path).unwrap();
+        let _ = std::fs::remove_file(&path);
+        assert_eq!(snap.slot, 20);
+    }
+}

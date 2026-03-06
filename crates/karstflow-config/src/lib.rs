@@ -1,4 +1,5 @@
 mod errors;
+pub mod features;
 mod ingress;
 mod metrics;
 pub mod network;
@@ -13,6 +14,7 @@ mod storage;
 mod topology;
 
 pub use crate::errors::{ConfigError, Result};
+use crate::features::{build_feature_activation_config, FeatureActivationConfig};
 use crate::network::NetworkConfig;
 use crate::parts::{
     build_ingress_policy, build_mainnet_readiness_policy, build_metrics_http_bind,
@@ -86,6 +88,8 @@ pub struct NodeConfig {
     pub storage_runtime_policy: StorageRuntimePolicy,
     pub mainnet_readiness_policy: MainnetReadinessPolicy,
     pub network_config: NetworkConfig,
+    /// Feature activation overrides for testing and hardfork coordination.
+    pub feature_activation_config: FeatureActivationConfig,
     /// Enable QUIC TPU ingress via the NetworkTile + QuicTile bridge.
     /// When true, the node spawns a dedicated tile thread that receives
     /// QUIC connections and reassembles transactions for the pipeline.
@@ -361,6 +365,9 @@ impl NodeConfig {
             storage_runtime_policy: build_storage_runtime_policy(profile)?,
             mainnet_readiness_policy: build_mainnet_readiness_policy(profile)?,
             network_config: build_network_config(profile.and_then(|p| p.network.as_ref())),
+            feature_activation_config: build_feature_activation_config(
+                profile.and_then(|p| p.features.as_ref()),
+            ),
             quic_enabled,
             data_dir,
             plugin_config_files,

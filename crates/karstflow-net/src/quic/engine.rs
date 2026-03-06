@@ -744,6 +744,19 @@ mod tests {
         }
     }
 
+    fn make_initial_packet(dcid: &[u8; 8], scid: &[u8; 8]) -> Vec<u8> {
+        let mut pkt = Vec::new();
+        pkt.push(0xC0);
+        pkt.extend_from_slice(&[0, 0, 0, 1]); // Version 1
+        pkt.push(8);
+        pkt.extend_from_slice(dcid);
+        pkt.push(8);
+        pkt.extend_from_slice(scid);
+        pkt.push(0); // token len = 0
+        pkt.extend_from_slice(&[0u8; 32]); // payload
+        pkt
+    }
+
     #[test]
     fn engine_creation() {
         let engine = QuicEngine::new(test_limits(), server_config()).unwrap();
@@ -1071,6 +1084,222 @@ mod tests {
         engine.set_retry_secret(secret, iv);
         assert_eq!(engine.retry_secret, secret);
         assert_eq!(engine.retry_iv, iv);
+    }
+
+    #[test]
+    fn free_list_integrity_after_fragmentation() {
+        let mut limits = test_limits();
+        limits.max_connections = 4;
+        let mut engine = QuicEngine::new(limits, server_config()).unwrap();
+        let mut cb = NoopCallbacks;
+
+        let src = PeerAddress {
+            ip: 0x7F000001,
+            port: 9000,
+        };
+        for i in 0..4u8 {
+            let pkt = make_initial_packet(&[i + 1; 8], &[0xBB; 8]);
+            let result = engine.receive_packet(&pkt, src, 1_000_000, &mut cb);
+            assert_eq!(result, ReceiveResult::NewConnection);
+        }
+        assert_eq!(engine.active_connection_count(), 4);
+
+        // 5th connection should fail — pool exhausted.
+        let pkt5 = make_initial_packet(&[0xFF; 8], &[0xBB; 8]);
+        let result = engine.receive_packet(&pkt5, src, 2_000_000, &mut cb);
+        assert_eq!(result, ReceiveResult::Dropped);
+
+        // Mark all connections dead and service them.
+        for idx in 0..4usize {
+            engine.connections[idx].mark_dead(3_000_000);
+            engine
+                .service_queue
+                .schedule(idx as u32, 3_000_000i64, 3_000_000i64);
+        }
+        for _ in 0..4 {
+            engine.service(3_000_000, &mut cb);
+        }
+        assert_eq!(engine.active_connection_count(), 0);
+
+        // Allocate 4 new connections — all should succeed.
+        let mut allocated = std::collections::HashSet::new();
+        for _ in 0..4 {
+            let idx = engine.allocate_connection().unwrap();
+            assert!(allocated.insert(idx), "duplicate allocation: {}", idx);
+        }
+        // Pool should be exhausted again.
+        assert!(engine.allocate_connection().is_none());
+    }
+
+    #[test]
+    fn handshake_timeout_aborts_connection() {
+        let mut config = client_config();
+        config.tls_handshake_ttl_ns = 5_000_000; // 5ms
+        config.idle_timeout_ns = 5_000_000; // keep small so reschedule fires soon
+        let mut engine = QuicEngine::new(test_limits(), config).unwrap();
+        let mut cb = RecordingCallbacks::new();
+
+        let dst = PeerAddress {
+            ip: 0x7F000001,
+            port: 9000,
+        };
+        let conn_idx = engine.connect(dst, 1_000_000, &mut cb).unwrap();
+        let ci = conn_idx as usize;
+        assert_eq!(engine.connections[ci].state, ConnectionState::Handshaking);
+
+        // Service before timeout — should remain Handshaking.
+        engine.service(3_000_000, &mut cb);
+        assert_eq!(engine.connections[ci].state, ConnectionState::Handshaking);
+
+        // Force reschedule so we can service after the handshake timeout.
+        engine
+            .service_queue
+            .schedule(conn_idx, 7_000_000i64, 7_000_000i64);
+
+        // Service after timeout — should begin close (Abort → ClosePending in same service call).
+        engine.service(7_000_000, &mut cb);
+        assert!(
+            engine.connections[ci].state == ConnectionState::ClosePending
+                || engine.connections[ci].state == ConnectionState::Abort
+                || engine.connections[ci].state == ConnectionState::Dead
+        );
+    }
+
+    #[test]
+    fn drain_timeout_releases_connection() {
+        let mut engine = QuicEngine::new(test_limits(), server_config()).unwrap();
+        let mut cb = RecordingCallbacks::new();
+
+        // Create connection via Initial packet.
+        let src = PeerAddress {
+            ip: 0x7F000001,
+            port: 9000,
+        };
+        let pkt = make_initial_packet(&[0xAA; 8], &[0xBB; 8]);
+        engine.receive_packet(&pkt, src, 1_000_000, &mut cb);
+        assert_eq!(engine.active_connection_count(), 1);
+
+        // Activate and then begin close.
+        engine.connections[0].activate(10_000_000);
+        engine.connections[0].idle_timeout_ns = 100_000_000; // 100ms
+        engine.connections[0].begin_close(QUIC_ERR_NO_ERROR, 20_000_000);
+
+        // Schedule for service.
+        engine
+            .service_queue
+            .schedule(0, 20_000_000i64, 20_000_000i64);
+
+        // Service during drain period (3 * max(100ms, 100ms) = 300ms).
+        engine.service(20_000_000, &mut cb);
+        assert_ne!(engine.connections[0].state, ConnectionState::Dead);
+
+        // Service after drain period.
+        engine
+            .service_queue
+            .schedule(0, 330_000_000i64, 300_000_000i64);
+        engine.service(330_000_000, &mut cb);
+        // Connection should be dead or released.
+        assert!(
+            engine.connections[0].state == ConnectionState::Dead
+                || engine.connections[0].state == ConnectionState::Invalid
+        );
+    }
+
+    #[test]
+    fn conn_map_cleanup_after_release() {
+        let mut engine = QuicEngine::new(test_limits(), server_config()).unwrap();
+        let mut cb = NoopCallbacks;
+
+        let src = PeerAddress {
+            ip: 0x7F000001,
+            port: 9000,
+        };
+        let pkt = make_initial_packet(&[0xAA; 8], &[0xBB; 8]);
+        engine.receive_packet(&pkt, src, 1_000_000, &mut cb);
+
+        let local_cid = engine.connections[0].local_conn_id;
+        assert!(engine.conn_map.get(&local_cid).is_some());
+
+        // Full lifecycle: Dead → release.
+        engine.connections[0].mark_dead(5_000_000);
+        engine.service_queue.schedule(0, 5_000_000i64, 5_000_000i64);
+        engine.service(5_000_000, &mut cb);
+
+        // Verify conn_map no longer has the old CID.
+        assert!(engine.conn_map.get(&local_cid).is_none());
+        assert_eq!(engine.active_connection_count(), 0);
+    }
+
+    #[test]
+    fn multiple_connections_drain_concurrently() {
+        let mut engine = QuicEngine::new(test_limits(), server_config()).unwrap();
+        let mut cb = NoopCallbacks;
+
+        let src = PeerAddress {
+            ip: 0x7F000001,
+            port: 9000,
+        };
+
+        // Create 3 connections.
+        for i in 0..3u8 {
+            let pkt = make_initial_packet(&[i + 1; 8], &[0xBB; 8]);
+            engine.receive_packet(&pkt, src, 1_000_000, &mut cb);
+        }
+        assert_eq!(engine.active_connection_count(), 3);
+
+        // Activate all, then close — goes Handshaking → Active → Abort.
+        let close_time = 10_000_000u64;
+        for i in 0..3usize {
+            engine.connections[i].activate(5_000_000);
+            engine.connections[i].idle_timeout_ns = 100_000_000;
+            engine.connections[i].begin_close(QUIC_ERR_NO_ERROR, close_time);
+        }
+
+        // Service Abort → ClosePending for all 3.
+        for i in 0..3u32 {
+            engine
+                .service_queue
+                .schedule(i, close_time as i64, close_time as i64);
+        }
+        for _ in 0..3 {
+            engine.service(close_time, &mut cb);
+        }
+        // All should now be ClosePending with drain timer running.
+        assert_eq!(engine.active_connection_count(), 3);
+
+        // Service during drain period — should stay ClosePending.
+        for i in 0..3u32 {
+            let mid_drain = close_time + 100_000_000; // 100ms < 300ms drain
+            engine
+                .service_queue
+                .schedule(i, mid_drain as i64, mid_drain as i64);
+        }
+        for _ in 0..3 {
+            engine.service(close_time + 100_000_000, &mut cb);
+        }
+        assert!(engine.active_connection_count() >= 1);
+
+        // Service after drain timeout (3 * 100ms = 300ms) → mark_dead.
+        let after_drain = close_time + 400_000_000;
+        for i in 0..3u32 {
+            engine
+                .service_queue
+                .schedule(i, after_drain as i64, after_drain as i64);
+        }
+        for _ in 0..3 {
+            engine.service(after_drain, &mut cb);
+        }
+        // All should be Dead now. Reschedule to process Dead → release.
+        let release_time = after_drain + 1;
+        for i in 0..3u32 {
+            engine
+                .service_queue
+                .schedule(i, release_time as i64, release_time as i64);
+        }
+        for _ in 0..3 {
+            engine.service(release_time, &mut cb);
+        }
+        assert_eq!(engine.active_connection_count(), 0);
     }
 
     #[test]

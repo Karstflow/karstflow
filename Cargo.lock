@@ -1443,6 +1443,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "karstflow-integration-tests"
+version = "0.1.0"
+dependencies = [
+ "curve25519-dalek",
+ "karstflow-config",
+ "karstflow-consensus",
+ "karstflow-constants",
+ "karstflow-control",
+ "karstflow-crypto",
+ "karstflow-execution",
+ "karstflow-ids",
+ "karstflow-runtime",
+ "karstflow-sbpf",
+ "karstflow-stages",
+ "karstflow-storage",
+ "karstflow-types",
+ "sha2",
+]
+
+[[package]]
 name = "karstflow-mesh"
 version = "0.1.0"
 dependencies = [

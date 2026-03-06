@@ -85,6 +85,68 @@ impl std::fmt::Display for SlotStatus {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn slot_status_display_processed() {
+        assert_eq!(SlotStatus::Processed.to_string(), "processed");
+    }
+
+    #[test]
+    fn slot_status_display_confirmed() {
+        assert_eq!(SlotStatus::Confirmed.to_string(), "confirmed");
+    }
+
+    #[test]
+    fn slot_status_display_rooted() {
+        assert_eq!(SlotStatus::Rooted.to_string(), "rooted");
+    }
+
+    #[test]
+    fn slot_status_display_first_shred_received() {
+        assert_eq!(
+            SlotStatus::FirstShredReceived.to_string(),
+            "first_shred_received"
+        );
+    }
+
+    #[test]
+    fn slot_status_display_completed() {
+        assert_eq!(SlotStatus::Completed.to_string(), "completed");
+    }
+
+    #[test]
+    fn slot_status_display_created_bank() {
+        assert_eq!(SlotStatus::CreatedBank.to_string(), "created_bank");
+    }
+
+    #[test]
+    fn slot_status_display_dead() {
+        assert_eq!(
+            SlotStatus::Dead("invalid shred".to_string()).to_string(),
+            "dead: invalid shred"
+        );
+    }
+
+    #[test]
+    fn slot_status_equality() {
+        assert_eq!(SlotStatus::Processed, SlotStatus::Processed);
+        assert_ne!(SlotStatus::Processed, SlotStatus::Confirmed);
+    }
+
+    #[test]
+    fn slot_status_dead_equality_with_same_reason() {
+        assert_eq!(SlotStatus::Dead("x".into()), SlotStatus::Dead("x".into()),);
+    }
+
+    #[test]
+    fn slot_status_dead_inequality_different_reason() {
+        assert_ne!(SlotStatus::Dead("a".into()), SlotStatus::Dead("b".into()),);
+    }
+}
+
 /// Block-level metadata delivered to plugins after replay completes.
 ///
 /// Summarizes the entire block including execution metrics, timing,

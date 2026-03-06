@@ -25,6 +25,20 @@ pub struct NetworkProfileToml {
     pub net_tile_cpu: Option<usize>,
     /// CPU affinity for QUIC tile.
     pub quic_tile_cpu: Option<usize>,
+    /// UDP socket receive buffer size in bytes.
+    pub udp_recv_buf_size: Option<usize>,
+    /// UDP socket send buffer size in bytes.
+    pub udp_send_buf_size: Option<usize>,
+    /// XDP ring depth (must be power of 2, >= 64).
+    pub xdp_ring_depth: Option<u32>,
+    /// XDP zero-copy mode (requires driver support).
+    pub xdp_zero_copy: Option<bool>,
+    /// XDP UMEM frame count.
+    pub xdp_frame_count: Option<u32>,
+    /// XDP UMEM frame size in bytes.
+    pub xdp_frame_size: Option<usize>,
+    /// XDP UMEM headroom per frame in bytes.
+    pub xdp_headroom: Option<usize>,
 }
 
 /// Parsed network configuration.
@@ -52,6 +66,20 @@ pub struct NetworkConfig {
     pub net_tile_cpu: Option<usize>,
     /// CPU affinity for QUIC tile.
     pub quic_tile_cpu: Option<usize>,
+    /// UDP socket receive buffer size in bytes.
+    pub udp_recv_buf_size: usize,
+    /// UDP socket send buffer size in bytes.
+    pub udp_send_buf_size: usize,
+    /// XDP ring depth.
+    pub xdp_ring_depth: u32,
+    /// XDP zero-copy mode.
+    pub xdp_zero_copy: bool,
+    /// XDP UMEM frame count.
+    pub xdp_frame_count: u32,
+    /// XDP UMEM frame size in bytes.
+    pub xdp_frame_size: usize,
+    /// XDP UMEM headroom per frame in bytes.
+    pub xdp_headroom: usize,
 }
 
 /// Network transport backend selection.
@@ -61,8 +89,11 @@ pub enum NetworkTransport {
     Xdp,
 }
 
+const DEFAULT_UDP_BUF_SIZE: usize = 4 * 1024 * 1024; // 4 MiB
+
 impl Default for NetworkConfig {
     fn default() -> Self {
+        use karstflow_constants::network;
         Self {
             transport: NetworkTransport::Udp,
             bind_address: "0.0.0.0".to_string(),
@@ -75,6 +106,13 @@ impl Default for NetworkConfig {
             queue_id: 0,
             net_tile_cpu: None,
             quic_tile_cpu: None,
+            udp_recv_buf_size: DEFAULT_UDP_BUF_SIZE,
+            udp_send_buf_size: DEFAULT_UDP_BUF_SIZE,
+            xdp_ring_depth: network::XDP_DEFAULT_RING_DEPTH,
+            xdp_zero_copy: false,
+            xdp_frame_count: network::XDP_DEFAULT_FRAME_COUNT,
+            xdp_frame_size: network::XDP_FRAME_SIZE,
+            xdp_headroom: network::XDP_HEADROOM,
         }
     }
 }
@@ -115,6 +153,31 @@ pub fn build_network_config(profile: Option<&NetworkProfileToml>) -> NetworkConf
         }
         config.net_tile_cpu = p.net_tile_cpu;
         config.quic_tile_cpu = p.quic_tile_cpu;
+
+        // UDP-specific
+        if let Some(sz) = p.udp_recv_buf_size {
+            config.udp_recv_buf_size = sz;
+        }
+        if let Some(sz) = p.udp_send_buf_size {
+            config.udp_send_buf_size = sz;
+        }
+
+        // XDP-specific
+        if let Some(depth) = p.xdp_ring_depth {
+            config.xdp_ring_depth = depth;
+        }
+        if let Some(zc) = p.xdp_zero_copy {
+            config.xdp_zero_copy = zc;
+        }
+        if let Some(fc) = p.xdp_frame_count {
+            config.xdp_frame_count = fc;
+        }
+        if let Some(fs) = p.xdp_frame_size {
+            config.xdp_frame_size = fs;
+        }
+        if let Some(hr) = p.xdp_headroom {
+            config.xdp_headroom = hr;
+        }
     }
 
     config
@@ -131,6 +194,13 @@ mod tests {
         assert_eq!(config.quic_port, 8003);
         assert_eq!(config.max_connections, 1024);
         assert!(config.enable_retry);
+        assert_eq!(config.udp_recv_buf_size, 4 * 1024 * 1024);
+        assert_eq!(config.udp_send_buf_size, 4 * 1024 * 1024);
+        assert_eq!(config.xdp_ring_depth, 2048);
+        assert!(!config.xdp_zero_copy);
+        assert_eq!(config.xdp_frame_count, 4096);
+        assert_eq!(config.xdp_frame_size, 4096);
+        assert_eq!(config.xdp_headroom, 256);
     }
 
     #[test]
@@ -167,5 +237,41 @@ mod tests {
         let config = build_network_config(Some(&profile));
         assert_eq!(config.net_tile_cpu, Some(2));
         assert_eq!(config.quic_tile_cpu, Some(3));
+    }
+
+    #[test]
+    fn build_with_udp_buffer_sizes() {
+        let profile = NetworkProfileToml {
+            udp_recv_buf_size: Some(8 * 1024 * 1024),
+            udp_send_buf_size: Some(2 * 1024 * 1024),
+            ..Default::default()
+        };
+        let config = build_network_config(Some(&profile));
+        assert_eq!(config.udp_recv_buf_size, 8 * 1024 * 1024);
+        assert_eq!(config.udp_send_buf_size, 2 * 1024 * 1024);
+    }
+
+    #[test]
+    fn build_with_xdp_config() {
+        let profile = NetworkProfileToml {
+            transport: Some("xdp".to_string()),
+            interface: Some("eth1".to_string()),
+            queue_id: Some(3),
+            xdp_ring_depth: Some(4096),
+            xdp_zero_copy: Some(true),
+            xdp_frame_count: Some(8192),
+            xdp_frame_size: Some(2048),
+            xdp_headroom: Some(128),
+            ..Default::default()
+        };
+        let config = build_network_config(Some(&profile));
+        assert_eq!(config.transport, NetworkTransport::Xdp);
+        assert_eq!(config.interface, "eth1");
+        assert_eq!(config.queue_id, 3);
+        assert_eq!(config.xdp_ring_depth, 4096);
+        assert!(config.xdp_zero_copy);
+        assert_eq!(config.xdp_frame_count, 8192);
+        assert_eq!(config.xdp_frame_size, 2048);
+        assert_eq!(config.xdp_headroom, 128);
     }
 }

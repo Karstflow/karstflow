@@ -2,7 +2,13 @@ pub mod append_vec;
 pub mod bank_fields;
 pub(crate) mod creator;
 pub(crate) mod loader;
+#[allow(dead_code, clippy::type_complexity)]
+pub mod merkle_parallel;
 pub(crate) mod metadata;
+#[allow(dead_code, clippy::io_other_error)]
+pub mod parallel_decompress;
+#[allow(dead_code)]
+pub mod peer_selector;
 pub mod restore;
 pub(crate) mod scheduler;
 pub mod solana_archive;

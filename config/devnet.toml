@@ -5,7 +5,7 @@ mode = "live"
 expected_genesis_hash = "EtWTRABZaYq6iMfeYKouRu166VU2xqa1wcaWoxPkrZBG"
 expected_shred_version = 64557
 gossip_bind_addr = "0.0.0.0:8001"
-gossip_allow_private_addresses = true
+gossip_allow_private_addresses = false
 snapshot_download = true
 ipc_mode = "shared_memory"
 quic_enabled = true
@@ -21,7 +21,7 @@ workers = 8
 
 [ingress_policy]
 ingress_mode = "udp"
-udp_bind_address = "0.0.0.0:8001"
+udp_bind_address = "0.0.0.0:8003"
 max_payload_bytes = 1232
 allow_quic_source = true
 allow_gossip_source = true
@@ -38,8 +38,9 @@ full_api = true
 
 [metrics]
 output_format = "prometheus"
-output_target = "http"
-http_bind = "0.0.0.0:9090"
+output_target = "file"
+file_path = "/var/log/karstflow/metrics.prom"
+http_bind = "127.0.0.1:7999"
 
 [logging]
 stderr_level = "info"

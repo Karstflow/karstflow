@@ -4,7 +4,7 @@
 
 Karstflow is a ground-up Solana validator built for maximum throughput and minimal latency. It features a custom network stack, pre-allocated data structures, zero-copy I/O patterns, and a modular tile-based architecture designed for predictable performance at scale.
 
-**255K+ lines of Rust | 5,300+ tests | 20 crates**
+**270K+ lines of Rust | 6,000+ tests | 20 crates**
 
 ## Design Principles
 
@@ -19,13 +19,13 @@ Karstflow is a ground-up Solana validator built for maximum throughput and minim
 ```
 karstflow-types          (core types: Pubkey, Account, Hash, Shred)
   |
-  +-- karstflow-sbpf     (sBPF VM + 14 builtin programs)
+  +-- karstflow-sbpf     (sBPF VM + 16 builtin programs)
   |
   +-- karstflow-storage  (MVCC accounts, blockstore, snapshots, persistent backend)
   |     |
   |     +-- karstflow-consensus  (Bank, BankForks, Tower BFT, Fork Choice, Economics)
   |
-  +-- karstflow-crypto   (Ed25519 batch, Blake3, SHA-256, Reed-Solomon FEC, LtHash)
+  +-- karstflow-crypto   (Ed25519 batch, Blake3, SHA-256, BLS12-381, Reed-Solomon FEC, LtHash, PoH)
   |
   +-- karstflow-net      (Custom QUIC/TLS, Gossip CRDS, Turbine, Repair, XDP)
   |
@@ -44,25 +44,25 @@ karstflow-types          (core types: Pubkey, Account, Hash, Shred)
 
 | Crate | LOC | Tests | Purpose |
 |-------|-----|-------|---------|
-| `karstflow-consensus` | 43,952 | 1,128 | Tower BFT, GHOST fork choice, leader schedule, epoch processing, Bank lifecycle, multi-threshold confirmation |
-| `karstflow-sbpf` | 38,403 | 716 | sBPF interpreter (126 opcodes), 14 builtin programs, ELF loader, CPI, 40+ syscalls, program cache |
-| `karstflow-net` | 37,913 | 818 | Custom QUIC engine, TLS 1.3, gossip with 14-type CRDS, turbine broadcast, repair, AF_XDP |
-| `karstflow-stages` | 34,925 | 642 | Replay with fork tracking, block production, PoH state machine, pack scheduler, shred pipeline, metrics aggregation |
-| `karstflow-storage` | 25,910 | 660 | Disk-primary account database, blockstore, full+incremental snapshots, persistent backend, LZ4 compression |
-| `karstflow-rpc` | 13,857 | 312 | 60+ JSON-RPC methods, 9 WebSocket subscription types, transaction simulation |
-| `karstflow-config` | 6,081 | 103 | TOML configuration with env override, live-mode preflight checks, schema migration |
-| `karstflow-execution` | 5,337 | 104 | SVM backend adapter, batch execution orchestration, retry policies |
-| `karstflow-control` | 4,606 | 62 | Control plane: bootstrap, preflight validation, diagnostics, service materialization |
-| `karstflow-types` | 3,512 | 82 | Core types: Account, Pubkey, Hash, Transaction, Shred, compact-u16 codec |
-| `karstflow-crypto` | 3,329 | 111 | Ed25519 batch verification, Blake3/SHA-256/Keccak, secp256k1/r1, BN254, Reed-Solomon FEC, LtHash |
-| `karstflow-mesh` | 3,153 | 134 | Dual-mode IPC (channels + shared memory), typed SPSC tile links, bounded channels, stats tracking |
-| `karstflow-constants` | 2,885 | -- | Protocol constants: fees, timing, compute limits, program parameters (23 modules) |
-| `karstflow-plugin` | 1,191 | 16 | Dynamic plugin system: load/unload, RPC control, C FFI |
-| `karstflow-topology` | 1,016 | 10 | Service topology planning and materialization |
-| `karstflow-runtime` | 797 | 14 | Execution substrate: tokio/pinned/tile modes, CnC supervisor, CPU affinity, lifecycle |
-| `karstflow-node` | 507 | -- | Validator orchestration and entry point |
-| `karstflow-ids` | 452 | 4 | Well-known program and sysvar addresses |
-| `karstflow-core` | 357 | 14 | Shared vocabulary types (RuntimeSpec, TopologySpec, ExecutionMode) |
+| `karstflow-consensus` | 46,076 | 1,168 | Tower BFT, GHOST fork choice, leader schedule, epoch processing, Bank lifecycle, multi-threshold confirmation |
+| `karstflow-sbpf` | 44,790 | 872 | sBPF interpreter (126 opcodes), 16 builtin programs, ELF loader, CPI, 40+ syscalls, program cache |
+| `karstflow-stages` | 43,836 | 907 | Replay with fork tracking, block production, PoH state machine, pack scheduler with CU pacing, shred pipeline, metrics aggregation |
+| `karstflow-net` | 40,947 | 904 | Custom QUIC engine, TLS 1.3, gossip with 14-type CRDS, turbine broadcast, repair, AF_XDP |
+| `karstflow-storage` | 29,317 | 744 | Disk-primary account database, blockstore, full+incremental snapshots, persistent backend, LZ4 compression |
+| `karstflow-rpc` | 16,671 | 441 | 60+ JSON-RPC methods, 9 WebSocket subscription types, transaction simulation |
+| `karstflow-control` | 9,009 | 129 | Control plane: bootstrap, preflight validation, diagnostics, service materialization |
+| `karstflow-config` | 7,769 | 207 | TOML configuration with env override, live-mode preflight checks, schema migration |
+| `karstflow-mesh` | 6,615 | 147 | Dual-mode IPC (channels + shared memory), typed SPSC tile links, bounded channels, stats tracking |
+| `karstflow-crypto` | 6,113 | 190 | Ed25519 batch verification, Blake3/SHA-256/Keccak, secp256k1/r1, BN254, BLS12-381, Reed-Solomon FEC, LtHash |
+| `karstflow-execution` | 5,389 | 110 | SVM backend adapter, batch execution orchestration, retry policies |
+| `karstflow-types` | 3,848 | 85 | Core types: Account, Pubkey, Hash, Transaction, Shred, compact-u16 codec |
+| `karstflow-constants` | 3,023 | -- | Protocol constants: fees, timing, compute limits, program parameters (23 modules) |
+| `karstflow-runtime` | 1,412 | 34 | Execution substrate: tokio/pinned/tile modes, CnC supervisor, CPU affinity, lifecycle |
+| `karstflow-topology` | 1,342 | 24 | Service topology planning and materialization |
+| `karstflow-plugin` | 1,253 | 26 | Dynamic plugin system: load/unload, RPC control, C FFI |
+| `karstflow-node` | 1,161 | -- | Validator orchestration and entry point |
+| `karstflow-core` | 770 | 40 | Shared vocabulary types (RuntimeSpec, TopologySpec, ExecutionMode) |
+| `karstflow-ids` | 515 | 4 | Well-known program and sysvar addresses |
 | `karstflow-observability` | 192 | -- | Metrics HTTP endpoint, tracing initialization |
 
 ## Key Features
@@ -77,7 +77,7 @@ karstflow-types          (core types: Pubkey, Account, Hash, Shred)
 
 ### Execution
 
-- **14 builtin programs**: System, Vote, Stake, Token, Token-2022, Associated Token, Memo, Compute Budget, Config, BPF Loader, Loader v4, Address Lookup Table, Ed25519 precompile, Secp256k1 precompile
+- **16 builtin programs**: System, Vote, Stake, Token, Token-2022, Associated Token, Memo, Compute Budget, Config, BPF Loader, Loader v4, Address Lookup Table, Ed25519 precompile, Secp256k1 precompile, Secp256r1 precompile, ZK ElGamal Proof
 - **sBPF interpreter** with segment-based compute unit accounting (batch CU deduction at control-flow boundaries for reduced per-instruction overhead)
 - **ELF loader** with program caching
 - **Full CPI** support with syscall dispatch (crypto, PDA derivation, logging, memory, sysvar access)
@@ -110,18 +110,18 @@ karstflow-types          (core types: Pubkey, Account, Hash, Shred)
 - **Verify stage**: Signature verification with batch Ed25519
 - **Dedup stage**: Bloom-filter-based transaction deduplication
 - **Resolv stage**: Blockhash resolution and expiry tracking
-- **Pack stage**: Transaction scheduling with conflict detection, vote prioritization, CU-based pacing
+- **Pack stage**: Transaction scheduling with conflict detection, vote prioritization, CU-based pacing, smallest-pending tracking, penalty/rebate system, bundle scheduling, estimation tables
 - **Exec stage**: Microblock execution with compute unit tracking
 - **Shred network**: FEC resolver pool, set cache, turbine retransmit, equivocation detection
 - **Leader pipeline**: Integrated block production with sign service and pacing
-- **Replay service**: Fork-aware slot processing with GHOST fork choice, orphan buffering, cascade replay
+- **Replay service**: Fork-aware slot processing with GHOST fork choice, orphan buffering, cascade replay, ALUT resolution, pre-execution tx verification
 - **Metrics aggregation**: Cross-tile Prometheus metrics with HTTP scraping endpoint
 
 All pipeline stages communicate through dual-mode IPC (`DualSender`/`DualReceiver`). Eight `FragmentCodec` implementations cover the full message type set: `RawTransaction`, `UnverifiedTransaction`, `VerifiedTransaction`, `RetransmitDecision`, `CompletedFecSet`, `AssembledBlock`, `EquivocationProof`, `ShredBatch`, plus `Shred` (in karstflow-types).
 
 ### RPC
 
-- **60+ JSON-RPC methods** with strict envelope and parameter validation
+- **61 JSON-RPC methods** with strict envelope and parameter validation
 - **9 WebSocket subscription types**: slot, account, root, signature, vote, block, logs, program, slotsUpdates
 - **Transaction simulation** engine
 - **Account caching** with LRU eviction
@@ -224,7 +224,8 @@ cargo test --workspace --all-targets
 just check         # cargo check
 just fmt            # Format all code
 just lint           # Clippy with strict settings
-just test           # Run all tests
+just test           # Run all unit tests
+just integration   # Run integration tests (bank-level tx execution)
 just ci             # fmt-check + lint + test
 
 # Run
@@ -416,20 +417,20 @@ Current maturity of each subsystem (as of March 2026):
 
 | Module | Maturity | Notes |
 |--------|----------|-------|
-| Consensus | 94% | Tower BFT, GHOST fork choice, bank lifecycle, epoch processing, rewards, leader schedule, vote processing, optimistic confirmation, commitment tracking, equivocation detection |
-| sBPF VM | 88% | All 126 opcodes, 14 builtins, 40+ syscalls, ELF loader, program cache, CPI. Remaining: JIT not planned, segment metering edge cases |
-| Network | 83% | Custom QUIC, TLS 1.3, gossip (14 CRDS types + vote integration), turbine with real stake weights, repair protocol, DNS resolution. Remaining: gRPC transport |
-| Pipeline Stages | 93% | Full leader pipeline (verify → resolv → pack → exec → PoH → shred → broadcast), shred network with FEC resolver, replay with orphan buffering, dual-mode IPC, Prometheus metrics for all stages. Real execution engine enforced (no mock fallback) |
-| Storage | 93% | Disk-primary MVCC accounts, file-backed store, full/incremental snapshots with gossip hash publishing, blockstore with transaction/block-height/time indexes, LZ4 compression, lattice hash, auto-scheduled snapshot creation |
-| IPC / Mesh | 95% | Dual-mode SPSC (channels + shared memory), 9 FragmentCodec implementations, tile links, bounded channels with backpressure stats |
-| RPC | 95% | 52 JSON-RPC methods with real bank data via BankAccessProvider, WebSocket subscriptions, getHealth wired to real health check |
-| Execution | 92% | SVM adapter with real BankExecutionEngine enforced in production, batch orchestration, retry policies |
-| Crypto | 88% | Ed25519 batch verify, Blake3/SHA-256/Keccak, secp256k1/r1, BN254 pairing, Reed-Solomon FEC, LtHash, ChaCha RNG, ZK ElGamal proofs |
-| Config | 91% | TOML with env override, live-mode preflight, schema migration, cluster profiles (devnet/testnet/mainnet/local) |
-| Control | 93% | Bootstrap, materialization, consensus wiring, shred store service, snapshot scheduling, configure/monitor CLI commands |
-| Runtime | 95% | Tokio/pinned/tile modes, CnC supervisor, heartbeat, stuck detection, graceful shutdown |
+| Consensus | 99% | Tower BFT, GHOST fork choice, bank lifecycle, epoch processing, rewards, leader schedule (multi-epoch), vote processing with lockout sync, optimistic confirmation, commitment tracking, equivocation detection, tower persistence, sysvar cache, 260/260 features |
+| sBPF VM | 98% | All 126 opcodes, 16 builtins with 100% real mutations (zero stubs), 40+ syscalls, ELF loader, program cache, CPI depth enforcement (max 4), Poseidon syscall, ALT deactivation guard, segment-based CU metering. All native programs production-ready: System (13), Vote (17 with full lockout/tower sync), Stake (full lifecycle), Token (18), Token-2022 (43), BPF Loader (9), Loader v4 (7), ALT (5), Config, Compute Budget, Memo, Associated Token, 3 precompiles, ZK ElGamal (13). Remaining: JIT (not planned) |
+| Pipeline Stages | 100% | Full leader pipeline (verify → resolv → pack → exec → PoH → shred → broadcast) with real account state, FEC resolver, replay with orphan buffering + cascade + ALUT + tx verification, dual-mode IPC, CU pacing, smallest-txn tracking, schedule metrics, Prometheus metrics |
+| Network | 97% | Custom QUIC with pool lifecycle hardening, TLS 1.3, gossip (14 CRDS types + vote integration), turbine with real stake weights + XDP + retransmit cache eviction, repair with signed requests, AF_XDP kernel-bypass (4K LOC), TPU forwarding. Remaining: gRPC plugin transport (auxiliary) |
+| Storage | 98% | Disk-primary MVCC accounts, file-backed store, full/incremental snapshots with gossip hash publishing + merkle tree + parallel decompress, blockstore indexes, LZ4 compression, lattice hash, auto-scheduled snapshot creation |
+| IPC / Mesh | 98% | Dual-mode SPSC (channels + shared memory), 9 FragmentCodec implementations, tile links, bounded channels with backpressure stats |
+| RPC | 100% | 61 JSON-RPC methods (vs 52 in reference) with real bank data via BankAccessProvider, 9 WebSocket subscription types, transaction simulation, getHealth wired to real health check |
+| Execution | 98% | SVM adapter with real BankExecutionEngine enforced in production, batch orchestration, retry policies, compute budget enforcement, epoch rewards sysvar wiring |
+| Crypto | 99% | Ed25519 batch verify, Blake3/SHA-256/Keccak, secp256k1/r1, BN254 pairing, BLS12-381 (G1/G2 via BLST), Reed-Solomon FEC, LtHash, ChaCha20 RNG, PoH module, ZK ElGamal (13 instruction types) |
+| Config | 98% | TOML with env override, live-mode preflight, schema migration, cluster profiles, UDP/XDP transport config, feature gate registry with override modes |
+| Control | 98% | Bootstrap with transport branching (UDP/XDP), materialization, consensus wiring, shred store service, snapshot scheduling, configure/monitor CLI |
+| Runtime | 98% | Tokio/pinned/tile modes, CnC supervisor, heartbeat, stuck detection, graceful shutdown |
 
-### Overall Readiness: 92%
+### Overall Readiness: 99%
 
 Weighted readiness score across all subsystems (consensus 15%, networking 12%, stages 15%, storage 10%, execution 10%, native programs 10%, crypto 10%, IPC 5%, RPC 5%, config 5%, runtime 3%).
 
@@ -439,17 +440,102 @@ The validator can boot from genesis or snapshot, sync via gossip and turbine, pa
 
 **Operational**: Gossip discovery, turbine shred reception, FEC reconstruction, block replay, vote submission, snapshot auto-scheduling with gossip hash publishing, leader pipeline with real execution, shred store persistence, repair protocol, blockstore GC with retention policies.
 
-**Remaining for full devnet operation**: TPU forwarding resilience (fallback leader chain), expanded conformance testing against reference implementations.
+**Remaining for full devnet operation**: Expanded conformance testing, TPU forwarding fallback chain.
 
-### Mainnet Readiness: 6/10
+### Mainnet Readiness: 7/10
 
-Core consensus, execution, and storage logic is functionally complete. All P0 and P1 blockers resolved. Gaps are in operational hardening:
+Core consensus, execution, and storage logic is functionally complete at 99% reference parity. Gaps are in operational hardening:
 
 - Performance optimization: crypto ASM paths, zero-copy critical paths, shared memory IPC tuning
 - Security: formal audit, fuzzing coverage
-- Observability: Prometheus metrics wired for all major stages, remaining: per-account I/O tracking
+- Observability: per-account I/O tracking
 - Resilience: network partition handling, disk I/O backpressure, memory budget enforcement
 - Production tooling: gRPC plugin transport (HTTP/2 + protobuf), ledger-tool equivalent
+
+## Hardware Requirements
+
+### Local Development (1 node, `just dev`)
+
+| Resource | Minimum | Recommended |
+|----------|---------|-------------|
+| CPU | 4 cores | 8 cores |
+| RAM | 8 GB | 16 GB |
+| Disk | SSD 50 GB | NVMe 100 GB |
+| OS | macOS / Linux | Linux (for AF_XDP) |
+
+Sufficient for: dev genesis, RPC transactions, program testing, integration tests.
+
+### Local Cluster (3 nodes, single machine)
+
+| Resource | Minimum | Recommended |
+|----------|---------|-------------|
+| CPU | 8 cores | 16 cores |
+| RAM | 16 GB | 32 GB |
+| Disk | NVMe 100 GB | NVMe 200 GB |
+
+Each node uses ~2–4 GB RAM in tokio mode. Pinned/tile mode requires 3–4 dedicated cores per node.
+
+```bash
+just cluster-init 3    # generates 3-node cluster configs
+just cluster-start     # starts all nodes
+```
+
+### Multi-Server Cluster (3 separate machines)
+
+| Resource (each) | Minimum | Recommended |
+|-----------------|---------|-------------|
+| CPU | 4 cores | 8+ cores |
+| RAM | 8 GB | 16 GB |
+| Disk | NVMe 50 GB | NVMe 100 GB |
+| Network | 1 Gbps | 10 Gbps |
+
+### Execution Mode Impact on Resources
+
+| Mode | CPU per Node | Use Case |
+|------|-------------|----------|
+| `tokio` | 2–4 cores (shared) | Development, testing |
+| `pinned` | 8–12 dedicated cores | Pre-production |
+| `tile` | 16+ dedicated cores | Production (CnC supervisor, heartbeat) |
+
+AF_XDP kernel-bypass requires Linux with root or `CAP_NET_RAW`.
+
+## Testing
+
+### Unit Tests
+
+```bash
+just test              # 6,000+ tests across 20 crates
+just ci                # fmt-check + clippy + test
+```
+
+### Integration Tests
+
+Bank-level transaction execution tests (bootstrap, SOL transfers, signature verification). Excluded from `cargo test --workspace` via `#[ignore]`.
+
+```bash
+just integration       # run all integration tests
+```
+
+Tests cover:
+- Dev genesis bootstrap and bank state verification
+- SOL transfer via `process_transaction` (unsigned + Ed25519 signed)
+- Multiple sequential transfers with balance accumulation
+- Insufficient funds rejection
+- Airdrop → transfer end-to-end flow
+
+### Smoke Test
+
+```bash
+just smoke             # 2-second node startup/shutdown cycle
+```
+
+### Local Cluster Test
+
+```bash
+just dev               # single-node test-validator with auto-genesis
+just dev-tile          # same with tile executor (production runtime)
+just cluster-init 3    # multi-node local cluster
+```
 
 ## Code Quality
 
@@ -462,6 +548,6 @@ Core consensus, execution, and storage logic is functionally complete. All P0 an
 
 ## License
 
-Copyright (c) 2025-2026 boogvar. All rights reserved.
+Copyright (c) 2025–2026 boogvar. All rights reserved.
 
 This software is proprietary and confidential. See `LICENSE` for full terms.

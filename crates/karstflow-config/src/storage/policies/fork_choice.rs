@@ -97,3 +97,85 @@ pub(crate) fn apply_fork_choice_quarantine_policy_env(
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn fork_choice_toml_applies_values() {
+        let mut policy = ForkChoiceRuntimePolicy::default();
+        let profile = StorageProfileToml {
+            fork_choice_enabled: Some(true),
+            fork_choice_reorg_retry_delay_millis: Some(200),
+            fork_choice_max_reorg_retry_attempts: Some(5),
+            fork_choice_hold_requires_confirmed_candidate: Some(true),
+            ..Default::default()
+        };
+        apply_fork_choice_runtime_policy_toml(&mut policy, &profile).unwrap();
+        assert!(policy.enabled);
+        assert_eq!(policy.reorg_retry_delay_millis, 200);
+        assert_eq!(policy.max_reorg_retry_attempts, 5);
+        assert!(policy.hold_requires_confirmed_candidate);
+    }
+
+    #[test]
+    fn fork_choice_toml_rejects_zero_retry_delay() {
+        let mut policy = ForkChoiceRuntimePolicy::default();
+        let profile = StorageProfileToml {
+            fork_choice_reorg_retry_delay_millis: Some(0),
+            ..Default::default()
+        };
+        assert!(apply_fork_choice_runtime_policy_toml(&mut policy, &profile).is_err());
+    }
+
+    #[test]
+    fn fork_choice_toml_rejects_zero_max_attempts() {
+        let mut policy = ForkChoiceRuntimePolicy::default();
+        let profile = StorageProfileToml {
+            fork_choice_max_reorg_retry_attempts: Some(0),
+            ..Default::default()
+        };
+        assert!(apply_fork_choice_runtime_policy_toml(&mut policy, &profile).is_err());
+    }
+
+    #[test]
+    fn quarantine_toml_applies_values() {
+        let mut policy = ForkChoiceQuarantinePolicy::default();
+        let profile = StorageProfileToml {
+            fork_choice_quarantine_enabled: Some(true),
+            fork_choice_quarantine_consecutive_reorg_threshold: Some(5),
+            fork_choice_quarantine_ticks: Some(20),
+            ..Default::default()
+        };
+        apply_fork_choice_quarantine_policy_toml(&mut policy, &profile).unwrap();
+        assert!(policy.enabled);
+        assert_eq!(policy.consecutive_reorg_threshold, 5);
+        assert_eq!(policy.quarantine_ticks, 20);
+    }
+
+    #[test]
+    fn quarantine_toml_rejects_zero_threshold() {
+        let mut policy = ForkChoiceQuarantinePolicy::default();
+        let profile = StorageProfileToml {
+            fork_choice_quarantine_consecutive_reorg_threshold: Some(0),
+            ..Default::default()
+        };
+        assert!(apply_fork_choice_quarantine_policy_toml(&mut policy, &profile).is_err());
+    }
+
+    #[test]
+    fn quarantine_env_applies_values() {
+        let mut policy = ForkChoiceQuarantinePolicy::default();
+        let env = StorageEnvOverrides {
+            fork_choice_quarantine_enabled: Some(true),
+            fork_choice_quarantine_consecutive_reorg_threshold: Some(3),
+            fork_choice_quarantine_ticks: Some(15),
+            ..Default::default()
+        };
+        apply_fork_choice_quarantine_policy_env(&mut policy, &env).unwrap();
+        assert!(policy.enabled);
+        assert_eq!(policy.consecutive_reorg_threshold, 3);
+        assert_eq!(policy.quarantine_ticks, 15);
+    }
+}

@@ -545,3 +545,237 @@ fn parse_max_supported_transaction_version(
 fn invalid_params_error() -> ErrorObjectOwned {
     ErrorObjectOwned::owned(-32602, "Invalid params", None::<()>)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    // ── parse_no_params ──
+
+    #[test]
+    fn parse_no_params_accepts_empty_array() {
+        assert!(parse_no_params(&json!([])).is_ok());
+    }
+
+    #[test]
+    fn parse_no_params_rejects_non_empty() {
+        assert!(parse_no_params(&json!([1])).is_err());
+    }
+
+    #[test]
+    fn parse_no_params_rejects_non_array() {
+        assert!(parse_no_params(&json!("hello")).is_err());
+    }
+
+    // ── parse_optional_commitment_config ──
+
+    #[test]
+    fn optional_commitment_defaults_to_finalized() {
+        let commitment = parse_optional_commitment_config(&json!([])).unwrap();
+        assert!(matches!(commitment, RpcCommitment::Finalized));
+    }
+
+    #[test]
+    fn optional_commitment_parses_confirmed() {
+        let commitment =
+            parse_optional_commitment_config(&json!([{"commitment": "confirmed"}])).unwrap();
+        assert!(matches!(commitment, RpcCommitment::Confirmed));
+    }
+
+    #[test]
+    fn optional_commitment_rejects_extra_params() {
+        assert!(parse_optional_commitment_config(&json!([{}, {}])).is_err());
+    }
+
+    #[test]
+    fn optional_commitment_rejects_non_object_param() {
+        assert!(parse_optional_commitment_config(&json!([42])).is_err());
+    }
+
+    // ── parse_subscription_commitment ──
+
+    #[test]
+    fn subscription_commitment_defaults_to_finalized() {
+        assert!(matches!(
+            parse_subscription_commitment(None).unwrap(),
+            RpcCommitment::Finalized
+        ));
+    }
+
+    #[test]
+    fn subscription_commitment_processed() {
+        let val = json!("processed");
+        assert!(matches!(
+            parse_subscription_commitment(Some(&val)).unwrap(),
+            RpcCommitment::Processed
+        ));
+    }
+
+    #[test]
+    fn subscription_commitment_invalid_string() {
+        let val = json!("unknown");
+        assert!(parse_subscription_commitment(Some(&val)).is_err());
+    }
+
+    #[test]
+    fn subscription_commitment_non_string() {
+        let val = json!(42);
+        assert!(parse_subscription_commitment(Some(&val)).is_err());
+    }
+
+    // ── parse_account_subscribe_params ──
+
+    #[test]
+    fn account_subscribe_minimal() {
+        let params = json!(["SomePublicKey123"]);
+        let (pubkey, config) = parse_account_subscribe_params(&params).unwrap();
+        assert_eq!(pubkey, "SomePublicKey123");
+        assert!(matches!(config.commitment, RpcCommitment::Finalized));
+        assert!(matches!(config.data_encoding, AccountDataEncoding::Base64));
+        assert!(config.data_slice.is_none());
+    }
+
+    #[test]
+    fn account_subscribe_with_config() {
+        let params = json!(["Pubkey", {"commitment": "confirmed", "encoding": "base58"}]);
+        let (_, config) = parse_account_subscribe_params(&params).unwrap();
+        assert!(matches!(config.commitment, RpcCommitment::Confirmed));
+        assert!(matches!(config.data_encoding, AccountDataEncoding::Base58));
+    }
+
+    #[test]
+    fn account_subscribe_with_data_slice() {
+        let params = json!(["Pubkey", {"dataSlice": {"offset": 10, "length": 20}}]);
+        let (_, config) = parse_account_subscribe_params(&params).unwrap();
+        let slice = config.data_slice.unwrap();
+        assert_eq!(slice.offset, 10);
+        assert_eq!(slice.length, 20);
+    }
+
+    #[test]
+    fn account_subscribe_rejects_empty_pubkey() {
+        assert!(parse_account_subscribe_params(&json!([""])).is_err());
+    }
+
+    #[test]
+    fn account_subscribe_rejects_unknown_keys() {
+        let params = json!(["Pubkey", {"badKey": "value"}]);
+        assert!(parse_account_subscribe_params(&params).is_err());
+    }
+
+    // ── parse_signature_subscribe_params ──
+
+    #[test]
+    fn signature_subscribe_minimal() {
+        let params = json!(["SomeSig123"]);
+        let (sig, config) = parse_signature_subscribe_params(&params).unwrap();
+        assert_eq!(sig, "SomeSig123");
+        assert!(!config.enable_received_notification);
+    }
+
+    #[test]
+    fn signature_subscribe_with_received() {
+        let params = json!(["SomeSig", {"enableReceivedNotification": true}]);
+        let (_, config) = parse_signature_subscribe_params(&params).unwrap();
+        assert!(config.enable_received_notification);
+    }
+
+    // ── parse_logs_subscribe_params ──
+
+    #[test]
+    fn logs_subscribe_all() {
+        let params = json!(["all"]);
+        let (filter, commitment) = parse_logs_subscribe_params(&params).unwrap();
+        assert!(matches!(filter, LogsSubscriptionFilter::All));
+        assert!(matches!(commitment, RpcCommitment::Finalized));
+    }
+
+    #[test]
+    fn logs_subscribe_all_with_votes() {
+        let params = json!(["allWithVotes"]);
+        let (filter, _) = parse_logs_subscribe_params(&params).unwrap();
+        assert!(matches!(filter, LogsSubscriptionFilter::AllWithVotes));
+    }
+
+    #[test]
+    fn logs_subscribe_mentions() {
+        let params = json!([{"mentions": ["SomePubkey"]}, {"commitment": "processed"}]);
+        let (filter, commitment) = parse_logs_subscribe_params(&params).unwrap();
+        assert!(matches!(filter, LogsSubscriptionFilter::Mentions(ref s) if s == "SomePubkey"));
+        assert!(matches!(commitment, RpcCommitment::Processed));
+    }
+
+    // ── parse_block_subscribe_params ──
+
+    #[test]
+    fn block_subscribe_all() {
+        let params = json!(["all"]);
+        let (filter, config) = parse_block_subscribe_params(&params).unwrap();
+        assert!(matches!(filter, BlockSubscriptionFilter::All));
+        assert!(matches!(config.encoding, BlockDataEncoding::Base64));
+        assert!(matches!(
+            config.transaction_details,
+            BlockTransactionDetails::Full
+        ));
+        assert!(config.show_rewards);
+        assert!(config.max_supported_transaction_version.is_none());
+    }
+
+    #[test]
+    fn block_subscribe_with_mention() {
+        let params = json!([{"mentionsAccountOrProgram": "Pubkey123"}]);
+        let (filter, _) = parse_block_subscribe_params(&params).unwrap();
+        assert!(
+            matches!(filter, BlockSubscriptionFilter::MentionsAccountOrProgram(ref s) if s == "Pubkey123")
+        );
+    }
+
+    #[test]
+    fn block_subscribe_with_config() {
+        let params = json!(["all", {
+            "encoding": "json",
+            "transactionDetails": "signatures",
+            "showRewards": false,
+            "maxSupportedTransactionVersion": 0
+        }]);
+        let (_, config) = parse_block_subscribe_params(&params).unwrap();
+        assert!(matches!(config.encoding, BlockDataEncoding::Json));
+        assert!(matches!(
+            config.transaction_details,
+            BlockTransactionDetails::Signatures
+        ));
+        assert!(!config.show_rewards);
+        assert_eq!(config.max_supported_transaction_version, Some(0));
+    }
+
+    // ── parse_program_subscribe_params ──
+
+    #[test]
+    fn program_subscribe_minimal() {
+        let params = json!(["TokenProgram"]);
+        let (program_id, config) = parse_program_subscribe_params(&params).unwrap();
+        assert_eq!(program_id, "TokenProgram");
+        assert!(config.filters.is_empty());
+    }
+
+    #[test]
+    fn program_subscribe_with_filters() {
+        let params = json!(["TokenProg", {
+            "filters": [
+                {"dataSize": 165},
+                {"memcmp": {"offset": 0, "bytes": "abc123"}}
+            ]
+        }]);
+        let (_, config) = parse_program_subscribe_params(&params).unwrap();
+        assert_eq!(config.filters.len(), 2);
+        assert!(matches!(
+            config.filters[0],
+            ProgramAccountFilter::DataSize(165)
+        ));
+        assert!(matches!(
+            config.filters[1],
+            ProgramAccountFilter::Memcmp { offset: 0, .. }
+        ));
+    }
+}

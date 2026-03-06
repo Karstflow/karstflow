@@ -38,3 +38,81 @@ impl EvictionPolicy {
         candidates.iter().take(to_evict).map(|(k, _)| *k).collect()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Arc;
+
+    fn make_slot(last_accessed: u64, ref_count: u64) -> CacheSlot {
+        CacheSlot {
+            program: Arc::new(super::super::CachedProgram::builtin(Pubkey::new([0; 32]))),
+            last_accessed,
+            deployment_slot: 0,
+            ref_count,
+        }
+    }
+
+    #[test]
+    fn no_eviction_when_under_target() {
+        let mut entries = HashMap::new();
+        entries.insert(Pubkey::new_from_array([1; 32]), make_slot(100, 0));
+        entries.insert(Pubkey::new_from_array([2; 32]), make_slot(200, 0));
+
+        let evicted = EvictionPolicy::select_evictions(&entries, 5);
+        assert!(evicted.is_empty());
+    }
+
+    #[test]
+    fn evicts_least_recently_used() {
+        let mut entries = HashMap::new();
+        let old_key = Pubkey::new_from_array([1; 32]);
+        let new_key = Pubkey::new_from_array([2; 32]);
+        entries.insert(old_key, make_slot(10, 0));
+        entries.insert(new_key, make_slot(100, 0));
+
+        let evicted = EvictionPolicy::select_evictions(&entries, 1);
+        assert_eq!(evicted.len(), 1);
+        assert_eq!(evicted[0], old_key);
+    }
+
+    #[test]
+    fn protects_referenced_entries() {
+        let mut entries = HashMap::new();
+        let protected = Pubkey::new_from_array([1; 32]);
+        let evictable = Pubkey::new_from_array([2; 32]);
+        entries.insert(protected, make_slot(10, 1)); // ref_count > 0
+        entries.insert(evictable, make_slot(20, 0));
+
+        let evicted = EvictionPolicy::select_evictions(&entries, 1);
+        assert_eq!(evicted.len(), 1);
+        assert_eq!(evicted[0], evictable);
+    }
+
+    #[test]
+    fn all_protected_means_no_eviction() {
+        let mut entries = HashMap::new();
+        entries.insert(Pubkey::new_from_array([1; 32]), make_slot(10, 1));
+        entries.insert(Pubkey::new_from_array([2; 32]), make_slot(20, 1));
+
+        let evicted = EvictionPolicy::select_evictions(&entries, 1);
+        assert!(evicted.is_empty());
+    }
+
+    #[test]
+    fn empty_entries_no_eviction() {
+        let entries = HashMap::new();
+        let evicted = EvictionPolicy::select_evictions(&entries, 0);
+        assert!(evicted.is_empty());
+    }
+
+    #[test]
+    fn exact_target_no_eviction() {
+        let mut entries = HashMap::new();
+        entries.insert(Pubkey::new_from_array([1; 32]), make_slot(10, 0));
+        entries.insert(Pubkey::new_from_array([2; 32]), make_slot(20, 0));
+
+        let evicted = EvictionPolicy::select_evictions(&entries, 2);
+        assert!(evicted.is_empty());
+    }
+}

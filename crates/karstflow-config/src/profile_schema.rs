@@ -24,3 +24,44 @@ pub fn migrate_node_profile_schema(mut profile: NodeProfileToml) -> Result<NodeP
         }),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn empty_profile() -> NodeProfileToml {
+        toml::from_str("").unwrap()
+    }
+
+    #[test]
+    fn migrate_current_version_is_noop() {
+        let mut profile = empty_profile();
+        profile.schema_version = Some(NODE_CONFIG_SCHEMA_VERSION);
+        let result = migrate_node_profile_schema(profile).unwrap();
+        assert_eq!(result.schema_version, Some(NODE_CONFIG_SCHEMA_VERSION));
+    }
+
+    #[test]
+    fn migrate_none_treated_as_current() {
+        let profile = empty_profile();
+        assert!(profile.schema_version.is_none());
+        // None defaults to current version — passes through unchanged.
+        let result = migrate_node_profile_schema(profile).unwrap();
+        assert!(result.schema_version.is_none());
+    }
+
+    #[test]
+    fn migrate_v0_upgrades_to_current() {
+        let mut profile = empty_profile();
+        profile.schema_version = Some(0);
+        let result = migrate_node_profile_schema(profile).unwrap();
+        assert_eq!(result.schema_version, Some(NODE_CONFIG_SCHEMA_VERSION));
+    }
+
+    #[test]
+    fn migrate_unsupported_version_errors() {
+        let mut profile = empty_profile();
+        profile.schema_version = Some(999);
+        assert!(migrate_node_profile_schema(profile).is_err());
+    }
+}

@@ -220,6 +220,16 @@ impl SysvarCache {
             .is_active()
     }
 
+    /// Get total epoch rewards in lamports (0 if not active).
+    pub fn epoch_rewards_total(&self) -> u64 {
+        self.epoch_rewards
+            .read()
+            .expect("epoch_rewards sysvar lock poisoned")
+            .rewards
+            .as_ref()
+            .map_or(0, |r| r.total_rewards)
+    }
+
     // -----------------------------------------------------------------------
     // LastRestartSlot operations
     // -----------------------------------------------------------------------

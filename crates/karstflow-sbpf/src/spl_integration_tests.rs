@@ -25,6 +25,28 @@ mod tests {
         }
     }
 
+    /// Create a test account with a valid Token-2022 mint base layout (82 bytes, initialized)
+    fn create_test_mint_account(lamports: u64, owner: Pubkey) -> Account {
+        use crate::token_2022_program::Token2022Mint;
+        let mint = Token2022Mint {
+            mint_authority: Some(Pubkey::new_unique()),
+            supply: 1_000_000,
+            decimals: 9,
+            is_initialized: true,
+            freeze_authority: None,
+            extensions: Vec::new(),
+        };
+        Account {
+            meta: AccountMeta {
+                lamports,
+                owner,
+                executable: false,
+                rent_epoch: 0,
+            },
+            data: AccountData::new(mint.pack()),
+        }
+    }
+
     fn create_test_mint(decimals: u8) -> Vec<u8> {
         let mut mint_data = vec![0u8; 82];
         // mint_authority (Some)
@@ -239,7 +261,7 @@ mod tests {
 
         let mint = Pubkey::new_unique();
 
-        let mint_account = create_test_account(1_000_000, TOKEN_2022_PROGRAM_ID);
+        let mint_account = create_test_mint_account(1_000_000, TOKEN_2022_PROGRAM_ID);
 
         let instruction_data = vec![34u8]; // InitializeNonTransferableMint
 
@@ -260,7 +282,7 @@ mod tests {
         let mint = Pubkey::new_unique();
         let rate_authority = Pubkey::new_unique();
 
-        let mint_account = create_test_account(1_000_000, TOKEN_2022_PROGRAM_ID);
+        let mint_account = create_test_mint_account(1_000_000, TOKEN_2022_PROGRAM_ID);
 
         let mut instruction_data = vec![35u8]; // InitializeInterestBearingConfig
         instruction_data.push(1); // has authority
@@ -378,7 +400,7 @@ mod tests {
         let processor = TransactionProcessor::new();
 
         let mint = Pubkey::new_unique();
-        let mint_account = create_test_account(1_000_000, TOKEN_2022_PROGRAM_ID);
+        let mint_account = create_test_mint_account(1_000_000, TOKEN_2022_PROGRAM_ID);
 
         let mut instruction_data = vec![32u8]; // InitializeDefaultAccountState
         instruction_data.push(2); // Frozen
@@ -529,7 +551,7 @@ mod tests {
         let mint = Pubkey::new_unique();
         let close_authority = Pubkey::new_unique();
 
-        let mint_account = create_test_account(1_000_000, TOKEN_2022_PROGRAM_ID);
+        let mint_account = create_test_mint_account(1_000_000, TOKEN_2022_PROGRAM_ID);
 
         let mut instruction_data = vec![25u8]; // InitializeMintCloseAuthority
         instruction_data.push(1); // has authority

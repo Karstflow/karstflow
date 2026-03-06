@@ -208,6 +208,7 @@ impl SavedTower {
     /// and then renaming, to avoid corruption from partial writes.
     pub fn save_to_directory(&self, dir: &Path) -> Result<(), TowerPersistenceError> {
         let data = self.serialize()?;
+        std::fs::create_dir_all(dir)?;
         let tower_path = dir.join(TOWER_FILE_NAME);
         let tmp_path = dir.join(format!("{}.tmp", TOWER_FILE_NAME));
 

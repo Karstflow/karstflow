@@ -149,4 +149,44 @@ mod tests {
         let bad_key = [0u8; 33];
         assert!(decompress_public_key(&bad_key).is_err());
     }
+
+    #[test]
+    fn verify_invalid_public_key_errors() {
+        let message_hash = [0x42u8; 32];
+        let sig = [0u8; 64];
+        // Empty key
+        let result = verify(&[], &message_hash, &sig);
+        assert!(result.is_err());
+        // Single byte key
+        let result = verify(&[0x02], &message_hash, &sig);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn verify_with_full_65_byte_key() {
+        let signing_key = SigningKey::random(&mut OsRng);
+        let verifying_key = signing_key.verifying_key();
+
+        let message_hash = [0x99; 32];
+
+        use p256::ecdsa::signature::hazmat::PrehashSigner;
+        let signature: Signature = signing_key.sign_prehash(&message_hash).unwrap();
+
+        // Verify with the full 65-byte uncompressed key (with 0x04 prefix).
+        let uncompressed = verifying_key.to_encoded_point(false);
+        let valid = verify(
+            uncompressed.as_bytes(),
+            &message_hash,
+            &signature.to_bytes().into(),
+        )
+        .unwrap();
+        assert!(valid);
+    }
+
+    #[test]
+    fn decompress_invalid_prefix_errors() {
+        let mut key = [0x42u8; 33]; // random bytes
+        key[0] = 0x05; // invalid prefix (not 0x02/0x03/0x04)
+        assert!(decompress_public_key(&key).is_err());
+    }
 }

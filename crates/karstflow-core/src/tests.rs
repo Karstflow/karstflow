@@ -1,5 +1,6 @@
 use crate::{
-    ExecutionMode, LinkKind, LinkSpec, PinnedCorePolicy, StageKind, StageSpec, TopologySpec,
+    ExecutionMode, IpcMode, LinkKind, LinkSpec, PinnedCorePolicy, StageKind, StageSpec,
+    TopologySpec,
 };
 
 #[test]
@@ -184,4 +185,130 @@ fn topology_validation_rejects_empty_stages() {
         links: vec![],
     };
     assert!(topology.validate().is_err());
+}
+
+#[test]
+fn topology_validation_rejects_empty_stage_id() {
+    let topology = TopologySpec {
+        topology_name: "empty-id".to_string(),
+        stages: vec![StageSpec {
+            stage_id: "  ".to_string(),
+            stage_kind: StageKind::IngressGateway,
+        }],
+        links: vec![],
+    };
+    let err = topology.validate().unwrap_err();
+    assert!(err.contains("stage_id must not be empty"));
+}
+
+#[test]
+fn topology_validation_rejects_empty_link_id() {
+    let topology = TopologySpec {
+        topology_name: "empty-link-id".to_string(),
+        stages: vec![
+            StageSpec {
+                stage_id: "a".to_string(),
+                stage_kind: StageKind::IngressGateway,
+            },
+            StageSpec {
+                stage_id: "b".to_string(),
+                stage_kind: StageKind::Telemetry,
+            },
+        ],
+        links: vec![LinkSpec {
+            link_id: "".to_string(),
+            link_kind: LinkKind::PacketStream,
+            source_stage_id: "a".to_string(),
+            destination_stage_id: "b".to_string(),
+            capacity: 64,
+        }],
+    };
+    let err = topology.validate().unwrap_err();
+    assert!(err.contains("link_id must not be empty"));
+}
+
+#[test]
+fn topology_validation_rejects_zero_capacity() {
+    let topology = TopologySpec {
+        topology_name: "zero-cap".to_string(),
+        stages: vec![
+            StageSpec {
+                stage_id: "a".to_string(),
+                stage_kind: StageKind::IngressGateway,
+            },
+            StageSpec {
+                stage_id: "b".to_string(),
+                stage_kind: StageKind::Telemetry,
+            },
+        ],
+        links: vec![LinkSpec {
+            link_id: "link1".to_string(),
+            link_kind: LinkKind::PacketStream,
+            source_stage_id: "a".to_string(),
+            destination_stage_id: "b".to_string(),
+            capacity: 0,
+        }],
+    };
+    let err = topology.validate().unwrap_err();
+    assert!(err.contains("zero capacity"));
+}
+
+#[test]
+fn topology_validation_rejects_unknown_source_stage() {
+    let topology = TopologySpec {
+        topology_name: "bad-src".to_string(),
+        stages: vec![StageSpec {
+            stage_id: "a".to_string(),
+            stage_kind: StageKind::IngressGateway,
+        }],
+        links: vec![LinkSpec {
+            link_id: "link1".to_string(),
+            link_kind: LinkKind::PacketStream,
+            source_stage_id: "nonexistent".to_string(),
+            destination_stage_id: "a".to_string(),
+            capacity: 64,
+        }],
+    };
+    let err = topology.validate().unwrap_err();
+    assert!(err.contains("unknown source stage"));
+}
+
+#[test]
+fn ipc_mode_from_env_channel() {
+    assert_eq!(IpcMode::from_env("channel"), Some(IpcMode::Channel));
+    assert_eq!(IpcMode::from_env("channels"), Some(IpcMode::Channel));
+}
+
+#[test]
+fn ipc_mode_from_env_shared_memory() {
+    assert_eq!(
+        IpcMode::from_env("shared_memory"),
+        Some(IpcMode::SharedMemory)
+    );
+    assert_eq!(IpcMode::from_env("shm"), Some(IpcMode::SharedMemory));
+}
+
+#[test]
+fn ipc_mode_from_env_case_insensitive() {
+    assert_eq!(IpcMode::from_env("CHANNEL"), Some(IpcMode::Channel));
+    assert_eq!(IpcMode::from_env("SHM"), Some(IpcMode::SharedMemory));
+}
+
+#[test]
+fn ipc_mode_from_env_invalid() {
+    assert_eq!(IpcMode::from_env("pipe"), None);
+    assert_eq!(IpcMode::from_env(""), None);
+}
+
+#[test]
+fn ipc_mode_display() {
+    assert_eq!(format!("{}", IpcMode::Channel), "channel");
+    assert_eq!(format!("{}", IpcMode::SharedMemory), "shared_memory");
+}
+
+#[test]
+fn execution_mode_tile_variant() {
+    assert_eq!(ExecutionMode::from_env("tile"), Some(ExecutionMode::Tile));
+    assert_eq!(ExecutionMode::from_env("TILE"), Some(ExecutionMode::Tile));
+    assert_eq!(format!("{}", ExecutionMode::Tile), "tile");
 }

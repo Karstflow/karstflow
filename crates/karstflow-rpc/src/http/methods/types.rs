@@ -425,3 +425,135 @@ pub struct ProgramFilterMemcmpInner {
     pub offset: usize,
     pub bytes: String,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn to_value_serializes_struct() {
+        let resp = GetVersionResponse {
+            karstflow_core: "0.1.0".into(),
+            feature_set: "12345".into(),
+        };
+        let val = to_value(&resp);
+        assert_eq!(val["karstflow-core"], "0.1.0");
+        assert_eq!(val["feature-set"], "12345");
+    }
+
+    #[test]
+    fn rpc_response_wraps_value() {
+        let resp = RpcResponse::new(42, true);
+        let val = to_value(&resp);
+        assert_eq!(val["context"]["slot"], 42);
+        assert_eq!(val["value"], true);
+    }
+
+    #[test]
+    fn rpc_response_with_null_value() {
+        let resp: RpcResponse<Option<u64>> = RpcResponse::new(0, None);
+        let val = to_value(&resp);
+        assert!(val["value"].is_null());
+    }
+
+    #[test]
+    fn epoch_info_camel_case_fields() {
+        let info = EpochInfo {
+            absolute_slot: 100,
+            block_height: 50,
+            epoch: 1,
+            slot_index: 10,
+            slots_in_epoch: 432000,
+            transaction_count: 999,
+        };
+        let val = to_value(&info);
+        assert_eq!(val["absoluteSlot"], 100);
+        assert_eq!(val["blockHeight"], 50);
+        assert_eq!(val["slotsInEpoch"], 432000);
+    }
+
+    #[test]
+    fn account_data_encoded_variant() {
+        let data = AccountData::Encoded("abc".into(), "base64".into());
+        let val = to_value(&data);
+        let arr = val.as_array().unwrap();
+        assert_eq!(arr[0], "abc");
+        assert_eq!(arr[1], "base64");
+    }
+
+    #[test]
+    fn account_data_json_parsed_variant() {
+        let data = AccountData::JsonParsed {
+            program: "spl-token".into(),
+            parsed: serde_json::json!({"type": "account"}),
+        };
+        let val = to_value(&data);
+        assert_eq!(val["program"], "spl-token");
+        assert!(val["parsed"].is_object());
+    }
+
+    #[test]
+    fn fee_calculator_camel_case() {
+        let fc = FeeCalculator {
+            lamports_per_signature: 5000,
+        };
+        let val = to_value(&fc);
+        assert_eq!(val["lamportsPerSignature"], 5000);
+    }
+
+    #[test]
+    fn slot_notification_fields() {
+        let notif = SlotNotification {
+            parent: 99,
+            slot: 100,
+            root: 68,
+        };
+        let val = to_value(&notif);
+        assert_eq!(val["parent"], 99);
+        assert_eq!(val["slot"], 100);
+        assert_eq!(val["root"], 68);
+    }
+
+    #[test]
+    fn cluster_node_optional_fields() {
+        let node = ClusterNode {
+            pubkey: "abc".into(),
+            gossip: None,
+            tpu: Some("127.0.0.1:8001".into()),
+            rpc: None,
+            version: Some("1.0.0".into()),
+            feature_set: None,
+            shred_version: 42,
+        };
+        let val = to_value(&node);
+        assert_eq!(val["pubkey"], "abc");
+        assert!(val["gossip"].is_null());
+        assert_eq!(val["tpu"], "127.0.0.1:8001");
+        assert_eq!(val["shredVersion"], 42);
+    }
+
+    #[test]
+    fn inflation_governor_fields() {
+        let gov = InflationGovernor {
+            foundation: 0.05,
+            foundation_term: 7.0,
+            initial: 0.08,
+            taper: 0.15,
+            terminal: 0.015,
+        };
+        let val = to_value(&gov);
+        assert_eq!(val["initial"], 0.08);
+        assert_eq!(val["terminal"], 0.015);
+    }
+
+    #[test]
+    fn prioritization_fee_camel_case() {
+        let fee = PrioritizationFee {
+            slot: 500,
+            prioritization_fee: 1000,
+        };
+        let val = to_value(&fee);
+        assert_eq!(val["slot"], 500);
+        assert_eq!(val["prioritizationFee"], 1000);
+    }
+}

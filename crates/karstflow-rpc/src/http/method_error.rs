@@ -46,3 +46,85 @@ impl From<i32> for RpcMethodError {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn error_codes_are_negative() {
+        let errors = [
+            RpcMethodError::InvalidRequest,
+            RpcMethodError::InvalidParams,
+            RpcMethodError::MethodNotFound,
+            RpcMethodError::MinimumContextSlotNotReached,
+            RpcMethodError::TransactionSubmissionFailed,
+            RpcMethodError::NodeUnhealthy,
+            RpcMethodError::Internal,
+        ];
+        for e in errors {
+            assert!(e.code() < 0);
+        }
+    }
+
+    #[test]
+    fn standard_jsonrpc_codes() {
+        assert_eq!(RpcMethodError::InvalidRequest.code(), -32600);
+        assert_eq!(RpcMethodError::InvalidParams.code(), -32602);
+        assert_eq!(RpcMethodError::MethodNotFound.code(), -32601);
+    }
+
+    #[test]
+    fn custom_error_codes() {
+        assert_eq!(RpcMethodError::MinimumContextSlotNotReached.code(), -32016);
+        assert_eq!(RpcMethodError::TransactionSubmissionFailed.code(), -32002);
+        assert_eq!(RpcMethodError::NodeUnhealthy.code(), -32005);
+        assert_eq!(RpcMethodError::Internal.code(), -32603);
+    }
+
+    #[test]
+    fn message_includes_method_name() {
+        let msg = RpcMethodError::MethodNotFound.message("getBalance");
+        assert!(msg.contains("getBalance"));
+    }
+
+    #[test]
+    fn message_static_errors() {
+        assert_eq!(RpcMethodError::InvalidParams.message("x"), "Invalid params");
+        assert_eq!(
+            RpcMethodError::InvalidRequest.message("x"),
+            "Invalid request"
+        );
+        assert_eq!(RpcMethodError::Internal.message("x"), "Internal error");
+    }
+
+    #[test]
+    fn from_known_code() {
+        assert_eq!(RpcMethodError::from(-32600), RpcMethodError::InvalidRequest);
+        assert_eq!(RpcMethodError::from(-32602), RpcMethodError::InvalidParams);
+        assert_eq!(RpcMethodError::from(-32601), RpcMethodError::MethodNotFound);
+        assert_eq!(
+            RpcMethodError::from(-32016),
+            RpcMethodError::MinimumContextSlotNotReached
+        );
+    }
+
+    #[test]
+    fn from_unknown_code_returns_internal() {
+        assert_eq!(RpcMethodError::from(-99999), RpcMethodError::Internal);
+        assert_eq!(RpcMethodError::from(0), RpcMethodError::Internal);
+    }
+
+    #[test]
+    fn roundtrip_code_to_error() {
+        let errors = [
+            RpcMethodError::InvalidRequest,
+            RpcMethodError::InvalidParams,
+            RpcMethodError::MethodNotFound,
+            RpcMethodError::MinimumContextSlotNotReached,
+        ];
+        for e in errors {
+            assert_eq!(RpcMethodError::from(e.code()), e);
+        }
+    }
+}

@@ -1,0 +1,26 @@
+[package]
+name = "karstflow-integration-tests"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+
+# This crate contains only tests — no library code is published.
+# All tests are marked #[ignore] so they never run with `cargo test --workspace`.
+# Run explicitly: `just integration` or `cargo test -p karstflow-integration-tests -- --ignored`
+
+[dependencies]
+karstflow-consensus = { path = "../karstflow-consensus" }
+karstflow-constants = { path = "../karstflow-constants" }
+karstflow-control = { path = "../karstflow-control" }
+karstflow-config = { path = "../karstflow-config" }
+karstflow-crypto = { path = "../karstflow-crypto" }
+karstflow-execution = { path = "../karstflow-execution" }
+karstflow-runtime = { path = "../karstflow-runtime" }
+karstflow-sbpf = { path = "../karstflow-sbpf" }
+karstflow-stages = { path = "../karstflow-stages" }
+karstflow-storage = { path = "../karstflow-storage" }
+karstflow-types = { path = "../karstflow-types" }
+karstflow-ids = { path = "../karstflow-ids" }
+sha2.workspace = true
+curve25519-dalek.workspace = true

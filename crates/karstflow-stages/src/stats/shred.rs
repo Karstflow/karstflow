@@ -55,3 +55,54 @@ impl ShredFilterStats {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn default_snapshot_is_all_zeros() {
+        let stats = ShredFilterStats::default();
+        let snap = stats.snapshot();
+        assert_eq!(snap.accepted_shreds, 0);
+        assert_eq!(snap.duplicate_shreds, 0);
+        assert_eq!(snap.dropped_empty_payload, 0);
+        assert_eq!(snap.parse_failures, 0);
+    }
+
+    #[test]
+    fn increment_accepted_and_duplicates() {
+        let stats = ShredFilterStats::default();
+        stats.increment_accepted();
+        stats.increment_accepted();
+        stats.increment_duplicates();
+        let snap = stats.snapshot();
+        assert_eq!(snap.accepted_shreds, 2);
+        assert_eq!(snap.duplicate_shreds, 1);
+    }
+
+    #[test]
+    fn increment_parse_failures() {
+        let stats = ShredFilterStats::default();
+        stats.increment_parse_failures();
+        stats.increment_parse_failures();
+        let snap = stats.snapshot();
+        assert_eq!(snap.parse_failures, 2);
+    }
+
+    #[test]
+    fn drop_reasons_increment_correct_counters() {
+        let stats = ShredFilterStats::default();
+        stats.increment_drop_reason(DropReason::EmptyPayload);
+        stats.increment_drop_reason(DropReason::OversizedPayload);
+        stats.increment_drop_reason(DropReason::SourceNotAllowed);
+        // These should be no-ops for shred filter
+        stats.increment_drop_reason(DropReason::SourceRateLimited);
+        stats.increment_drop_reason(DropReason::SourceCostBudgetExceeded);
+        stats.increment_drop_reason(DropReason::DownstreamBackpressure);
+        let snap = stats.snapshot();
+        assert_eq!(snap.dropped_empty_payload, 1);
+        assert_eq!(snap.dropped_oversized_payload, 1);
+        assert_eq!(snap.dropped_disallowed_source, 1);
+    }
+}

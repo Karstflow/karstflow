@@ -63,3 +63,60 @@ pub trait Service: Send + 'static {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn shutdown_switch_initially_not_requested() {
+        let switch = ShutdownSwitch::new();
+        assert!(!switch.is_stop_requested());
+    }
+
+    #[test]
+    fn shutdown_switch_request_stop_transitions() {
+        let switch = ShutdownSwitch::new();
+        switch.request_stop();
+        assert!(switch.is_stop_requested());
+    }
+
+    #[test]
+    fn shutdown_switch_clones_share_state() {
+        let switch = ShutdownSwitch::new();
+        let clone = switch.clone();
+        switch.request_stop();
+        assert!(clone.is_stop_requested());
+    }
+
+    #[test]
+    fn shutdown_switch_default_equals_new() {
+        let switch = ShutdownSwitch::default();
+        assert!(!switch.is_stop_requested());
+    }
+
+    #[test]
+    fn shutdown_switch_double_stop_is_idempotent() {
+        let switch = ShutdownSwitch::new();
+        switch.request_stop();
+        switch.request_stop();
+        assert!(switch.is_stop_requested());
+    }
+
+    #[test]
+    fn service_context_captures_shutdown() {
+        let switch = ShutdownSwitch::new();
+        let ctx = ServiceContext::new(switch.clone());
+        switch.request_stop();
+        assert!(ctx.shutdown.is_stop_requested());
+    }
+
+    #[test]
+    fn service_context_launch_time_is_recent() {
+        let before = Instant::now();
+        let ctx = ServiceContext::new(ShutdownSwitch::new());
+        let after = Instant::now();
+        assert!(ctx.launch_time >= before);
+        assert!(ctx.launch_time <= after);
+    }
+}

@@ -623,6 +623,7 @@ fn run_with_node_config(
         node_id,
         cluster_info.clone(),
         consensus.vote_processor.clone(),
+        &node_config.network_config,
     )?;
     let retransmit_service = turbine_bundle.retransmit;
 
@@ -641,6 +642,7 @@ fn run_with_node_config(
         consensus.bank_forks.clone(),
         shred_provider,
         shred_arrival_rx,
+        node_config.repair_bind_addr(),
     )?;
     // Keep repair I/O handle alive — its JoinHandle keeps the background
     // UDP requester/server thread running for the repair service lifetime.

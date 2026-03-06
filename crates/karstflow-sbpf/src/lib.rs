@@ -16,10 +16,12 @@
 mod address_lookup_table;
 mod associated_token_program;
 mod bpf_loader;
+mod bpf_loader_deprecated;
 pub mod bpf_serialization;
 mod compute_budget_program;
 mod config_program;
 pub mod elf_loader;
+mod feature_gate_program;
 pub mod instruction;
 #[cfg(test)]
 mod integration_tests;
@@ -29,6 +31,7 @@ mod memo_program;
 pub mod memory;
 pub mod precompiles;
 mod program_cache;
+mod slashing_program;
 #[cfg(test)]
 mod spl_integration_tests;
 mod stake;
@@ -50,10 +53,12 @@ pub use address_lookup_table::{
 };
 pub use associated_token_program::AssociatedTokenProgramExecutor;
 pub use bpf_loader::{BpfLoaderExecutor, ProgramAccountState};
+pub use bpf_loader_deprecated::BpfLoaderDeprecatedExecutor;
 pub use compute_budget_program::{
     extract_compute_budget, ComputeBudgetProgramExecutor, ExtractedComputeBudget,
 };
 pub use config_program::ConfigProgramExecutor;
+pub use feature_gate_program::FeatureGateProgramExecutor;
 pub use karstflow_constants::execution::{
     COMPUTE_UNIT_COST_ACCOUNT_WRITEBACK, COMPUTE_UNIT_COST_PER_ACCOUNT,
     COMPUTE_UNIT_COST_PER_DATA_BYTE, DEFAULT_INSTRUCTION_BASE_COST, MAX_COMPUTE_UNITS,
@@ -64,6 +69,7 @@ pub use precompiles::{
     Ed25519PrecompileExecutor, Secp256k1PrecompileExecutor, Secp256r1PrecompileExecutor,
 };
 pub use program_cache::{CacheError, CachedProgram, ProgramCache};
+pub use slashing_program::SlashingProgramExecutor;
 pub use stake::StakeProgramExecutor;
 pub use syscall_dispatch::InstructionExecutor;
 pub use system_program::SystemProgramExecutor;

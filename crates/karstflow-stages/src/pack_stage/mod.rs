@@ -5,15 +5,34 @@
 /// transactions by fee, detects write-lock conflicts between accounts,
 /// and respects per-block cost limits.
 ///
-/// This corresponds to Firedancer's pack tile which is responsible for
+/// This corresponds to the pack tile which is responsible for
 /// maximizing validator profitability by selecting and ordering transactions.
+pub mod bitset_conflict;
+pub mod bundle;
+pub mod chkdup;
+pub mod compute_budget;
 mod conflict_detector;
+pub mod cost_model;
+pub mod estimation_table;
+pub mod nonce_validation;
+pub mod penalty;
 mod priority_queue;
 mod scheduler;
+pub mod tip_blacklist;
+pub mod unwritable;
 
+pub use bitset_conflict::{AccountBitset, TxnLockFootprint};
+pub use bundle::{BundleMeta, BundleTracker, IbState};
+pub use chkdup::{has_duplicate_accounts, has_duplicate_accounts_flat};
+pub use compute_budget::{ComputeBudgetResult, ComputeBudgetState};
 pub use conflict_detector::{AccountLock, ConflictDetector, LockKind};
+pub use cost_model::{compute_cost, CostInput, CostResult};
+pub use estimation_table::EstimationTable;
+pub use nonce_validation::{validate_durable_nonce, NonceValidation};
 pub use priority_queue::{PackedTransaction, TransactionQueue};
 pub use scheduler::{
-    Microblock, MicroblockRebate, PackConfig, PackLimits, PackOutcome, PackPacer, PackScheduler,
-    PackStats, PackStatsSnapshot,
+    CuPacer, Microblock, MicroblockRebate, PackConfig, PackLimits, PackOutcome, PackPacer,
+    PackScheduler, PackStats, PackStatsSnapshot, ScheduleMetrics, SmallestPending,
 };
+pub use tip_blacklist::{check_tip_blacklist, TipBlacklistResult};
+pub use unwritable::is_unwritable;

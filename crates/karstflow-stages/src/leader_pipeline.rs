@@ -129,8 +129,8 @@ impl SbpfExecutionEngine {
                 // Convert modified accounts to raw byte pairs for ExecStage.
                 let modified: Vec<([u8; 32], Vec<u8>)> = result
                     .modified_accounts
-                    .keys()
-                    .map(|k| (k.to_bytes(), Vec::new()))
+                    .iter()
+                    .map(|(k, account)| (k.to_bytes(), account.data.as_slice().to_vec()))
                     .collect();
 
                 let consumed = result.compute_units_consumed;

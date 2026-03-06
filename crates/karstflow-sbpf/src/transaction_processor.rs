@@ -1,10 +1,11 @@
 use crate::sysvar_snapshot::SysvarSnapshot;
 use crate::vm::{BytecodeVm, SbpfVm};
 use crate::{
-    AddressLookupTableExecutor, AssociatedTokenProgramExecutor, BpfLoaderExecutor,
-    ComputeBudgetProgramExecutor, ConfigProgramExecutor, Ed25519PrecompileExecutor,
-    ExecutionContext, ExecutionOutcome, LoaderV4Executor, MemoProgramExecutor,
-    Secp256k1PrecompileExecutor, Secp256r1PrecompileExecutor, StakeProgramExecutor,
+    AddressLookupTableExecutor, AssociatedTokenProgramExecutor, BpfLoaderDeprecatedExecutor,
+    BpfLoaderExecutor, ComputeBudgetProgramExecutor, ConfigProgramExecutor,
+    Ed25519PrecompileExecutor, ExecutionContext, ExecutionOutcome, FeatureGateProgramExecutor,
+    LoaderV4Executor, MemoProgramExecutor, Secp256k1PrecompileExecutor,
+    Secp256r1PrecompileExecutor, SlashingProgramExecutor, StakeProgramExecutor,
     SystemProgramExecutor, Token2022ProgramExecutor, TokenProgramExecutor, VoteProgramExecutor,
     ZkElGamalProofExecutor, MAX_COMPUTE_UNITS,
 };
@@ -13,9 +14,10 @@ use karstflow_ids::{
         is_feature_active, ENABLE_LOADER_V4, ENABLE_SECP256R1_PRECOMPILE,
         ZK_ELGAMAL_PROOF_PROGRAM_ENABLED,
     },
-    ADDRESS_LOOKUP_TABLE_PROGRAM_ID, ASSOCIATED_TOKEN_PROGRAM_ID, BPF_LOADER_PROGRAM_ID,
-    COMPUTE_BUDGET_PROGRAM_ID, CONFIG_PROGRAM_ID, ED25519_PROGRAM_ID, LOADER_V4_PROGRAM_ID,
-    MEMO_PROGRAM_ID, MEMO_PROGRAM_V3_ID, SECP256K1_PROGRAM_ID, SECP256R1_PROGRAM_ID,
+    ADDRESS_LOOKUP_TABLE_PROGRAM_ID, ASSOCIATED_TOKEN_PROGRAM_ID, BPF_LOADER_DEPRECATED_PROGRAM_ID,
+    BPF_LOADER_PROGRAM_ID, BPF_LOADER_V2_PROGRAM_ID, COMPUTE_BUDGET_PROGRAM_ID, CONFIG_PROGRAM_ID,
+    ED25519_PROGRAM_ID, FEATURE_PROGRAM_ID, LOADER_V4_PROGRAM_ID, MEMO_PROGRAM_ID,
+    MEMO_PROGRAM_V3_ID, SECP256K1_PROGRAM_ID, SECP256R1_PROGRAM_ID, SLASHING_PROGRAM_ID,
     STAKE_PROGRAM_ID, SYSTEM_PROGRAM_ID, TOKEN_2022_PROGRAM_ID, TOKEN_PROGRAM_ID, VOTE_PROGRAM_ID,
     ZK_ELGAMAL_PROOF_PROGRAM_ID,
 };
@@ -128,6 +130,7 @@ pub struct TransactionProcessor {
     associated_token_program: AssociatedTokenProgramExecutor,
     memo_program: MemoProgramExecutor,
     bpf_loader: BpfLoaderExecutor,
+    bpf_loader_deprecated: BpfLoaderDeprecatedExecutor,
     compute_budget_program: ComputeBudgetProgramExecutor,
     address_lookup_table: AddressLookupTableExecutor,
     config_program: ConfigProgramExecutor,
@@ -136,6 +139,8 @@ pub struct TransactionProcessor {
     secp256k1_precompile: Secp256k1PrecompileExecutor,
     secp256r1_precompile: Secp256r1PrecompileExecutor,
     zk_elgamal_proof: ZkElGamalProofExecutor,
+    feature_gate_program: FeatureGateProgramExecutor,
+    slashing_program: SlashingProgramExecutor,
     bytecode_vm: BytecodeVm,
     max_compute_units: u64,
 }
@@ -152,6 +157,7 @@ impl TransactionProcessor {
             associated_token_program: AssociatedTokenProgramExecutor::new(180),
             memo_program: MemoProgramExecutor::new(100),
             bpf_loader: BpfLoaderExecutor::new(400),
+            bpf_loader_deprecated: BpfLoaderDeprecatedExecutor::new(1140),
             compute_budget_program: ComputeBudgetProgramExecutor::new(150),
             address_lookup_table: AddressLookupTableExecutor::new(200),
             config_program: ConfigProgramExecutor::new(150),
@@ -160,6 +166,8 @@ impl TransactionProcessor {
             secp256k1_precompile: Secp256k1PrecompileExecutor::new(200),
             secp256r1_precompile: Secp256r1PrecompileExecutor::new(200),
             zk_elgamal_proof: ZkElGamalProofExecutor::new(200),
+            feature_gate_program: FeatureGateProgramExecutor::new(750),
+            slashing_program: SlashingProgramExecutor::new(2500),
             bytecode_vm: BytecodeVm::new(),
             max_compute_units: MAX_COMPUTE_UNITS,
         }
@@ -364,6 +372,17 @@ impl TransactionProcessor {
                 self.invalidate_after_loader_instruction(context);
             }
             outcome
+        } else if context.program_id == BPF_LOADER_DEPRECATED_PROGRAM_ID {
+            self.bpf_loader_deprecated
+                .execute(context)
+                .unwrap_or_else(|err| ExecutionOutcome::failure(1140, err))
+        } else if context.program_id == BPF_LOADER_V2_PROGRAM_ID {
+            // BPF Loader V2 uses the same Write/Finalize logic as deprecated
+            // but with lower compute cost. Route through the deprecated handler
+            // since the instruction format is identical.
+            self.bpf_loader_deprecated
+                .execute(context)
+                .unwrap_or_else(|err| ExecutionOutcome::failure(570, err))
         } else if context.program_id == COMPUTE_BUDGET_PROGRAM_ID {
             self.compute_budget_program
                 .execute(context)
@@ -416,6 +435,14 @@ impl TransactionProcessor {
             self.zk_elgamal_proof
                 .execute(context)
                 .unwrap_or_else(|err| ExecutionOutcome::failure(200, err))
+        } else if context.program_id == FEATURE_PROGRAM_ID {
+            self.feature_gate_program
+                .execute(context)
+                .unwrap_or_else(|err| ExecutionOutcome::failure(750, err))
+        } else if context.program_id == SLASHING_PROGRAM_ID {
+            self.slashing_program
+                .execute(context)
+                .unwrap_or_else(|err| ExecutionOutcome::failure(2500, err))
         } else {
             // Try executing as a deployed BPF program via BytecodeVm
             self.try_execute_bpf(context)

@@ -1,3 +1,4 @@
+pub mod alut_resolver;
 mod ancestry_verifier;
 mod bank_transition;
 mod block_processor;
@@ -7,6 +8,7 @@ mod slot_metrics;
 #[cfg(test)]
 mod tests;
 mod transaction_dispatcher;
+pub mod tx_verifier;
 mod vote_integration;
 
 pub use ancestry_verifier::{

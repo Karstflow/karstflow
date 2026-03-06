@@ -24,3 +24,59 @@ pub(crate) fn apply_snapshot_retention_policy_env(
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn toml_noop_when_all_none() {
+        let mut policy = SnapshotRetentionPolicy::default();
+        let original = policy;
+        let profile = StorageProfileToml::default();
+        apply_snapshot_retention_policy_toml(&mut policy, &profile).unwrap();
+        assert_eq!(policy, original);
+    }
+
+    #[test]
+    fn toml_applies_value() {
+        let mut policy = SnapshotRetentionPolicy::default();
+        let profile = StorageProfileToml {
+            snapshot_max_catalog_entries: Some(8_192),
+            ..Default::default()
+        };
+        apply_snapshot_retention_policy_toml(&mut policy, &profile).unwrap();
+        assert_eq!(policy.max_catalog_snapshots, 8_192);
+    }
+
+    #[test]
+    fn toml_rejects_zero() {
+        let mut policy = SnapshotRetentionPolicy::default();
+        let profile = StorageProfileToml {
+            snapshot_max_catalog_entries: Some(0),
+            ..Default::default()
+        };
+        assert!(apply_snapshot_retention_policy_toml(&mut policy, &profile).is_err());
+    }
+
+    #[test]
+    fn env_applies_value() {
+        let mut policy = SnapshotRetentionPolicy::default();
+        let env = StorageEnvOverrides {
+            snapshot_max_catalog_entries: Some(16_384),
+            ..Default::default()
+        };
+        apply_snapshot_retention_policy_env(&mut policy, &env).unwrap();
+        assert_eq!(policy.max_catalog_snapshots, 16_384);
+    }
+
+    #[test]
+    fn env_rejects_zero() {
+        let mut policy = SnapshotRetentionPolicy::default();
+        let env = StorageEnvOverrides {
+            snapshot_max_catalog_entries: Some(0),
+            ..Default::default()
+        };
+        assert!(apply_snapshot_retention_policy_env(&mut policy, &env).is_err());
+    }
+}

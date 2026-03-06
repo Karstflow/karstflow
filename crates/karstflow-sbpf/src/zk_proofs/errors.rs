@@ -34,3 +34,63 @@ impl std::fmt::Display for ZkProofError {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn display_unknown_proof_type() {
+        assert_eq!(
+            ZkProofError::UnknownProofType.to_string(),
+            "unknown ZK proof type"
+        );
+    }
+
+    #[test]
+    fn display_insufficient_data() {
+        assert_eq!(
+            ZkProofError::InsufficientData.to_string(),
+            "insufficient proof data"
+        );
+    }
+
+    #[test]
+    fn display_identity_point() {
+        assert_eq!(
+            ZkProofError::IdentityPoint.to_string(),
+            "proof contains identity point"
+        );
+    }
+
+    #[test]
+    fn display_verification_failed() {
+        assert_eq!(
+            ZkProofError::VerificationFailed.to_string(),
+            "proof verification failed"
+        );
+    }
+
+    #[test]
+    fn all_variants_have_distinct_display() {
+        let variants = [
+            ZkProofError::UnknownProofType,
+            ZkProofError::InsufficientData,
+            ZkProofError::InvalidPoint,
+            ZkProofError::IdentityPoint,
+            ZkProofError::InvalidScalar,
+            ZkProofError::VerificationFailed,
+            ZkProofError::InvalidBitLength,
+            ZkProofError::TooManyCommitments,
+        ];
+        let messages: std::collections::HashSet<String> =
+            variants.iter().map(|v| v.to_string()).collect();
+        assert_eq!(messages.len(), variants.len());
+    }
+
+    #[test]
+    fn error_is_eq() {
+        assert_eq!(ZkProofError::InvalidPoint, ZkProofError::InvalidPoint);
+        assert_ne!(ZkProofError::InvalidPoint, ZkProofError::IdentityPoint);
+    }
+}

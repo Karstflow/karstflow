@@ -31,3 +31,48 @@ impl LastRestartSlotSysvar {
         Some(Self { slot })
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn roundtrip_serialization() {
+        let sysvar = LastRestartSlotSysvar::new(42);
+        let bytes = sysvar.to_bytes();
+        let decoded = LastRestartSlotSysvar::from_bytes(&bytes).unwrap();
+        assert_eq!(decoded.slot, 42);
+    }
+
+    #[test]
+    fn from_bytes_too_short() {
+        assert!(LastRestartSlotSysvar::from_bytes(&[1, 2, 3]).is_none());
+    }
+
+    #[test]
+    fn from_bytes_empty() {
+        assert!(LastRestartSlotSysvar::from_bytes(&[]).is_none());
+    }
+
+    #[test]
+    fn default_is_zero() {
+        let sysvar = LastRestartSlotSysvar::default();
+        assert_eq!(sysvar.slot, 0);
+    }
+
+    #[test]
+    fn roundtrip_max_value() {
+        let sysvar = LastRestartSlotSysvar::new(u64::MAX);
+        let bytes = sysvar.to_bytes();
+        let decoded = LastRestartSlotSysvar::from_bytes(&bytes).unwrap();
+        assert_eq!(decoded.slot, u64::MAX);
+    }
+
+    #[test]
+    fn from_bytes_extra_data_accepted() {
+        let mut data = 99u64.to_le_bytes().to_vec();
+        data.extend_from_slice(&[0xFF; 8]); // extra trailing bytes
+        let decoded = LastRestartSlotSysvar::from_bytes(&data).unwrap();
+        assert_eq!(decoded.slot, 99);
+    }
+}

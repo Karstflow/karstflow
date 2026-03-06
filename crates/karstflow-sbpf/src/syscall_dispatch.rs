@@ -657,20 +657,61 @@ impl SyscallHandler for SolLogComputeUnitsHandler {
 }
 
 /// sol_log_data: Log raw data buffers.
+///
+/// r1 = pointer to array of `SolBytes` entries (each: ptr u64, len u64),
+/// r2 = number of entries.
 struct SolLogDataHandler;
 
 impl SyscallHandler for SolLogDataHandler {
     fn call(
         &self,
         vm: &mut VmState,
-        _r1: u64,
-        _r2: u64,
+        r1: u64,
+        r2: u64,
         _r3: u64,
         _r4: u64,
         _r5: u64,
     ) -> Result<u64, VmError> {
+        let count = r2 as usize;
         deduct_compute(vm, syscalls::LOG_DATA_BASE_COST)?;
-        try_append_log(vm, "Program data: <encoded>".to_string());
+
+        if count == 0 {
+            try_append_log(vm, "Program data: ".to_string());
+            return Ok(0);
+        }
+
+        // Each SolBytes entry is 16 bytes: ptr (u64 LE) + len (u64 LE)
+        let entries_bytes = vm
+            .memory
+            .read_slice(r1, count * 16)
+            .map_err(|e| VmError::MemoryError(e.to_string()))?;
+
+        let mut parts = Vec::with_capacity(count);
+        let mut total_bytes = 0u64;
+
+        for i in 0..count {
+            let base = i * 16;
+            let ptr = u64::from_le_bytes(
+                entries_bytes[base..base + 8]
+                    .try_into()
+                    .map_err(|_| VmError::MemoryError("invalid SolBytes ptr".to_string()))?,
+            );
+            let len = u64::from_le_bytes(
+                entries_bytes[base + 8..base + 16]
+                    .try_into()
+                    .map_err(|_| VmError::MemoryError("invalid SolBytes len".to_string()))?,
+            );
+            total_bytes = total_bytes.saturating_add(len);
+
+            let data = vm
+                .memory
+                .read_slice(ptr, len as usize)
+                .map_err(|e| VmError::MemoryError(e.to_string()))?;
+            parts.push(encode_base64(&data));
+        }
+
+        deduct_compute(vm, syscalls::LOG_PER_BYTE_COST * total_bytes)?;
+        try_append_log(vm, format!("Program data: {}", parts.join(" ")));
         Ok(0)
     }
 }
@@ -2212,10 +2253,16 @@ fn scan_input_region(input: &[u8]) -> Vec<InputRegionEntry> {
         offset += 40;
 
         // Read data_len(8)
+        if offset + 8 > input.len() {
+            break;
+        }
         let data_len = u64::from_le_bytes(input[offset..offset + 8].try_into().unwrap()) as usize;
         offset += 8;
 
         // Skip data + padding
+        if offset + data_len > input.len() {
+            break;
+        }
         offset += data_len;
         let padding = (8 - (offset % 8)) % 8;
         offset += padding;
@@ -2718,6 +2765,32 @@ fn deduct_compute(vm: &mut VmState, cost: u64) -> Result<(), VmError> {
     }
     vm.compute_meter -= cost;
     Ok(())
+}
+
+/// Minimal base64 encoding without external dependencies.
+fn encode_base64(data: &[u8]) -> String {
+    const CHARS: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+
+    let mut result = String::with_capacity(data.len().div_ceil(3) * 4);
+    for chunk in data.chunks(3) {
+        let b0 = chunk[0] as u32;
+        let b1 = if chunk.len() > 1 { chunk[1] as u32 } else { 0 };
+        let b2 = if chunk.len() > 2 { chunk[2] as u32 } else { 0 };
+        let triple = (b0 << 16) | (b1 << 8) | b2;
+        result.push(CHARS[((triple >> 18) & 0x3F) as usize] as char);
+        result.push(CHARS[((triple >> 12) & 0x3F) as usize] as char);
+        if chunk.len() > 1 {
+            result.push(CHARS[((triple >> 6) & 0x3F) as usize] as char);
+        } else {
+            result.push('=');
+        }
+        if chunk.len() > 2 {
+            result.push(CHARS[(triple & 0x3F) as usize] as char);
+        } else {
+            result.push('=');
+        }
+    }
+    result
 }
 
 // ---------------------------------------------------------------------------
@@ -4003,5 +4076,51 @@ mod tests {
         assert!(dispatch
             .registered_ids()
             .contains(&murmur3_hash("sol_remaining_compute_units")));
+    }
+
+    #[test]
+    fn sol_log_data_encodes_buffers() {
+        let handler = SolLogDataHandler;
+        let mut vm = make_test_vm(100_000);
+
+        // Write two SolBytes entries on the heap:
+        // Entry 0: ptr=heap+32, len=3 ("foo")
+        // Entry 1: ptr=heap+64, len=2 ("hi")
+        let heap = REGION_HEAP_BASE;
+        let entry0_ptr = heap + 32;
+        let entry1_ptr = heap + 64;
+
+        // SolBytes array at heap+0: [ptr0(8), len0(8), ptr1(8), len1(8)] = 32 bytes
+        vm.memory
+            .write_slice(heap, &(entry0_ptr).to_le_bytes())
+            .unwrap();
+        vm.memory
+            .write_slice(heap + 8, &3u64.to_le_bytes())
+            .unwrap();
+        vm.memory
+            .write_slice(heap + 16, &(entry1_ptr).to_le_bytes())
+            .unwrap();
+        vm.memory
+            .write_slice(heap + 24, &2u64.to_le_bytes())
+            .unwrap();
+
+        // Write actual data
+        vm.memory.write_slice(entry0_ptr, b"foo").unwrap();
+        vm.memory.write_slice(entry1_ptr, b"hi").unwrap();
+
+        let result = handler.call(&mut vm, heap, 2, 0, 0, 0).unwrap();
+        assert_eq!(result, 0);
+        assert_eq!(vm.logs.len(), 1);
+        // "foo" -> "Zm9v", "hi" -> "aGk="
+        assert_eq!(vm.logs[0], "Program data: Zm9v aGk=");
+    }
+
+    #[test]
+    fn sol_log_data_empty_count() {
+        let handler = SolLogDataHandler;
+        let mut vm = make_test_vm(100_000);
+        let result = handler.call(&mut vm, 0, 0, 0, 0, 0).unwrap();
+        assert_eq!(result, 0);
+        assert_eq!(vm.logs[0], "Program data: ");
     }
 }
