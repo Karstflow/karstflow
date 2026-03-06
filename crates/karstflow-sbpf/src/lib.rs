@@ -16,9 +16,11 @@
 mod address_lookup_table;
 mod associated_token_program;
 mod bpf_loader;
+mod bpf_loader_deprecated;
 pub mod bpf_serialization;
 mod compute_budget_program;
 mod config_program;
+mod feature_gate_program;
 pub mod elf_loader;
 pub mod instruction;
 #[cfg(test)]
@@ -29,6 +31,7 @@ mod memo_program;
 pub mod memory;
 pub mod precompiles;
 mod program_cache;
+mod slashing_program;
 #[cfg(test)]
 mod spl_integration_tests;
 mod stake;
@@ -50,6 +53,9 @@ pub use address_lookup_table::{
 };
 pub use associated_token_program::AssociatedTokenProgramExecutor;
 pub use bpf_loader::{BpfLoaderExecutor, ProgramAccountState};
+pub use bpf_loader_deprecated::BpfLoaderDeprecatedExecutor;
+pub use feature_gate_program::FeatureGateProgramExecutor;
+pub use slashing_program::SlashingProgramExecutor;
 pub use compute_budget_program::{
     extract_compute_budget, ComputeBudgetProgramExecutor, ExtractedComputeBudget,
 };

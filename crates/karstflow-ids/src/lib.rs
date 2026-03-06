@@ -218,6 +218,13 @@ pub const FEES_SYSVAR_ID: Pubkey = Pubkey::new([
     75, 109, 92, 115, 85, 91, 42, 0, 0, 0, 1,
 ]);
 
+/// Slashing Program — SIMD-0204 validator slashing for equivocation.
+/// S1ashing11111111111111111111111111111111111
+pub const SLASHING_PROGRAM_ID: Pubkey = Pubkey::new([
+    0x04, 0x7e, 0xf4, 0x82, 0x41, 0x6e, 0x2f, 0x31, 0xa4, 0x5a, 0xb0, 0xc5, 0x4e, 0x7d, 0x1c, 0x8d,
+    0x3b, 0xf2, 0xa4, 0x12, 0x67, 0xe4, 0x91, 0xb9, 0x0c, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+]);
+
 /// Incinerator account — accumulated burned lamports are zeroed at slot freeze.
 /// 1nc1nerator11111111111111111111111111111111
 pub const INCINERATOR_ID: Pubkey = Pubkey::new([
