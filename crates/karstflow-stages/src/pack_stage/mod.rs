@@ -13,6 +13,7 @@ pub mod chkdup;
 mod conflict_detector;
 pub mod cost_model;
 pub mod estimation_table;
+pub mod penalty;
 mod priority_queue;
 mod scheduler;
 pub mod tip_blacklist;
