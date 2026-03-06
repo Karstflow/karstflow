@@ -6,9 +6,7 @@
 
 #[cfg(test)]
 mod tests {
-    use karstflow_consensus::{
-        BlockhashInfo, CompiledInstruction, SanitizedTransaction,
-    };
+    use karstflow_consensus::{BlockhashInfo, CompiledInstruction, SanitizedTransaction};
     use karstflow_constants::execution::MAX_COMPUTE_UNITS;
     use karstflow_control::{bootstrap_from_development_genesis, development_faucet_pubkey};
     use karstflow_ids::SYSTEM_PROGRAM_ID;
@@ -129,7 +127,9 @@ mod tests {
         // Build a System::Transfer instruction
         let transfer_data = system_transfer_data(1_000_000);
         let message_bytes = build_message_bytes(
-            1, 0, 1,
+            1,
+            0,
+            1,
             &[sender, receiver, SYSTEM_PROGRAM_ID],
             &blockhash,
             &[(2, &[0, 1], &transfer_data)],
@@ -143,9 +143,9 @@ mod tests {
                 account_indices: vec![0, 1],
                 data: transfer_data.clone(),
             }],
-            1,     // num_signatures
-            0,     // num_readonly_signed
-            1,     // num_readonly_unsigned
+            1,      // num_signatures
+            0,      // num_readonly_signed
+            1,      // num_readonly_unsigned
             vec![], // empty signatures — skips sig verification
             message_bytes,
         );
@@ -211,7 +211,9 @@ mod tests {
         // Build message bytes (what gets signed)
         let transfer_data = system_transfer_data(500_000);
         let message_bytes = build_message_bytes(
-            1, 0, 1,
+            1,
+            0,
+            1,
             &[sender, receiver, SYSTEM_PROGRAM_ID],
             &blockhash,
             &[(2, &[0, 1], &transfer_data)],
@@ -228,10 +230,10 @@ mod tests {
                 account_indices: vec![0, 1],
                 data: transfer_data.clone(),
             }],
-            1,                  // num_signatures
-            0,                  // num_readonly_signed
-            1,                  // num_readonly_unsigned
-            vec![signature],    // real Ed25519 signature
+            1,               // num_signatures
+            0,               // num_readonly_signed
+            1,               // num_readonly_unsigned
+            vec![signature], // real Ed25519 signature
             message_bytes,
         );
 
@@ -276,7 +278,9 @@ mod tests {
         for amount in [1_000_000u64, 2_000_000, 3_000_000] {
             let transfer_data = system_transfer_data(amount);
             let message_bytes = build_message_bytes(
-                1, 0, 1,
+                1,
+                0,
+                1,
                 &[sender, receiver, SYSTEM_PROGRAM_ID],
                 &blockhash,
                 &[(2, &[0, 1], &transfer_data)],
@@ -290,7 +294,11 @@ mod tests {
                     account_indices: vec![0, 1],
                     data: transfer_data,
                 }],
-                1, 0, 1, vec![], message_bytes,
+                1,
+                0,
+                1,
+                vec![],
+                message_bytes,
             );
 
             let result = bank.process_transaction(&tx, &backend, MAX_COMPUTE_UNITS);
@@ -308,8 +316,7 @@ mod tests {
             .meta
             .lamports;
         assert_eq!(
-            receiver_balance,
-            6_000_000,
+            receiver_balance, 6_000_000,
             "receiver should have accumulated 1M + 2M + 3M"
         );
     }
@@ -335,7 +342,9 @@ mod tests {
 
         let transfer_data = system_transfer_data(1_000_000);
         let message_bytes = build_message_bytes(
-            1, 0, 0,
+            1,
+            0,
+            0,
             &[account, SYSTEM_PROGRAM_ID],
             &blockhash,
             &[(1, &[0, 0], &transfer_data)],
@@ -349,7 +358,11 @@ mod tests {
                 account_indices: vec![0, 0], // sender == receiver
                 data: transfer_data,
             }],
-            1, 0, 0, vec![], message_bytes,
+            1,
+            0,
+            0,
+            vec![],
+            message_bytes,
         );
 
         let result = bank.process_transaction(&tx, &backend, MAX_COMPUTE_UNITS);
@@ -391,7 +404,9 @@ mod tests {
 
         let transfer_data = system_transfer_data(1_000_000); // transfer 1M > balance
         let message_bytes = build_message_bytes(
-            1, 0, 1,
+            1,
+            0,
+            1,
             &[sender, receiver, SYSTEM_PROGRAM_ID],
             &blockhash,
             &[(2, &[0, 1], &transfer_data)],
@@ -405,7 +420,11 @@ mod tests {
                 account_indices: vec![0, 1],
                 data: transfer_data,
             }],
-            1, 0, 1, vec![], message_bytes,
+            1,
+            0,
+            1,
+            vec![],
+            message_bytes,
         );
 
         let result = bank.process_transaction(&tx, &backend, MAX_COMPUTE_UNITS);
@@ -455,7 +474,9 @@ mod tests {
 
         let transfer_data = system_transfer_data(1_000_000_000); // 1 SOL
         let message_bytes = build_message_bytes(
-            1, 0, 1,
+            1,
+            0,
+            1,
             &[identity, recipient, SYSTEM_PROGRAM_ID],
             &blockhash,
             &[(2, &[0, 1], &transfer_data)],
@@ -469,7 +490,11 @@ mod tests {
                 account_indices: vec![0, 1],
                 data: transfer_data,
             }],
-            1, 0, 1, vec![], message_bytes,
+            1,
+            0,
+            1,
+            vec![],
+            message_bytes,
         );
 
         let result = bank.process_transaction(&tx, &backend, MAX_COMPUTE_UNITS);
@@ -485,6 +510,9 @@ mod tests {
             .unwrap()
             .meta
             .lamports;
-        assert_eq!(recipient_balance, 1_000_000_000, "recipient should have 1 SOL");
+        assert_eq!(
+            recipient_balance, 1_000_000_000,
+            "recipient should have 1 SOL"
+        );
     }
 }
