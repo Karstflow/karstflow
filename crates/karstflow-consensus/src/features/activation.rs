@@ -16,6 +16,9 @@ pub struct FeatureActivation {
     pub activation_slot: Option<u64>,
     /// Human-readable description of what this feature does.
     pub description: &'static str,
+    /// Whether the feature has been cleaned up (behavior hardcoded into the runtime).
+    /// Cleaned-up features are always active regardless of on-chain state.
+    pub cleaned_up: bool,
 }
 
 /// Process feature activations for the given slot.
