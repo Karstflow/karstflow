@@ -4,6 +4,7 @@ pub(crate) mod creator;
 pub(crate) mod loader;
 pub mod merkle_parallel;
 pub(crate) mod metadata;
+pub mod parallel_decompress;
 pub mod peer_selector;
 pub mod restore;
 pub(crate) mod scheduler;
