@@ -31,6 +31,7 @@ mod stake_history;
 pub mod sysvars;
 #[cfg(test)]
 mod tests;
+mod top_votes;
 mod tower;
 mod tower_persistence;
 pub mod transaction_cache;
@@ -89,6 +90,7 @@ pub use stake::{
 pub use stake_history::{EpochStakeEntry, StakeHistory, StakeHistoryEntry, STAKE_HISTORY_CAP};
 pub use tower::{Tower, TowerError, TowerVote};
 pub use tower_persistence::{SavedTower, SavedVote, TowerPersistenceError};
+pub use top_votes::{TopVoteEntry, TopVotes, DEFAULT_MAX_VALIDATORS};
 pub use vote_account_cache::{VoteAccountCache, VoteAccountEntry};
 pub use vote_processor::{
     SlotVoteInfo, VoteProcessor, VoteProcessorConfig, VoteProcessorError, VoteProcessorStats,
