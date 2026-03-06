@@ -41,3 +41,32 @@ pub fn verify_proof(discriminant: u8, proof_data: &[u8]) -> Result<Vec<u8>, ZkPr
         _ => Err(ZkProofError::UnknownProofType),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn unknown_discriminant_returns_error() {
+        assert_eq!(verify_proof(0, &[]), Err(ZkProofError::UnknownProofType));
+        assert_eq!(verify_proof(13, &[]), Err(ZkProofError::UnknownProofType));
+        assert_eq!(verify_proof(255, &[]), Err(ZkProofError::UnknownProofType));
+    }
+
+    #[test]
+    fn valid_discriminant_with_empty_data_returns_insufficient() {
+        // All valid discriminants should fail with empty proof data
+        for d in 1..=12 {
+            let result = verify_proof(d, &[]);
+            assert!(
+                result.is_err(),
+                "discriminant {d} should fail with empty data"
+            );
+        }
+    }
+
+    #[test]
+    fn unit_len_is_32() {
+        assert_eq!(UNIT_LEN, 32);
+    }
+}

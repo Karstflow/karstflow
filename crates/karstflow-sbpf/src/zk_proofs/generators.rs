@@ -30,3 +30,47 @@ static H_POINT: std::sync::OnceLock<RistrettoPoint> = std::sync::OnceLock::new()
 pub fn h() -> &'static RistrettoPoint {
     H_POINT.get_or_init(h_generator)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use curve25519_dalek::traits::Identity;
+
+    #[test]
+    fn h_generator_is_deterministic() {
+        let h1 = h_generator();
+        let h2 = h_generator();
+        assert_eq!(h1, h2);
+    }
+
+    #[test]
+    fn h_generator_is_not_identity() {
+        let h_point = h_generator();
+        assert_ne!(h_point, RistrettoPoint::identity());
+    }
+
+    #[test]
+    fn h_generator_differs_from_g() {
+        let h_point = h_generator();
+        assert_ne!(h_point, G);
+    }
+
+    #[test]
+    fn cached_h_matches_direct_computation() {
+        let cached = h();
+        let direct = h_generator();
+        assert_eq!(*cached, direct);
+    }
+
+    #[test]
+    fn cached_h_returns_same_reference() {
+        let h1 = h();
+        let h2 = h();
+        assert!(std::ptr::eq(h1, h2));
+    }
+
+    #[test]
+    fn g_is_standard_basepoint() {
+        assert_eq!(G, RISTRETTO_BASEPOINT_POINT);
+    }
+}
