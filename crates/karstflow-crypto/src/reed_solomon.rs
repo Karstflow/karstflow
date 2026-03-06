@@ -406,4 +406,60 @@ mod tests {
         assert_eq!(reconstructor.num_data(), DEFAULT_FEC_DATA);
         assert_eq!(reconstructor.num_coding(), DEFAULT_FEC_CODING);
     }
+
+    #[test]
+    fn test_size_mismatch_rejected() {
+        let reconstructor = FecReconstructor::new(4, 4).unwrap();
+        // Mixed sizes: 128 and 64 bytes.
+        let data_shreds = vec![Some(vec![0u8; 128]), Some(vec![0u8; 64]), None, None];
+        let coding_shreds = vec![Some(vec![0u8; 128]), Some(vec![0u8; 128]), None, None];
+        let result = reconstructor.reconstruct(data_shreds, coding_shreds);
+        assert!(matches!(result, Err(FecError::SizeMismatch { .. })));
+    }
+
+    #[test]
+    fn test_reconstruct_with_indices_invalid_index() {
+        let reconstructor = FecReconstructor::new(4, 4).unwrap();
+        // Provide 4 shreds but one has an invalid index (999 > total 8).
+        let shreds = vec![
+            (0, vec![0u8; 128]),
+            (1, vec![0u8; 128]),
+            (2, vec![0u8; 128]),
+            (999, vec![0u8; 128]),
+        ];
+        let result = reconstructor.reconstruct_with_indices(shreds, 128);
+        assert!(matches!(result, Err(FecError::InvalidIndex(999))));
+    }
+
+    #[test]
+    fn test_reconstruct_with_indices_size_mismatch() {
+        let reconstructor = FecReconstructor::new(4, 4).unwrap();
+        let shreds = vec![
+            (0, vec![0u8; 128]),
+            (1, vec![0u8; 128]),
+            (2, vec![0u8; 128]),
+            (3, vec![0u8; 64]), // wrong size
+        ];
+        let result = reconstructor.reconstruct_with_indices(shreds, 128);
+        assert!(matches!(result, Err(FecError::SizeMismatch { .. })));
+    }
+
+    #[test]
+    fn test_wrong_data_count_rejected() {
+        let reconstructor = FecReconstructor::new(4, 4).unwrap();
+        // Pass 3 data shreds instead of 4.
+        let data_shreds = vec![None; 3];
+        let coding_shreds = vec![None; 4];
+        let result = reconstructor.reconstruct(data_shreds, coding_shreds);
+        assert!(matches!(result, Err(FecError::InvalidParameters { .. })));
+    }
+
+    #[test]
+    fn test_helper_function() {
+        let data = create_test_shreds(4, 64);
+        let data_shreds: Vec<Option<Vec<u8>>> = data.into_iter().map(Some).collect();
+        let coding_shreds = vec![None; 4];
+        let result = reconstruct_fec_set(data_shreds, coding_shreds).unwrap();
+        assert_eq!(result.num_reconstructed, 0);
+    }
 }

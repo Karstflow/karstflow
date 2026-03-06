@@ -117,3 +117,72 @@ pub fn plan_default_topology(
     validate_topology_requirements(&topology_spec)?;
     Ok(topology_spec)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use karstflow_core::StageKind;
+
+    #[test]
+    fn plan_default_topology_single_workers() {
+        let spec = plan_default_topology(64, 64, 64, 1, 1).unwrap();
+        assert_eq!(spec.topology_name, "default-pipeline");
+        // 1 ingress + 1 tx_sanitizer + 1 shred_sanitizer + 1 block_builder + 1 telemetry = 5
+        assert_eq!(spec.stages.len(), 5);
+        // 1 packet_stream + 1 transaction_stream + 1 shred_stream = 3
+        assert_eq!(spec.links.len(), 3);
+    }
+
+    #[test]
+    fn plan_default_topology_multi_workers() {
+        let spec = plan_default_topology(64, 64, 64, 3, 2).unwrap();
+        // 1 ingress + 3 tx_sanitizer + 2 shred_sanitizer + 1 block_builder + 1 telemetry = 8
+        assert_eq!(spec.stages.len(), 8);
+        // 3 packet + 3 transaction + 2 shred = 8
+        assert_eq!(spec.links.len(), 8);
+    }
+
+    #[test]
+    fn plan_default_topology_zero_workers_clamped_to_one() {
+        let spec = plan_default_topology(64, 64, 64, 0, 0).unwrap();
+        // 0 gets clamped to 1
+        assert_eq!(spec.stages.len(), 5);
+        assert_eq!(spec.links.len(), 3);
+    }
+
+    #[test]
+    fn plan_default_topology_has_required_stage_kinds() {
+        let spec = plan_default_topology(128, 128, 128, 2, 2).unwrap();
+        let kinds: Vec<StageKind> = spec.stages.iter().map(|s| s.stage_kind).collect();
+        assert!(kinds.contains(&StageKind::IngressGateway));
+        assert!(kinds.contains(&StageKind::TransactionSanitizer));
+        assert!(kinds.contains(&StageKind::ShredSanitizer));
+        assert!(kinds.contains(&StageKind::BlockBuilder));
+        assert!(kinds.contains(&StageKind::Telemetry));
+    }
+
+    #[test]
+    fn plan_default_topology_naming_convention() {
+        let spec = plan_default_topology(64, 64, 64, 3, 2).unwrap();
+        let stage_ids: Vec<&str> = spec.stages.iter().map(|s| s.stage_id.as_str()).collect();
+        assert!(stage_ids.contains(&"transaction_sanitizer"));
+        assert!(stage_ids.contains(&"transaction_sanitizer_1"));
+        assert!(stage_ids.contains(&"transaction_sanitizer_2"));
+        assert!(stage_ids.contains(&"shred_sanitizer"));
+        assert!(stage_ids.contains(&"shred_sanitizer_1"));
+    }
+
+    #[test]
+    fn plan_default_topology_zero_capacity_clamped() {
+        let spec = plan_default_topology(0, 0, 0, 1, 1).unwrap();
+        for link in &spec.links {
+            assert!(link.capacity >= 1, "capacity must be at least 1");
+        }
+    }
+
+    #[test]
+    fn plan_default_topology_passes_validation() {
+        // This implicitly tests that validate_topology_requirements() passes
+        assert!(plan_default_topology(64, 64, 64, 4, 4).is_ok());
+    }
+}

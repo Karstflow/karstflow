@@ -165,6 +165,110 @@ mod tests {
     use super::find_link_capacity;
     use karstflow_core::{LinkKind, LinkSpec, StageKind, StageSpec, TopologySpec};
 
+    use super::{
+        ensure_lane_connectivity, ensure_required_stage_kinds, validate_topology_requirements,
+    };
+
+    fn minimal_valid_topology() -> TopologySpec {
+        TopologySpec {
+            topology_name: "test".to_string(),
+            stages: vec![
+                StageSpec {
+                    stage_id: "ingress_gateway".to_string(),
+                    stage_kind: StageKind::IngressGateway,
+                },
+                StageSpec {
+                    stage_id: "transaction_sanitizer".to_string(),
+                    stage_kind: StageKind::TransactionSanitizer,
+                },
+                StageSpec {
+                    stage_id: "shred_sanitizer".to_string(),
+                    stage_kind: StageKind::ShredSanitizer,
+                },
+                StageSpec {
+                    stage_id: "block_builder".to_string(),
+                    stage_kind: StageKind::BlockBuilder,
+                },
+                StageSpec {
+                    stage_id: "telemetry".to_string(),
+                    stage_kind: StageKind::Telemetry,
+                },
+            ],
+            links: vec![
+                LinkSpec {
+                    link_id: "pkt".to_string(),
+                    link_kind: LinkKind::PacketStream,
+                    source_stage_id: "ingress_gateway".to_string(),
+                    destination_stage_id: "transaction_sanitizer".to_string(),
+                    capacity: 64,
+                },
+                LinkSpec {
+                    link_id: "tx".to_string(),
+                    link_kind: LinkKind::TransactionStream,
+                    source_stage_id: "transaction_sanitizer".to_string(),
+                    destination_stage_id: "block_builder".to_string(),
+                    capacity: 64,
+                },
+                LinkSpec {
+                    link_id: "shrd".to_string(),
+                    link_kind: LinkKind::ShredStream,
+                    source_stage_id: "ingress_gateway".to_string(),
+                    destination_stage_id: "shred_sanitizer".to_string(),
+                    capacity: 64,
+                },
+            ],
+        }
+    }
+
+    #[test]
+    fn validate_topology_requirements_accepts_valid() {
+        assert!(validate_topology_requirements(&minimal_valid_topology()).is_ok());
+    }
+
+    #[test]
+    fn ensure_required_stage_kinds_rejects_missing_ingress() {
+        let mut topo = minimal_valid_topology();
+        topo.stages
+            .retain(|s| s.stage_kind != StageKind::IngressGateway);
+        assert!(ensure_required_stage_kinds(&topo).is_err());
+    }
+
+    #[test]
+    fn ensure_required_stage_kinds_rejects_missing_block_builder() {
+        let mut topo = minimal_valid_topology();
+        topo.stages
+            .retain(|s| s.stage_kind != StageKind::BlockBuilder);
+        assert!(ensure_required_stage_kinds(&topo).is_err());
+    }
+
+    #[test]
+    fn ensure_lane_connectivity_rejects_missing_packet_input() {
+        let mut topo = minimal_valid_topology();
+        topo.links.retain(|l| l.link_kind != LinkKind::PacketStream);
+        assert!(ensure_lane_connectivity(&topo).is_err());
+    }
+
+    #[test]
+    fn ensure_lane_connectivity_rejects_missing_tx_output() {
+        let mut topo = minimal_valid_topology();
+        topo.links
+            .retain(|l| l.link_kind != LinkKind::TransactionStream);
+        assert!(ensure_lane_connectivity(&topo).is_err());
+    }
+
+    #[test]
+    fn ensure_lane_connectivity_rejects_missing_shred_input() {
+        let mut topo = minimal_valid_topology();
+        topo.links.retain(|l| l.link_kind != LinkKind::ShredStream);
+        assert!(ensure_lane_connectivity(&topo).is_err());
+    }
+
+    #[test]
+    fn find_link_capacity_returns_error_for_missing_kind() {
+        let topo = minimal_valid_topology();
+        assert!(find_link_capacity(&topo, LinkKind::BlockStream).is_err());
+    }
+
     #[test]
     fn find_link_capacity_sums_capacities_for_same_link_kind() {
         let topology = TopologySpec {

@@ -730,4 +730,139 @@ mod tests {
         let decoded = ShredBatch::decode(&buf[..len]);
         assert!(decoded.0.is_empty());
     }
+
+    #[test]
+    fn unverified_transaction_codec_roundtrip() {
+        let tx = UnverifiedTransaction {
+            payload: vec![0xAA; 128],
+            source: TransactionSource::Bundle,
+            num_signatures: 3,
+            signature_offset: 0,
+            message_offset: 192,
+            signer_offsets: vec![0, 64, 128],
+        };
+        let mut buf = vec![0u8; UnverifiedTransaction::max_encoded_size()];
+        let len = tx.encode(&mut buf);
+        let decoded = UnverifiedTransaction::decode(&buf[..len]);
+        assert_eq!(decoded.payload, vec![0xAA; 128]);
+        assert!(matches!(decoded.source, TransactionSource::Bundle));
+        assert_eq!(decoded.num_signatures, 3);
+        assert_eq!(decoded.signature_offset, 0);
+        assert_eq!(decoded.message_offset, 192);
+        assert_eq!(decoded.signer_offsets, vec![0, 64, 128]);
+    }
+
+    #[test]
+    fn unverified_transaction_empty_signers() {
+        let tx = UnverifiedTransaction {
+            payload: vec![1],
+            source: TransactionSource::Quic,
+            num_signatures: 1,
+            signature_offset: 0,
+            message_offset: 64,
+            signer_offsets: vec![],
+        };
+        let mut buf = vec![0u8; UnverifiedTransaction::max_encoded_size()];
+        let len = tx.encode(&mut buf);
+        let decoded = UnverifiedTransaction::decode(&buf[..len]);
+        assert_eq!(decoded.signer_offsets.len(), 0);
+        assert_eq!(decoded.payload, vec![1]);
+    }
+
+    #[test]
+    fn verified_transaction_codec_roundtrip() {
+        let tx = VerifiedTransaction {
+            payload: vec![0xBB; 64],
+            source: TransactionSource::Forwarded,
+            num_signatures: 2,
+        };
+        let mut buf = vec![0u8; VerifiedTransaction::max_encoded_size()];
+        let len = tx.encode(&mut buf);
+        let decoded = VerifiedTransaction::decode(&buf[..len]);
+        assert_eq!(decoded.payload, vec![0xBB; 64]);
+        assert!(matches!(decoded.source, TransactionSource::Forwarded));
+        assert_eq!(decoded.num_signatures, 2);
+    }
+
+    #[test]
+    fn equivocation_proof_distinct_signatures() {
+        let proof = EquivocationProof {
+            slot: u64::MAX,
+            fec_set_index: u32::MAX,
+            position: u32::MAX,
+            existing_signature: [0xFF; 64],
+            conflicting_signature: [0x00; 64],
+        };
+        let mut buf = vec![0u8; EquivocationProof::max_encoded_size()];
+        let len = proof.encode(&mut buf);
+        let decoded = EquivocationProof::decode(&buf[..len]);
+        assert_eq!(decoded.slot, u64::MAX);
+        assert_eq!(decoded.existing_signature, [0xFF; 64]);
+        assert_eq!(decoded.conflicting_signature, [0x00; 64]);
+    }
+
+    #[test]
+    fn retransmit_decision_max_destination_count() {
+        let dests: Vec<u16> = (0..RETRANSMIT_MAX_DESTS as u16).collect();
+        let decision = RetransmitDecision {
+            shred_data: vec![0xCC; 100],
+            destination_indices: dests.clone(),
+            slot: 42,
+        };
+        let mut buf = vec![0u8; RetransmitDecision::max_encoded_size()];
+        let len = decision.encode(&mut buf);
+        let decoded = RetransmitDecision::decode(&buf[..len]);
+        assert_eq!(decoded.destination_indices.len(), RETRANSMIT_MAX_DESTS);
+        assert_eq!(decoded.destination_indices[0], 0);
+        assert_eq!(
+            decoded.destination_indices[RETRANSMIT_MAX_DESTS - 1],
+            (RETRANSMIT_MAX_DESTS - 1) as u16
+        );
+    }
+
+    #[test]
+    fn raw_transaction_max_payload_truncates() {
+        let tx = RawTransaction {
+            payload: vec![0xFF; RAW_TX_MAX_PAYLOAD + 100],
+            source: TransactionSource::Quic,
+        };
+        let mut buf = vec![0u8; RawTransaction::max_encoded_size()];
+        let len = tx.encode(&mut buf);
+        let decoded = RawTransaction::decode(&buf[..len]);
+        assert_eq!(decoded.payload.len(), RAW_TX_MAX_PAYLOAD);
+    }
+
+    #[test]
+    fn retransmit_decision_signature_is_slot() {
+        let decision = RetransmitDecision {
+            shred_data: vec![],
+            destination_indices: vec![],
+            slot: 777,
+        };
+        assert_eq!(decision.signature(), 777);
+    }
+
+    #[test]
+    fn completed_fec_set_signature_is_slot() {
+        let fec = CompletedFecSet {
+            slot: 888,
+            fec_set_index: 0,
+            data_shreds: vec![],
+            was_recovered: false,
+        };
+        assert_eq!(fec.signature(), 888);
+    }
+
+    #[test]
+    fn assembled_block_signature_is_slot() {
+        let block = AssembledBlock {
+            slot: 999,
+            parent_slot: 998,
+            entries: vec![],
+            transaction_count: 0,
+            total_bytes: 0,
+            shred_count: 0,
+        };
+        assert_eq!(block.signature(), 999);
+    }
 }

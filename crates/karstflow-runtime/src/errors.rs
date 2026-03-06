@@ -56,3 +56,75 @@ impl RuntimeError {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn service_failure_constructor() {
+        let err = RuntimeError::service_failure("my_service", "crashed");
+        let msg = err.to_string();
+        assert!(msg.contains("my_service"));
+        assert!(msg.contains("crashed"));
+    }
+
+    #[test]
+    fn no_cpu_cores_display() {
+        let err = RuntimeError::NoCpuCoresDetected;
+        assert_eq!(err.to_string(), "no CPU cores detected");
+    }
+
+    #[test]
+    fn strict_policy_insufficient_cores_display() {
+        let err = RuntimeError::StrictPolicyInsufficientCores {
+            service_count: 8,
+            core_count: 4,
+        };
+        let msg = err.to_string();
+        assert!(msg.contains("8"));
+        assert!(msg.contains("4"));
+    }
+
+    #[test]
+    fn adaptive_policy_rejected_display() {
+        let err = RuntimeError::AdaptivePolicyRejected {
+            oversubscription_ratio: 3.50,
+            service_count: 14,
+            core_count: 4,
+        };
+        let msg = err.to_string();
+        assert!(msg.contains("3.50"));
+        assert!(msg.contains("14"));
+        assert!(msg.contains("4"));
+    }
+
+    #[test]
+    fn explicit_pinned_length_mismatch_display() {
+        let err = RuntimeError::ExplicitPinnedAssignmentLengthMismatch {
+            service_count: 5,
+            assigned_count: 3,
+        };
+        let msg = err.to_string();
+        assert!(msg.contains("5"));
+        assert!(msg.contains("3"));
+    }
+
+    #[test]
+    fn explicit_pinned_core_unavailable_display() {
+        let err = RuntimeError::ExplicitPinnedCoreUnavailable { core_id: 99 };
+        assert!(err.to_string().contains("99"));
+    }
+
+    #[test]
+    fn strict_policy_duplicate_core_display() {
+        let err = RuntimeError::StrictPolicyDuplicateCoreAssignment { core_id: 7 };
+        assert!(err.to_string().contains("7"));
+    }
+
+    #[test]
+    fn service_thread_panic_display() {
+        let err = RuntimeError::ServiceThreadPanic;
+        assert_eq!(err.to_string(), "service thread panicked");
+    }
+}
