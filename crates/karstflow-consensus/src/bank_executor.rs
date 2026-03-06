@@ -1614,6 +1614,19 @@ impl Bank {
                 break 'execution;
             }
 
+            // Inject the program account if not already present in the
+            // instruction accounts.  The runtime must always make the
+            // executable program available to the execution backend so it
+            // can locate and run the bytecode.
+            if !instr_accounts.iter().any(|(pk, _, _, _)| *pk == program_id) {
+                let program_account = modified
+                    .get(&program_id)
+                    .or_else(|| account_state.get(&program_id))
+                    .cloned()
+                    .unwrap_or_default();
+                instr_accounts.push((program_id, program_account, false, false));
+            }
+
             let info = InstructionInfo {
                 program_id,
                 accounts: instr_accounts,

@@ -22,3 +22,5 @@ karstflow-stages = { path = "../karstflow-stages" }
 karstflow-storage = { path = "../karstflow-storage" }
 karstflow-types = { path = "../karstflow-types" }
 karstflow-ids = { path = "../karstflow-ids" }
+sha2.workspace = true
+curve25519-dalek.workspace = true
