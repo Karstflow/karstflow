@@ -12,7 +12,6 @@ use karstflow_types::{Account, AccountData, AccountMeta, Pubkey};
 ///
 /// The proof contains two conflicting votes from the same validator.
 /// If valid, the validator's stake is reduced by the slashing penalty.
-
 const INSTRUCTION_SLASH_VIOLATION: u32 = 0;
 
 const SLASHING_COMPUTE_UNITS: u64 = 2_500;

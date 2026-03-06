@@ -11,7 +11,7 @@ workers = 4
 
 [ingress_policy]
 ingress_mode = "udp"
-udp_bind_address = "0.0.0.0:8001"
+udp_bind_address = "0.0.0.0:8003"
 max_payload_bytes = 1232
 allow_quic_source = true
 allow_gossip_source = true
@@ -28,8 +28,7 @@ full_api = true
 
 [metrics]
 output_format = "prometheus"
-output_target = "http"
-http_bind = "0.0.0.0:9090"
+output_target = "stdout"
 
 [logging]
 stderr_level = "info"

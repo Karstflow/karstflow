@@ -13,7 +13,6 @@ use karstflow_types::{Account, AccountData, AccountMeta, Pubkey};
 ///
 /// Feature accounts are simple: they hold a single optional u64 (the
 /// activation slot). None = pending, Some(slot) = activated at slot.
-
 const INSTRUCTION_ACTIVATE: u32 = 0;
 const INSTRUCTION_REVOKE: u32 = 1;
 

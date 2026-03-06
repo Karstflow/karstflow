@@ -1407,9 +1407,11 @@ mod tests {
 
     #[test]
     fn schedule_metrics_reset() {
-        let mut m = ScheduleMetrics::default();
-        m.taken = 100;
-        m.slow_path = 50;
+        let mut m = ScheduleMetrics {
+            taken: 100,
+            slow_path: 50,
+            ..ScheduleMetrics::default()
+        };
         m.reset();
         assert_eq!(m.total(), 0);
     }

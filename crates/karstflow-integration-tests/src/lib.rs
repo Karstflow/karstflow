@@ -1,8 +1,8 @@
-/// Integration tests for the karstflow validator.
-///
-/// All tests are `#[ignore]` so they don't run with `cargo test --workspace`.
-/// Run explicitly: `just integration` or
-/// `cargo test -p karstflow-integration-tests -- --ignored`
+//! Integration tests for the karstflow validator.
+//!
+//! All tests are `#[ignore]` so they don't run with `cargo test --workspace`.
+//! Run explicitly: `just integration` or
+//! `cargo test -p karstflow-integration-tests -- --ignored`
 
 #[cfg(test)]
 mod tests {

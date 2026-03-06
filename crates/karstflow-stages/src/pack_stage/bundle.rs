@@ -1,17 +1,17 @@
-/// Initializer bundle state machine for the pack scheduler.
-///
-/// Manages the lifecycle of the "initializer bundle" — a special bundle
-/// that must succeed before any other bundles can be scheduled in a slot.
-/// The state machine ensures that:
-/// - Only one initializer bundle is in-flight at a time
-/// - Bundle scheduling is blocked until initialization succeeds
-/// - Failed initializations can be retried
-///
-/// State transitions:
-///   NotInitialized → Pending (when IB is scheduled)
-///   Pending → Ready (on IB execution success)
-///   Pending → Failed (on IB execution failure)
-///   Failed → Pending (when a new IB is scheduled)
+//! Initializer bundle state machine for the pack scheduler.
+//!
+//! Manages the lifecycle of the "initializer bundle" — a special bundle
+//! that must succeed before any other bundles can be scheduled in a slot.
+//! The state machine ensures that:
+//! - Only one initializer bundle is in-flight at a time
+//! - Bundle scheduling is blocked until initialization succeeds
+//! - Failed initializations can be retried
+//!
+//! State transitions:
+//!   NotInitialized → Pending (when IB is scheduled)
+//!   Pending → Ready (on IB execution success)
+//!   Pending → Failed (on IB execution failure)
+//!   Failed → Pending (when a new IB is scheduled)
 
 /// Maximum number of transactions in a single bundle.
 pub const MAX_TXN_PER_BUNDLE: usize = 5;

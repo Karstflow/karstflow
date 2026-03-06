@@ -1,13 +1,13 @@
-/// Compute Budget Program instruction parser for pack scheduling.
-///
-/// Parses ComputeBudgetProgram instructions from transactions to determine:
-/// - Requested compute unit limit
-/// - Prioritization fee (micro-lamports per CU)
-/// - Heap frame size
-/// - Loaded accounts data size limit
-///
-/// Each instruction type can appear at most once per transaction.
-/// Duplicates cause the transaction to be rejected as malformed.
+//! Compute Budget Program instruction parser for pack scheduling.
+//!
+//! Parses ComputeBudgetProgram instructions from transactions to determine:
+//! - Requested compute unit limit
+//! - Prioritization fee (micro-lamports per CU)
+//! - Heap frame size
+//! - Loaded accounts data size limit
+//!
+//! Each instruction type can appear at most once per transaction.
+//! Duplicates cause the transaction to be rejected as malformed.
 
 /// Compute Budget Program ID bytes.
 pub const COMPUTE_BUDGET_PROGRAM_ID: [u8; 32] = [
@@ -89,7 +89,7 @@ impl ComputeBudgetState {
                     return false;
                 }
                 self.heap_size = u32::from_le_bytes([data[1], data[2], data[3], data[4]]);
-                if self.heap_size % HEAP_FRAME_GRANULARITY != 0 {
+                if !self.heap_size.is_multiple_of(HEAP_FRAME_GRANULARITY) {
                     return false;
                 }
                 self.flags |= FLAG_SET_HEAP;
@@ -210,10 +210,7 @@ fn compute_priority_fee(cu_limit: u64, micro_lamports_per_cu: u64) -> u64 {
     let ll = (c_l * p_l + MICRO_LAMPORTS_PER_LAMPORT - 1) / MICRO_LAMPORTS_PER_LAMPORT;
     let right = hl + ll;
 
-    match hh.checked_add(right) {
-        Some(total) => total,
-        None => u64::MAX,
-    }
+    hh.saturating_add(right)
 }
 
 /// Check if an account address is the Compute Budget Program.

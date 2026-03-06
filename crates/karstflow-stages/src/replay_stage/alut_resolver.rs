@@ -67,7 +67,7 @@ pub fn parse_lookup_table(data: &[u8]) -> Result<ParsedLookupTable, &'static str
     }
 
     let addresses_data = &data[LOOKUP_TABLE_META_SIZE..];
-    if addresses_data.len() % 32 != 0 {
+    if !addresses_data.len().is_multiple_of(32) {
         return Err("address data not aligned to 32 bytes");
     }
 

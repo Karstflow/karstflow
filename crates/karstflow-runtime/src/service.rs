@@ -46,6 +46,24 @@ impl ServiceContext {
     }
 }
 
+pub trait Service: Send + 'static {
+    fn name(&self) -> &'static str;
+
+    fn tick_interval(&self) -> Duration {
+        Duration::from_millis(50)
+    }
+
+    fn on_start(&mut self, _context: &ServiceContext) -> RuntimeResult<()> {
+        Ok(())
+    }
+
+    fn tick(&mut self, _context: &ServiceContext) -> RuntimeResult<()>;
+
+    fn on_stop(&mut self, _context: &ServiceContext) -> RuntimeResult<()> {
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -100,23 +118,5 @@ mod tests {
         let after = Instant::now();
         assert!(ctx.launch_time >= before);
         assert!(ctx.launch_time <= after);
-    }
-}
-
-pub trait Service: Send + 'static {
-    fn name(&self) -> &'static str;
-
-    fn tick_interval(&self) -> Duration {
-        Duration::from_millis(50)
-    }
-
-    fn on_start(&mut self, _context: &ServiceContext) -> RuntimeResult<()> {
-        Ok(())
-    }
-
-    fn tick(&mut self, _context: &ServiceContext) -> RuntimeResult<()>;
-
-    fn on_stop(&mut self, _context: &ServiceContext) -> RuntimeResult<()> {
-        Ok(())
     }
 }

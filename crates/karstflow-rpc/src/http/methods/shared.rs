@@ -38,7 +38,7 @@ mod tests {
     fn synthetic_block_time_sub_second_uptime() {
         // 999ms → 0 seconds
         let t = synthetic_block_time(999, 1);
-        assert_eq!(t, SYNTHETIC_UNIX_TIMESTAMP_BASE + 0 + 1);
+        assert_eq!(t, SYNTHETIC_UNIX_TIMESTAMP_BASE + 1);
     }
 
     #[test]

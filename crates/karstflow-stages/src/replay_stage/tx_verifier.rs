@@ -1,14 +1,14 @@
-/// Pre-execution transaction verification for the replay pipeline.
-///
-/// Validates transactions before they are dispatched for execution:
-/// - Signature count matches message header
-/// - Fee payer is a valid signer
-/// - Program IDs reference valid accounts
-/// - Account count does not exceed limits
-/// - Instruction account indices are within bounds
-///
-/// This catches malformed transactions early, before consuming
-/// execution resources.
+//! Pre-execution transaction verification for the replay pipeline.
+//!
+//! Validates transactions before they are dispatched for execution:
+//! - Signature count matches message header
+//! - Fee payer is a valid signer
+//! - Program IDs reference valid accounts
+//! - Account count does not exceed limits
+//! - Instruction account indices are within bounds
+//!
+//! This catches malformed transactions early, before consuming
+//! execution resources.
 
 /// Maximum number of accounts a transaction can reference.
 pub const MAX_TRANSACTION_ACCOUNTS: usize = 256;

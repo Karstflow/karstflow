@@ -13,7 +13,6 @@ use std::collections::HashMap;
 /// Instruction format (bincode):
 ///   Write:    [0u32, offset: u32, bytes: Vec<u8>]
 ///   Finalize: [1u32]
-
 const INSTRUCTION_WRITE: u32 = 0;
 const INSTRUCTION_FINALIZE: u32 = 1;
 

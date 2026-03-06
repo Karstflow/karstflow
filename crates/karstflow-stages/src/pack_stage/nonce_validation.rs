@@ -1,12 +1,12 @@
-/// Durable nonce transaction validation for the pack scheduler.
-///
-/// Validates that durable nonce transactions have the correct structure:
-/// - First instruction invokes the System Program
-/// - Instruction data starts with LE u32 value 4 (AdvanceNonceAccount)
-/// - At least 3 accounts: nonce account, recent blockhashes sysvar, nonce authority
-/// - The nonce authority (3rd account) must be a signer
-///
-/// This prevents invalid durable nonce transactions from being packed.
+//! Durable nonce transaction validation for the pack scheduler.
+//!
+//! Validates that durable nonce transactions have the correct structure:
+//! - First instruction invokes the System Program
+//! - Instruction data starts with LE u32 value 4 (AdvanceNonceAccount)
+//! - At least 3 accounts: nonce account, recent blockhashes sysvar, nonce authority
+//! - The nonce authority (3rd account) must be a signer
+//!
+//! This prevents invalid durable nonce transactions from being packed.
 
 /// System Program ID (all zeros except last byte = 0x00).
 const SYSTEM_PROGRAM_ID: [u8; 32] = [0u8; 32];

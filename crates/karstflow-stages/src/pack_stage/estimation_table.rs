@@ -1,12 +1,12 @@
-/// Per-program cost estimation table for the pack scheduler.
-///
-/// Uses exponential moving average (EMA) to estimate the mean and variance
-/// of compute unit usage per program. Tags (program IDs) are hashed into
-/// a fixed number of bins. Aliasing between programs that hash to the same
-/// bin is intentional — it provides a reasonable default for unseen programs.
-///
-/// When a program has no history, the table returns a configurable default
-/// value (typically the max CU limit).
+//! Per-program cost estimation table for the pack scheduler.
+//!
+//! Uses exponential moving average (EMA) to estimate the mean and variance
+//! of compute unit usage per program. Tags (program IDs) are hashed into
+//! a fixed number of bins. Aliasing between programs that hash to the same
+//! bin is intentional — it provides a reasonable default for unseen programs.
+//!
+//! When a program has no history, the table returns a configurable default
+//! value (typically the max CU limit).
 
 /// A single bin in the estimation table.
 #[derive(Debug, Clone, Copy)]
@@ -71,7 +71,7 @@ impl EstimationTable {
     pub fn estimate(&self, tag: u64) -> (f64, f64) {
         let bin = &self.bins[tag as usize & self.bin_mask];
 
-        if !(bin.d > 0.0) {
+        if bin.d <= 0.0 {
             return (self.default_val, 0.0);
         }
 
