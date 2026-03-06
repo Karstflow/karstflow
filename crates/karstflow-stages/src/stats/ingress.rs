@@ -94,3 +94,73 @@ impl IngressFilterStats {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn default_snapshot_is_all_zeros() {
+        let stats = IngressFilterStats::default();
+        let snap = stats.snapshot();
+        assert_eq!(snap.accepted_transactions, 0);
+        assert_eq!(snap.duplicate_transactions, 0);
+        assert_eq!(snap.dropped_empty_payload, 0);
+    }
+
+    #[test]
+    fn increment_accepted_by_source() {
+        let stats = IngressFilterStats::default();
+        stats.increment_accepted(IngressSource::Quic);
+        stats.increment_accepted(IngressSource::Gossip);
+        stats.increment_accepted(IngressSource::Bundle);
+        stats.increment_accepted(IngressSource::Rpc);
+        let snap = stats.snapshot();
+        assert_eq!(snap.accepted_transactions, 4);
+        assert_eq!(snap.accepted_quic_source, 1);
+        assert_eq!(snap.accepted_gossip_source, 1);
+        assert_eq!(snap.accepted_bundle_source, 1);
+        assert_eq!(snap.accepted_rpc_source, 1);
+    }
+
+    #[test]
+    fn increment_duplicates_by_source() {
+        let stats = IngressFilterStats::default();
+        stats.increment_duplicates(IngressSource::Quic);
+        stats.increment_duplicates(IngressSource::Quic);
+        stats.increment_duplicates(IngressSource::Gossip);
+        let snap = stats.snapshot();
+        assert_eq!(snap.duplicate_transactions, 3);
+        assert_eq!(snap.duplicate_quic_source, 2);
+        assert_eq!(snap.duplicate_gossip_source, 1);
+    }
+
+    #[test]
+    fn increment_drop_reasons() {
+        let stats = IngressFilterStats::default();
+        stats.increment_drop_reason(DropReason::EmptyPayload, IngressSource::Quic);
+        stats.increment_drop_reason(DropReason::OversizedPayload, IngressSource::Quic);
+        stats.increment_drop_reason(DropReason::SourceNotAllowed, IngressSource::Quic);
+        stats.increment_drop_reason(DropReason::SourceRateLimited, IngressSource::Quic);
+        stats.increment_drop_reason(DropReason::SourceCostBudgetExceeded, IngressSource::Quic);
+        stats.increment_drop_reason(DropReason::DownstreamBackpressure, IngressSource::Quic);
+        let snap = stats.snapshot();
+        assert_eq!(snap.dropped_empty_payload, 1);
+        assert_eq!(snap.dropped_oversized_payload, 1);
+        assert_eq!(snap.dropped_disallowed_source, 1);
+        assert_eq!(snap.dropped_rate_limited_source, 1);
+        assert_eq!(snap.dropped_cost_budget_source, 1);
+        assert_eq!(snap.dropped_downstream_backpressure, 1);
+    }
+
+    #[test]
+    fn multiple_increments_accumulate() {
+        let stats = IngressFilterStats::default();
+        for _ in 0..5 {
+            stats.increment_accepted(IngressSource::Quic);
+        }
+        let snap = stats.snapshot();
+        assert_eq!(snap.accepted_transactions, 5);
+        assert_eq!(snap.accepted_quic_source, 5);
+    }
+}
