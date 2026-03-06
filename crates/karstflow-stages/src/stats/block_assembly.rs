@@ -423,3 +423,109 @@ impl BlockAssemblyStats {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn default_snapshot_is_all_zeros() {
+        let stats = BlockAssemblyStats::default();
+        let snap = stats.snapshot();
+        assert_eq!(snap.deferred_retries, 0);
+        assert_eq!(snap.dropped_fragments, 0);
+        assert_eq!(snap.committed_fragments, 0);
+        assert_eq!(snap.execution_error_total, 0);
+    }
+
+    #[test]
+    fn increment_basic_counters() {
+        let stats = BlockAssemblyStats::default();
+        stats.increment_deferred_retries();
+        stats.increment_dropped_fragments();
+        stats.increment_committed_fragments();
+        stats.increment_committed_fragments();
+        let snap = stats.snapshot();
+        assert_eq!(snap.deferred_retries, 1);
+        assert_eq!(snap.dropped_fragments, 1);
+        assert_eq!(snap.committed_fragments, 2);
+    }
+
+    #[test]
+    fn set_pending_retries() {
+        let stats = BlockAssemblyStats::default();
+        stats.set_pending_retries(42);
+        assert_eq!(stats.snapshot().pending_retries, 42);
+        stats.set_pending_retries(0);
+        assert_eq!(stats.snapshot().pending_retries, 0);
+    }
+
+    #[test]
+    fn record_execution_error_empty_batch() {
+        let stats = BlockAssemblyStats::default();
+        stats.record_execution_error(&ExecutionError::EmptyBatch { fragment_id: 1 });
+        let snap = stats.snapshot();
+        assert_eq!(snap.execution_error_total, 1);
+        assert_eq!(snap.execution_error_empty_batch, 1);
+    }
+
+    #[test]
+    fn record_execution_error_cost_overflow() {
+        let stats = BlockAssemblyStats::default();
+        stats.record_execution_error(&ExecutionError::CostOverflow {
+            fragment_id: 1,
+            transaction_count: 100,
+        });
+        let snap = stats.snapshot();
+        assert_eq!(snap.execution_error_total, 1);
+        assert_eq!(snap.execution_error_cost_overflow, 1);
+    }
+
+    #[test]
+    fn increment_retry_scheduled_replay_conflict() {
+        let stats = BlockAssemblyStats::default();
+        stats.increment_retry_scheduled_for_failure_class(Some(
+            ExecutionFailureClass::ReplayConflict,
+        ));
+        let snap = stats.snapshot();
+        assert_eq!(snap.retry_scheduled_replay_conflict, 1);
+    }
+
+    #[test]
+    fn increment_retry_scheduled_fallback_for_none() {
+        let stats = BlockAssemblyStats::default();
+        stats.increment_retry_scheduled_for_failure_class(None);
+        let snap = stats.snapshot();
+        assert_eq!(snap.retry_scheduled_fallback, 1);
+    }
+
+    #[test]
+    fn increment_dropped_for_failure_classes() {
+        let stats = BlockAssemblyStats::default();
+        stats.increment_dropped_for_failure_class(Some(
+            ExecutionFailureClass::DeterministicTransactionFailure,
+        ));
+        stats.increment_dropped_for_failure_class(Some(
+            ExecutionFailureClass::TransientSchedulerPressure,
+        ));
+        stats.increment_dropped_for_failure_class(None);
+        let snap = stats.snapshot();
+        assert_eq!(snap.dropped_deterministic, 1);
+        assert_eq!(snap.dropped_transient_pressure, 1);
+        assert_eq!(snap.dropped_fallback, 1);
+    }
+
+    #[test]
+    fn leader_gate_and_fork_choice_counters() {
+        let stats = BlockAssemblyStats::default();
+        stats.increment_leader_gate_permit();
+        stats.increment_leader_gate_hold();
+        stats.increment_fork_choice_keep();
+        stats.increment_fork_choice_reorg();
+        let snap = stats.snapshot();
+        assert_eq!(snap.leader_gate_permit, 1);
+        assert_eq!(snap.leader_gate_hold, 1);
+        assert_eq!(snap.fork_choice_keep, 1);
+        assert_eq!(snap.fork_choice_reorg, 1);
+    }
+}
