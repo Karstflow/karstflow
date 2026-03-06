@@ -38,6 +38,7 @@ pub mod transaction_cache;
 pub mod transaction_wire;
 mod vote_account_cache;
 mod vote_processor;
+mod vote_stakes;
 mod vote_state;
 
 pub use bank::{
@@ -92,6 +93,7 @@ pub use tower::{Tower, TowerError, TowerVote};
 pub use tower_persistence::{SavedTower, SavedVote, TowerPersistenceError};
 pub use top_votes::{TopVoteEntry, TopVotes, DEFAULT_MAX_VALIDATORS};
 pub use vote_account_cache::{VoteAccountCache, VoteAccountEntry};
+pub use vote_stakes::{ForkId, VoteStakeEntry, VoteStakes};
 pub use vote_processor::{
     SlotVoteInfo, VoteProcessor, VoteProcessorConfig, VoteProcessorError, VoteProcessorStats,
 };
