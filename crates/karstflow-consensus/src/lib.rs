@@ -106,7 +106,7 @@ pub use bank_executor::{
     SanitizedTransaction, SlotContext, TransactionExecutionError, TransactionExecutionResult,
     TransactionSimulationResult, VoteUpdate,
 };
-pub use cost_tracker::{CostTracker, CostTrackerError, TransactionCost};
+pub use cost_tracker::{CostLimits, CostTracker, CostTrackerError, TransactionCost};
 pub use features::{FeatureActivation, FeatureSet};
 pub use signature_status::{AddressSignatureEntry, SignatureStatus, SignatureStatusCache};
 pub use snapshot_bootstrap::{

@@ -171,6 +171,39 @@ fn remaining_capacity_calculation() {
     );
 }
 
+// ── feature-gated limits ────────────────────────────────────────────
+
+#[test]
+fn with_100m_limit_allows_more_cost() {
+    let limits = CostLimits::from_features(true, false, false);
+    let tracker = CostTracker::with_limits(limits);
+    assert_eq!(tracker.remaining_capacity(), 100_000_000);
+
+    let cost = TransactionCost::new(60_000_000, false);
+    assert!(tracker.try_add(&cost).is_ok());
+    assert_eq!(tracker.remaining_capacity(), 40_000_000);
+}
+
+#[test]
+fn with_raised_account_limit() {
+    let limits = CostLimits::from_features(true, false, true);
+    let tracker = CostTracker::with_limits(limits);
+
+    let acct = Pubkey::new_unique();
+    let mut cost = TransactionCost::new(1000, false);
+    cost.add_writable_account(acct, 39_000_000);
+    assert!(tracker.try_add(&cost).is_ok());
+
+    // Now adding 2M more should exceed 40M account limit
+    let mut cost2 = TransactionCost::new(1000, false);
+    cost2.add_writable_account(acct, 2_000_000);
+    let err = tracker.try_add(&cost2).unwrap_err();
+    assert!(matches!(
+        err,
+        CostTrackerError::AccountCostLimitExceeded { .. }
+    ));
+}
+
 // ── multiple transactions accumulate ────────────────────────────────
 
 #[test]

@@ -46,9 +46,31 @@ pub const VOTE_DEFAULT_COMPUTE_UNITS: u64 = 2_100;
 /// Minimum transaction cost: one signature + one writable account.
 pub const MIN_TXN_COST: u64 = COST_PER_SIGNATURE + COST_PER_WRITABLE_ACCOUNT;
 
-/// Fixed cost for a simple vote transaction.
-pub const SIMPLE_VOTE_COST: u64 =
-    COST_PER_SIGNATURE + 2 * COST_PER_WRITABLE_ACCOUNT + VOTE_DEFAULT_COMPUTE_UNITS + 8;
+/// Maximum loaded accounts data cost for a simple vote transaction.
+/// ceil(64 MiB / 32768) * 8 = 2048 * 8 = 16384 CUs.
+pub const VOTE_DEFAULT_LOADED_ACCOUNTS_DATA_COST: u64 = 16_384;
+
+/// Maximum instruction data cost for a simple vote transaction.
+/// (MTU - 169 fixed bytes) / 4 = 1063 / 4 = 265 CUs.
+pub const SIMPLE_VOTE_MAX_INSTR_DATA_COST: u64 = 265;
+
+/// BLS proof-of-possession verification cost (SIMD-0387).
+pub const BLS_PROOF_OF_POSSESSION_VERIFICATION_COMPUTE_UNITS: u64 = 34_500;
+
+/// Upper bound on execution CUs for any vote instruction.
+pub const VOTE_MAX_COMPUTE_UNITS: u64 =
+    VOTE_DEFAULT_COMPUTE_UNITS + BLS_PROOF_OF_POSSESSION_VERIFICATION_COMPUTE_UNITS;
+
+/// Worst-case cost for a simple vote transaction.
+///
+/// Computes a tight upper bound assuming worst-case parameters:
+/// - 2 signatures, 35 writable accounts, max vote execution cost,
+///   max loaded accounts data, max instruction data.
+pub const SIMPLE_VOTE_COST: u64 = 2 * COST_PER_SIGNATURE
+    + 35 * COST_PER_WRITABLE_ACCOUNT
+    + VOTE_MAX_COMPUTE_UNITS
+    + VOTE_DEFAULT_LOADED_ACCOUNTS_DATA_COST
+    + SIMPLE_VOTE_MAX_INSTR_DATA_COST;
 
 /// Maximum theoretical transaction cost.
 pub const MAX_TXN_COST: u64 = 1_573_166;
@@ -119,7 +141,7 @@ pub fn compute_cost(input: &CostInput) -> CostResult {
     if input.is_simple_vote {
         return CostResult {
             total_cost: SIMPLE_VOTE_COST,
-            execution_cost: VOTE_DEFAULT_COMPUTE_UNITS,
+            execution_cost: VOTE_MAX_COMPUTE_UNITS,
             is_simple_vote: true,
         };
     }
@@ -164,14 +186,14 @@ mod tests {
         };
         let result = compute_cost(&input);
         assert_eq!(result.total_cost, SIMPLE_VOTE_COST);
-        assert_eq!(result.execution_cost, VOTE_DEFAULT_COMPUTE_UNITS);
+        assert_eq!(result.execution_cost, VOTE_MAX_COMPUTE_UNITS);
         assert!(result.is_simple_vote);
     }
 
     #[test]
     fn simple_vote_cost_matches_reference() {
-        // 720 + 2*300 + 2100 + 8 = 3428
-        assert_eq!(SIMPLE_VOTE_COST, 3_428);
+        // 2*720 + 35*300 + (2100+34500) + 16384 + 265 = 65189
+        assert_eq!(SIMPLE_VOTE_COST, 65_189);
     }
 
     #[test]

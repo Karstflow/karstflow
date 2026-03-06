@@ -4,14 +4,36 @@
 //! and other per-block limits that prevent any single block from consuming
 //! excessive resources.
 
-/// Maximum total compute units per block.
-pub const MAX_BLOCK_COMPUTE_UNITS: u64 = 48_000_000;
+/// Maximum total compute units per block (legacy, pre-SIMD-0207).
+pub const MAX_BLOCK_COMPUTE_UNITS_LEGACY: u64 = 48_000_000;
+
+/// Maximum total compute units per block (SIMD-0207).
+pub const MAX_BLOCK_COMPUTE_UNITS_SIMD_0207: u64 = 50_000_000;
+
+/// Maximum total compute units per block (SIMD-0256).
+pub const MAX_BLOCK_COMPUTE_UNITS_SIMD_0256: u64 = 60_000_000;
+
+/// Maximum total compute units per block (SIMD-0286, current).
+pub const MAX_BLOCK_COMPUTE_UNITS_SIMD_0286: u64 = 100_000_000;
+
+/// Default maximum total compute units per block.
+///
+/// This should be resolved at runtime based on active feature flags.
+/// Use `MAX_BLOCK_COMPUTE_UNITS_SIMD_0207` as the safe default for
+/// networks that have activated SIMD-0207 but not yet SIMD-0256/0286.
+pub const MAX_BLOCK_COMPUTE_UNITS: u64 = MAX_BLOCK_COMPUTE_UNITS_SIMD_0207;
 
 /// Maximum compute units for vote transactions per block.
 pub const MAX_VOTE_COMPUTE_UNITS: u64 = 36_000_000;
 
 /// Maximum compute units per writable account per block.
 pub const MAX_WRITABLE_ACCOUNT_COMPUTE_UNITS: u64 = 12_000_000;
+
+/// Maximum writable account compute units after raise_account_cu_limit
+/// feature activation (SIMD-0306): 40% of block limit.
+///
+/// Computed at runtime as `block_limit * 40 / 100`.
+pub const ACCOUNT_CU_LIMIT_RATIO_PERCENT: u64 = 40;
 
 /// Cost of acquiring a write lock on an account.
 pub const WRITE_LOCK_COST: u64 = 300;
@@ -114,3 +136,30 @@ pub const MAX_CUS_PER_MICROBLOCK: u64 = 1_600_000;
 /// Prevents bursty microblock production that could overwhelm
 /// execution tiles. At 50us, this allows up to ~20K microblocks/sec.
 pub const DEFAULT_MICROBLOCK_PACE_NS: u64 = 50_000;
+
+// ---------------------------------------------------------------------------
+// Runtime bounds
+// ---------------------------------------------------------------------------
+
+/// Maximum number of vote accounts in the system.
+pub const MAX_VOTE_ACCOUNTS: usize = 40_200;
+
+/// Expected number of active vote accounts (for sizing hints).
+pub const EXPECTED_VOTE_ACCOUNTS: usize = 2_048;
+
+/// Maximum number of stake accounts in the system.
+pub const MAX_STAKE_ACCOUNTS: usize = 3_000_000;
+
+/// Expected number of active stake accounts (for sizing hints).
+pub const EXPECTED_STAKE_ACCOUNTS: usize = 2_000_000;
+
+/// BLS proof-of-possession verification cost charged by the vote
+/// program for authorize instructions (SIMD-0387).
+pub const BLS_PROOF_OF_POSSESSION_VERIFICATION_CU: u64 = 34_500;
+
+/// Upper bound on execution CUs used by any vote instruction.
+///
+/// The authorize instruction charges the default vote cost plus
+/// BLS proof-of-possession verification.
+pub const VOTE_MAX_COMPUTE_UNITS: u64 =
+    SIMPLE_VOTE_EXECUTION_COST + BLS_PROOF_OF_POSSESSION_VERIFICATION_CU;
