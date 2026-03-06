@@ -89,3 +89,159 @@ pub fn sync_callee_to_caller(
 
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::syscalls::cpi::{CpiAccountInfo, InstructionAccount};
+    use karstflow_types::Pubkey;
+
+    fn test_pubkey(byte: u8) -> Pubkey {
+        Pubkey::new([byte; 32])
+    }
+
+    fn test_ctx() -> SyscallContext {
+        SyscallContext::new(test_pubkey(1), 1_000_000_000)
+    }
+
+    fn writable_acct(pubkey: Pubkey) -> InstructionAccount {
+        InstructionAccount {
+            index_in_callee: 0,
+            is_signer: false,
+            is_writable: true,
+            pubkey,
+        }
+    }
+
+    fn readonly_acct(pubkey: Pubkey) -> InstructionAccount {
+        InstructionAccount {
+            index_in_callee: 0,
+            is_signer: false,
+            is_writable: false,
+            pubkey,
+        }
+    }
+
+    #[test]
+    fn sync_caller_to_callee_skips_readonly() {
+        let ctx = test_ctx();
+        let pk = test_pubkey(10);
+        let deduped = vec![readonly_acct(pk)];
+        let result = sync_caller_to_callee(&ctx, &deduped, &[]);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn sync_caller_to_callee_writable_ok() {
+        let mut ctx = test_ctx();
+        let pk = test_pubkey(10);
+        ctx.modified_accounts.insert(pk, Account {
+            meta: AccountMeta::new(1000, test_pubkey(0xFF), false, 0),
+            data: AccountData::new(vec![1, 2, 3]),
+        });
+        let deduped = vec![writable_acct(pk)];
+        let result = sync_caller_to_callee(&ctx, &deduped, &[]);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn sync_callee_to_caller_writes_back() {
+        let mut ctx = test_ctx();
+        let pk = test_pubkey(10);
+        ctx.accounts.insert(pk, Account {
+            meta: AccountMeta::new(1000, test_pubkey(0xFF), false, 0),
+            data: AccountData::new(vec![0; 32]),
+        });
+        let deduped = vec![writable_acct(pk)];
+        let info = CpiAccountInfo {
+            pubkey: pk,
+            lamports: 2000,
+            data: vec![0; 32],
+            owner: test_pubkey(0xEE),
+            executable: false,
+        };
+        let result = sync_callee_to_caller(&mut ctx, &deduped, &[info]);
+        assert!(result.is_ok());
+        let modified = ctx.modified_accounts.get(&pk).unwrap();
+        assert_eq!(modified.meta.lamports, 2000);
+    }
+
+    #[test]
+    fn sync_callee_to_caller_skips_readonly() {
+        let mut ctx = test_ctx();
+        let pk = test_pubkey(10);
+        let deduped = vec![readonly_acct(pk)];
+        let info = CpiAccountInfo {
+            pubkey: pk,
+            lamports: 9999,
+            data: vec![],
+            owner: test_pubkey(0xFF),
+            executable: false,
+        };
+        let result = sync_callee_to_caller(&mut ctx, &deduped, &[info]);
+        assert!(result.is_ok());
+        assert!(!ctx.modified_accounts.contains_key(&pk));
+    }
+
+    #[test]
+    fn sync_callee_to_caller_rejects_excessive_realloc() {
+        let mut ctx = test_ctx();
+        let pk = test_pubkey(10);
+        ctx.accounts.insert(pk, Account {
+            meta: AccountMeta::new(1000, test_pubkey(0xFF), false, 0),
+            data: AccountData::new(vec![0; 32]),
+        });
+        let deduped = vec![writable_acct(pk)];
+        let info = CpiAccountInfo {
+            pubkey: pk,
+            lamports: 1000,
+            data: vec![0; 32 + MAX_PERMITTED_DATA_INCREASE + 1],
+            owner: test_pubkey(0xFF),
+            executable: false,
+        };
+        let result = sync_callee_to_caller(&mut ctx, &deduped, &[info]);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn sync_callee_to_caller_allows_data_shrink() {
+        let mut ctx = test_ctx();
+        let pk = test_pubkey(10);
+        ctx.accounts.insert(pk, Account {
+            meta: AccountMeta::new(1000, test_pubkey(0xFF), false, 0),
+            data: AccountData::new(vec![0; 1024]),
+        });
+        let deduped = vec![writable_acct(pk)];
+        let info = CpiAccountInfo {
+            pubkey: pk,
+            lamports: 1000,
+            data: vec![0; 16], // shrink from 1024 to 16
+            owner: test_pubkey(0xFF),
+            executable: false,
+        };
+        let result = sync_callee_to_caller(&mut ctx, &deduped, &[info]);
+        assert!(result.is_ok());
+        let modified = ctx.modified_accounts.get(&pk).unwrap();
+        assert_eq!(modified.data.len(), 16);
+    }
+
+    #[test]
+    fn sync_callee_to_caller_allows_max_realloc() {
+        let mut ctx = test_ctx();
+        let pk = test_pubkey(10);
+        ctx.accounts.insert(pk, Account {
+            meta: AccountMeta::new(1000, test_pubkey(0xFF), false, 0),
+            data: AccountData::new(vec![0; 32]),
+        });
+        let deduped = vec![writable_acct(pk)];
+        let info = CpiAccountInfo {
+            pubkey: pk,
+            lamports: 1000,
+            data: vec![0; 32 + MAX_PERMITTED_DATA_INCREASE], // exactly at limit
+            owner: test_pubkey(0xFF),
+            executable: false,
+        };
+        let result = sync_callee_to_caller(&mut ctx, &deduped, &[info]);
+        assert!(result.is_ok());
+    }
+}

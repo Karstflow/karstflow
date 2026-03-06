@@ -351,3 +351,243 @@ pub fn derive_pda_signers(
 
     Ok(signers)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_pubkey(byte: u8) -> Pubkey {
+        Pubkey::new([byte; 32])
+    }
+
+    fn make_instruction(program_id: Pubkey, accounts: Vec<CpiAccountMeta>, data: Vec<u8>) -> CpiInstruction {
+        CpiInstruction { program_id, accounts, data }
+    }
+
+    fn make_meta(pubkey: Pubkey, is_signer: bool, is_writable: bool) -> CpiAccountMeta {
+        CpiAccountMeta { pubkey, is_signer, is_writable }
+    }
+
+    fn make_info(pubkey: Pubkey, executable: bool) -> CpiAccountInfo {
+        CpiAccountInfo {
+            pubkey,
+            lamports: 1_000_000,
+            data: vec![0u8; 32],
+            owner: test_pubkey(0xFF),
+            executable,
+        }
+    }
+
+    fn test_ctx() -> SyscallContext {
+        SyscallContext::new(test_pubkey(1), 1_000_000_000)
+    }
+
+    // ---- deduplicate_accounts ----
+
+    #[test]
+    fn dedup_no_duplicates() {
+        let ix = make_instruction(
+            test_pubkey(99),
+            vec![
+                make_meta(test_pubkey(10), true, false),
+                make_meta(test_pubkey(11), false, true),
+            ],
+            vec![],
+        );
+        let deduped = deduplicate_accounts(&ix).unwrap();
+        assert_eq!(deduped.len(), 2);
+        assert!(deduped[0].is_signer);
+        assert!(!deduped[0].is_writable);
+        assert!(!deduped[1].is_signer);
+        assert!(deduped[1].is_writable);
+    }
+
+    #[test]
+    fn dedup_merges_privileges() {
+        let pk = test_pubkey(10);
+        let ix = make_instruction(
+            test_pubkey(99),
+            vec![
+                make_meta(pk, true, false),
+                make_meta(pk, false, true),
+            ],
+            vec![],
+        );
+        let deduped = deduplicate_accounts(&ix).unwrap();
+        assert_eq!(deduped.len(), 1);
+        assert!(deduped[0].is_signer);
+        assert!(deduped[0].is_writable);
+    }
+
+    #[test]
+    fn dedup_three_identical_accounts() {
+        let pk = test_pubkey(10);
+        let ix = make_instruction(
+            test_pubkey(99),
+            vec![
+                make_meta(pk, false, false),
+                make_meta(pk, true, false),
+                make_meta(pk, false, true),
+            ],
+            vec![],
+        );
+        let deduped = deduplicate_accounts(&ix).unwrap();
+        assert_eq!(deduped.len(), 1);
+        assert!(deduped[0].is_signer);
+        assert!(deduped[0].is_writable);
+    }
+
+    #[test]
+    fn dedup_empty_accounts() {
+        let ix = make_instruction(test_pubkey(99), vec![], vec![]);
+        let deduped = deduplicate_accounts(&ix).unwrap();
+        assert!(deduped.is_empty());
+    }
+
+    // ---- derive_pda_signers ----
+
+    #[test]
+    fn derive_pda_empty_seeds() {
+        let signers = derive_pda_signers(&[], &test_pubkey(1)).unwrap();
+        assert!(signers.is_empty());
+    }
+
+    #[test]
+    fn derive_pda_valid_seeds() {
+        let seeds: &[&[u8]] = &[b"hello", &[255]];
+        let result = derive_pda_signers(&[seeds], &test_pubkey(1));
+        // Result depends on whether the hash lands on the curve — just verify it doesn't panic
+        // and returns either Ok or InvalidProgramAddress
+        assert!(result.is_ok() || matches!(result, Err(SyscallError::InvalidProgramAddress)));
+    }
+
+    #[test]
+    fn derive_pda_too_many_seeds() {
+        let seed: &[u8] = b"x";
+        let seeds: Vec<&[u8]> = vec![seed; MAX_SIGNER_SEEDS + 1];
+        let result = derive_pda_signers(&[&seeds], &test_pubkey(1));
+        assert!(matches!(result, Err(SyscallError::InvalidSeeds)));
+    }
+
+    #[test]
+    fn derive_pda_seed_too_long() {
+        let long_seed = vec![0u8; MAX_SEED_BYTES + 1];
+        let seeds: &[&[u8]] = &[&long_seed];
+        let result = derive_pda_signers(&[seeds], &test_pubkey(1));
+        assert!(matches!(result, Err(SyscallError::InvalidSeeds)));
+    }
+
+    // ---- invoke_signed ----
+
+    #[test]
+    fn invoke_rejects_reentrancy() {
+        let mut ctx = test_ctx();
+        let self_program = ctx.program_id;
+        let ix = make_instruction(self_program, vec![], vec![]);
+        let result = invoke_signed(&mut ctx, &ix, &[], &[]);
+        assert!(matches!(result, Err(SyscallError::ReentrancyDetected)));
+    }
+
+    #[test]
+    fn invoke_rejects_max_depth() {
+        let mut ctx = test_ctx();
+        ctx.stack_depth = MAX_CPI_DEPTH;
+        let ix = make_instruction(test_pubkey(99), vec![], vec![]);
+        let result = invoke_signed(&mut ctx, &ix, &[], &[]);
+        assert!(matches!(result, Err(SyscallError::MaxCpiDepthExceeded)));
+    }
+
+    #[test]
+    fn invoke_rejects_oversized_data() {
+        let mut ctx = test_ctx();
+        let ix = make_instruction(
+            test_pubkey(99),
+            vec![],
+            vec![0u8; MAX_CPI_INSTRUCTION_SIZE + 1],
+        );
+        let result = invoke_signed(&mut ctx, &ix, &[], &[]);
+        assert!(matches!(result, Err(SyscallError::MaxInstructionSizeExceeded)));
+    }
+
+    #[test]
+    fn invoke_rejects_too_many_signers() {
+        let mut ctx = test_ctx();
+        let ix = make_instruction(test_pubkey(99), vec![], vec![]);
+        let seed: &[u8] = b"s";
+        let one_seed: &[&[u8]] = &[seed];
+        let signer_seeds: Vec<&[&[u8]]> = vec![one_seed; MAX_CPI_SIGNERS + 1];
+        let result = invoke_signed(&mut ctx, &ix, &[], &signer_seeds);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn invoke_rejects_missing_account() {
+        let mut ctx = test_ctx();
+        let pk = test_pubkey(10);
+        let ix = make_instruction(
+            test_pubkey(99),
+            vec![make_meta(pk, false, false)],
+            vec![],
+        );
+        let result = invoke_signed(&mut ctx, &ix, &[], &[]);
+        assert!(matches!(result, Err(SyscallError::MissingAccount(_))));
+    }
+
+    #[test]
+    fn invoke_succeeds_minimal() {
+        let mut ctx = test_ctx();
+        let target = test_pubkey(99);
+        let acct_pk = test_pubkey(10);
+        // Add account to ctx so privilege check passes
+        ctx.accounts.insert(acct_pk, karstflow_types::Account {
+            meta: karstflow_types::AccountMeta::new(1000, test_pubkey(0xFF), false, 0),
+            data: karstflow_types::AccountData::new(vec![]),
+        });
+        let ix = make_instruction(
+            target,
+            vec![make_meta(acct_pk, false, true)],
+            vec![],
+        );
+        let infos = vec![
+            make_info(target, true),
+            make_info(acct_pk, false),
+        ];
+        let result = invoke_signed(&mut ctx, &ix, &infos, &[]);
+        assert!(result.is_ok());
+        assert_eq!(ctx.stack_depth, 0); // depth restored after invoke
+    }
+
+    // ---- validate_privilege_escalation ----
+
+    #[test]
+    fn privilege_escalation_writable_rejected_with_explicit_privs() {
+        let mut ctx = test_ctx();
+        let pk = test_pubkey(10);
+        // Account is read-only in caller
+        ctx.caller_account_privileges.push((pk, false, false));
+        let deduped = vec![InstructionAccount {
+            index_in_callee: 0,
+            is_signer: false,
+            is_writable: true,
+            pubkey: pk,
+        }];
+        let result = validate_privilege_escalation(&ctx, &deduped, &[]);
+        assert!(matches!(result, Err(SyscallError::PrivilegeEscalation(_))));
+    }
+
+    #[test]
+    fn privilege_escalation_signer_allowed_via_pda() {
+        let mut ctx = test_ctx();
+        let pk = test_pubkey(10);
+        ctx.caller_account_privileges.push((pk, false, true));
+        let deduped = vec![InstructionAccount {
+            index_in_callee: 0,
+            is_signer: true,
+            is_writable: true,
+            pubkey: pk,
+        }];
+        // pk is a PDA signer
+        let result = validate_privilege_escalation(&ctx, &deduped, &[pk]);
+        assert!(result.is_ok());
+    }
+}
