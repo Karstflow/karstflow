@@ -723,7 +723,7 @@ fn run_with_node_config(
                     // finish_slot() and collect entries.
                     dev_handle.end_slot();
 
-                    // Tick + freeze the bank for the completed slot.
+                    // Tick, freeze, and root the bank for the completed slot.
                     {
                         let forks = bank_forks.read().expect("bank_forks lock poisoned");
                         let bank = forks.working_bank();
@@ -733,9 +733,10 @@ fn run_with_node_config(
                             let _ = bank.register_tick();
                         }
                         let _ = bank.freeze();
+                        let _ = bank.mark_rooted();
                     }
 
-                    // Create child bank for next slot.
+                    // Create child bank for next slot and advance root.
                     current_slot = completed_slot + 1;
                     {
                         let mut forks = bank_forks.write().expect("bank_forks lock poisoned");
@@ -755,6 +756,16 @@ fn run_with_node_config(
                             break;
                         }
                         let _ = forks.set_working_bank(current_slot);
+
+                        // Advance root to the completed slot so RPC
+                        // sees finalized/confirmed state progressing.
+                        if let Err(e) = forks.set_root(completed_slot) {
+                            warn!(
+                                error = ?e,
+                                slot = completed_slot,
+                                "dev slot driver: failed to set root"
+                            );
+                        }
                     }
 
                     info!(
@@ -816,6 +827,7 @@ fn run_with_node_config(
     // entries.
     let vote_sender_tower = consensus.tower.clone();
     let vote_sender_forks = consensus.bank_forks.clone();
+    let reporter_bank_forks = consensus.bank_forks.clone();
     let vote_sender_cluster = cluster_info.clone();
     let vote_broadcast_bundle = build_vote_broadcast_service(
         &identity,
@@ -978,7 +990,8 @@ fn run_with_node_config(
         if let Some(ref bs) = shared_blockstore {
             aggregator = aggregator.with_blockstore(std::sync::Arc::clone(bs.stats()));
         }
-        rpt.with_aggregator(aggregator)
+        rpt.with_bank_forks(reporter_bank_forks.clone())
+            .with_aggregator(aggregator)
     });
 
     let metrics_http_content = runtime_topology.metrics_http_content.clone();

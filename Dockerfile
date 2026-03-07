@@ -77,4 +77,4 @@ HEALTHCHECK --interval=5s --timeout=3s --start-period=10s --retries=10 \
     CMD curl -sf http://localhost:8899 -d '{"jsonrpc":"2.0","id":1,"method":"getHealth"}' || exit 1
 
 ENTRYPOINT ["karstflow-node"]
-CMD ["--config", "/etc/karstflow/config.toml", "--dev"]
+CMD ["--config", "/etc/karstflow/config.toml"]
