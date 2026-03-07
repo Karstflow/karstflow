@@ -42,6 +42,7 @@ mod vote_account_cache;
 mod vote_processor;
 mod vote_stakes;
 mod vote_state;
+mod vote_tx_tracker;
 
 pub use bank::{
     Bank, BankFeeError, BankFreezeError, BankRootError, BankStatus, BankTickError,
@@ -116,6 +117,7 @@ pub use bank_executor::{
     TransactionSimulationResult, VoteUpdate,
 };
 pub use cost_tracker::{CostLimits, CostTracker, CostTrackerError, TransactionCost};
+pub use vote_tx_tracker::VoteTxTracker;
 pub use features::{FeatureActivation, FeatureSet};
 pub use signature_status::{AddressSignatureEntry, SignatureStatus, SignatureStatusCache};
 pub use snapshot_bootstrap::{
