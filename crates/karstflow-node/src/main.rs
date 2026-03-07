@@ -723,7 +723,7 @@ fn run_with_node_config(
                     // finish_slot() and collect entries.
                     dev_handle.end_slot();
 
-                    // Tick, freeze, and root the bank for the completed slot.
+                    // Tick, finalize, and root the bank for the completed slot.
                     {
                         let forks = bank_forks.read().expect("bank_forks lock poisoned");
                         let bank = forks.working_bank();
@@ -732,7 +732,9 @@ fn run_with_node_config(
                         for _ in 0..ticks_needed {
                             let _ = bank.register_tick();
                         }
-                        let _ = bank.freeze();
+                        if let Err(e) = bank.finish_slot() {
+                            warn!(error = ?e, slot = completed_slot, "dev slot driver: finish_slot failed");
+                        }
                         let _ = bank.mark_rooted();
                     }
 

@@ -6,42 +6,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 WORKDIR /build
 
-# Cache dependencies: copy manifests first, build a dummy to cache deps layer
-COPY Cargo.toml Cargo.lock rust-toolchain.toml ./
-COPY crates/karstflow-core/Cargo.toml crates/karstflow-core/Cargo.toml
-COPY crates/karstflow-runtime/Cargo.toml crates/karstflow-runtime/Cargo.toml
-COPY crates/karstflow-mesh/Cargo.toml crates/karstflow-mesh/Cargo.toml
-COPY crates/karstflow-execution/Cargo.toml crates/karstflow-execution/Cargo.toml
-COPY crates/karstflow-storage/Cargo.toml crates/karstflow-storage/Cargo.toml
-COPY crates/karstflow-constants/Cargo.toml crates/karstflow-constants/Cargo.toml
-COPY crates/karstflow-stages/Cargo.toml crates/karstflow-stages/Cargo.toml
-COPY crates/karstflow-config/Cargo.toml crates/karstflow-config/Cargo.toml
-COPY crates/karstflow-observability/Cargo.toml crates/karstflow-observability/Cargo.toml
-COPY crates/karstflow-rpc/Cargo.toml crates/karstflow-rpc/Cargo.toml
-COPY crates/karstflow-control/Cargo.toml crates/karstflow-control/Cargo.toml
-COPY crates/karstflow-topology/Cargo.toml crates/karstflow-topology/Cargo.toml
-COPY crates/karstflow-node/Cargo.toml crates/karstflow-node/Cargo.toml
-COPY crates/karstflow-consensus/Cargo.toml crates/karstflow-consensus/Cargo.toml
-COPY crates/karstflow-sbpf/Cargo.toml crates/karstflow-sbpf/Cargo.toml
-COPY crates/karstflow-types/Cargo.toml crates/karstflow-types/Cargo.toml
-COPY crates/karstflow-ids/Cargo.toml crates/karstflow-ids/Cargo.toml
-COPY crates/karstflow-crypto/Cargo.toml crates/karstflow-crypto/Cargo.toml
-COPY crates/karstflow-net/Cargo.toml crates/karstflow-net/Cargo.toml
-COPY crates/karstflow-plugin/Cargo.toml crates/karstflow-plugin/Cargo.toml
-COPY crates/karstflow-integration-tests/Cargo.toml crates/karstflow-integration-tests/Cargo.toml
-COPY crates/karstflow-conformance/Cargo.toml crates/karstflow-conformance/Cargo.toml
-
-# Create stub lib.rs for each crate so cargo can resolve the workspace
-RUN for crate_dir in crates/*/; do \
-      mkdir -p "$crate_dir/src"; \
-      echo "" > "$crate_dir/src/lib.rs"; \
-    done && \
-    mkdir -p crates/karstflow-node/src && \
-    echo "fn main() {}" > crates/karstflow-node/src/main.rs
-
-RUN cargo build --release --bin karstflow-node 2>/dev/null || true
-
-# Now copy real source and build
 COPY . .
 RUN cargo build --release --bin karstflow-node
 
@@ -74,7 +38,8 @@ WORKDIR /home/karstflow
 EXPOSE 8899 8900 8001 8000
 
 HEALTHCHECK --interval=5s --timeout=3s --start-period=10s --retries=10 \
-    CMD curl -sf http://localhost:8899 -d '{"jsonrpc":"2.0","id":1,"method":"getHealth"}' || exit 1
+    CMD curl -sf -H "Content-Type: application/json" http://localhost:8899 \
+    -d '{"jsonrpc":"2.0","id":1,"method":"getHealth"}' || exit 1
 
 ENTRYPOINT ["karstflow-node"]
 CMD ["--config", "/etc/karstflow/config.toml"]

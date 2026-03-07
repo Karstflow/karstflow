@@ -777,6 +777,20 @@ impl Bank {
         *self.last_blockhash.read().expect("blockhash lock poisoned")
     }
 
+    /// Get the most recent blockhash that is registered in the queue and
+    /// therefore accepted by `is_blockhash_valid` / `process_transaction`.
+    /// Falls back to `last_blockhash()` if the queue is empty.
+    pub fn latest_valid_blockhash(&self) -> [u8; 32] {
+        let queue = self
+            .blockhash_queue
+            .read()
+            .expect("blockhash_queue lock poisoned");
+        queue
+            .last_blockhash()
+            .map(|h| h.to_bytes())
+            .unwrap_or_else(|| self.last_blockhash())
+    }
+
     /// Set the last PoH blockhash for this slot.
     pub fn set_last_blockhash(&self, hash: [u8; 32]) {
         *self

@@ -119,7 +119,7 @@ fn build_send_transaction_response(
 
         let sig_bytes = submitter
             .submit_transaction(&tx_bytes)
-            .map_err(|_| RpcMethodError::TransactionSubmissionFailed)?;
+            .map_err(|e| RpcMethodError::transaction_failed(&e))?;
 
         let sig_str = bs58::encode(sig_bytes).into_string();
         return Ok(types::to_value(&sig_str));

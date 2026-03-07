@@ -29,7 +29,7 @@ pub(super) fn handle(
             if healthy {
                 Ok(types::to_value(&"ok"))
             } else {
-                Err(RpcMethodError::NodeUnhealthy)
+                Err(RpcMethodError::node_unhealthy(None))
             }
         }
         RpcMethod::GetVersion => {

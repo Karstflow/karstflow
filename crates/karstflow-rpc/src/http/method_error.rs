@@ -1,36 +1,78 @@
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RpcMethodError {
     InvalidRequest,
     InvalidParams,
     MethodNotFound,
     MinimumContextSlotNotReached,
-    TransactionSubmissionFailed,
-    NodeUnhealthy,
+    TransactionSubmissionFailed {
+        message: String,
+        err: Option<String>,
+        logs: Option<Vec<String>>,
+    },
+    NodeUnhealthy {
+        num_slots_behind: Option<u64>,
+    },
     Internal,
 }
 
 impl RpcMethodError {
-    pub fn code(self) -> i32 {
+    pub fn code(&self) -> i32 {
         match self {
             Self::InvalidRequest => -32600,
             Self::InvalidParams => -32602,
             Self::MethodNotFound => -32601,
             Self::MinimumContextSlotNotReached => -32016,
-            Self::TransactionSubmissionFailed => -32002,
-            Self::NodeUnhealthy => -32005,
+            Self::TransactionSubmissionFailed { .. } => -32002,
+            Self::NodeUnhealthy { .. } => -32005,
             Self::Internal => -32603,
         }
     }
 
-    pub fn message(self, method: &str) -> String {
+    pub fn message(&self, method: &str) -> String {
         match self {
             Self::InvalidRequest => "Invalid request".to_string(),
             Self::InvalidParams => "Invalid params".to_string(),
             Self::MethodNotFound => format!("Method not found: {method}"),
             Self::MinimumContextSlotNotReached => "Minimum context slot not reached".to_string(),
-            Self::TransactionSubmissionFailed => "Transaction submission failed".to_string(),
-            Self::NodeUnhealthy => "Node is behind by too many slots".to_string(),
+            Self::TransactionSubmissionFailed { message, .. } => message.clone(),
+            Self::NodeUnhealthy { .. } => "Node is behind by too many slots".to_string(),
             Self::Internal => "Internal error".to_string(),
+        }
+    }
+
+    pub fn data(&self) -> Option<serde_json::Value> {
+        match self {
+            Self::TransactionSubmissionFailed { err, logs, .. } => Some(serde_json::json!({
+                "accounts": null,
+                "err": err.as_deref().unwrap_or("BlockhashNotFound"),
+                "innerInstructions": null,
+                "logs": logs.as_deref().unwrap_or(&[]),
+                "returnData": null,
+                "unitsConsumed": 0
+            })),
+            Self::NodeUnhealthy { num_slots_behind } => Some(serde_json::json!({
+                "numSlotsBehind": num_slots_behind
+            })),
+            _ => None,
+        }
+    }
+
+    /// Create a transaction submission failure with a valid Solana TransactionError variant.
+    ///
+    /// Valid `err` values include: `AccountInUse`, `AccountNotFound`,
+    /// `InsufficientFundsForFee`, `BlockhashNotFound`, `AlreadyProcessed`,
+    /// `SignatureFailure`, `SanitizeFailure`, and others from solana TransactionError.
+    pub fn transaction_failed(err: &str) -> Self {
+        Self::TransactionSubmissionFailed {
+            message: format!("Transaction simulation failed: {err}"),
+            err: Some(err.to_string()),
+            logs: None,
+        }
+    }
+
+    pub fn node_unhealthy(slots_behind: Option<u64>) -> Self {
+        Self::NodeUnhealthy {
+            num_slots_behind: slots_behind,
         }
     }
 }
@@ -53,16 +95,16 @@ mod tests {
 
     #[test]
     fn error_codes_are_negative() {
-        let errors = [
+        let errors: Vec<RpcMethodError> = vec![
             RpcMethodError::InvalidRequest,
             RpcMethodError::InvalidParams,
             RpcMethodError::MethodNotFound,
             RpcMethodError::MinimumContextSlotNotReached,
-            RpcMethodError::TransactionSubmissionFailed,
-            RpcMethodError::NodeUnhealthy,
+            RpcMethodError::transaction_failed("test"),
+            RpcMethodError::node_unhealthy(Some(100)),
             RpcMethodError::Internal,
         ];
-        for e in errors {
+        for e in &errors {
             assert!(e.code() < 0);
         }
     }
@@ -77,8 +119,8 @@ mod tests {
     #[test]
     fn custom_error_codes() {
         assert_eq!(RpcMethodError::MinimumContextSlotNotReached.code(), -32016);
-        assert_eq!(RpcMethodError::TransactionSubmissionFailed.code(), -32002);
-        assert_eq!(RpcMethodError::NodeUnhealthy.code(), -32005);
+        assert_eq!(RpcMethodError::transaction_failed("x").code(), -32002);
+        assert_eq!(RpcMethodError::node_unhealthy(None).code(), -32005);
         assert_eq!(RpcMethodError::Internal.code(), -32603);
     }
 
@@ -123,8 +165,31 @@ mod tests {
             RpcMethodError::MethodNotFound,
             RpcMethodError::MinimumContextSlotNotReached,
         ];
-        for e in errors {
-            assert_eq!(RpcMethodError::from(e.code()), e);
+        for e in &errors {
+            assert_eq!(RpcMethodError::from(e.code()), e.clone());
         }
+    }
+
+    #[test]
+    fn transaction_failed_has_data() {
+        let err = RpcMethodError::transaction_failed("InsufficientFundsForFee");
+        assert!(err.data().is_some());
+        let data = err.data().unwrap();
+        assert_eq!(data["err"], "InsufficientFundsForFee");
+    }
+
+    #[test]
+    fn node_unhealthy_has_data() {
+        let err = RpcMethodError::node_unhealthy(Some(50));
+        assert!(err.data().is_some());
+        let data = err.data().unwrap();
+        assert_eq!(data["numSlotsBehind"], 50);
+    }
+
+    #[test]
+    fn simple_errors_have_no_data() {
+        assert!(RpcMethodError::InvalidParams.data().is_none());
+        assert!(RpcMethodError::Internal.data().is_none());
+        assert!(RpcMethodError::MethodNotFound.data().is_none());
     }
 }

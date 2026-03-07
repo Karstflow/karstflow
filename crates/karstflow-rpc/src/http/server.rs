@@ -161,7 +161,8 @@ fn dispatch_via_legacy_renderer(
             .get("message")
             .and_then(|value| value.as_str())
             .unwrap_or("Internal error");
-        return Err(ErrorObjectOwned::owned(code as i32, message, None::<()>));
+        let data = error.get("data").cloned();
+        return Err(ErrorObjectOwned::owned(code as i32, message, data));
     }
 
     Ok(parsed_response

@@ -515,6 +515,9 @@ pub fn bootstrap_from_development_genesis(
         },
     ));
 
+    // Add native programs, SPL programs, precompiles, and sysvars.
+    append_builtin_genesis_accounts(&mut genesis.accounts);
+
     let validators = vec![(identity, 500_000_000)];
     let leader_schedule = Arc::new(
         LeaderSchedule::new(0, &validators).expect("leader schedule from single validator"),
@@ -549,6 +552,91 @@ pub fn development_faucet_pubkey() -> Pubkey {
         0x20, 0xc6, 0x83, 0x2b, 0x5a, 0x55, 0xf3, 0x2e, 0x77, 0x1c, 0x48, 0x3a, 0xf6, 0xe1, 0x13,
         0x5b, 0x7d,
     ])
+}
+
+/// Append native program, SPL program, precompile, and sysvar accounts
+/// to the genesis account list so that `getAccountInfo` returns valid
+/// entries for all builtin addresses.
+fn append_builtin_genesis_accounts(accounts: &mut Vec<(Pubkey, karstflow_storage::GenesisAccount)>) {
+    use karstflow_ids::*;
+
+    // Helper: executable program account owned by NativeLoader.
+    let native_program = |id: Pubkey| {
+        (
+            id,
+            karstflow_storage::GenesisAccount {
+                lamports: 1,
+                data: Vec::new(),
+                owner: NATIVE_LOADER_PROGRAM_ID,
+                executable: true,
+                rent_epoch: u64::MAX,
+            },
+        )
+    };
+
+    // Helper: sysvar account with placeholder data of the given size.
+    let sysvar = |id: Pubkey, data_len: usize| {
+        (
+            id,
+            karstflow_storage::GenesisAccount {
+                lamports: 1,
+                data: vec![0u8; data_len],
+                owner: SYSVAR_PROGRAM_ID,
+                executable: false,
+                rent_epoch: u64::MAX,
+            },
+        )
+    };
+
+    // ── Native programs ─────────────────────────────────────────────
+    accounts.push(native_program(SYSTEM_PROGRAM_ID));
+    accounts.push(native_program(VOTE_PROGRAM_ID));
+    accounts.push(native_program(STAKE_PROGRAM_ID));
+    accounts.push(native_program(CONFIG_PROGRAM_ID));
+    accounts.push(native_program(BPF_LOADER_V2_PROGRAM_ID));
+    accounts.push(native_program(BPF_LOADER_PROGRAM_ID)); // upgradeable
+    accounts.push(native_program(COMPUTE_BUDGET_PROGRAM_ID));
+    accounts.push(native_program(ADDRESS_LOOKUP_TABLE_PROGRAM_ID));
+    accounts.push(native_program(FEATURE_PROGRAM_ID));
+
+    // ── SPL programs ────────────────────────────────────────────────
+    // In Solana, SPL Token and Memo are BPF programs owned by the
+    // upgradeable loader. We mark them executable with an appropriate owner.
+    let spl_program = |id: Pubkey| {
+        (
+            id,
+            karstflow_storage::GenesisAccount {
+                lamports: 1,
+                data: vec![0u8; 36], // minimal program-data stub
+                owner: BPF_LOADER_PROGRAM_ID,
+                executable: true,
+                rent_epoch: u64::MAX,
+            },
+        )
+    };
+    accounts.push(spl_program(TOKEN_PROGRAM_ID));
+    accounts.push(spl_program(TOKEN_2022_PROGRAM_ID));
+    accounts.push(spl_program(ASSOCIATED_TOKEN_PROGRAM_ID));
+    accounts.push(spl_program(MEMO_PROGRAM_ID));
+    accounts.push(spl_program(MEMO_PROGRAM_V3_ID));
+
+    // ── Precompiles ─────────────────────────────────────────────────
+    accounts.push(native_program(ED25519_PROGRAM_ID));
+    accounts.push(native_program(SECP256K1_PROGRAM_ID));
+
+    // ── Sysvars ─────────────────────────────────────────────────────
+    // Data sizes match Solana mainnet account sizes.
+    accounts.push(sysvar(CLOCK_SYSVAR_ID, 40));          // Clock: 40 bytes
+    accounts.push(sysvar(RENT_SYSVAR_ID, 17));           // Rent: 17 bytes
+    accounts.push(sysvar(EPOCH_SCHEDULE_SYSVAR_ID, 33)); // EpochSchedule: 33 bytes
+    accounts.push(sysvar(SLOT_HASHES_SYSVAR_ID, 20_488)); // SlotHashes: 512 entries × 40 + 8
+    accounts.push(sysvar(SLOT_HISTORY_SYSVAR_ID, 131_097)); // SlotHistory: bitvec
+    accounts.push(sysvar(STAKE_HISTORY_SYSVAR_ID, 16_392)); // StakeHistory
+    accounts.push(sysvar(INSTRUCTIONS_SYSVAR_ID, 8));    // Instructions: virtual, stub data
+    accounts.push(sysvar(RECENT_BLOCKHASHES_SYSVAR_ID, 6_008)); // RecentBlockhashes (deprecated)
+    accounts.push(sysvar(FEES_SYSVAR_ID, 8));            // Fees (deprecated)
+    accounts.push(sysvar(EPOCH_REWARDS_SYSVAR_ID, 0));   // EpochRewards
+    accounts.push(sysvar(LAST_RESTART_SLOT_SYSVAR_ID, 8)); // LastRestartSlot
 }
 
 /// Build the replay service for processing assembled blocks through consensus.
@@ -2565,10 +2653,16 @@ pub fn maybe_start_rpc_http_server_with_consensus(
                     node_config.expected_genesis_hash.clone(),
                     health_status,
                 )));
-            let submitter: Option<Arc<dyn TransactionSubmitter>> =
+            let dev_mode = node_config.cluster_mode == karstflow_config::ClusterMode::Dev;
+            let submitter: Option<Arc<dyn TransactionSubmitter>> = if dev_mode {
+                // In dev mode, accept transactions and return the signature
+                // without forwarding through TPU/gossip (no real network).
+                Some(Arc::new(DevTransactionSubmitter::new(forks.clone())))
+            } else {
                 cluster_info.map(|ci| -> Arc<dyn TransactionSubmitter> {
                     Arc::new(ConsensusTransactionSubmitter::new(forks.clone(), ci))
-                });
+                })
+            };
             (snap, bank, submitter)
         } else {
             let snapshot_provider: Option<Arc<dyn karstflow_rpc::RuntimeSnapshotProvider>> =
@@ -2737,7 +2831,7 @@ impl BankAccessProvider for ConsensusBankAccessProvider {
 
     fn get_latest_blockhash(&self, commitment: karstflow_rpc::RpcCommitment) -> [u8; 32] {
         self.bank_for_commitment(commitment)
-            .map(|bank| bank.last_blockhash())
+            .map(|bank| bank.latest_valid_blockhash())
             .unwrap_or([0u8; 32])
     }
 
@@ -3593,6 +3687,70 @@ impl TransactionSubmitter for LocalTransactionSubmitter {
             .try_send(raw_tx)
             .map_err(|_| "pipeline input channel full or closed".to_string())?;
         Ok(sig)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Dev-mode transaction submitter
+// ---------------------------------------------------------------------------
+
+/// Accepts transactions in dev mode and executes them directly on the working bank.
+///
+/// No TPU/gossip/UDP required — transactions are deserialized, validated,
+/// and executed synchronously against the current working bank.
+struct DevTransactionSubmitter {
+    bank_forks: Arc<RwLock<BankForks>>,
+    backend: karstflow_stages::SbpfExecutionAdapter,
+}
+
+impl DevTransactionSubmitter {
+    fn new(bank_forks: Arc<RwLock<BankForks>>) -> Self {
+        Self {
+            bank_forks,
+            backend: karstflow_stages::SbpfExecutionAdapter::with_defaults(),
+        }
+    }
+}
+
+impl TransactionSubmitter for DevTransactionSubmitter {
+    fn submit_transaction(&self, tx_bytes: &[u8]) -> std::result::Result<[u8; 64], String> {
+        // Deserialize the wire-format transaction.
+        let deserialized = karstflow_consensus::deserialize_transaction(tx_bytes)?;
+        let sig = deserialized.tx.signatures.first().copied().unwrap_or([0u8; 64]);
+
+        // Execute directly on the working bank.
+        let forks = self
+            .bank_forks
+            .read()
+            .map_err(|e| format!("bank_forks lock poisoned: {e}"))?;
+        let bank = forks.working_bank();
+
+        let result = bank.process_transaction(
+            &deserialized.tx,
+            &self.backend,
+            karstflow_constants::execution::MAX_COMPUTE_UNITS,
+        );
+
+        if result.success {
+            tracing::debug!(
+                sig = bs58::encode(&sig).into_string(),
+                slot = bank.slot(),
+                units = result.compute_units_consumed,
+                "dev-mode: transaction executed"
+            );
+            Ok(sig)
+        } else {
+            let err_msg = result
+                .error
+                .map(|e| format!("{e:?}"))
+                .unwrap_or_else(|| "unknown error".to_string());
+            tracing::warn!(
+                sig = bs58::encode(&sig).into_string(),
+                error = %err_msg,
+                "dev-mode: transaction failed"
+            );
+            Err(err_msg)
+        }
     }
 }
 

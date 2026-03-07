@@ -167,11 +167,20 @@ fn render_single_request(
     } else {
         Some(match result {
             Ok(result) => json!({"jsonrpc": "2.0", "result": result, "id": id}),
-            Err(error) => json!({
-                "jsonrpc": "2.0",
-                "error": {"code": error.code(), "message": error.message(method)},
-                "id": id
-            }),
+            Err(ref error) => {
+                let mut err_obj = json!({
+                    "code": error.code(),
+                    "message": error.message(method)
+                });
+                if let Some(data) = error.data() {
+                    err_obj["data"] = data;
+                }
+                json!({
+                    "jsonrpc": "2.0",
+                    "error": err_obj,
+                    "id": id
+                })
+            }
         })
     }
 }
