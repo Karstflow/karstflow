@@ -126,10 +126,7 @@ impl TopVotes {
         }
 
         // Insert the new entry.
-        self.heap.push(HeapEntry {
-            stake,
-            pubkey,
-        });
+        self.heap.push(HeapEntry { stake, pubkey });
         self.map.insert(
             pubkey,
             TopVoteEntry {

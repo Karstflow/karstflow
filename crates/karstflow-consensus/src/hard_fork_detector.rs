@@ -173,13 +173,10 @@ impl HardForkDetector {
                         self.candidates.remove(&key);
                         // Clean up block tracking.
                         if let Some(block) = self.our_blocks.get_mut(&old.block_id) {
-                            block
-                                .observed_bank_hashes
-                                .retain(|h| h != &old.bank_hash);
+                            block.observed_bank_hashes.retain(|h| h != &old.bank_hash);
                             if block.observed_bank_hashes.is_empty() {
                                 if block.forked {
-                                    self.metrics.active =
-                                        self.metrics.active.saturating_sub(1);
+                                    self.metrics.active = self.metrics.active.saturating_sub(1);
                                     self.metrics.pruned += 1;
                                 }
                                 self.our_blocks.remove(&old.block_id);
@@ -282,8 +279,7 @@ impl HardForkDetector {
     /// Advance the root slot, pruning old tracking data.
     pub fn publish_root(&mut self, root_slot: u64) {
         // Remove candidates for slots older than root.
-        self.candidates
-            .retain(|_, c| c.slot >= root_slot);
+        self.candidates.retain(|_, c| c.slot >= root_slot);
 
         // Remove old blocks.
         self.our_blocks.retain(|_, b| {

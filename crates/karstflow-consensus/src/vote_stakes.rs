@@ -314,20 +314,17 @@ impl VoteStakes {
 
     /// Iterate over all vote stake entries on a fork.
     pub fn fork_iter(&self, fork_id: ForkId) -> impl Iterator<Item = VoteStakeEntry> + '_ {
-        self.forks
-            .get(&fork_id)
-            .into_iter()
-            .flat_map(move |fork| {
-                fork.entries.iter().filter_map(move |id| {
-                    self.index.get(id).map(|e| VoteStakeEntry {
-                        pubkey: e.pubkey,
-                        node_account_t1: e.node_account_t1,
-                        node_account_t2: e.node_account_t2,
-                        stake_t1: e.stake_t1,
-                        stake_t2: e.stake_t2,
-                    })
+        self.forks.get(&fork_id).into_iter().flat_map(move |fork| {
+            fork.entries.iter().filter_map(move |id| {
+                self.index.get(id).map(|e| VoteStakeEntry {
+                    pubkey: e.pubkey,
+                    node_account_t1: e.node_account_t1,
+                    node_account_t2: e.node_account_t2,
+                    stake_t1: e.stake_t1,
+                    stake_t2: e.stake_t2,
                 })
             })
+        })
     }
 
     /// Reset the entire structure to initial state.

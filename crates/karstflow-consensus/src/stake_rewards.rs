@@ -161,7 +161,11 @@ impl StakeRewards {
             id
         };
 
-        let partition_count = self.forks.get(&fork_id).expect("fork exists").partition_count;
+        let partition_count = self
+            .forks
+            .get(&fork_id)
+            .expect("fork exists")
+            .partition_count;
 
         // Hash pubkey into partition using SipHash-1-3.
         let partition_idx = self.compute_partition(pubkey, partition_count);
@@ -208,16 +212,12 @@ impl StakeRewards {
 
     /// Total rewards for a fork.
     pub fn total_rewards(&self, fork_id: StakeRewardForkId) -> u64 {
-        self.forks
-            .get(&fork_id)
-            .map_or(0, |f| f.total_rewards)
+        self.forks.get(&fork_id).map_or(0, |f| f.total_rewards)
     }
 
     /// Number of partitions for a fork.
     pub fn num_partitions(&self, fork_id: StakeRewardForkId) -> u32 {
-        self.forks
-            .get(&fork_id)
-            .map_or(0, |f| f.partition_count)
+        self.forks.get(&fork_id).map_or(0, |f| f.partition_count)
     }
 
     /// Starting block height for a fork's reward distribution.
@@ -229,9 +229,9 @@ impl StakeRewards {
 
     /// Exclusive ending block height (start + partition_count).
     pub fn exclusive_ending_block_height(&self, fork_id: StakeRewardForkId) -> u64 {
-        self.forks.get(&fork_id).map_or(0, |f| {
-            f.starting_block_height + f.partition_count as u64
-        })
+        self.forks
+            .get(&fork_id)
+            .map_or(0, |f| f.starting_block_height + f.partition_count as u64)
     }
 
     /// Compute partition index for a pubkey using SipHash-1-3.

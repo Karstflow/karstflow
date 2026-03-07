@@ -1331,14 +1331,12 @@ impl Bank {
                             fee: 0,
                             modified_accounts: HashMap::new(),
                             logs: vec![],
-                            error: Some(TransactionExecutionError::SanitizeFailure(
-                                format!(
-                                    "instruction {} references {} accounts, limit is {}",
-                                    i,
-                                    ix.account_indices.len(),
-                                    MAX_INSTRUCTION_ACCOUNTS,
-                                ),
-                            )),
+                            error: Some(TransactionExecutionError::SanitizeFailure(format!(
+                                "instruction {} references {} accounts, limit is {}",
+                                i,
+                                ix.account_indices.len(),
+                                MAX_INSTRUCTION_ACCOUNTS,
+                            ))),
                             vote_updates: vec![],
                             return_data: None,
                         };

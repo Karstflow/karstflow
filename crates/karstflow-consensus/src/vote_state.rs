@@ -1870,7 +1870,10 @@ mod tests {
         assert_eq!(state.inflation_rewards_commission_bps, 700); // 7 * 100
         assert_eq!(state.inflation_rewards_collector, vote_account_pk);
         assert_eq!(state.block_revenue_collector, node);
-        assert_eq!(state.block_revenue_commission_bps, DEFAULT_BLOCK_REVENUE_COMMISSION_BPS);
+        assert_eq!(
+            state.block_revenue_commission_bps,
+            DEFAULT_BLOCK_REVENUE_COMMISSION_BPS
+        );
         assert_eq!(state.pending_delegator_rewards, 0);
         assert!(!state.has_bls_pubkey());
     }

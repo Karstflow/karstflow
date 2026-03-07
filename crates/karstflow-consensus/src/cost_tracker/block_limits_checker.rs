@@ -88,7 +88,15 @@ mod tests {
     #[test]
     fn within_all_limits() {
         let tx = simple_tx(1_000);
-        let result = check_limits(0, 0, 0, &no_account_cost, &tx, &default_limits(), tx.is_vote);
+        let result = check_limits(
+            0,
+            0,
+            0,
+            &no_account_cost,
+            &tx,
+            &default_limits(),
+            tx.is_vote,
+        );
         assert!(result.is_ok());
     }
 
@@ -204,7 +212,15 @@ mod tests {
         assert!(result.is_ok());
 
         // Same tx would fail under default 50M
-        let result = check_limits(0, 0, 0, &no_account_cost, &tx, &default_limits(), tx.is_vote);
+        let result = check_limits(
+            0,
+            0,
+            0,
+            &no_account_cost,
+            &tx,
+            &default_limits(),
+            tx.is_vote,
+        );
         assert!(matches!(
             result,
             Err(CostTrackerError::BlockCostLimitExceeded { .. })

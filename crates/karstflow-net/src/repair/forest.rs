@@ -634,13 +634,7 @@ impl RepairForest {
             .orphaned
             .iter()
             .chain(self.subtrees.iter())
-            .filter(|s| {
-                is_eligible(s)
-                    && self
-                        .slots
-                        .get(s)
-                        .is_some_and(|state| !state.confirmed)
-            })
+            .filter(|s| is_eligible(s) && self.slots.get(s).is_some_and(|state| !state.confirmed))
             .max();
         if let Some(&victim) = tier1 {
             return Some(victim);
@@ -650,13 +644,7 @@ impl RepairForest {
         let tier2 = self
             .frontier
             .iter()
-            .filter(|s| {
-                is_eligible(s)
-                    && self
-                        .slots
-                        .get(s)
-                        .is_some_and(|state| !state.confirmed)
-            })
+            .filter(|s| is_eligible(s) && self.slots.get(s).is_some_and(|state| !state.confirmed))
             .max();
         if let Some(&victim) = tier2 {
             return Some(victim);
@@ -667,13 +655,7 @@ impl RepairForest {
             .orphaned
             .iter()
             .chain(self.subtrees.iter())
-            .filter(|s| {
-                is_eligible(s)
-                    && self
-                        .slots
-                        .get(s)
-                        .is_some_and(|state| state.confirmed)
-            })
+            .filter(|s| is_eligible(s) && self.slots.get(s).is_some_and(|state| state.confirmed))
             .max();
         if let Some(&victim) = tier3 {
             return Some(victim);

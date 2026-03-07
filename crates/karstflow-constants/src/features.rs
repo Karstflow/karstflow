@@ -74,4 +74,5 @@ pub const FEATURE_REMOVE_SIMPLE_VOTE_FROM_COST_MODEL: &str = "remove_simple_vote
 pub const FEATURE_LIMIT_INSTRUCTION_ACCOUNTS: &str = "limit_instruction_accounts";
 
 /// Feature: relax programdata account ownership check during BPF migration.
-pub const FEATURE_RELAX_PROGRAMDATA_ACCOUNT_CHECK: &str = "relax_programdata_account_check_migration";
+pub const FEATURE_RELAX_PROGRAMDATA_ACCOUNT_CHECK: &str =
+    "relax_programdata_account_check_migration";

@@ -28,8 +28,8 @@ pub mod rewards_distribution;
 pub mod signature_status;
 mod snapshot_bootstrap;
 mod stake;
-mod stake_rewards;
 mod stake_history;
+mod stake_rewards;
 pub mod sysvars;
 #[cfg(test)]
 mod tests;
@@ -85,7 +85,6 @@ pub use rewards_calculator::{
     DelegatorReward, EpochRewardsSummary, RewardsCalculator, ValidatorReward, VoteAccountInfo,
 };
 pub use rewards_distribution::{PendingReward, RewardsDistributor};
-pub use stake_rewards::{StakeRewardEntry, StakeRewardForkId, StakeRewards};
 pub use stake::{
     calculate_points_and_credits, calculate_stake_rewards, calculate_total_points,
     deserialize_stake_state, serialize_stake_state, split_commission, warmup_cooldown_rate,
@@ -94,14 +93,15 @@ pub use stake::{
     StakeState, StakeTracker,
 };
 pub use stake_history::{EpochStakeEntry, StakeHistory, StakeHistoryEntry, STAKE_HISTORY_CAP};
+pub use stake_rewards::{StakeRewardEntry, StakeRewardForkId, StakeRewards};
+pub use top_votes::{TopVoteEntry, TopVotes, DEFAULT_MAX_VALIDATORS};
 pub use tower::{Tower, TowerError, TowerVote};
 pub use tower_persistence::{SavedTower, SavedVote, TowerPersistenceError};
-pub use top_votes::{TopVoteEntry, TopVotes, DEFAULT_MAX_VALIDATORS};
 pub use vote_account_cache::{VoteAccountCache, VoteAccountEntry};
-pub use vote_stakes::{ForkId, VoteStakeEntry, VoteStakes};
 pub use vote_processor::{
     SlotVoteInfo, VoteProcessor, VoteProcessorConfig, VoteProcessorError, VoteProcessorStats,
 };
+pub use vote_stakes::{ForkId, VoteStakeEntry, VoteStakes};
 pub use vote_state::{
     AuthorizedVoters, BlockTimestamp, EpochCredits, LandedVote, PriorVoters, VoteError,
     VoteLockout, VoteState, DEFAULT_BLOCK_REVENUE_COMMISSION_BPS, MAX_EPOCH_CREDITS,
@@ -117,7 +117,6 @@ pub use bank_executor::{
     TransactionSimulationResult, VoteUpdate,
 };
 pub use cost_tracker::{CostLimits, CostTracker, CostTrackerError, TransactionCost};
-pub use vote_tx_tracker::VoteTxTracker;
 pub use features::{FeatureActivation, FeatureSet};
 pub use signature_status::{AddressSignatureEntry, SignatureStatus, SignatureStatusCache};
 pub use snapshot_bootstrap::{
@@ -126,3 +125,4 @@ pub use snapshot_bootstrap::{
 };
 pub use transaction_cache::{SeedEntry, TransactionCache};
 pub use transaction_wire::{deserialize_transaction, DeserializedTransaction};
+pub use vote_tx_tracker::VoteTxTracker;
