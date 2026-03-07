@@ -14,8 +14,28 @@ use karstflow_constants::vote_program::{
     VOTE_CREDITS_MAXIMUM_PER_SLOT,
 };
 use karstflow_storage::Pubkey;
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::collections::{BTreeMap, VecDeque};
+
+fn serialize_bls_key<S: Serializer>(key: &Option<[u8; 48]>, s: S) -> Result<S::Ok, S::Error> {
+    match key {
+        Some(k) => s.serialize_some(&k[..]),
+        None => s.serialize_none(),
+    }
+}
+
+fn deserialize_bls_key<'de, D: Deserializer<'de>>(d: D) -> Result<Option<[u8; 48]>, D::Error> {
+    let opt: Option<Vec<u8>> = Option::deserialize(d)?;
+    match opt {
+        Some(v) if v.len() == 48 => {
+            let mut arr = [0u8; 48];
+            arr.copy_from_slice(&v);
+            Ok(Some(arr))
+        }
+        Some(_) => Err(serde::de::Error::custom("BLS key must be 48 bytes")),
+        None => Ok(None),
+    }
+}
 
 /// A vote for a specific slot with confirmation count for lockout calculation.
 ///
@@ -347,6 +367,15 @@ impl Default for PriorVoters {
     }
 }
 
+/// Vote state serialization size for V3 format.
+pub const VOTE_STATE_V3_SIZE: usize = 3762;
+
+/// Vote state serialization size for V4 format (same as V3).
+pub const VOTE_STATE_V4_SIZE: usize = 3762;
+
+/// Default block revenue commission in basis points (100% = 10000 bps).
+pub const DEFAULT_BLOCK_REVENUE_COMMISSION_BPS: u16 = 10_000;
+
 /// Core vote account state.
 ///
 /// Stores validator voting history, credits, and authorization info.
@@ -358,7 +387,7 @@ pub struct VoteState {
     pub node_pubkey: Pubkey,
     /// Authorized withdrawer (can withdraw stake)
     pub authorized_withdrawer: Pubkey,
-    /// Commission rate (0-100) taken from delegator rewards
+    /// Commission rate (0-100) taken from delegator rewards (V3 legacy)
     pub commission: u8,
     /// Recent vote history with lockouts and latencies
     pub votes: VecDeque<LandedVote>,
@@ -372,10 +401,31 @@ pub struct VoteState {
     pub epoch_credits: VecDeque<EpochCredits>,
     /// Last block timestamp
     pub last_timestamp: BlockTimestamp,
+    // ----- V4 fields -----
+    /// Inflation rewards commission in basis points (V4).
+    /// Derived from `commission * 100` during V3→V4 migration.
+    pub inflation_rewards_commission_bps: u16,
+    /// Account collecting inflation rewards (V4).
+    /// Defaults to the vote account pubkey during migration.
+    pub inflation_rewards_collector: Pubkey,
+    /// Account collecting block revenue (V4).
+    /// Defaults to the node identity during migration.
+    pub block_revenue_collector: Pubkey,
+    /// Block revenue commission in basis points (V4).
+    /// Defaults to 10000 (100%) during migration.
+    pub block_revenue_commission_bps: u16,
+    /// Pending delegator rewards accumulator (V4).
+    pub pending_delegator_rewards: u64,
+    /// BLS proof-of-possession compressed public key (V4, optional).
+    #[serde(
+        serialize_with = "serialize_bls_key",
+        deserialize_with = "deserialize_bls_key"
+    )]
+    pub bls_pubkey: Option<[u8; 48]>,
 }
 
 impl VoteState {
-    /// Create a new vote state for a validator.
+    /// Create a new vote state for a validator (V3-compatible defaults).
     pub fn new(
         node_pubkey: Pubkey,
         authorized_voter: Pubkey,
@@ -392,10 +442,16 @@ impl VoteState {
             prior_voters: PriorVoters::new(),
             epoch_credits: VecDeque::with_capacity(MAX_EPOCH_CREDITS_HISTORY),
             last_timestamp: BlockTimestamp::new(0, 0),
+            inflation_rewards_commission_bps: (commission as u16) * 100,
+            inflation_rewards_collector: Pubkey::default(),
+            block_revenue_collector: node_pubkey,
+            block_revenue_commission_bps: DEFAULT_BLOCK_REVENUE_COMMISSION_BPS,
+            pending_delegator_rewards: 0,
+            bls_pubkey: None,
         }
     }
 
-    /// Create a new vote state for a specific epoch.
+    /// Create a new vote state for a specific epoch (V3-compatible defaults).
     pub fn new_for_epoch(
         node_pubkey: Pubkey,
         authorized_voter: Pubkey,
@@ -413,7 +469,65 @@ impl VoteState {
             prior_voters: PriorVoters::new(),
             epoch_credits: VecDeque::with_capacity(MAX_EPOCH_CREDITS_HISTORY),
             last_timestamp: BlockTimestamp::new(0, 0),
+            inflation_rewards_commission_bps: (commission as u16) * 100,
+            inflation_rewards_collector: Pubkey::default(),
+            block_revenue_collector: node_pubkey,
+            block_revenue_commission_bps: DEFAULT_BLOCK_REVENUE_COMMISSION_BPS,
+            pending_delegator_rewards: 0,
+            bls_pubkey: None,
         }
+    }
+
+    /// Create a V4 vote state with explicit V4 fields.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_v4(
+        node_pubkey: Pubkey,
+        authorized_voter: Pubkey,
+        authorized_withdrawer: Pubkey,
+        inflation_rewards_commission_bps: u16,
+        inflation_rewards_collector: Pubkey,
+        block_revenue_collector: Pubkey,
+        block_revenue_commission_bps: u16,
+        epoch: u64,
+    ) -> Self {
+        Self {
+            node_pubkey,
+            authorized_withdrawer,
+            commission: (inflation_rewards_commission_bps / 100) as u8,
+            votes: VecDeque::with_capacity(MAX_LOCKOUT_HISTORY),
+            root_slot: None,
+            authorized_voters: AuthorizedVoters::new(epoch, authorized_voter),
+            prior_voters: PriorVoters::new(),
+            epoch_credits: VecDeque::with_capacity(MAX_EPOCH_CREDITS_HISTORY),
+            last_timestamp: BlockTimestamp::new(0, 0),
+            inflation_rewards_commission_bps,
+            inflation_rewards_collector,
+            block_revenue_collector,
+            block_revenue_commission_bps,
+            pending_delegator_rewards: 0,
+            bls_pubkey: None,
+        }
+    }
+
+    /// Convert a V3-format vote state to V4 in-place.
+    ///
+    /// Maps legacy fields to the new V4 split commission model:
+    /// - `commission * 100` → `inflation_rewards_commission_bps`
+    /// - vote account pubkey → `inflation_rewards_collector`
+    /// - `node_pubkey` → `block_revenue_collector`
+    /// - 10000 bps (100%) → `block_revenue_commission_bps`
+    pub fn convert_v3_to_v4(&mut self, vote_account_pubkey: &Pubkey) {
+        self.inflation_rewards_commission_bps = (self.commission as u16) * 100;
+        self.inflation_rewards_collector = *vote_account_pubkey;
+        self.block_revenue_collector = self.node_pubkey;
+        self.block_revenue_commission_bps = DEFAULT_BLOCK_REVENUE_COMMISSION_BPS;
+        self.pending_delegator_rewards = 0;
+        self.bls_pubkey = None;
+    }
+
+    /// Check if this vote state has a BLS proof-of-possession key set.
+    pub fn has_bls_pubkey(&self) -> bool {
+        self.bls_pubkey.is_some()
     }
 
     /// Get the currently authorized voter for an epoch.
@@ -977,6 +1091,12 @@ impl VoteState {
             prior_voters: PriorVoters::new(),
             epoch_credits,
             last_timestamp,
+            inflation_rewards_commission_bps: (commission as u16) * 100,
+            inflation_rewards_collector: Pubkey::default(),
+            block_revenue_collector: node_pubkey,
+            block_revenue_commission_bps: DEFAULT_BLOCK_REVENUE_COMMISSION_BPS,
+            pending_delegator_rewards: 0,
+            bls_pubkey: None,
         })
     }
 
@@ -1707,5 +1827,78 @@ mod tests {
         assert_eq!(pv, voter1);
         assert_eq!(start, 0);
         assert_eq!(end, 5);
+    }
+
+    #[test]
+    fn vote_state_new_v4_constructor() {
+        let node = Pubkey::new_unique();
+        let voter = Pubkey::new_unique();
+        let withdrawer = Pubkey::new_unique();
+        let infl_collector = Pubkey::new_unique();
+        let block_collector = Pubkey::new_unique();
+
+        let state = VoteState::new_v4(
+            node,
+            voter,
+            withdrawer,
+            500, // 5% in bps
+            infl_collector,
+            block_collector,
+            8000,
+            10,
+        );
+
+        assert_eq!(state.inflation_rewards_commission_bps, 500);
+        assert_eq!(state.inflation_rewards_collector, infl_collector);
+        assert_eq!(state.block_revenue_collector, block_collector);
+        assert_eq!(state.block_revenue_commission_bps, 8000);
+        assert_eq!(state.commission, 5); // 500/100
+        assert_eq!(state.pending_delegator_rewards, 0);
+        assert!(!state.has_bls_pubkey());
+    }
+
+    #[test]
+    fn vote_state_convert_v3_to_v4() {
+        let node = Pubkey::new_unique();
+        let voter = Pubkey::new_unique();
+        let withdrawer = Pubkey::new_unique();
+        let vote_account_pk = Pubkey::new_unique();
+
+        let mut state = VoteState::new(node, voter, withdrawer, 7);
+        state.convert_v3_to_v4(&vote_account_pk);
+
+        assert_eq!(state.inflation_rewards_commission_bps, 700); // 7 * 100
+        assert_eq!(state.inflation_rewards_collector, vote_account_pk);
+        assert_eq!(state.block_revenue_collector, node);
+        assert_eq!(
+            state.block_revenue_commission_bps,
+            DEFAULT_BLOCK_REVENUE_COMMISSION_BPS
+        );
+        assert_eq!(state.pending_delegator_rewards, 0);
+        assert!(!state.has_bls_pubkey());
+    }
+
+    #[test]
+    fn vote_state_bls_pubkey_serde_roundtrip() {
+        let node = Pubkey::new_unique();
+        let voter = Pubkey::new_unique();
+        let withdrawer = Pubkey::new_unique();
+
+        // Without BLS key
+        let state = VoteState::new(node, voter, withdrawer, 5);
+        let serialized = bincode::serialize(&state).unwrap();
+        let deserialized: VoteState = bincode::deserialize(&serialized).unwrap();
+        assert_eq!(state, deserialized);
+        assert!(!deserialized.has_bls_pubkey());
+
+        // With BLS key
+        let mut state_with_bls = VoteState::new(node, voter, withdrawer, 5);
+        let bls_key = [0xABu8; 48];
+        state_with_bls.bls_pubkey = Some(bls_key);
+        let serialized = bincode::serialize(&state_with_bls).unwrap();
+        let deserialized: VoteState = bincode::deserialize(&serialized).unwrap();
+        assert_eq!(state_with_bls, deserialized);
+        assert!(deserialized.has_bls_pubkey());
+        assert_eq!(deserialized.bls_pubkey.unwrap(), bls_key);
     }
 }

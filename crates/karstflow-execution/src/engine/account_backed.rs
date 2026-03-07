@@ -82,15 +82,21 @@ impl AccountBackedExecutionEngine {
         &self,
         batch: &ExecutionBatch,
     ) -> std::result::Result<ExecutionOutcome, ExecutionError> {
-        let estimated_per_tx = 5_000u64;
-        let total_cost = (batch.transaction_count as u64).saturating_mul(estimated_per_tx);
-
-        Ok(ExecutionOutcome {
+        if batch.transaction_count == 0 {
+            return Ok(ExecutionOutcome {
+                fragment_id: batch.fragment_id,
+                executed_transactions: 0,
+                failed_transactions: 0,
+                total_cost_units: 0,
+                failure_class: None,
+            });
+        }
+        Err(ExecutionError::InvalidBatch {
             fragment_id: batch.fragment_id,
-            executed_transactions: batch.transaction_count,
-            failed_transactions: 0,
-            total_cost_units: total_cost,
-            failure_class: None,
+            detail: format!(
+                "AccountBackedExecutionEngine requires transaction data for {} transactions",
+                batch.transaction_count
+            ),
         })
     }
 }

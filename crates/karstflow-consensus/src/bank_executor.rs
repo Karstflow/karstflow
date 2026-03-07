@@ -8,7 +8,7 @@ use crate::cost_tracker::TransactionCost;
 use crate::nonce::{derive_durable_nonce, deserialize_nonce_state, serialize_nonce_state};
 use crate::transaction_cache::{extract_nonce_key_index, is_nonce_instruction};
 use crate::{Bank, BankStatus, FeeCalculator};
-use karstflow_constants::block_limits::MAX_TRANSACTION_ACCOUNT_LOCKS;
+use karstflow_constants::block_limits::{MAX_INSTRUCTION_ACCOUNTS, MAX_TRANSACTION_ACCOUNT_LOCKS};
 use karstflow_constants::compute_budget_program::{
     INSTRUCTION_SET_COMPUTE_UNIT_LIMIT, INSTRUCTION_SET_COMPUTE_UNIT_PRICE,
     INSTRUCTION_SET_LOADED_ACCOUNTS_DATA_SIZE_LIMIT,
@@ -350,6 +350,8 @@ pub enum TransactionExecutionError {
     },
     /// Transaction exceeds the static instruction count limit.
     TooManyInstructions { count: usize, limit: usize },
+    /// Transaction failed sanitization (e.g. instruction account count exceeded).
+    SanitizeFailure(String),
 }
 
 impl std::fmt::Display for TransactionExecutionError {
@@ -408,6 +410,7 @@ impl std::fmt::Display for TransactionExecutionError {
             Self::TooManyInstructions { count, limit } => {
                 write!(f, "too many instructions: {count} > {limit}")
             }
+            Self::SanitizeFailure(msg) => write!(f, "sanitize failure: {msg}"),
         }
     }
 }
@@ -512,7 +515,9 @@ fn reclaim_zero_lamport_accounts(modified: &mut HashMap<Pubkey, Account>) {
     for account in modified.values_mut() {
         if account.meta.lamports == 0 {
             account.data = AccountData::empty();
-            account.meta.owner = Pubkey::default();
+            // Zero all metadata fields (not just owner) to prevent
+            // stale executable/rent_epoch data from leaking.
+            account.meta = karstflow_types::AccountMeta::zeroed();
         }
     }
 }
@@ -1304,6 +1309,42 @@ impl Bank {
             };
         }
 
+        // Step 1a3: Enforce per-instruction account count limit (SIMD-0406).
+        //
+        // When `limit_instruction_accounts` is active, reject transactions
+        // where any instruction references more than 255 accounts.
+        {
+            let check_instruction_accounts = self
+                .feature_set()
+                .map(|fs| {
+                    let fs = fs.read().expect("feature_set lock poisoned");
+                    fs.is_active(&crate::features::known_features::limit_instruction_accounts())
+                })
+                .unwrap_or(false);
+
+            if check_instruction_accounts {
+                for (i, ix) in transaction.instructions.iter().enumerate() {
+                    if ix.account_indices.len() > MAX_INSTRUCTION_ACCOUNTS {
+                        return TransactionExecutionResult {
+                            success: false,
+                            compute_units_consumed: 0,
+                            fee: 0,
+                            modified_accounts: HashMap::new(),
+                            logs: vec![],
+                            error: Some(TransactionExecutionError::SanitizeFailure(format!(
+                                "instruction {} references {} accounts, limit is {}",
+                                i,
+                                ix.account_indices.len(),
+                                MAX_INSTRUCTION_ACCOUNTS,
+                            ))),
+                            vote_updates: vec![],
+                            return_data: None,
+                        };
+                    }
+                }
+            }
+        }
+
         // Step 1b: Validate blockhash or detect durable nonce transaction.
         //
         // If the blockhash is in the recent queue, this is a regular transaction.
@@ -1528,7 +1569,7 @@ impl Bank {
         let mut all_logs = Vec::new();
         let mut log_bytes_written: usize = 0;
         let mut log_truncated = false;
-        let mut modified = HashMap::new();
+        let mut modified = HashMap::with_capacity(transaction.account_keys.len());
         let mut exec_error: Option<TransactionExecutionError> = None;
         let mut return_data: Option<(Pubkey, Vec<u8>)> = None;
 
@@ -1627,10 +1668,13 @@ impl Bank {
                 instr_accounts.push((program_id, program_account, false, false));
             }
 
+            // Clone instruction data once for both InstructionInfo and sibling recording.
+            let instruction_data = instruction.data.clone();
+
             let info = InstructionInfo {
                 program_id,
                 accounts: instr_accounts,
-                data: instruction.data.clone(),
+                data: instruction_data.clone(),
                 slot_context: self.slot_context(),
                 sibling_instructions: sibling_instructions.clone(),
             };
@@ -1678,7 +1722,7 @@ impl Bank {
                 .collect();
             sibling_instructions.push(ProcessedSibling {
                 program_id,
-                data: instruction.data.clone(),
+                data: instruction_data,
                 accounts: sibling_accounts,
             });
 
@@ -2145,10 +2189,12 @@ impl Bank {
                 break 'sim_execution;
             }
 
+            let instruction_data = instruction.data.clone();
+
             let info = InstructionInfo {
                 program_id,
                 accounts: instr_accounts,
-                data: instruction.data.clone(),
+                data: instruction_data.clone(),
                 slot_context: self.slot_context(),
                 sibling_instructions: sibling_instructions.clone(),
             };
@@ -2186,7 +2232,7 @@ impl Bank {
 
             sibling_instructions.push(ProcessedSibling {
                 program_id,
-                data: instruction.data.clone(),
+                data: instruction_data,
                 accounts: instruction
                     .account_indices
                     .iter()
@@ -4978,9 +5024,11 @@ mod tests {
     // ── account reclamation tests ─────────────────────────────────────
 
     #[test]
-    fn reclaim_clears_data_and_owner_on_zero_lamport_account() {
+    fn reclaim_clears_data_and_all_meta_on_zero_lamport_account() {
         let pubkey = Pubkey::new_unique();
-        let account = Account::new(0, vec![1, 2, 3], Pubkey::new_unique());
+        let mut account = Account::new(0, vec![1, 2, 3], Pubkey::new_unique());
+        account.meta.executable = true;
+        account.meta.rent_epoch = 42;
         assert!(!account.data.is_empty());
         assert_ne!(account.meta.owner, Pubkey::default());
 
@@ -4993,6 +5041,8 @@ mod tests {
         assert!(reclaimed.data.is_empty());
         assert_eq!(reclaimed.meta.owner, Pubkey::default());
         assert_eq!(reclaimed.meta.lamports, 0);
+        assert!(!reclaimed.meta.executable);
+        assert_eq!(reclaimed.meta.rent_epoch, 0);
     }
 
     #[test]

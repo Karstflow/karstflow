@@ -4,14 +4,36 @@
 //! and other per-block limits that prevent any single block from consuming
 //! excessive resources.
 
-/// Maximum total compute units per block.
-pub const MAX_BLOCK_COMPUTE_UNITS: u64 = 48_000_000;
+/// Maximum total compute units per block (legacy, pre-SIMD-0207).
+pub const MAX_BLOCK_COMPUTE_UNITS_LEGACY: u64 = 48_000_000;
+
+/// Maximum total compute units per block (SIMD-0207).
+pub const MAX_BLOCK_COMPUTE_UNITS_SIMD_0207: u64 = 50_000_000;
+
+/// Maximum total compute units per block (SIMD-0256).
+pub const MAX_BLOCK_COMPUTE_UNITS_SIMD_0256: u64 = 60_000_000;
+
+/// Maximum total compute units per block (SIMD-0286, current).
+pub const MAX_BLOCK_COMPUTE_UNITS_SIMD_0286: u64 = 100_000_000;
+
+/// Default maximum total compute units per block.
+///
+/// This should be resolved at runtime based on active feature flags.
+/// Use `MAX_BLOCK_COMPUTE_UNITS_SIMD_0207` as the safe default for
+/// networks that have activated SIMD-0207 but not yet SIMD-0256/0286.
+pub const MAX_BLOCK_COMPUTE_UNITS: u64 = MAX_BLOCK_COMPUTE_UNITS_SIMD_0207;
 
 /// Maximum compute units for vote transactions per block.
 pub const MAX_VOTE_COMPUTE_UNITS: u64 = 36_000_000;
 
 /// Maximum compute units per writable account per block.
 pub const MAX_WRITABLE_ACCOUNT_COMPUTE_UNITS: u64 = 12_000_000;
+
+/// Maximum writable account compute units after raise_account_cu_limit
+/// feature activation (SIMD-0306): 40% of block limit.
+///
+/// Computed at runtime as `block_limit * 40 / 100`.
+pub const ACCOUNT_CU_LIMIT_RATIO_PERCENT: u64 = 40;
 
 /// Cost of acquiring a write lock on an account.
 pub const WRITE_LOCK_COST: u64 = 300;
@@ -50,6 +72,12 @@ pub const INSTRUCTION_BASE_COST: u64 = 200;
 /// With the `increase_tx_account_lock_limit` feature active, this is 128.
 /// The legacy limit (64) is not used in current protocol versions.
 pub const MAX_TRANSACTION_ACCOUNT_LOCKS: usize = 128;
+
+/// Maximum number of accounts per instruction (SIMD-0406).
+///
+/// When `limit_instruction_accounts` is active, transactions with any
+/// instruction referencing more than 255 accounts are rejected.
+pub const MAX_INSTRUCTION_ACCOUNTS: usize = 255;
 
 /// Maximum data bytes per block (derived from shred limits).
 pub const MAX_DATA_BYTES_PER_BLOCK: u64 = 27_539_200; // ~26.3 MiB
@@ -114,3 +142,53 @@ pub const MAX_CUS_PER_MICROBLOCK: u64 = 1_600_000;
 /// Prevents bursty microblock production that could overwhelm
 /// execution tiles. At 50us, this allows up to ~20K microblocks/sec.
 pub const DEFAULT_MICROBLOCK_PACE_NS: u64 = 50_000;
+
+// ---------------------------------------------------------------------------
+// Runtime bounds
+// ---------------------------------------------------------------------------
+
+/// Maximum number of live bank forks.
+///
+/// Bounds the fork tree depth to prevent unbounded memory growth
+/// from sustained equivocation or deep fork chains.
+pub const MAX_BANK_FORKS: usize = 4_096;
+
+/// Maximum number of vote accounts in the system.
+pub const MAX_VOTE_ACCOUNTS: usize = 40_200;
+
+/// Expected number of active vote accounts (for sizing hints).
+pub const EXPECTED_VOTE_ACCOUNTS: usize = 2_048;
+
+/// Maximum number of stake accounts in the system.
+pub const MAX_STAKE_ACCOUNTS: usize = 3_000_000;
+
+/// Expected number of active stake accounts (for sizing hints).
+pub const EXPECTED_STAKE_ACCOUNTS: usize = 2_000_000;
+
+/// BLS proof-of-possession verification cost charged by the vote
+/// program for authorize instructions (SIMD-0387).
+pub const BLS_PROOF_OF_POSSESSION_VERIFICATION_CU: u64 = 34_500;
+
+/// Upper bound on execution CUs used by any vote instruction.
+///
+/// The authorize instruction charges the default vote cost plus
+/// BLS proof-of-possession verification.
+pub const VOTE_MAX_COMPUTE_UNITS: u64 =
+    SIMPLE_VOTE_EXECUTION_COST + BLS_PROOF_OF_POSSESSION_VERIFICATION_CU;
+
+/// Fixed cost for a simple vote transaction before `remove_simple_vote_from_cost_model`.
+///
+/// When the feature is NOT active, simple votes have this fixed cost
+/// instead of going through the full cost model.
+pub const SIMPLE_VOTE_USAGE_COST: u64 = 3_428;
+
+/// Upper bound cost for simple vote transactions (used in pack scheduling).
+///
+/// Computed as:
+///   2 signatures * 720          =  1,440
+///   35 writable accounts * 300  = 10,500
+///   vote max CU (36,600)        = 36,600
+///   loaded accounts data cost   = 16,384
+///   max instruction data cost   =    265
+///   Total                       = 65,189
+pub const SIMPLE_VOTE_COST_UPPER_BOUND: u64 = 65_189;

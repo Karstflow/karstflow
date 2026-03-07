@@ -179,6 +179,20 @@ impl TransactionCache {
         }
     }
 
+    /// Remove all references to a cancelled (abandoned) fork.
+    ///
+    /// Entries that existed only on the cancelled fork are evicted.
+    /// Entries shared with other forks simply drop the cancelled fork
+    /// from their fork list.
+    pub fn cancel_fork(&self, fork: u64) {
+        for shard_lock in &self.shards {
+            let mut shard = shard_lock
+                .write()
+                .expect("transaction cache shard lock poisoned");
+            shard.cancel_fork(fork);
+        }
+    }
+
     /// Total number of cached transaction entries across all shards.
     pub fn entry_count(&self) -> usize {
         self.shards

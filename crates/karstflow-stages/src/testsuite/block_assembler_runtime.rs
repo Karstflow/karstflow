@@ -142,7 +142,11 @@ impl ExecutionEngine for RewindCatalogReplayConflictEngine {
 #[test]
 fn block_assembler_defers_fragment_on_retry_directive() {
     let (transaction_outbound, transaction_inbound) = bounded_link::<SanitizedTransaction>(128);
-    let mut block_assembler = BlockAssembler::new(DualReceiver::Channel(transaction_inbound));
+    let mut block_assembler = BlockAssembler::with_storage_policy(
+        DualReceiver::Channel(transaction_inbound),
+        test_storage_runtime_policy(),
+    )
+    .unwrap();
     block_assembler.fragment_counter = 10;
     let context = ServiceContext::new(ShutdownSwitch::new());
 
@@ -167,7 +171,11 @@ fn block_assembler_defers_fragment_on_retry_directive() {
 #[test]
 fn block_assembler_returns_runtime_error_on_fragment_counter_overflow() {
     let (transaction_outbound, transaction_inbound) = bounded_link::<SanitizedTransaction>(128);
-    let mut block_assembler = BlockAssembler::new(DualReceiver::Channel(transaction_inbound));
+    let mut block_assembler = BlockAssembler::with_storage_policy(
+        DualReceiver::Channel(transaction_inbound),
+        test_storage_runtime_policy(),
+    )
+    .unwrap();
     block_assembler.fragment_counter = u64::MAX;
     let context = ServiceContext::new(ShutdownSwitch::new());
 
@@ -201,7 +209,7 @@ fn block_assembler_accepts_runtime_like_execution_engine_policy() {
         DualReceiver::Channel(transaction_inbound),
         StorageRuntimePolicy {
             execution_engine_policy: ExecutionEnginePolicy::RuntimeLike,
-            ..StorageRuntimePolicy::default()
+            ..test_storage_runtime_policy()
         },
     );
     assert!(block_assembler.is_ok());
@@ -211,7 +219,7 @@ fn block_assembler_accepts_runtime_like_execution_engine_policy() {
 fn block_assembler_fail_open_on_execution_error_records_telemetry_and_continues() {
     let (transaction_outbound, transaction_inbound) = bounded_link::<SanitizedTransaction>(128);
     let stats = Arc::new(BlockAssemblyStats::default());
-    let policy = StorageRuntimePolicy::default();
+    let policy = test_storage_runtime_policy();
     let retry_policy = policy.execution_retry_policy;
     let bridge = ExecutionBridge::with_engine_and_retry_policy(
         Arc::new(AlwaysFailExecutionEngine),
@@ -260,7 +268,7 @@ fn block_assembler_fail_open_on_execution_error_records_telemetry_and_continues(
 fn block_assembler_fail_open_replay_conflict_error_schedules_retry_and_does_not_commit() {
     let (transaction_outbound, transaction_inbound) = bounded_link::<SanitizedTransaction>(128);
     let stats = Arc::new(BlockAssemblyStats::default());
-    let mut policy = StorageRuntimePolicy::default();
+    let mut policy = test_storage_runtime_policy();
     policy.execution_error_handling_policy = ExecutionErrorHandlingPolicy::FailOpen;
     let retry_policy = policy.execution_retry_policy;
     let bridge = ExecutionBridge::with_engine_and_retry_policy(
@@ -300,7 +308,7 @@ fn block_assembler_fail_open_replay_conflict_error_schedules_retry_and_does_not_
 fn block_assembler_fail_open_contract_violation_drops_without_retry() {
     let (transaction_outbound, transaction_inbound) = bounded_link::<SanitizedTransaction>(128);
     let stats = Arc::new(BlockAssemblyStats::default());
-    let mut policy = StorageRuntimePolicy::default();
+    let mut policy = test_storage_runtime_policy();
     policy.execution_error_handling_policy = ExecutionErrorHandlingPolicy::FailOpen;
     let retry_policy = policy.execution_retry_policy;
     let bridge = ExecutionBridge::with_engine_and_retry_policy(
@@ -348,7 +356,7 @@ fn block_assembler_fail_open_contract_violation_drops_without_retry() {
 fn block_assembler_fail_fast_on_execution_error_returns_runtime_error() {
     let (transaction_outbound, transaction_inbound) = bounded_link::<SanitizedTransaction>(128);
     let stats = Arc::new(BlockAssemblyStats::default());
-    let mut policy = StorageRuntimePolicy::default();
+    let mut policy = test_storage_runtime_policy();
     policy.execution_error_handling_policy = ExecutionErrorHandlingPolicy::FailFast;
     let retry_policy = policy.execution_retry_policy;
     let bridge = ExecutionBridge::with_engine_and_retry_policy(
@@ -399,7 +407,7 @@ fn block_assembler_fail_fast_on_execution_error_returns_runtime_error() {
 fn block_assembler_fail_open_circuit_breaker_halts_after_consecutive_errors() {
     let (transaction_outbound, transaction_inbound) = bounded_link::<SanitizedTransaction>(128);
     let stats = Arc::new(BlockAssemblyStats::default());
-    let mut policy = StorageRuntimePolicy::default();
+    let mut policy = test_storage_runtime_policy();
     policy.execution_error_handling_policy = ExecutionErrorHandlingPolicy::FailOpen;
     policy.execution_error_fail_open_max_consecutive = 2;
     policy.retry_backoff_cap_millis = 1;
@@ -455,7 +463,7 @@ fn block_assembler_fail_open_circuit_breaker_halts_after_consecutive_errors() {
 fn block_assembler_resets_consecutive_execution_errors_after_successful_retry() {
     let (transaction_outbound, transaction_inbound) = bounded_link::<SanitizedTransaction>(128);
     let stats = Arc::new(BlockAssemblyStats::default());
-    let mut policy = StorageRuntimePolicy::default();
+    let mut policy = test_storage_runtime_policy();
     policy.execution_error_handling_policy = ExecutionErrorHandlingPolicy::FailOpen;
     policy.retry_backoff_cap_millis = 1;
     let retry_policy = policy.execution_retry_policy;
@@ -509,7 +517,7 @@ fn block_assembler_applies_retry_budget_and_backoff_cap_from_runtime_policy() {
         StorageRuntimePolicy {
             max_retry_attempts: 1,
             retry_backoff_cap_millis: 2,
-            ..StorageRuntimePolicy::default()
+            ..test_storage_runtime_policy()
         },
     )
     .unwrap();
@@ -550,7 +558,7 @@ fn block_assembler_honors_short_execution_replay_retry_delay_policy() {
                 replay_conflict_delay_millis: 2,
                 ..RetryPolicy::default()
             },
-            ..StorageRuntimePolicy::default()
+            ..test_storage_runtime_policy()
         },
     )
     .unwrap();
@@ -604,7 +612,7 @@ fn block_assembler_applies_failure_class_retry_budget_for_replay_conflicts() {
                 max_retries_resource_exhaustion: 5,
                 max_retries_fallback: 5,
             },
-            ..StorageRuntimePolicy::default()
+            ..test_storage_runtime_policy()
         },
     )
     .unwrap();
@@ -661,7 +669,7 @@ fn block_assembler_applies_failure_class_retry_budget_for_resource_exhaustion() 
                 max_retries_resource_exhaustion: 1,
                 max_retries_fallback: 5,
             },
-            ..StorageRuntimePolicy::default()
+            ..test_storage_runtime_policy()
         },
     )
     .unwrap();
@@ -701,7 +709,7 @@ fn block_assembler_honors_long_execution_replay_retry_delay_policy() {
                 replay_conflict_delay_millis: 120,
                 ..RetryPolicy::default()
             },
-            ..StorageRuntimePolicy::default()
+            ..test_storage_runtime_policy()
         },
     )
     .unwrap();
@@ -747,7 +755,7 @@ fn block_assembler_execution_health_policy_enters_and_drains_cooldown() {
                 transient_failure_threshold: 1,
                 cooldown_ticks: 3,
             },
-            ..StorageRuntimePolicy::default()
+            ..test_storage_runtime_policy()
         },
     )
     .unwrap();
@@ -794,7 +802,7 @@ fn block_assembler_execution_health_policy_disabled_does_not_enter_cooldown() {
                 transient_failure_threshold: 1,
                 cooldown_ticks: 7,
             },
-            ..StorageRuntimePolicy::default()
+            ..test_storage_runtime_policy()
         },
     )
     .unwrap();
@@ -821,7 +829,11 @@ fn block_assembler_execution_health_policy_disabled_does_not_enter_cooldown() {
 #[test]
 fn block_assembler_slot_pipeline_advances_on_commit() {
     let (transaction_outbound, transaction_inbound) = bounded_link::<SanitizedTransaction>(128);
-    let mut block_assembler = BlockAssembler::new(DualReceiver::Channel(transaction_inbound));
+    let mut block_assembler = BlockAssembler::with_storage_policy(
+        DualReceiver::Channel(transaction_inbound),
+        test_storage_runtime_policy(),
+    )
+    .unwrap();
     let context = ServiceContext::new(ShutdownSwitch::new());
 
     for transaction_id in 1..=64_u64 {
@@ -856,7 +868,7 @@ fn block_assembler_slot_pipeline_advances_on_drop_after_retries() {
                 transient_cap_millis: 1,
                 ..RetryPolicy::default()
             },
-            ..StorageRuntimePolicy::default()
+            ..test_storage_runtime_policy()
         },
     )
     .unwrap();
@@ -895,7 +907,7 @@ fn block_assembler_replay_controller_tracks_reorg_candidate_for_replay_conflict(
                 replay_conflict_delay_millis: 2,
                 ..RetryPolicy::default()
             },
-            ..StorageRuntimePolicy::default()
+            ..test_storage_runtime_policy()
         },
     )
     .unwrap();
@@ -939,7 +951,7 @@ fn block_assembler_replay_window_rewinds_to_checkpoint_on_confirmed_reorg_when_e
                 max_checkpoints: 8,
                 rewind_on_confirmed_reorg: true,
             },
-            ..StorageRuntimePolicy::default()
+            ..test_storage_runtime_policy()
         },
     )
     .unwrap();
@@ -1011,7 +1023,7 @@ fn block_assembler_replay_window_does_not_rewind_when_disabled() {
                 max_checkpoints: 8,
                 rewind_on_confirmed_reorg: false,
             },
-            ..StorageRuntimePolicy::default()
+            ..test_storage_runtime_policy()
         },
     )
     .unwrap();
@@ -1058,7 +1070,7 @@ fn block_assembler_replay_window_does_not_rewind_when_disabled() {
 #[test]
 fn block_assembler_confirmed_reorg_rewind_failure_bubbles_runtime_error() {
     let (transaction_outbound, transaction_inbound) = bounded_link::<SanitizedTransaction>(256);
-    let mut policy = StorageRuntimePolicy::default();
+    let mut policy = test_storage_runtime_policy();
     policy.fork_choice_runtime_policy = ForkChoiceRuntimePolicy {
         enabled: true,
         reorg_retry_delay_millis: 2,
@@ -1137,7 +1149,7 @@ fn block_assembler_confirmed_reorg_rewind_persists_pruned_snapshot_catalog() {
     let (transaction_outbound, transaction_inbound) = bounded_link::<SanitizedTransaction>(512);
     let catalog_path = unique_temp_file("karstflow-reorg-rewind-catalog", "json");
 
-    let mut policy = StorageRuntimePolicy::default();
+    let mut policy = test_storage_runtime_policy();
     policy.snapshot_interval = 1;
     policy.snapshot_catalog_path = Some(catalog_path.clone());
     policy.fork_choice_runtime_policy = ForkChoiceRuntimePolicy {
@@ -1223,7 +1235,7 @@ fn block_assembler_confirmed_reorg_rewind_respects_leader_initial_slot_floor() {
     let (transaction_outbound, transaction_inbound) = bounded_link::<SanitizedTransaction>(512);
     let catalog_path = unique_temp_file("karstflow-reorg-rewind-slot-floor", "json");
 
-    let mut policy = StorageRuntimePolicy::default();
+    let mut policy = test_storage_runtime_policy();
     policy.snapshot_interval = 1;
     policy.snapshot_catalog_path = Some(catalog_path.clone());
     policy.fork_choice_runtime_policy = ForkChoiceRuntimePolicy {
@@ -1312,7 +1324,7 @@ fn block_assembler_replay_safety_policy_enters_and_drains_hold() {
                 replay_conflict_threshold: 1,
                 hold_ticks: 2,
             },
-            ..StorageRuntimePolicy::default()
+            ..test_storage_runtime_policy()
         },
     )
     .unwrap();
@@ -1354,7 +1366,7 @@ fn block_assembler_replay_safety_policy_disabled_does_not_enter_hold() {
                 replay_conflict_threshold: 1,
                 hold_ticks: 9,
             },
-            ..StorageRuntimePolicy::default()
+            ..test_storage_runtime_policy()
         },
     )
     .unwrap();
@@ -1389,7 +1401,7 @@ fn block_assembler_fork_choice_quarantine_enters_and_drains() {
                 consecutive_reorg_threshold: 1,
                 quarantine_ticks: 3,
             },
-            ..StorageRuntimePolicy::default()
+            ..test_storage_runtime_policy()
         },
     )
     .unwrap();
@@ -1430,7 +1442,7 @@ fn block_assembler_fork_choice_quarantine_disabled_does_not_enter() {
                 consecutive_reorg_threshold: 1,
                 quarantine_ticks: 7,
             },
-            ..StorageRuntimePolicy::default()
+            ..test_storage_runtime_policy()
         },
     )
     .unwrap();
@@ -1467,7 +1479,7 @@ fn block_assembler_holds_fragment_while_not_leader_and_commits_after_rotation() 
                 initial_slot: 1,
                 hold_retry_delay_millis: 2,
             },
-            ..StorageRuntimePolicy::default()
+            ..test_storage_runtime_policy()
         },
     )
     .unwrap();
@@ -1514,7 +1526,7 @@ fn block_assembler_scheduler_policy_increases_retry_wait_for_priority_class_two(
                 priority_penalty_class_2_millis: 300,
                 priority_penalty_class_3_millis: 700,
             },
-            ..StorageRuntimePolicy::default()
+            ..test_storage_runtime_policy()
         },
     )
     .unwrap();
@@ -1555,7 +1567,7 @@ fn block_assembler_fork_choice_policy_retries_reorg_then_drops() {
                 max_reorg_retry_attempts: 1,
                 hold_requires_confirmed_candidate: false,
             },
-            ..StorageRuntimePolicy::default()
+            ..test_storage_runtime_policy()
         },
     )
     .unwrap();
@@ -1602,7 +1614,7 @@ fn block_assembler_assembles_fragment_when_cost_budget_is_reached_before_tx_coun
                 max_fragment_cost_units: 30,
                 max_fragment_wait_ticks: 100,
             },
-            ..StorageRuntimePolicy::default()
+            ..test_storage_runtime_policy()
         },
     )
     .unwrap();
@@ -1635,7 +1647,7 @@ fn block_assembler_assembles_fragment_when_wait_ticks_budget_is_reached() {
                 max_fragment_cost_units: u64::MAX,
                 max_fragment_wait_ticks: 2,
             },
-            ..StorageRuntimePolicy::default()
+            ..test_storage_runtime_policy()
         },
     )
     .unwrap();
@@ -1660,7 +1672,11 @@ fn block_assembler_assembles_fragment_when_wait_ticks_budget_is_reached() {
 #[test]
 fn block_assembler_drops_fragment_after_retry_budget_exhaustion() {
     let (transaction_outbound, transaction_inbound) = bounded_link::<SanitizedTransaction>(128);
-    let mut block_assembler = BlockAssembler::new(DualReceiver::Channel(transaction_inbound));
+    let mut block_assembler = BlockAssembler::with_storage_policy(
+        DualReceiver::Channel(transaction_inbound),
+        test_storage_runtime_policy(),
+    )
+    .unwrap();
     block_assembler.fragment_counter = 10;
     let context = ServiceContext::new(ShutdownSwitch::new());
 
@@ -1691,7 +1707,11 @@ fn block_assembler_drops_fragment_after_retry_budget_exhaustion() {
 #[test]
 fn block_assembler_drops_deterministic_failure_without_retry() {
     let (transaction_outbound, transaction_inbound) = bounded_link::<SanitizedTransaction>(128);
-    let mut block_assembler = BlockAssembler::new(DualReceiver::Channel(transaction_inbound));
+    let mut block_assembler = BlockAssembler::with_storage_policy(
+        DualReceiver::Channel(transaction_inbound),
+        test_storage_runtime_policy(),
+    )
+    .unwrap();
     block_assembler.fragment_counter = 28;
     let context = ServiceContext::new(ShutdownSwitch::new());
 

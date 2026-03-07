@@ -13,8 +13,9 @@ use crate::{
 };
 use bank_timeline::BankTimeline;
 use karstflow_execution::{
-    ExecutionBridge, ExecutionEngine, ExecutionStateController, HeuristicExecutionEngine,
-    LeaderGateState, ReplayBoundaryState, RuntimeLikeExecutionEngine, StorageBackedRuntimeAdapter,
+    AccountBackedExecutionEngine, ExecutionBridge, ExecutionEngine, ExecutionStateController,
+    HeuristicExecutionEngine, LeaderGateState, ReplayBoundaryState, RuntimeLikeExecutionEngine,
+    StorageBackedRuntimeAdapter,
 };
 use karstflow_mesh::DualReceiver;
 use karstflow_runtime::{RuntimeError, RuntimeResult, Service};
@@ -342,6 +343,13 @@ fn build_execution_bridge(
         Arc<dyn ExecutionEngine>,
         Option<Arc<dyn ExecutionStateController>>,
     ) = match storage_runtime_policy.execution_engine_policy {
+        ExecutionEnginePolicy::AccountBacked => {
+            let db = karstflow_storage::AccountDatabase::new();
+            (
+                Arc::new(AccountBackedExecutionEngine::new(db)) as Arc<dyn ExecutionEngine>,
+                None,
+            )
+        }
         ExecutionEnginePolicy::Heuristic => (Arc::new(HeuristicExecutionEngine::new()), None),
         ExecutionEnginePolicy::RuntimeLike => {
             let mut seeded_store = karstflow_storage::RuntimeStateStore::new();

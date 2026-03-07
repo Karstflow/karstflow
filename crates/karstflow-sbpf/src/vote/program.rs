@@ -110,6 +110,17 @@ impl VoteProgramExecutor {
                     &mut logs,
                 )?;
             }
+            constants::INSTRUCTION_UPDATE_COMMISSION_COLLECTOR
+            | constants::INSTRUCTION_UPDATE_COMMISSION_BPS
+            | constants::INSTRUCTION_DEPOSIT_DELEGATOR_REWARDS => {
+                // Agave 4.0 stub instructions — feature-gated and not yet
+                // activated on any network. Return an error matching the
+                // reference implementation behavior.
+                return Err(format!(
+                    "Unimplemented vote instruction type {}",
+                    instruction_type
+                ));
+            }
             _ => {
                 return Err(format!(
                     "Unknown vote instruction type {}",

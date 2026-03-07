@@ -1036,18 +1036,20 @@ impl Bank {
             .distribute_fees()
             .map_err(|_| BankFreezeError::AlreadyFrozen)?;
 
+        // Compute bank hash and fee rate once (avoids redundant SHA256 + lock acquisition).
+        let bank_hash = self.hash();
+        let fee_rate = self.lamports_per_signature();
+
         // Update sysvars for this slot
         if let Some(sysvars) = &self.sysvars {
             let timestamp = self.estimate_network_timestamp();
             sysvars.update_clock(self.slot, self.epoch, timestamp);
-            sysvars.update_slot_hashes(self.slot, self.hash());
+            sysvars.update_slot_hashes(self.slot, bank_hash);
             sysvars.update_slot_history(self.slot);
-            sysvars.update_recent_blockhashes(self.hash(), self.lamports_per_signature());
+            sysvars.update_recent_blockhashes(bank_hash, fee_rate);
         }
 
         // Register this slot's blockhash in the recent blockhash queue
-        let bank_hash = self.hash();
-        let fee_rate = self.lamports_per_signature();
         let blockhash_info = BlockhashInfo::new(Pubkey::from(bank_hash), fee_rate, self.slot);
         self.blockhash_queue
             .write()

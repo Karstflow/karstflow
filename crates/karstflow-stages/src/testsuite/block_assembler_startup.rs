@@ -10,7 +10,7 @@ fn block_assembler_persists_snapshot_catalog_when_path_is_configured() {
             snapshot_interval: 1,
             startup_policy: StorageStartupPolicy::SkipRestore,
             snapshot_catalog_path: Some(unique_temp_file("karstflow-catalog", "json")),
-            ..StorageRuntimePolicy::default()
+            ..test_storage_runtime_policy()
         },
     )
     .unwrap();
@@ -52,7 +52,7 @@ fn block_assembler_prunes_old_catalog_snapshots_when_retention_is_enabled() {
             },
             startup_policy: StorageStartupPolicy::SkipRestore,
             snapshot_catalog_path: Some(unique_temp_file("karstflow-catalog-retain", "json")),
-            ..StorageRuntimePolicy::default()
+            ..test_storage_runtime_policy()
         },
     )
     .unwrap();
@@ -102,7 +102,7 @@ fn block_assembler_restore_latest_initializes_runtime_state_from_catalog() {
             snapshot_interval: 256,
             startup_policy: StorageStartupPolicy::RestoreLatestIfAvailable,
             snapshot_catalog_path: Some(catalog_path.clone()),
-            ..StorageRuntimePolicy::default()
+            ..test_storage_runtime_policy()
         },
     )
     .unwrap();
@@ -131,7 +131,7 @@ fn block_assembler_restore_specific_initializes_runtime_state_from_catalog() {
             snapshot_interval: 256,
             startup_policy: StorageStartupPolicy::RestoreSpecificIfAvailable { fragment_id: 4 },
             snapshot_catalog_path: Some(catalog_path.clone()),
-            ..StorageRuntimePolicy::default()
+            ..test_storage_runtime_policy()
         },
     )
     .unwrap();
@@ -159,7 +159,7 @@ fn block_assembler_restore_latest_seeds_slot_and_leader_positions_from_checkpoin
         StorageRuntimePolicy {
             startup_policy: StorageStartupPolicy::RestoreLatestIfAvailable,
             snapshot_catalog_path: Some(catalog_path.clone()),
-            ..StorageRuntimePolicy::default()
+            ..test_storage_runtime_policy()
         },
     )
     .unwrap();
@@ -187,7 +187,7 @@ fn block_assembler_restore_respects_higher_configured_initial_slot_floor() {
                 hold_retry_delay_millis: 10,
                 initial_slot: 11,
             },
-            ..StorageRuntimePolicy::default()
+            ..test_storage_runtime_policy()
         },
     )
     .unwrap();
@@ -208,7 +208,7 @@ fn block_assembler_runtime_like_restore_latest_commits_next_fragment_without_dri
             execution_engine_policy: ExecutionEnginePolicy::RuntimeLike,
             startup_policy: StorageStartupPolicy::RestoreLatestIfAvailable,
             snapshot_catalog_path: Some(catalog_path.clone()),
-            ..StorageRuntimePolicy::default()
+            ..test_storage_runtime_policy()
         },
     )
     .unwrap();
@@ -256,7 +256,7 @@ fn block_assembler_strict_restore_latest_fails_when_snapshot_missing() {
                 restore_latest_requires_snapshot: true,
                 restore_specific_requires_snapshot: false,
             },
-            ..StorageRuntimePolicy::default()
+            ..test_storage_runtime_policy()
         },
     );
 
@@ -278,7 +278,7 @@ fn block_assembler_strict_restore_specific_without_catalog_path_fails_preflight(
                 restore_latest_requires_snapshot: false,
                 restore_specific_requires_snapshot: true,
             },
-            ..StorageRuntimePolicy::default()
+            ..test_storage_runtime_policy()
         },
     );
 
@@ -304,7 +304,7 @@ fn block_assembler_strict_restore_specific_fails_when_snapshot_missing() {
                 restore_specific_requires_snapshot: true,
             },
             snapshot_catalog_path: Some(catalog_path.clone()),
-            ..StorageRuntimePolicy::default()
+            ..test_storage_runtime_policy()
         },
     );
 
@@ -326,7 +326,7 @@ fn block_assembler_rejects_malformed_snapshot_catalog_on_startup() {
         DualReceiver::Channel(transaction_inbound),
         StorageRuntimePolicy {
             snapshot_catalog_path: Some(catalog_path.clone()),
-            ..StorageRuntimePolicy::default()
+            ..test_storage_runtime_policy()
         },
     ) {
         Ok(_) => panic!("malformed catalog must fail startup"),
@@ -349,7 +349,7 @@ fn block_assembler_rejects_truncated_snapshot_catalog_on_startup() {
         DualReceiver::Channel(transaction_inbound),
         StorageRuntimePolicy {
             snapshot_catalog_path: Some(catalog_path.clone()),
-            ..StorageRuntimePolicy::default()
+            ..test_storage_runtime_policy()
         },
     ) {
         Ok(_) => panic!("truncated catalog must fail startup"),
@@ -376,7 +376,7 @@ fn block_assembler_rejects_unknown_catalog_schema_on_startup() {
         DualReceiver::Channel(transaction_inbound),
         StorageRuntimePolicy {
             snapshot_catalog_path: Some(catalog_path.clone()),
-            ..StorageRuntimePolicy::default()
+            ..test_storage_runtime_policy()
         },
     ) {
         Ok(_) => panic!("unknown schema catalog must fail startup"),
@@ -403,7 +403,7 @@ fn block_assembler_rejects_catalog_with_invalid_field_shape_on_startup() {
         DualReceiver::Channel(transaction_inbound),
         StorageRuntimePolicy {
             snapshot_catalog_path: Some(catalog_path.clone()),
-            ..StorageRuntimePolicy::default()
+            ..test_storage_runtime_policy()
         },
     ) {
         Ok(_) => panic!("invalid-shape catalog must fail startup"),
@@ -427,7 +427,7 @@ fn block_assembler_restores_after_catalog_is_rewritten_from_corrupt_to_valid() {
         StorageRuntimePolicy {
             startup_policy: StorageStartupPolicy::RestoreLatestIfAvailable,
             snapshot_catalog_path: Some(catalog_path.clone()),
-            ..StorageRuntimePolicy::default()
+            ..test_storage_runtime_policy()
         },
     );
     assert!(failed_startup.is_err());
@@ -438,7 +438,7 @@ fn block_assembler_restores_after_catalog_is_rewritten_from_corrupt_to_valid() {
         StorageRuntimePolicy {
             startup_policy: StorageStartupPolicy::RestoreLatestIfAvailable,
             snapshot_catalog_path: Some(catalog_path.clone()),
-            ..StorageRuntimePolicy::default()
+            ..test_storage_runtime_policy()
         },
     )
     .unwrap();
@@ -459,7 +459,7 @@ fn block_assembler_returns_runtime_error_when_catalog_parent_is_missing() {
         StorageRuntimePolicy {
             snapshot_interval: 1,
             snapshot_catalog_path: Some(catalog_path),
-            ..StorageRuntimePolicy::default()
+            ..test_storage_runtime_policy()
         },
     )
     .unwrap();
@@ -506,7 +506,7 @@ fn block_assembler_returns_runtime_error_when_catalog_parent_is_not_writable() {
         StorageRuntimePolicy {
             snapshot_interval: 1,
             snapshot_catalog_path: Some(catalog_path),
-            ..StorageRuntimePolicy::default()
+            ..test_storage_runtime_policy()
         },
     )
     .unwrap();

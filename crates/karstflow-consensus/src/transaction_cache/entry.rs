@@ -39,6 +39,13 @@ impl CacheEntry {
     pub fn seen_on_fork(&self, fork: u64) -> bool {
         self.forks.contains(&fork)
     }
+
+    /// Remove a fork from this entry. Returns `true` if the entry
+    /// has no remaining forks and should be evicted.
+    pub fn remove_fork(&mut self, fork: u64) -> bool {
+        self.forks.retain(|&f| f != fork);
+        self.forks.is_empty()
+    }
 }
 
 #[cfg(test)]

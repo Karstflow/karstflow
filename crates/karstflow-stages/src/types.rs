@@ -33,7 +33,11 @@ pub struct StorageStartupStrictRestorePolicy {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ExecutionEnginePolicy {
+    /// Real execution through AccountDatabase and TransactionProcessor.
+    AccountBacked,
+    /// Synthetic heuristic-based failure simulation (test only).
     Heuristic,
+    /// Runtime-like adapter with storage-backed state (test only).
     RuntimeLike,
 }
 
@@ -156,7 +160,7 @@ impl Default for StorageRuntimePolicy {
             assembly_policy: AssemblyPolicy::default(),
             max_retry_attempts: 3,
             retry_backoff_cap_millis: 2_000,
-            execution_engine_policy: ExecutionEnginePolicy::Heuristic,
+            execution_engine_policy: ExecutionEnginePolicy::AccountBacked,
             execution_error_handling_policy: ExecutionErrorHandlingPolicy::FailOpen,
             execution_error_fail_open_max_consecutive: 0,
             runtime_like_account_state_apply_policy: AccountStateApplyPolicy::Strict,
@@ -380,7 +384,7 @@ mod tests {
         assert_eq!(p.retry_backoff_cap_millis, 2_000);
         assert!(matches!(
             p.execution_engine_policy,
-            ExecutionEnginePolicy::Heuristic
+            ExecutionEnginePolicy::AccountBacked
         ));
         assert!(matches!(
             p.execution_error_handling_policy,

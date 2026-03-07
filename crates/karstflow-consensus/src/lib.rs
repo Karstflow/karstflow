@@ -15,6 +15,7 @@ mod equivocation;
 pub mod features;
 mod fee;
 mod fork_choice;
+mod hard_fork_detector;
 mod inflation;
 mod leader_schedule;
 mod nonce;
@@ -28,16 +29,20 @@ pub mod signature_status;
 mod snapshot_bootstrap;
 mod stake;
 mod stake_history;
+mod stake_rewards;
 pub mod sysvars;
 #[cfg(test)]
 mod tests;
+mod top_votes;
 mod tower;
 mod tower_persistence;
 pub mod transaction_cache;
 pub mod transaction_wire;
 mod vote_account_cache;
 mod vote_processor;
+mod vote_stakes;
 mod vote_state;
+mod vote_tx_tracker;
 
 pub use bank::{
     Bank, BankFeeError, BankFreezeError, BankRootError, BankStatus, BankTickError,
@@ -66,6 +71,7 @@ pub use epoch_schedule::{EpochSchedule, EpochScheduleConfig};
 pub use equivocation::{EquivocationDetector, EquivocationProof};
 pub use fee::{FeeCalculator, FeeCollector, FeeRateGovernor};
 pub use fork_choice::{ForkChoice, ForkChoiceStats, ForkInfo};
+pub use hard_fork_detector::{HardForkDetector, HardForkEvent, HardForkMetrics};
 pub use inflation::Inflation;
 pub use leader_schedule::{EpochLeaders, LeaderSchedule, LeaderScheduleError};
 pub use nonce::{Nonce, NonceAccount, NonceData, NonceError, NonceState};
@@ -87,15 +93,19 @@ pub use stake::{
     StakeState, StakeTracker,
 };
 pub use stake_history::{EpochStakeEntry, StakeHistory, StakeHistoryEntry, STAKE_HISTORY_CAP};
+pub use stake_rewards::{StakeRewardEntry, StakeRewardForkId, StakeRewards};
+pub use top_votes::{TopVoteEntry, TopVotes, DEFAULT_MAX_VALIDATORS};
 pub use tower::{Tower, TowerError, TowerVote};
 pub use tower_persistence::{SavedTower, SavedVote, TowerPersistenceError};
 pub use vote_account_cache::{VoteAccountCache, VoteAccountEntry};
 pub use vote_processor::{
     SlotVoteInfo, VoteProcessor, VoteProcessorConfig, VoteProcessorError, VoteProcessorStats,
 };
+pub use vote_stakes::{ForkId, VoteStakeEntry, VoteStakes};
 pub use vote_state::{
     AuthorizedVoters, BlockTimestamp, EpochCredits, LandedVote, PriorVoters, VoteError,
-    VoteLockout, VoteState, MAX_EPOCH_CREDITS,
+    VoteLockout, VoteState, DEFAULT_BLOCK_REVENUE_COMMISSION_BPS, MAX_EPOCH_CREDITS,
+    VOTE_STATE_V3_SIZE, VOTE_STATE_V4_SIZE,
 };
 
 pub use sysvars::SysvarCache;
@@ -106,7 +116,7 @@ pub use bank_executor::{
     SanitizedTransaction, SlotContext, TransactionExecutionError, TransactionExecutionResult,
     TransactionSimulationResult, VoteUpdate,
 };
-pub use cost_tracker::{CostTracker, CostTrackerError, TransactionCost};
+pub use cost_tracker::{CostLimits, CostTracker, CostTrackerError, TransactionCost};
 pub use features::{FeatureActivation, FeatureSet};
 pub use signature_status::{AddressSignatureEntry, SignatureStatus, SignatureStatusCache};
 pub use snapshot_bootstrap::{
@@ -115,3 +125,4 @@ pub use snapshot_bootstrap::{
 };
 pub use transaction_cache::{SeedEntry, TransactionCache};
 pub use transaction_wire::{deserialize_transaction, DeserializedTransaction};
+pub use vote_tx_tracker::VoteTxTracker;

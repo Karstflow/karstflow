@@ -164,6 +164,99 @@ pub const INCREASE_TX_ACCOUNT_LOCK_LIMIT: Pubkey = Pubkey::new([
 ]);
 
 // ---------------------------------------------------------------------------
+// Block limit feature gates
+// ---------------------------------------------------------------------------
+
+/// Raises block compute limit to 60M CU (SIMD-0256).
+/// Base58: 6oMCUgfY6BzZ6jwB681J6ju5Bh6CjVXbd7NeWYqiXBSu
+pub const RAISE_BLOCK_LIMITS_TO_60M: Pubkey = Pubkey::new([
+    0x56, 0x29, 0xFD, 0x5B, 0x06, 0x1D, 0x78, 0x49, 0xFC, 0x80, 0x45, 0xEF, 0xBE, 0x42, 0x3F, 0xBC,
+    0x45, 0x8B, 0x26, 0xF1, 0x43, 0x04, 0xD8, 0x27, 0x0E, 0xFB, 0xBA, 0x13, 0x22, 0x82, 0x30, 0xC6,
+]);
+
+/// Raises block compute limit to 100M CU (SIMD-0286).
+/// Base58: P1BCUMpAC7V2GRBRiJCNUgpMyWZhoqt3LKo712ePqsz
+pub const RAISE_BLOCK_LIMITS_TO_100M: Pubkey = Pubkey::new([
+    0x05, 0xA2, 0xFA, 0x02, 0xBF, 0x06, 0x9B, 0xB5, 0xCF, 0xEB, 0xC7, 0x5C, 0x1D, 0xC9, 0x2A, 0x8B,
+    0x6C, 0x88, 0x83, 0x7E, 0xAD, 0x76, 0x0E, 0x05, 0x45, 0xF5, 0xA8, 0x63, 0x63, 0x9C, 0xE7, 0xAD,
+]);
+
+/// Raises per-account CU limit to 40% of block limit (SIMD-0306).
+/// Base58: htsptAwi2yRoZH83SKaUXykeZGtZHgxkS2QwW1pssR8
+pub const RAISE_ACCOUNT_CU_LIMIT: Pubkey = Pubkey::new([
+    0x0A, 0x79, 0xE3, 0x9B, 0x1A, 0xCC, 0x64, 0x5C, 0x8C, 0xDF, 0x47, 0xAD, 0x61, 0x25, 0x63, 0x73,
+    0xDD, 0xF4, 0xC7, 0x34, 0x54, 0x57, 0x6D, 0x36, 0x90, 0xBE, 0xFD, 0xD7, 0x75, 0x72, 0x01, 0x7F,
+]);
+
+// ---------------------------------------------------------------------------
+// Vote / consensus feature gates
+// ---------------------------------------------------------------------------
+
+/// Enables V4 vote state format (3762 bytes, landed votes).
+/// Base58: Gx4XFcrVMt4HUvPzTpTSVkdDVgcDSjKhDN1RqRS6KDuZ
+pub const VOTE_STATE_V4: Pubkey = Pubkey::new([
+    0xEC, 0xFA, 0x3A, 0xF2, 0xAB, 0xA3, 0x21, 0x89, 0x19, 0xF4, 0xC3, 0x4C, 0x05, 0xDF, 0x88, 0xF0,
+    0x79, 0x57, 0x48, 0xF1, 0x3E, 0x35, 0x12, 0x0B, 0x7B, 0x56, 0xAA, 0xAE, 0x3F, 0xE9, 0x98, 0x58,
+]);
+
+/// Enables the TowerSync vote instruction (replaces compact vote updates).
+/// Base58: tSynMCspg4xFiCj1v3TDb4c7crMR5tSBhLz4sF7rrNA
+pub const ENABLE_TOWER_SYNC_IX: Pubkey = Pubkey::new([
+    0x0D, 0x2D, 0xFE, 0xED, 0x5A, 0x25, 0x11, 0xF7, 0x8D, 0x62, 0x07, 0x44, 0x0D, 0xAD, 0x2C, 0xC2,
+    0x50, 0x72, 0xDA, 0x55, 0x9C, 0xF7, 0x30, 0x7A, 0xE8, 0x45, 0x22, 0x92, 0x56, 0xDD, 0x66, 0x77,
+]);
+
+/// Deprecates legacy vote instructions (Vote, VoteSwitch, CompactVoteStateUpdate).
+/// Base58: depVvnQ2UysGrhwdiwU42tCadZL8GcBb1i2GYhMopQv
+pub const DEPRECATE_LEGACY_VOTE_IXS: Pubkey = Pubkey::new([
+    0x09, 0x63, 0xAB, 0xD0, 0x05, 0x64, 0xA6, 0xA5, 0x74, 0xCD, 0xDF, 0xB3, 0xC1, 0xA6, 0xCF, 0xB3,
+    0xC9, 0x9E, 0x1D, 0x7D, 0xF1, 0xDC, 0x91, 0xD5, 0x67, 0xDF, 0x68, 0xEB, 0x77, 0x49, 0x22, 0xB7,
+]);
+
+/// Enables vote-address-based leader schedule (SIMD-0387 / VAT).
+/// Base58: 5JsG4NWH8Jbrqdd8uL6BNwnyZK3dQSoieRXG5vmofj9y
+pub const ENABLE_VOTE_ADDRESS_LEADER_SCHEDULE: Pubkey = Pubkey::new([
+    0x40, 0x02, 0x73, 0x40, 0x0F, 0xB3, 0x11, 0x37, 0x08, 0x32, 0x50, 0x92, 0x29, 0x6A, 0x13, 0x68,
+    0xE5, 0xE5, 0xDE, 0x04, 0x99, 0x41, 0x79, 0xC5, 0xA0, 0xDF, 0xD8, 0x45, 0x51, 0x44, 0x24, 0x80,
+]);
+
+/// Enables BLS proof-of-possession key management in vote accounts.
+/// Base58: 2uxQgtKa2ECHGs67Zdj7dgmzn2w9HiqhdcedwCWfYzzq
+pub const BLS_PUBKEY_MANAGEMENT_IN_VOTE_ACCOUNT: Pubkey = Pubkey::new([
+    0x1C, 0x6C, 0x8A, 0x1B, 0xB0, 0xB6, 0x27, 0x37, 0xD6, 0xC4, 0x05, 0x8B, 0x2F, 0x29, 0x96, 0x0B,
+    0x09, 0x31, 0xA0, 0xD5, 0xCD, 0x5F, 0x9D, 0x1A, 0xBB, 0x2A, 0xC0, 0x3A, 0xC6, 0x9F, 0xB6, 0x36,
+]);
+
+// ---------------------------------------------------------------------------
+// Cost model feature gates
+// ---------------------------------------------------------------------------
+
+/// Removes special-case simple vote handling from the cost model.
+/// Base58: 2GCrNXbzmt4xrwdcKS2RdsLzsgu4V5zHAemW57pcHT6a
+pub const REMOVE_SIMPLE_VOTE_FROM_COST_MODEL: Pubkey = Pubkey::new([
+    0x12, 0xC0, 0xCC, 0x9E, 0x1C, 0x42, 0x5C, 0xF5, 0xC7, 0xDE, 0x6C, 0x39, 0x5E, 0xC1, 0xBF, 0xDC,
+    0x21, 0x5A, 0x01, 0x3E, 0x68, 0x94, 0x70, 0x0E, 0x15, 0xA2, 0x20, 0x46, 0x17, 0x7A, 0xFB, 0x7B,
+]);
+
+// ---------------------------------------------------------------------------
+// Runtime feature gates
+// ---------------------------------------------------------------------------
+
+/// Limits the number of accounts per instruction.
+/// Base58: DqbnFPASg7tHmZ6qfpdrt2M6MWoSeiicWPXxPhxqFCQ
+pub const LIMIT_INSTRUCTION_ACCOUNTS: Pubkey = Pubkey::new([
+    0x03, 0x49, 0xEB, 0xE8, 0x87, 0x98, 0x86, 0x73, 0x53, 0x66, 0xE5, 0x65, 0x8C, 0xF5, 0x66, 0x5C,
+    0x2C, 0x97, 0x0C, 0xFE, 0x58, 0x24, 0x37, 0x66, 0x9F, 0xDB, 0x3C, 0xA0, 0x86, 0xBC, 0x72, 0x7D,
+]);
+
+/// Relaxes programdata account ownership check during BPF migration.
+/// Base58: rexav5eNTUSNT1K2N7cfRjnthwhcP5BC25v2tA4rW4h
+pub const RELAX_PROGRAMDATA_ACCOUNT_CHECK_MIGRATION: Pubkey = Pubkey::new([
+    0x0C, 0xB8, 0x61, 0x19, 0x93, 0x8F, 0xCE, 0xA5, 0xF4, 0x30, 0x8B, 0x2D, 0x20, 0xE5, 0xF6, 0xDF,
+    0xE7, 0x66, 0x90, 0x8A, 0x06, 0xB4, 0x57, 0xAA, 0xA9, 0x0D, 0x88, 0xB6, 0x2F, 0xD6, 0x4B, 0xA2,
+]);
+
+// ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 
@@ -186,33 +279,14 @@ mod tests {
 
     #[test]
     fn feature_ids_are_32_bytes() {
-        let features = [
-            ENABLE_LOADER_V4,
-            ENABLE_SECP256R1_PRECOMPILE,
-            MOVE_PRECOMPILE_VERIFICATION_TO_SVM,
-            ENABLE_BPF_LOADER_SET_AUTHORITY_CHECKED,
-            ENABLE_EXTEND_PROGRAM_CHECKED,
-            ACCOUNT_DATA_DIRECT_MAPPING,
-            STRICTER_ABI_AND_RUNTIME_CONSTRAINTS,
-            DEPLETE_CU_METER_ON_VM_FAILURE,
-            BLAKE3_SYSCALL_ENABLED,
-            CURVE25519_SYSCALL_ENABLED,
-            ENABLE_ALT_BN128_SYSCALL,
-            ENABLE_ALT_BN128_COMPRESSION_SYSCALL,
-            ENABLE_POSEIDON_SYSCALL,
-            REMAINING_COMPUTE_UNITS_SYSCALL_ENABLED,
-            ABORT_ON_INVALID_CURVE,
-            ENABLE_GET_EPOCH_STAKE_SYSCALL,
-            INCREASE_TX_ACCOUNT_LOCK_LIMIT,
-        ];
+        let features = all_features();
         for f in &features {
             assert_eq!(f.as_bytes().len(), 32);
         }
     }
 
-    #[test]
-    fn all_feature_ids_are_unique() {
-        let features = [
+    fn all_features() -> Vec<Pubkey> {
+        vec![
             ENABLE_LOADER_V4,
             ENABLE_SECP256R1_PRECOMPILE,
             MOVE_PRECOMPILE_VERIFICATION_TO_SVM,
@@ -230,7 +304,23 @@ mod tests {
             ABORT_ON_INVALID_CURVE,
             ENABLE_GET_EPOCH_STAKE_SYSCALL,
             INCREASE_TX_ACCOUNT_LOCK_LIMIT,
-        ];
+            RAISE_BLOCK_LIMITS_TO_60M,
+            RAISE_BLOCK_LIMITS_TO_100M,
+            RAISE_ACCOUNT_CU_LIMIT,
+            VOTE_STATE_V4,
+            ENABLE_TOWER_SYNC_IX,
+            DEPRECATE_LEGACY_VOTE_IXS,
+            ENABLE_VOTE_ADDRESS_LEADER_SCHEDULE,
+            BLS_PUBKEY_MANAGEMENT_IN_VOTE_ACCOUNT,
+            REMOVE_SIMPLE_VOTE_FROM_COST_MODEL,
+            LIMIT_INSTRUCTION_ACCOUNTS,
+            RELAX_PROGRAMDATA_ACCOUNT_CHECK_MIGRATION,
+        ]
+    }
+
+    #[test]
+    fn all_feature_ids_are_unique() {
+        let features = all_features();
         let set: HashSet<[u8; 32]> = features.iter().map(|f| *f.as_bytes()).collect();
         assert_eq!(set.len(), features.len(), "duplicate feature IDs detected");
     }

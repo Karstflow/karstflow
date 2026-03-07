@@ -1,7 +1,7 @@
 mod directives;
 mod retry;
 
-use crate::engine::{ExecutionEngine, HeuristicExecutionEngine};
+use crate::engine::{AccountBackedExecutionEngine, ExecutionEngine};
 use crate::errors::ExecutionError;
 use crate::types::{
     ExecutionBatch, ExecutionFailureClass, ExecutionOutcome, ForkChoiceDirective,
@@ -28,7 +28,9 @@ pub struct ExecutionBridge {
 impl ExecutionBridge {
     pub fn new() -> Self {
         Self::with_engine_and_retry_policy(
-            Arc::new(HeuristicExecutionEngine::new()),
+            Arc::new(AccountBackedExecutionEngine::new(
+                karstflow_storage::AccountDatabase::new(),
+            )),
             RetryPolicy::default(),
         )
     }
@@ -57,7 +59,12 @@ impl ExecutionBridge {
     }
 
     pub fn with_retry_policy(retry_policy: RetryPolicy) -> Self {
-        Self::with_engine_and_retry_policy(Arc::new(HeuristicExecutionEngine::new()), retry_policy)
+        Self::with_engine_and_retry_policy(
+            Arc::new(AccountBackedExecutionEngine::new(
+                karstflow_storage::AccountDatabase::new(),
+            )),
+            retry_policy,
+        )
     }
 
     pub fn try_execute_batch(

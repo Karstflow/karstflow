@@ -14,9 +14,79 @@ pub use account_cost::AccountCostTracker;
 pub use block_limits_checker::check_limits;
 pub use transaction_cost::TransactionCost;
 
-use karstflow_constants::block_limits::MAX_BLOCK_COMPUTE_UNITS;
+use karstflow_constants::block_limits::{
+    ACCOUNT_CU_LIMIT_RATIO_PERCENT, MAX_ACCOUNT_DATA_SIZE_DELTA, MAX_BLOCK_COMPUTE_UNITS,
+    MAX_BLOCK_COMPUTE_UNITS_SIMD_0256, MAX_BLOCK_COMPUTE_UNITS_SIMD_0286, MAX_VOTE_COMPUTE_UNITS,
+    MAX_WRITABLE_ACCOUNT_COMPUTE_UNITS,
+};
 use karstflow_storage::Pubkey;
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
+
+/// Resolved block cost limits for a specific slot.
+///
+/// At each slot boundary, feature flags are consulted to determine
+/// which SIMD-level limits are active. This struct stores the resolved
+/// values so they can be used throughout the slot without repeated
+/// feature checks.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CostLimits {
+    /// Maximum total compute units per block.
+    pub block_cost_limit: u64,
+    /// Maximum compute units for vote transactions per block.
+    pub vote_cost_limit: u64,
+    /// Maximum compute units per writable account per block.
+    pub account_cost_limit: u64,
+    /// Maximum account data size delta per block (bytes).
+    pub account_data_size_limit: i64,
+}
+
+impl CostLimits {
+    /// Resolve cost limits based on active feature flags.
+    ///
+    /// Feature flags:
+    /// - `raise_block_limits_to_100m` → SIMD-0286 (100M CU)
+    /// - `raise_block_limits_to_60m`  → SIMD-0256 (60M CU)
+    /// - `raise_account_cu_limit`     → SIMD-0306 (account limit = 40% of block limit)
+    ///
+    /// Falls back to SIMD-0207 (50M CU) when neither raise feature is active.
+    pub fn from_features(
+        raise_to_100m: bool,
+        raise_to_60m: bool,
+        raise_account_limit: bool,
+    ) -> Self {
+        let block_cost_limit = if raise_to_100m {
+            MAX_BLOCK_COMPUTE_UNITS_SIMD_0286
+        } else if raise_to_60m {
+            MAX_BLOCK_COMPUTE_UNITS_SIMD_0256
+        } else {
+            MAX_BLOCK_COMPUTE_UNITS
+        };
+
+        let account_cost_limit = if raise_account_limit {
+            block_cost_limit * ACCOUNT_CU_LIMIT_RATIO_PERCENT / 100
+        } else {
+            MAX_WRITABLE_ACCOUNT_COMPUTE_UNITS
+        };
+
+        Self {
+            block_cost_limit,
+            vote_cost_limit: MAX_VOTE_COMPUTE_UNITS,
+            account_cost_limit,
+            account_data_size_limit: MAX_ACCOUNT_DATA_SIZE_DELTA,
+        }
+    }
+}
+
+impl Default for CostLimits {
+    fn default() -> Self {
+        Self {
+            block_cost_limit: MAX_BLOCK_COMPUTE_UNITS,
+            vote_cost_limit: MAX_VOTE_COMPUTE_UNITS,
+            account_cost_limit: MAX_WRITABLE_ACCOUNT_COMPUTE_UNITS,
+            account_data_size_limit: MAX_ACCOUNT_DATA_SIZE_DELTA,
+        }
+    }
+}
 
 /// Per-block cost tracker with atomic counters for concurrent access.
 ///
@@ -24,6 +94,8 @@ use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
 /// and account data size changes. All limit checks and updates happen
 /// atomically to support multi-threaded transaction scheduling.
 pub struct CostTracker {
+    /// Resolved limits for this block.
+    limits: CostLimits,
     /// Total compute units consumed in this block.
     block_cost: AtomicU64,
     /// Compute units consumed by vote transactions.
@@ -36,19 +108,48 @@ pub struct CostTracker {
     is_dead: AtomicBool,
     /// Number of transactions added to this block.
     transaction_count: AtomicU64,
+    /// When true, simple votes are no longer tracked separately in the
+    /// vote cost bucket — they use the full cost model instead.
+    remove_simple_vote_from_cost_model: bool,
 }
 
 impl CostTracker {
-    /// Create a new, empty cost tracker for a block.
+    /// Create a new, empty cost tracker with default limits.
     pub fn new() -> Self {
+        Self::with_limits(CostLimits::default())
+    }
+
+    /// Create a new, empty cost tracker with specific limits.
+    pub fn with_limits(limits: CostLimits) -> Self {
         Self {
+            limits,
             block_cost: AtomicU64::new(0),
             vote_cost: AtomicU64::new(0),
             account_costs: AccountCostTracker::new(),
             account_data_size_delta: AtomicI64::new(0),
             is_dead: AtomicBool::new(false),
             transaction_count: AtomicU64::new(0),
+            remove_simple_vote_from_cost_model: false,
         }
+    }
+
+    /// Create a new cost tracker with the `remove_simple_vote_from_cost_model` feature.
+    pub fn with_limits_and_features(limits: CostLimits, remove_simple_vote: bool) -> Self {
+        Self {
+            limits,
+            block_cost: AtomicU64::new(0),
+            vote_cost: AtomicU64::new(0),
+            account_costs: AccountCostTracker::new(),
+            account_data_size_delta: AtomicI64::new(0),
+            is_dead: AtomicBool::new(false),
+            transaction_count: AtomicU64::new(0),
+            remove_simple_vote_from_cost_model: remove_simple_vote,
+        }
+    }
+
+    /// Get the resolved cost limits for this block.
+    pub fn limits(&self) -> &CostLimits {
+        &self.limits
     }
 
     /// Attempt to add a transaction's cost to this block.
@@ -66,12 +167,15 @@ impl CostTracker {
         let current_vote = self.vote_cost.load(Ordering::Acquire);
         let current_delta = self.account_data_size_delta.load(Ordering::Acquire);
 
+        let check_vote_limit = cost.is_vote && !self.remove_simple_vote_from_cost_model;
         check_limits(
             current_block,
             current_vote,
             current_delta,
             &|pubkey| self.account_costs.get(pubkey),
             cost,
+            &self.limits,
+            check_vote_limit,
         )?;
 
         // Apply the cost. In a highly concurrent system there is a TOCTOU gap
@@ -79,7 +183,7 @@ impl CostTracker {
         // worst case is a slight over-commitment that the validator can handle.
         self.block_cost
             .fetch_add(cost.compute_units, Ordering::Release);
-        if cost.is_vote {
+        if cost.is_vote && !self.remove_simple_vote_from_cost_model {
             self.vote_cost
                 .fetch_add(cost.compute_units, Ordering::Release);
         }
@@ -99,7 +203,7 @@ impl CostTracker {
     pub fn remove(&self, cost: &TransactionCost) {
         self.block_cost
             .fetch_sub(cost.compute_units, Ordering::Release);
-        if cost.is_vote {
+        if cost.is_vote && !self.remove_simple_vote_from_cost_model {
             self.vote_cost
                 .fetch_sub(cost.compute_units, Ordering::Release);
         }
@@ -119,7 +223,9 @@ impl CostTracker {
 
     /// Remaining compute units that can still fit in this block.
     pub fn remaining_capacity(&self) -> u64 {
-        MAX_BLOCK_COMPUTE_UNITS.saturating_sub(self.block_cost.load(Ordering::Acquire))
+        self.limits
+            .block_cost_limit
+            .saturating_sub(self.block_cost.load(Ordering::Acquire))
     }
 
     /// Total block compute units consumed so far.

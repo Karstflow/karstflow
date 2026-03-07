@@ -16,6 +16,13 @@ use std::fs;
 use std::net::UdpSocket;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+fn test_storage_runtime_policy() -> StorageRuntimePolicy {
+    StorageRuntimePolicy {
+        execution_engine_policy: ExecutionEnginePolicy::Heuristic,
+        ..StorageRuntimePolicy::default()
+    }
+}
+
 fn unique_temp_file(prefix: &str, extension: &str) -> std::path::PathBuf {
     let suffix = SystemTime::now()
         .duration_since(UNIX_EPOCH)
