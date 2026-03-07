@@ -14,7 +14,11 @@ fn three_stage_pipeline_moves_messages_end_to_end() {
         DualReceiver::Channel(packet_inbound),
         DualSender::Channel(transaction_outbound),
     );
-    let mut block_assembler = BlockAssembler::new(DualReceiver::Channel(transaction_inbound));
+    let mut block_assembler = BlockAssembler::with_storage_policy(
+        DualReceiver::Channel(transaction_inbound),
+        test_storage_runtime_policy(),
+    )
+    .unwrap();
 
     let context = ServiceContext::new(ShutdownSwitch::new());
 

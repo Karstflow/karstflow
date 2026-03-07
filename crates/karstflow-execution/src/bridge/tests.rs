@@ -4,9 +4,10 @@ use super::{
     RetryPolicy,
 };
 use crate::bridge::ExecutionStateController;
-use crate::engine::ExecutionEngine;
+use crate::engine::{ExecutionEngine, HeuristicExecutionEngine};
 use std::sync::{Arc, Mutex};
 
+struct SuccessExecutionEngine;
 struct FixedExecutionEngine;
 struct OverreportingExecutionEngine;
 struct MissingClassExecutionEngine;
@@ -19,6 +20,21 @@ struct FailingExecutionEngine {
 struct RecordingStateController {
     rewinds: Mutex<Vec<u64>>,
     fail_on_target: Option<u64>,
+}
+
+impl ExecutionEngine for SuccessExecutionEngine {
+    fn try_execute_batch(
+        &self,
+        batch: &ExecutionBatch,
+    ) -> std::result::Result<ExecutionOutcome, ExecutionError> {
+        Ok(ExecutionOutcome {
+            fragment_id: batch.fragment_id,
+            executed_transactions: batch.transaction_count,
+            failed_transactions: 0,
+            total_cost_units: batch.estimated_total_cost_units,
+            failure_class: None,
+        })
+    }
 }
 
 impl ExecutionEngine for FixedExecutionEngine {
@@ -124,7 +140,7 @@ impl ExecutionStateController for RecordingStateController {
 
 #[test]
 fn execution_bridge_produces_deterministic_outcome() {
-    let bridge = ExecutionBridge::new();
+    let bridge = ExecutionBridge::with_engine(Arc::new(SuccessExecutionEngine));
     let batch = ExecutionBatch::new(7, 64, 256_000);
 
     let outcome = bridge.execute_batch(&batch);
@@ -137,7 +153,7 @@ fn execution_bridge_produces_deterministic_outcome() {
 
 #[test]
 fn replay_boundary_updates_with_successful_outcome() {
-    let bridge = ExecutionBridge::new();
+    let bridge = ExecutionBridge::with_engine(Arc::new(SuccessExecutionEngine));
     let mut replay_state = ReplayBoundaryState {
         last_applied_fragment_id: 0,
         total_executed_transactions: 0,
@@ -174,7 +190,7 @@ fn replay_boundary_total_executed_transactions_saturates_on_large_updates() {
 
 #[test]
 fn replay_boundary_considers_reorg_for_replay_conflict() {
-    let bridge = ExecutionBridge::new();
+    let bridge = ExecutionBridge::with_engine(Arc::new(HeuristicExecutionEngine::new()));
     let mut replay_state = ReplayBoundaryState {
         last_applied_fragment_id: 0,
         total_executed_transactions: 0,
@@ -189,7 +205,7 @@ fn replay_boundary_considers_reorg_for_replay_conflict() {
 
 #[test]
 fn replay_boundary_keeps_fork_for_transient_pressure() {
-    let bridge = ExecutionBridge::new();
+    let bridge = ExecutionBridge::with_engine(Arc::new(HeuristicExecutionEngine::new()));
     let mut replay_state = ReplayBoundaryState {
         last_applied_fragment_id: 0,
         total_executed_transactions: 0,
@@ -290,7 +306,7 @@ fn execution_bridge_rewind_propagates_state_controller_error() {
 
 #[test]
 fn execute_batch_marks_replay_conflict_for_fragment_multiple_of_17() {
-    let bridge = ExecutionBridge::new();
+    let bridge = ExecutionBridge::with_engine(Arc::new(HeuristicExecutionEngine::new()));
     let outcome = bridge.try_execute_batch(&ExecutionBatch::new(34, 64, 256_000));
     let outcome = outcome.unwrap();
     assert_eq!(
@@ -426,7 +442,7 @@ fn scheduler_priority_escalates_for_resource_exhaustion() {
 
 #[test]
 fn classify_resource_exhaustion_for_high_average_cost_batch() {
-    let bridge = ExecutionBridge::new();
+    let bridge = ExecutionBridge::with_engine(Arc::new(HeuristicExecutionEngine::new()));
     let outcome = bridge
         .try_execute_batch(&ExecutionBatch::new(19, 96, 1_200_000))
         .unwrap();
@@ -438,7 +454,7 @@ fn classify_resource_exhaustion_for_high_average_cost_batch() {
 
 #[test]
 fn classify_deterministic_failure_for_low_cost_pattern_batch() {
-    let bridge = ExecutionBridge::new();
+    let bridge = ExecutionBridge::with_engine(Arc::new(HeuristicExecutionEngine::new()));
     let outcome = bridge
         .try_execute_batch(&ExecutionBatch::new(14, 32, 32_000))
         .unwrap();

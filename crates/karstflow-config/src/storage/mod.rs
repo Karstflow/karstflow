@@ -326,6 +326,7 @@ fn parse_execution_engine_policy(
     scope_name: &'static str,
 ) -> Result<ExecutionEnginePolicy> {
     match raw.trim().to_ascii_lowercase().as_str() {
+        "account_backed" | "account-backed" | "account" => Ok(ExecutionEnginePolicy::AccountBacked),
         "heuristic" => Ok(ExecutionEnginePolicy::Heuristic),
         "runtime_like" | "runtime-like" | "runtime" => Ok(ExecutionEnginePolicy::RuntimeLike),
         _ => Err(ConfigError::InvalidScope {
