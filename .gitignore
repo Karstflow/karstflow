@@ -1,4 +1,5 @@
 .githooks
+.vscode
 
 # Build artifacts
 /target/
