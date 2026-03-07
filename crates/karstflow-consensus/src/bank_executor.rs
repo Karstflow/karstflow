@@ -1571,7 +1571,7 @@ impl Bank {
         let mut all_logs = Vec::new();
         let mut log_bytes_written: usize = 0;
         let mut log_truncated = false;
-        let mut modified = HashMap::new();
+        let mut modified = HashMap::with_capacity(transaction.account_keys.len());
         let mut exec_error: Option<TransactionExecutionError> = None;
         let mut return_data: Option<(Pubkey, Vec<u8>)> = None;
 
@@ -1670,10 +1670,13 @@ impl Bank {
                 instr_accounts.push((program_id, program_account, false, false));
             }
 
+            // Clone instruction data once for both InstructionInfo and sibling recording.
+            let instruction_data = instruction.data.clone();
+
             let info = InstructionInfo {
                 program_id,
                 accounts: instr_accounts,
-                data: instruction.data.clone(),
+                data: instruction_data.clone(),
                 slot_context: self.slot_context(),
                 sibling_instructions: sibling_instructions.clone(),
             };
@@ -1721,7 +1724,7 @@ impl Bank {
                 .collect();
             sibling_instructions.push(ProcessedSibling {
                 program_id,
-                data: instruction.data.clone(),
+                data: instruction_data,
                 accounts: sibling_accounts,
             });
 
@@ -2188,10 +2191,12 @@ impl Bank {
                 break 'sim_execution;
             }
 
+            let instruction_data = instruction.data.clone();
+
             let info = InstructionInfo {
                 program_id,
                 accounts: instr_accounts,
-                data: instruction.data.clone(),
+                data: instruction_data.clone(),
                 slot_context: self.slot_context(),
                 sibling_instructions: sibling_instructions.clone(),
             };
@@ -2229,7 +2234,7 @@ impl Bank {
 
             sibling_instructions.push(ProcessedSibling {
                 program_id,
-                data: instruction.data.clone(),
+                data: instruction_data,
                 accounts: instruction
                     .account_indices
                     .iter()
