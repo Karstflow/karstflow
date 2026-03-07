@@ -541,6 +541,37 @@ just conformance       # run conformance tests (20 ignored tests)
 just smoke             # 2-second node startup/shutdown cycle
 ```
 
+### E2E Tests (karstflow-tests)
+
+Black-box testing via JSON-RPC and WebSocket using the official Solana Python client. See [karstflow-tests README](../karstflow-tests/README.md) for setup and usage.
+
+```bash
+cd ../karstflow-tests
+just smoke             # health + genesis checks
+just functional        # single-node RPC method coverage
+just websocket         # WebSocket subscription tests
+just integration       # multi-node cluster tests
+just load              # Locust load tests + benchmarks
+```
+
+### Docker
+
+Build and run the validator in Docker:
+
+```bash
+# Build image
+docker build -t karstflow:latest .
+
+# Run single dev node
+cd ../karstflow-tests
+just node-up           # start single node
+just node-down         # stop
+
+# Run 3-node cluster
+just cluster-up        # start cluster
+just cluster-down      # stop
+```
+
 ### Local Cluster Test
 
 ```bash
