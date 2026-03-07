@@ -55,14 +55,20 @@ struct SimulateTransactionConfig {
     accounts: Option<SimulateAccountsConfig>,
 }
 
-const SEND_TRANSACTION_CONFIG_ALLOWED_KEYS: &[&str] =
-    &["skipPreflight", "maxRetries", "minContextSlot", "encoding"];
+const SEND_TRANSACTION_CONFIG_ALLOWED_KEYS: &[&str] = &[
+    "skipPreflight",
+    "maxRetries",
+    "minContextSlot",
+    "encoding",
+    "preflightCommitment",
+];
 const SIMULATE_TRANSACTION_CONFIG_ALLOWED_KEYS: &[&str] = &[
     "sigVerify",
     "replaceRecentBlockhash",
     "minContextSlot",
     "encoding",
     "accounts",
+    "commitment",
 ];
 const SIMULATE_ACCOUNTS_CONFIG_ALLOWED_KEYS: &[&str] = &["encoding", "addresses"];
 
