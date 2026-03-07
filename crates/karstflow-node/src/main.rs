@@ -215,6 +215,8 @@ fn run_with_node_config(
         .unwrap_or_else(|| crossbeam_channel::bounded(1).1);
 
     // Choose bootstrap path: snapshot archive → genesis file → empty genesis.
+    let is_dev_mode =
+        node_config.snapshot_archive_path.is_none() && node_config.genesis_path.is_none();
     let replay_bundle = if let Some(ref archive_path) = node_config.snapshot_archive_path {
         // Path 1: Restore from a Solana snapshot archive to join an existing network.
         let identity_pubkey = karstflow_storage::Pubkey::from(*identity.pubkey());
@@ -614,6 +616,97 @@ fn run_with_node_config(
                 }
             })
             .expect("failed to spawn leader orchestrator thread");
+    }
+
+    // Dev mode genesis completion: tick + freeze genesis bank, then emit
+    // BecameLeader to bootstrap the block production cycle. Without this,
+    // the leader orchestrator never receives a signal because SlotCompleted
+    // is only emitted after replay_block(), and no blocks exist at genesis.
+    if is_dev_mode {
+        let identity_pubkey = karstflow_storage::Pubkey::from(*identity.pubkey());
+        let bank_forks = consensus.bank_forks.clone();
+        let signal_bus = replay_bundle.signal_bus.clone();
+
+        std::thread::Builder::new()
+            .name("dev-genesis-trigger".into())
+            .spawn(move || {
+                // Small delay to let leader orchestrator subscribe to signal bus.
+                std::thread::sleep(std::time::Duration::from_millis(100));
+
+                // Step 1: Tick the genesis bank to completion (TICKS_PER_SLOT ticks).
+                let forks = bank_forks.read().expect("bank_forks lock poisoned");
+                let genesis_bank = forks.working_bank();
+                let ticks_needed = genesis_bank
+                    .max_tick_height()
+                    .saturating_sub(genesis_bank.tick_height());
+                for _ in 0..ticks_needed {
+                    if let Err(e) = genesis_bank.register_tick() {
+                        warn!(error = ?e, "failed to register genesis tick");
+                        return;
+                    }
+                }
+
+                // Step 2: Freeze the genesis bank.
+                if let Err(e) = genesis_bank.freeze() {
+                    warn!(error = ?e, "failed to freeze genesis bank");
+                    return;
+                }
+                let genesis_slot = genesis_bank.slot();
+                info!(
+                    slot = genesis_slot,
+                    tick_height = genesis_bank.tick_height(),
+                    "dev mode: genesis bank ticked and frozen",
+                );
+                drop(forks);
+
+                // Step 3: Create child bank for slot 1.
+                {
+                    let mut forks = bank_forks.write().expect("bank_forks lock poisoned");
+                    let parent = forks.working_bank();
+                    let leader_schedule = parent.leader_schedule();
+                    let child_slot = genesis_slot + 1;
+                    let child = karstflow_consensus::Bank::new_from_parent(
+                        &parent,
+                        child_slot,
+                        leader_schedule.clone(),
+                    );
+                    if let Err(e) = forks.insert(child) {
+                        warn!(error = ?e, slot = child_slot, "failed to insert child bank");
+                        return;
+                    }
+                    if let Err(e) = forks.set_working_bank(child_slot) {
+                        warn!(error = ?e, slot = child_slot, "failed to set working bank");
+                        return;
+                    }
+                    info!(
+                        slot = child_slot,
+                        "dev mode: created child bank for first leader slot"
+                    );
+                }
+
+                // Step 4: Determine leader range and emit BecameLeader.
+                // In dev mode with single validator, all slots are ours.
+                // Cap the initial leader range to a reasonable size; after
+                // the first slot completes, the replay stage will emit
+                // subsequent BecameLeader signals automatically.
+                let start_slot = genesis_slot + 1;
+                let end_slot = start_slot + 3;
+
+                info!(
+                    start_slot,
+                    end_slot, "dev mode: emitting BecameLeader to bootstrap block production",
+                );
+                let mut bus = signal_bus.lock().expect("signal_bus lock poisoned");
+                bus.emit(karstflow_stages::ReplaySignal::BecameLeader(
+                    karstflow_stages::BecameLeaderInfo {
+                        start_slot,
+                        end_slot,
+                        epoch: 0,
+                        identity_pubkey: *identity_pubkey.as_bytes(),
+                    },
+                ));
+            })
+            .expect("failed to spawn dev genesis trigger thread");
     }
 
     // Build the turbine retransmit service for shred propagation.
