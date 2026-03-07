@@ -14,6 +14,7 @@ pub fn check_limits(
     account_cost_fn: &dyn Fn(&Pubkey) -> u64,
     tx_cost: &TransactionCost,
     limits: &CostLimits,
+    check_vote_limit: bool,
 ) -> Result<(), CostTrackerError> {
     // Block compute-unit limit.
     let new_block_cost = current_block_cost.saturating_add(tx_cost.compute_units);
@@ -25,8 +26,8 @@ pub fn check_limits(
         });
     }
 
-    // Vote compute-unit limit.
-    if tx_cost.is_vote {
+    // Vote compute-unit limit (skipped when remove_simple_vote_from_cost_model active).
+    if check_vote_limit {
         let new_vote_cost = current_vote_cost.saturating_add(tx_cost.compute_units);
         if new_vote_cost > limits.vote_cost_limit {
             return Err(CostTrackerError::VoteCostLimitExceeded {
@@ -87,7 +88,7 @@ mod tests {
     #[test]
     fn within_all_limits() {
         let tx = simple_tx(1_000);
-        let result = check_limits(0, 0, 0, &no_account_cost, &tx, &default_limits());
+        let result = check_limits(0, 0, 0, &no_account_cost, &tx, &default_limits(), tx.is_vote);
         assert!(result.is_ok());
     }
 
@@ -101,6 +102,7 @@ mod tests {
             &no_account_cost,
             &tx,
             &default_limits(),
+            tx.is_vote,
         );
         assert!(matches!(
             result,
@@ -119,6 +121,7 @@ mod tests {
             &no_account_cost,
             &tx,
             &default_limits(),
+            tx.is_vote,
         );
         assert!(matches!(
             result,
@@ -136,6 +139,7 @@ mod tests {
             &no_account_cost,
             &tx,
             &default_limits(),
+            tx.is_vote,
         );
         assert!(result.is_ok());
     }
@@ -153,7 +157,7 @@ mod tests {
                 0
             }
         };
-        let result = check_limits(0, 0, 0, &cost_fn, &tx, &default_limits());
+        let result = check_limits(0, 0, 0, &cost_fn, &tx, &default_limits(), tx.is_vote);
         assert!(matches!(
             result,
             Err(CostTrackerError::AccountCostLimitExceeded { .. })
@@ -171,6 +175,7 @@ mod tests {
             &no_account_cost,
             &tx,
             &default_limits(),
+            tx.is_vote,
         );
         assert!(matches!(
             result,
@@ -195,11 +200,11 @@ mod tests {
 
         // A tx fitting under 100M but not 50M should pass
         let tx = simple_tx(60_000_000);
-        let result = check_limits(0, 0, 0, &no_account_cost, &tx, &limits);
+        let result = check_limits(0, 0, 0, &no_account_cost, &tx, &limits, tx.is_vote);
         assert!(result.is_ok());
 
         // Same tx would fail under default 50M
-        let result = check_limits(0, 0, 0, &no_account_cost, &tx, &default_limits());
+        let result = check_limits(0, 0, 0, &no_account_cost, &tx, &default_limits(), tx.is_vote);
         assert!(matches!(
             result,
             Err(CostTrackerError::BlockCostLimitExceeded { .. })

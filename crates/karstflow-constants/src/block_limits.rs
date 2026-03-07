@@ -163,3 +163,20 @@ pub const BLS_PROOF_OF_POSSESSION_VERIFICATION_CU: u64 = 34_500;
 /// BLS proof-of-possession verification.
 pub const VOTE_MAX_COMPUTE_UNITS: u64 =
     SIMPLE_VOTE_EXECUTION_COST + BLS_PROOF_OF_POSSESSION_VERIFICATION_CU;
+
+/// Fixed cost for a simple vote transaction before `remove_simple_vote_from_cost_model`.
+///
+/// When the feature is NOT active, simple votes have this fixed cost
+/// instead of going through the full cost model.
+pub const SIMPLE_VOTE_USAGE_COST: u64 = 3_428;
+
+/// Upper bound cost for simple vote transactions (used in pack scheduling).
+///
+/// Computed as:
+///   2 signatures * 720          =  1,440
+///   35 writable accounts * 300  = 10,500
+///   vote max CU (36,600)        = 36,600
+///   loaded accounts data cost   = 16,384
+///   max instruction data cost   =    265
+///   Total                       = 65,189
+pub const SIMPLE_VOTE_COST_UPPER_BOUND: u64 = 65_189;

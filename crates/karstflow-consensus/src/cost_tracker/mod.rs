@@ -108,6 +108,9 @@ pub struct CostTracker {
     is_dead: AtomicBool,
     /// Number of transactions added to this block.
     transaction_count: AtomicU64,
+    /// When true, simple votes are no longer tracked separately in the
+    /// vote cost bucket — they use the full cost model instead.
+    remove_simple_vote_from_cost_model: bool,
 }
 
 impl CostTracker {
@@ -126,6 +129,21 @@ impl CostTracker {
             account_data_size_delta: AtomicI64::new(0),
             is_dead: AtomicBool::new(false),
             transaction_count: AtomicU64::new(0),
+            remove_simple_vote_from_cost_model: false,
+        }
+    }
+
+    /// Create a new cost tracker with the `remove_simple_vote_from_cost_model` feature.
+    pub fn with_limits_and_features(limits: CostLimits, remove_simple_vote: bool) -> Self {
+        Self {
+            limits,
+            block_cost: AtomicU64::new(0),
+            vote_cost: AtomicU64::new(0),
+            account_costs: AccountCostTracker::new(),
+            account_data_size_delta: AtomicI64::new(0),
+            is_dead: AtomicBool::new(false),
+            transaction_count: AtomicU64::new(0),
+            remove_simple_vote_from_cost_model: remove_simple_vote,
         }
     }
 
@@ -149,6 +167,7 @@ impl CostTracker {
         let current_vote = self.vote_cost.load(Ordering::Acquire);
         let current_delta = self.account_data_size_delta.load(Ordering::Acquire);
 
+        let check_vote_limit = cost.is_vote && !self.remove_simple_vote_from_cost_model;
         check_limits(
             current_block,
             current_vote,
@@ -156,6 +175,7 @@ impl CostTracker {
             &|pubkey| self.account_costs.get(pubkey),
             cost,
             &self.limits,
+            check_vote_limit,
         )?;
 
         // Apply the cost. In a highly concurrent system there is a TOCTOU gap
@@ -163,7 +183,7 @@ impl CostTracker {
         // worst case is a slight over-commitment that the validator can handle.
         self.block_cost
             .fetch_add(cost.compute_units, Ordering::Release);
-        if cost.is_vote {
+        if cost.is_vote && !self.remove_simple_vote_from_cost_model {
             self.vote_cost
                 .fetch_add(cost.compute_units, Ordering::Release);
         }
@@ -183,7 +203,7 @@ impl CostTracker {
     pub fn remove(&self, cost: &TransactionCost) {
         self.block_cost
             .fetch_sub(cost.compute_units, Ordering::Release);
-        if cost.is_vote {
+        if cost.is_vote && !self.remove_simple_vote_from_cost_model {
             self.vote_cost
                 .fetch_sub(cost.compute_units, Ordering::Release);
         }
