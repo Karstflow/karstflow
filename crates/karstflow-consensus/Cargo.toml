@@ -6,12 +6,12 @@ license.workspace = true
 authors.workspace = true
 
 [dependencies]
-karstflow-constants = { path = "../karstflow-constants" }
-karstflow-crypto = { path = "../karstflow-crypto" }
-karstflow-storage = { path = "../karstflow-storage" }
-karstflow-types = { path = "../karstflow-types" }
-karstflow-ids = { path = "../karstflow-ids" }
-karstflow-mesh = { path = "../karstflow-mesh" }
+karstflow-constants = { workspace = true }
+karstflow-crypto = { workspace = true }
+karstflow-storage = { workspace = true }
+karstflow-types = { workspace = true }
+karstflow-ids = { workspace = true }
+karstflow-mesh = { workspace = true }
 bincode = { workspace = true }
 ed25519-dalek = { workspace = true }
 serde = { workspace = true }

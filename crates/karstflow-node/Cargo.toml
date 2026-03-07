@@ -9,15 +9,15 @@ authors.workspace = true
 crossbeam-channel.workspace = true
 ed25519-dalek.workspace = true
 tracing.workspace = true
-karstflow-consensus = { path = "../karstflow-consensus" }
-karstflow-constants = { path = "../karstflow-constants" }
-karstflow-control = { path = "../karstflow-control" }
-karstflow-config = { path = "../karstflow-config" }
-karstflow-mesh = { path = "../karstflow-mesh" }
-karstflow-net = { path = "../karstflow-net" }
-karstflow-observability = { path = "../karstflow-observability" }
-karstflow-plugin = { path = "../karstflow-plugin" }
-karstflow-stages = { path = "../karstflow-stages" }
-karstflow-storage = { path = "../karstflow-storage" }
-karstflow-topology = { path = "../karstflow-topology" }
-karstflow-types = { path = "../karstflow-types" }
+karstflow-consensus = { workspace = true }
+karstflow-constants = { workspace = true }
+karstflow-control = { workspace = true }
+karstflow-config = { workspace = true }
+karstflow-mesh = { workspace = true }
+karstflow-net = { workspace = true }
+karstflow-observability = { workspace = true }
+karstflow-plugin = { workspace = true }
+karstflow-stages = { workspace = true }
+karstflow-storage = { workspace = true }
+karstflow-topology = { workspace = true }
+karstflow-types = { workspace = true }

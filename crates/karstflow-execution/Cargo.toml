@@ -7,11 +7,11 @@ authors.workspace = true
 
 [dependencies]
 thiserror.workspace = true
-karstflow-storage = { path = "../karstflow-storage" }
-karstflow-consensus = { path = "../karstflow-consensus" }
-karstflow-sbpf = { path = "../karstflow-sbpf" }
-karstflow-types = { path = "../karstflow-types" }
+karstflow-storage = { workspace = true }
+karstflow-consensus = { workspace = true }
+karstflow-sbpf = { workspace = true }
+karstflow-types = { workspace = true }
 dashmap = "6.1"
 
 [dev-dependencies]
-karstflow-ids = { path = "../karstflow-ids" }
+karstflow-ids = { workspace = true }

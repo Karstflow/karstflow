@@ -6,4 +6,4 @@ license.workspace = true
 authors.workspace = true
 
 [dependencies]
-karstflow-types = { path = "../karstflow-types" }
+karstflow-types = { workspace = true }

@@ -20,7 +20,7 @@ p256 = { workspace = true }
 substrate-bn = { workspace = true }
 
 # Internal
-karstflow-constants = { path = "../karstflow-constants" }
+karstflow-constants = { workspace = true }
 
 # Utilities
 thiserror.workspace = true

@@ -10,17 +10,17 @@ authors.workspace = true
 # Run explicitly: `just integration` or `cargo test -p karstflow-integration-tests -- --ignored`
 
 [dependencies]
-karstflow-consensus = { path = "../karstflow-consensus" }
-karstflow-constants = { path = "../karstflow-constants" }
-karstflow-control = { path = "../karstflow-control" }
-karstflow-config = { path = "../karstflow-config" }
-karstflow-crypto = { path = "../karstflow-crypto" }
-karstflow-execution = { path = "../karstflow-execution" }
-karstflow-runtime = { path = "../karstflow-runtime" }
-karstflow-sbpf = { path = "../karstflow-sbpf" }
-karstflow-stages = { path = "../karstflow-stages" }
-karstflow-storage = { path = "../karstflow-storage" }
-karstflow-types = { path = "../karstflow-types" }
-karstflow-ids = { path = "../karstflow-ids" }
+karstflow-consensus = { workspace = true }
+karstflow-constants = { workspace = true }
+karstflow-control = { workspace = true }
+karstflow-config = { workspace = true }
+karstflow-crypto = { workspace = true }
+karstflow-execution = { workspace = true }
+karstflow-runtime = { workspace = true }
+karstflow-sbpf = { workspace = true }
+karstflow-stages = { workspace = true }
+karstflow-storage = { workspace = true }
+karstflow-types = { workspace = true }
+karstflow-ids = { workspace = true }
 sha2.workspace = true
 curve25519-dalek.workspace = true

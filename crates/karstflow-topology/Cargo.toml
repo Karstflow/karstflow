@@ -9,11 +9,11 @@ authors.workspace = true
 thiserror.workspace = true
 toml.workspace = true
 crossbeam-channel = { workspace = true }
-karstflow-core = { path = "../karstflow-core" }
-karstflow-net = { path = "../karstflow-net" }
-karstflow-runtime = { path = "../karstflow-runtime" }
-karstflow-stages = { path = "../karstflow-stages" }
-karstflow-storage = { path = "../karstflow-storage" }
-karstflow-mesh = { path = "../karstflow-mesh" }
-karstflow-types = { path = "../karstflow-types" }
-karstflow-constants = { path = "../karstflow-constants" }
+karstflow-core = { workspace = true }
+karstflow-net = { workspace = true }
+karstflow-runtime = { workspace = true }
+karstflow-stages = { workspace = true }
+karstflow-storage = { workspace = true }
+karstflow-mesh = { workspace = true }
+karstflow-types = { workspace = true }
+karstflow-constants = { workspace = true }

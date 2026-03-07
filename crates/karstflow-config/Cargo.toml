@@ -11,9 +11,9 @@ toml.workspace = true
 serde.workspace = true
 tracing.workspace = true
 serde_json.workspace = true
-karstflow-constants = { path = "../karstflow-constants" }
-karstflow-core = { path = "../karstflow-core" }
-karstflow-execution = { path = "../karstflow-execution" }
-karstflow-net = { path = "../karstflow-net" }
-karstflow-stages = { path = "../karstflow-stages" }
-karstflow-storage = { path = "../karstflow-storage" }
+karstflow-constants = { workspace = true }
+karstflow-core = { workspace = true }
+karstflow-execution = { workspace = true }
+karstflow-net = { workspace = true }
+karstflow-stages = { workspace = true }
+karstflow-storage = { workspace = true }

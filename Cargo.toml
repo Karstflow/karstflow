@@ -21,6 +21,7 @@ members = [
   "crates/karstflow-net",
   "crates/karstflow-plugin",
   "crates/karstflow-integration-tests",
+  "crates/karstflow-conformance",
 ]
 resolver = "2"
 
@@ -94,9 +95,25 @@ memmap2 = "0.9"
 
 # Internal crates
 libloading = "0.8"
+karstflow-config = { path = "crates/karstflow-config" }
+karstflow-consensus = { path = "crates/karstflow-consensus" }
 karstflow-constants = { path = "crates/karstflow-constants" }
-karstflow-types = { path = "crates/karstflow-types" }
+karstflow-control = { path = "crates/karstflow-control" }
+karstflow-core = { path = "crates/karstflow-core" }
 karstflow-crypto = { path = "crates/karstflow-crypto" }
+karstflow-execution = { path = "crates/karstflow-execution" }
+karstflow-ids = { path = "crates/karstflow-ids" }
+karstflow-mesh = { path = "crates/karstflow-mesh" }
+karstflow-net = { path = "crates/karstflow-net" }
+karstflow-observability = { path = "crates/karstflow-observability" }
+karstflow-plugin = { path = "crates/karstflow-plugin" }
+karstflow-rpc = { path = "crates/karstflow-rpc" }
+karstflow-runtime = { path = "crates/karstflow-runtime" }
+karstflow-sbpf = { path = "crates/karstflow-sbpf" }
+karstflow-stages = { path = "crates/karstflow-stages" }
+karstflow-storage = { path = "crates/karstflow-storage" }
+karstflow-topology = { path = "crates/karstflow-topology" }
+karstflow-types = { path = "crates/karstflow-types" }
 
 [profile.release]
 lto = "thin"
