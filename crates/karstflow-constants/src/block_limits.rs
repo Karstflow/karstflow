@@ -73,6 +73,12 @@ pub const INSTRUCTION_BASE_COST: u64 = 200;
 /// The legacy limit (64) is not used in current protocol versions.
 pub const MAX_TRANSACTION_ACCOUNT_LOCKS: usize = 128;
 
+/// Maximum number of accounts per instruction (SIMD-0406).
+///
+/// When `limit_instruction_accounts` is active, transactions with any
+/// instruction referencing more than 255 accounts are rejected.
+pub const MAX_INSTRUCTION_ACCOUNTS: usize = 255;
+
 /// Maximum data bytes per block (derived from shred limits).
 pub const MAX_DATA_BYTES_PER_BLOCK: u64 = 27_539_200; // ~26.3 MiB
 

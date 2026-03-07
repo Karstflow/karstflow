@@ -281,6 +281,9 @@ pub mod vote_program {
     pub const INSTRUCTION_AUTHORIZE_WITH_SEED: u32 = 14;
     pub const INSTRUCTION_AUTHORIZE_CHECKED_WITH_SEED: u32 = 15;
     pub const INSTRUCTION_INITIALIZE_ACCOUNT_V2: u32 = 16;
+    pub const INSTRUCTION_UPDATE_COMMISSION_COLLECTOR: u32 = 17;
+    pub const INSTRUCTION_UPDATE_COMMISSION_BPS: u32 = 18;
+    pub const INSTRUCTION_DEPOSIT_DELEGATOR_REWARDS: u32 = 19;
 
     // Vote authorize types (discriminants in instruction data)
     pub const VOTE_AUTHORIZE_VOTER: u32 = 0;

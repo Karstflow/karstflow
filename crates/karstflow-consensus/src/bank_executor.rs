@@ -8,7 +8,7 @@ use crate::cost_tracker::TransactionCost;
 use crate::nonce::{derive_durable_nonce, deserialize_nonce_state, serialize_nonce_state};
 use crate::transaction_cache::{extract_nonce_key_index, is_nonce_instruction};
 use crate::{Bank, BankStatus, FeeCalculator};
-use karstflow_constants::block_limits::MAX_TRANSACTION_ACCOUNT_LOCKS;
+use karstflow_constants::block_limits::{MAX_INSTRUCTION_ACCOUNTS, MAX_TRANSACTION_ACCOUNT_LOCKS};
 use karstflow_constants::compute_budget_program::{
     INSTRUCTION_SET_COMPUTE_UNIT_LIMIT, INSTRUCTION_SET_COMPUTE_UNIT_PRICE,
     INSTRUCTION_SET_LOADED_ACCOUNTS_DATA_SIZE_LIMIT,
@@ -350,6 +350,8 @@ pub enum TransactionExecutionError {
     },
     /// Transaction exceeds the static instruction count limit.
     TooManyInstructions { count: usize, limit: usize },
+    /// Transaction failed sanitization (e.g. instruction account count exceeded).
+    SanitizeFailure(String),
 }
 
 impl std::fmt::Display for TransactionExecutionError {
@@ -408,6 +410,7 @@ impl std::fmt::Display for TransactionExecutionError {
             Self::TooManyInstructions { count, limit } => {
                 write!(f, "too many instructions: {count} > {limit}")
             }
+            Self::SanitizeFailure(msg) => write!(f, "sanitize failure: {msg}"),
         }
     }
 }
@@ -1302,6 +1305,44 @@ impl Bank {
                 vote_updates: vec![],
                 return_data: None,
             };
+        }
+
+        // Step 1a3: Enforce per-instruction account count limit (SIMD-0406).
+        //
+        // When `limit_instruction_accounts` is active, reject transactions
+        // where any instruction references more than 255 accounts.
+        {
+            let check_instruction_accounts = self
+                .feature_set()
+                .map(|fs| {
+                    let fs = fs.read().expect("feature_set lock poisoned");
+                    fs.is_active(&crate::features::known_features::limit_instruction_accounts())
+                })
+                .unwrap_or(false);
+
+            if check_instruction_accounts {
+                for (i, ix) in transaction.instructions.iter().enumerate() {
+                    if ix.account_indices.len() > MAX_INSTRUCTION_ACCOUNTS {
+                        return TransactionExecutionResult {
+                            success: false,
+                            compute_units_consumed: 0,
+                            fee: 0,
+                            modified_accounts: HashMap::new(),
+                            logs: vec![],
+                            error: Some(TransactionExecutionError::SanitizeFailure(
+                                format!(
+                                    "instruction {} references {} accounts, limit is {}",
+                                    i,
+                                    ix.account_indices.len(),
+                                    MAX_INSTRUCTION_ACCOUNTS,
+                                ),
+                            )),
+                            vote_updates: vec![],
+                            return_data: None,
+                        };
+                    }
+                }
+            }
         }
 
         // Step 1b: Validate blockhash or detect durable nonce transaction.
