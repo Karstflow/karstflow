@@ -433,7 +433,7 @@ impl VoteState {
         commission: u8,
     ) -> Self {
         Self {
-            node_pubkey: node_pubkey.clone(),
+            node_pubkey,
             authorized_withdrawer,
             commission,
             votes: VecDeque::with_capacity(MAX_LOCKOUT_HISTORY),
@@ -460,7 +460,7 @@ impl VoteState {
         epoch: u64,
     ) -> Self {
         Self {
-            node_pubkey: node_pubkey.clone(),
+            node_pubkey,
             authorized_withdrawer,
             commission,
             votes: VecDeque::with_capacity(MAX_LOCKOUT_HISTORY),
@@ -479,6 +479,7 @@ impl VoteState {
     }
 
     /// Create a V4 vote state with explicit V4 fields.
+    #[allow(clippy::too_many_arguments)]
     pub fn new_v4(
         node_pubkey: Pubkey,
         authorized_voter: Pubkey,
@@ -517,8 +518,8 @@ impl VoteState {
     /// - 10000 bps (100%) → `block_revenue_commission_bps`
     pub fn convert_v3_to_v4(&mut self, vote_account_pubkey: &Pubkey) {
         self.inflation_rewards_commission_bps = (self.commission as u16) * 100;
-        self.inflation_rewards_collector = vote_account_pubkey.clone();
-        self.block_revenue_collector = self.node_pubkey.clone();
+        self.inflation_rewards_collector = *vote_account_pubkey;
+        self.block_revenue_collector = self.node_pubkey;
         self.block_revenue_commission_bps = DEFAULT_BLOCK_REVENUE_COMMISSION_BPS;
         self.pending_delegator_rewards = 0;
         self.bls_pubkey = None;
@@ -1081,7 +1082,7 @@ impl VoteState {
         };
 
         Ok(Self {
-            node_pubkey: node_pubkey.clone(),
+            node_pubkey,
             authorized_withdrawer,
             commission,
             votes,

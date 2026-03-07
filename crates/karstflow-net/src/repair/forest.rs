@@ -599,7 +599,7 @@ impl RepairForest {
     pub fn is_leaf(&self, slot: Slot) -> bool {
         self.children
             .get(&slot)
-            .map_or(true, |children| children.is_empty())
+            .is_none_or(|children| children.is_empty())
     }
 
     // --- Internal methods ---

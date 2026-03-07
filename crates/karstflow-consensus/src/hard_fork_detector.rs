@@ -153,7 +153,7 @@ impl HardForkDetector {
         // Only process newer votes from this voter.
         let history = self
             .voter_history
-            .entry(vote_account.clone())
+            .entry(*vote_account)
             .or_insert_with(|| VecDeque::with_capacity(self.max_votes_per_account));
 
         if let Some(last) = history.back() {

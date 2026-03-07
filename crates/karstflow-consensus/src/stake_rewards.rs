@@ -119,7 +119,7 @@ impl StakeRewards {
         self.forks.insert(
             fork_id,
             ForkRewardInfo {
-                partition_count: partition_count,
+                partition_count,
                 starting_block_height,
                 total_rewards: 0,
                 partition_heads: vec![u32::MAX; pc],
@@ -361,7 +361,7 @@ impl SipHasher13 {
         let mut v3 = self.v3;
 
         // Last block: remaining bytes + length byte.
-        let mut last = ((self.total_len as u64 & 0xff) << 56) as u64;
+        let mut last = (self.total_len as u64 & 0xff) << 56;
         let mut buf = [0u8; 8];
         buf[..self.buf_len].copy_from_slice(&self.buf[..self.buf_len]);
         last |= u64::from_le_bytes(buf) & ((1u64 << (self.buf_len * 8)) - 1);
