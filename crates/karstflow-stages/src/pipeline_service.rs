@@ -59,6 +59,8 @@ pub struct PipelineServiceConfig {
     pub exec: ExecConfig,
     /// Maximum transactions to drain from input per tick.
     pub max_drain_per_tick: usize,
+    /// Hashes per PoH tick. Set to 1 for dev/low-power mode.
+    pub hashes_per_tick: u64,
 }
 
 impl Default for PipelineServiceConfig {
@@ -68,6 +70,17 @@ impl Default for PipelineServiceConfig {
             pack: PackConfig::default(),
             exec: ExecConfig::default(),
             max_drain_per_tick: 256,
+            hashes_per_tick: karstflow_constants::ledger::DEFAULT_HASHES_PER_TICK,
+        }
+    }
+}
+
+impl PipelineServiceConfig {
+    /// Create a dev-mode configuration with low-power PoH (instant ticks).
+    pub fn dev() -> Self {
+        Self {
+            hashes_per_tick: 1,
+            ..Default::default()
         }
     }
 }
@@ -233,6 +246,8 @@ pub struct PipelineService {
     completed_shred_entries: Vec<Vec<PohEntry>>,
     /// Maximum transactions to drain per tick.
     max_drain_per_tick: usize,
+    /// Hashes to advance PoH per service tick when leading.
+    hashes_per_poh_advance: u64,
 }
 
 // ---------------------------------------------------------------------------
@@ -286,7 +301,10 @@ impl PipelineServiceBuilder {
             .engine
             .expect("ExecutionEngine must be provided via with_execution_engine()");
         let exec = ExecStage::with_config(engine, self.config.exec);
-        let poh = PohService::new(karstflow_types::Hash::default());
+        let poh = PohService::with_hashes_per_tick(
+            karstflow_types::Hash::default(),
+            self.config.hashes_per_tick,
+        );
 
         // Capture pack/exec stats before stages are consumed by LeaderPipeline.
         let pack_stats = pack.stats();
@@ -313,6 +331,7 @@ impl PipelineServiceBuilder {
             completed_entries: Vec::new(),
             completed_shred_entries: Vec::new(),
             max_drain_per_tick: self.config.max_drain_per_tick,
+            hashes_per_poh_advance: self.config.hashes_per_tick,
         };
 
         (service, handle)
@@ -408,6 +427,12 @@ impl Service for PipelineService {
             .fetch_add(result.transactions_resolved as u64, Ordering::Relaxed);
         if result.leader_step.is_some() {
             stats.microblocks_executed.fetch_add(1, Ordering::Relaxed);
+        }
+
+        // Advance PoH ticks when leading. This generates tick entries that
+        // fill the slot's PoH chain even when no transactions arrive.
+        if self.handle.is_leading() {
+            self.pipeline.advance_poh(self.hashes_per_poh_advance);
         }
 
         Ok(())

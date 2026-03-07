@@ -539,7 +539,11 @@ fn run_with_node_config(
         ))
     };
     let pipeline_bundle = build_pipeline_service(
-        karstflow_stages::PipelineServiceConfig::default(),
+        if is_dev_mode {
+            karstflow_stages::PipelineServiceConfig::dev()
+        } else {
+            karstflow_stages::PipelineServiceConfig::default()
+        },
         pipeline_inputs,
         Some(leader_exec_engine),
     );
@@ -626,9 +630,10 @@ fn run_with_node_config(
         let identity_pubkey = karstflow_storage::Pubkey::from(*identity.pubkey());
         let bank_forks = consensus.bank_forks.clone();
         let signal_bus = replay_bundle.signal_bus.clone();
+        let dev_handle = pipeline_bundle.handle.clone();
 
         std::thread::Builder::new()
-            .name("dev-genesis-trigger".into())
+            .name("dev-slot-driver".into())
             .spawn(move || {
                 // Small delay to let leader orchestrator subscribe to signal bus.
                 std::thread::sleep(std::time::Duration::from_millis(100));
@@ -659,54 +664,110 @@ fn run_with_node_config(
                 );
                 drop(forks);
 
-                // Step 3: Create child bank for slot 1.
+                // Step 3: Create child bank for slot 1 and start leading.
+                let mut current_slot = genesis_slot + 1;
                 {
                     let mut forks = bank_forks.write().expect("bank_forks lock poisoned");
                     let parent = forks.working_bank();
                     let leader_schedule = parent.leader_schedule();
-                    let child_slot = genesis_slot + 1;
                     let child = karstflow_consensus::Bank::new_from_parent(
                         &parent,
-                        child_slot,
+                        current_slot,
                         leader_schedule.clone(),
                     );
                     if let Err(e) = forks.insert(child) {
-                        warn!(error = ?e, slot = child_slot, "failed to insert child bank");
+                        warn!(error = ?e, slot = current_slot, "failed to insert child bank");
                         return;
                     }
-                    if let Err(e) = forks.set_working_bank(child_slot) {
-                        warn!(error = ?e, slot = child_slot, "failed to set working bank");
+                    if let Err(e) = forks.set_working_bank(current_slot) {
+                        warn!(error = ?e, slot = current_slot, "failed to set working bank");
                         return;
                     }
                     info!(
-                        slot = child_slot,
+                        slot = current_slot,
                         "dev mode: created child bank for first leader slot"
                     );
                 }
 
-                // Step 4: Determine leader range and emit BecameLeader.
-                // In dev mode with single validator, all slots are ours.
-                // Cap the initial leader range to a reasonable size; after
-                // the first slot completes, the replay stage will emit
-                // subsequent BecameLeader signals automatically.
-                let start_slot = genesis_slot + 1;
-                let end_slot = start_slot + 3;
+                // Step 4: Emit initial BecameLeader to bootstrap block production.
+                {
+                    info!(
+                        start_slot = current_slot,
+                        "dev mode: emitting BecameLeader to bootstrap block production",
+                    );
+                    let mut bus = signal_bus.lock().expect("signal_bus lock poisoned");
+                    bus.emit(karstflow_stages::ReplaySignal::BecameLeader(
+                        karstflow_stages::BecameLeaderInfo {
+                            start_slot: current_slot,
+                            end_slot: current_slot + 1,
+                            epoch: 0,
+                            identity_pubkey: *identity_pubkey.as_bytes(),
+                        },
+                    ));
+                }
 
-                info!(
-                    start_slot,
-                    end_slot, "dev mode: emitting BecameLeader to bootstrap block production",
-                );
-                let mut bus = signal_bus.lock().expect("signal_bus lock poisoned");
-                bus.emit(karstflow_stages::ReplaySignal::BecameLeader(
-                    karstflow_stages::BecameLeaderInfo {
-                        start_slot,
-                        end_slot,
-                        epoch: 0,
-                        identity_pubkey: *identity_pubkey.as_bytes(),
-                    },
-                ));
+                // Step 5: Dev slot driver loop — complete slots on a timer.
+                // The pipeline service advances PoH each tick. This thread
+                // periodically completes the slot and starts the next one.
+                let slot_duration = std::time::Duration::from_millis(400);
+                loop {
+                    std::thread::sleep(slot_duration);
+
+                    if !dev_handle.is_leading() {
+                        continue;
+                    }
+
+                    let completed_slot = current_slot;
+
+                    // End the current slot — pipeline service will call
+                    // finish_slot() and collect entries.
+                    dev_handle.end_slot();
+
+                    // Tick + freeze the bank for the completed slot.
+                    {
+                        let forks = bank_forks.read().expect("bank_forks lock poisoned");
+                        let bank = forks.working_bank();
+                        let ticks_needed =
+                            bank.max_tick_height().saturating_sub(bank.tick_height());
+                        for _ in 0..ticks_needed {
+                            let _ = bank.register_tick();
+                        }
+                        let _ = bank.freeze();
+                    }
+
+                    // Create child bank for next slot.
+                    current_slot = completed_slot + 1;
+                    {
+                        let mut forks = bank_forks.write().expect("bank_forks lock poisoned");
+                        let parent = forks.working_bank();
+                        let leader_schedule = parent.leader_schedule();
+                        let child = karstflow_consensus::Bank::new_from_parent(
+                            &parent,
+                            current_slot,
+                            leader_schedule.clone(),
+                        );
+                        if let Err(e) = forks.insert(child) {
+                            warn!(
+                                error = ?e,
+                                slot = current_slot,
+                                "dev slot driver: failed to insert bank"
+                            );
+                            break;
+                        }
+                        let _ = forks.set_working_bank(current_slot);
+                    }
+
+                    info!(
+                        completed = completed_slot,
+                        next = current_slot,
+                        "dev mode: slot completed, starting next"
+                    );
+
+                    // Begin next slot.
+                    dev_handle.begin_slot(current_slot);
+                }
             })
-            .expect("failed to spawn dev genesis trigger thread");
+            .expect("failed to spawn dev slot driver thread");
     }
 
     // Build the turbine retransmit service for shred propagation.
