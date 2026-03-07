@@ -59,6 +59,10 @@ run-genesis path:
 integration:
   cargo test -p karstflow-integration-tests -- --ignored --test-threads=1
 
+# Run conformance tests (excluded from normal `just test`)
+conformance:
+  cargo test -p karstflow-conformance -- --ignored --test-threads=1
+
 # Initialize a local multi-validator cluster (default: 3 nodes, output: cluster-data/)
 cluster-init n="3" dir="cluster-data":
   cargo run -p karstflow-node -- genesis cluster {{n}} --output-dir {{dir}}

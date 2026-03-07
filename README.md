@@ -4,13 +4,13 @@
 
 Karstflow is a ground-up Solana validator built for maximum throughput and minimal latency. It features a custom network stack, pre-allocated data structures, zero-copy I/O patterns, and a modular tile-based architecture designed for predictable performance at scale.
 
-**270K+ lines of Rust | 6,000+ tests | 20 crates**
+**270K+ lines of Rust | 6,100+ tests | 22 crates**
 
 ## Design Principles
 
 - **Performance first**: Pre-allocated pools, batch processing, zero-copy where possible, segment-based compute metering
 - **Native implementation**: No runtime dependency on existing Solana validator codebases
-- **Clean architecture**: 20-crate workspace with strict dependency hierarchy and single-responsibility modules
+- **Clean architecture**: 22-crate workspace with strict dependency hierarchy and single-responsibility modules
 - **Idiomatic Rust**: Leverages Rust's type system, ownership model, traits, and ecosystem for safety and correctness
 - **Tile-based execution**: Pinned-core service model for deterministic scheduling and cache locality
 
@@ -63,6 +63,8 @@ karstflow-types          (core types: Pubkey, Account, Hash, Shred)
 | `karstflow-node` | 1,161 | -- | Validator orchestration and entry point |
 | `karstflow-core` | 770 | 40 | Shared vocabulary types (RuntimeSpec, TopologySpec, ExecutionMode) |
 | `karstflow-ids` | 515 | 4 | Well-known program and sysvar addresses |
+| `karstflow-conformance` | 1,200+ | 35 | Conformance testing: instruction/transaction/block harnesses, state diff engine, fixture system ([README](crates/karstflow-conformance/README.md)) |
+| `karstflow-integration-tests` | 800+ | 15 | Multi-node cluster integration tests: airdrop, transfers, BPF deploy, PDA derivation |
 | `karstflow-observability` | 192 | -- | Metrics HTTP endpoint, tracing initialization |
 
 ## Key Features
@@ -384,7 +386,7 @@ Live mode includes preflight safety checks (identity keypair, entrypoint routabi
 
 ```
 karstflow/
-+-- crates/                        # 20 Rust crates
++-- crates/                        # 22 Rust crates
 |   +-- karstflow-consensus/      # Consensus (Tower BFT, Bank, Economics)
 |   +-- karstflow-crypto/         # Cryptography (Ed25519, FEC, Hashing)
 |   +-- karstflow-sbpf/           # sBPF VM + Builtin programs
@@ -405,6 +407,8 @@ karstflow/
 |   +-- karstflow-topology/       # Service topology
 |   +-- karstflow-runtime/        # Runtime utilities
 |   +-- karstflow-core/           # Core utilities
+|   +-- karstflow-conformance/   # Conformance test harnesses
+|   +-- karstflow-integration-tests/ # Multi-node integration tests
 +-- config/                        # TOML configuration files
 +-- Cargo.toml                     # Workspace definition
 +-- rust-toolchain.toml            # Rust toolchain
@@ -504,7 +508,7 @@ AF_XDP kernel-bypass requires Linux with root or `CAP_NET_RAW`.
 ### Unit Tests
 
 ```bash
-just test              # 6,000+ tests across 20 crates
+just test              # 6,100+ tests across 22 crates
 just ci                # fmt-check + clippy + test
 ```
 
@@ -522,6 +526,14 @@ Tests cover:
 - Multiple sequential transfers with balance accumulation
 - Insufficient funds rejection
 - Airdrop → transfer end-to-end flow
+
+### Conformance Tests
+
+Three-layer execution verification: instruction, transaction, and block. Tests compare execution outcomes against expected post-states and verify bank hash determinism. See [karstflow-conformance README](crates/karstflow-conformance/README.md) for details.
+
+```bash
+just conformance       # run conformance tests (20 ignored tests)
+```
 
 ### Smoke Test
 
