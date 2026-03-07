@@ -7,6 +7,9 @@
 pub const MAX_CPI_DEPTH: usize = 4;
 pub const MAX_CPI_INSTRUCTION_SIZE: usize = 1280;
 pub const MAX_CPI_INSTRUCTION_ACCOUNTS: usize = 255;
+/// Maximum CPI instruction data length (bytes).
+/// Used in BPF input region footprint calculation.
+pub const MAX_CPI_INSTRUCTION_DATA_LEN: usize = 10_240;
 pub const MAX_CPI_ACCOUNT_INFOS: usize = 128;
 pub const MAX_RETURN_DATA_SIZE: usize = 1024;
 pub const MAX_SIGNER_SEEDS: usize = 16;
