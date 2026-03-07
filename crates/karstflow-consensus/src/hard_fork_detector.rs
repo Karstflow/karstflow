@@ -247,7 +247,7 @@ impl HardForkDetector {
         &mut self,
         block_id: &[u8; 32],
         bank_hash: Option<&[u8; 32]>,
-        total_stake: u64,
+        _total_stake: u64,
     ) -> Vec<HardForkEvent> {
         let block = self.our_blocks.entry(*block_id).or_insert(OurBlock {
             dead: false,
@@ -355,11 +355,7 @@ impl HardForkDetector {
     /// Mark a block as fully replayed, enabling divergence checks.
     ///
     /// Returns any hard fork events detected against already-counted votes.
-    pub fn mark_replayed(
-        &mut self,
-        block_id: &[u8; 32],
-        total_stake: u64,
-    ) -> Vec<HardForkEvent> {
+    pub fn mark_replayed(&mut self, block_id: &[u8; 32], total_stake: u64) -> Vec<HardForkEvent> {
         if let Some(block) = self.our_blocks.get_mut(block_id) {
             block.replayed = true;
         }
