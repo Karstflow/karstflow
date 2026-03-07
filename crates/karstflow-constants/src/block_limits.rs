@@ -147,6 +147,12 @@ pub const DEFAULT_MICROBLOCK_PACE_NS: u64 = 50_000;
 // Runtime bounds
 // ---------------------------------------------------------------------------
 
+/// Maximum number of live bank forks.
+///
+/// Bounds the fork tree depth to prevent unbounded memory growth
+/// from sustained equivocation or deep fork chains.
+pub const MAX_BANK_FORKS: usize = 4_096;
+
 /// Maximum number of vote accounts in the system.
 pub const MAX_VOTE_ACCOUNTS: usize = 40_200;
 

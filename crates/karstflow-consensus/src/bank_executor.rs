@@ -515,7 +515,9 @@ fn reclaim_zero_lamport_accounts(modified: &mut HashMap<Pubkey, Account>) {
     for account in modified.values_mut() {
         if account.meta.lamports == 0 {
             account.data = AccountData::empty();
-            account.meta.owner = Pubkey::default();
+            // Zero all metadata fields (not just owner) to prevent
+            // stale executable/rent_epoch data from leaking.
+            account.meta = karstflow_types::AccountMeta::zeroed();
         }
     }
 }
@@ -5019,9 +5021,11 @@ mod tests {
     // ── account reclamation tests ─────────────────────────────────────
 
     #[test]
-    fn reclaim_clears_data_and_owner_on_zero_lamport_account() {
+    fn reclaim_clears_data_and_all_meta_on_zero_lamport_account() {
         let pubkey = Pubkey::new_unique();
-        let account = Account::new(0, vec![1, 2, 3], Pubkey::new_unique());
+        let mut account = Account::new(0, vec![1, 2, 3], Pubkey::new_unique());
+        account.meta.executable = true;
+        account.meta.rent_epoch = 42;
         assert!(!account.data.is_empty());
         assert_ne!(account.meta.owner, Pubkey::default());
 
@@ -5034,6 +5038,8 @@ mod tests {
         assert!(reclaimed.data.is_empty());
         assert_eq!(reclaimed.meta.owner, Pubkey::default());
         assert_eq!(reclaimed.meta.lamports, 0);
+        assert!(!reclaimed.meta.executable);
+        assert_eq!(reclaimed.meta.rent_epoch, 0);
     }
 
     #[test]

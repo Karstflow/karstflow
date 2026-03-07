@@ -102,6 +102,19 @@ impl CacheShard {
         self.entry_count = self.entry_count.saturating_sub(removed);
     }
 
+    /// Remove all references to a cancelled fork. Entries that were
+    /// only seen on this fork are evicted entirely.
+    pub fn cancel_fork(&mut self, fork: u64) {
+        let mut removed = 0usize;
+        self.entries.retain(|_blockhash, message_map| {
+            let before = message_map.len();
+            message_map.retain(|_msg_hash, entry| !entry.remove_fork(fork));
+            removed += before - message_map.len();
+            !message_map.is_empty()
+        });
+        self.entry_count = self.entry_count.saturating_sub(removed);
+    }
+
     /// Total number of unique transaction entries in this shard.
     pub fn entry_count(&self) -> usize {
         self.entry_count
