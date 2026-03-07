@@ -1842,8 +1842,8 @@ mod tests {
             voter,
             withdrawer,
             500, // 5% in bps
-            infl_collector.clone(),
-            block_collector.clone(),
+            infl_collector,
+            block_collector,
             8000,
             10,
         );
@@ -1864,7 +1864,7 @@ mod tests {
         let withdrawer = Pubkey::new_unique();
         let vote_account_pk = Pubkey::new_unique();
 
-        let mut state = VoteState::new(node.clone(), voter, withdrawer, 7);
+        let mut state = VoteState::new(node, voter, withdrawer, 7);
         state.convert_v3_to_v4(&vote_account_pk);
 
         assert_eq!(state.inflation_rewards_commission_bps, 700); // 7 * 100
@@ -1885,7 +1885,7 @@ mod tests {
         let withdrawer = Pubkey::new_unique();
 
         // Without BLS key
-        let state = VoteState::new(node.clone(), voter.clone(), withdrawer.clone(), 5);
+        let state = VoteState::new(node, voter, withdrawer, 5);
         let serialized = bincode::serialize(&state).unwrap();
         let deserialized: VoteState = bincode::deserialize(&serialized).unwrap();
         assert_eq!(state, deserialized);
