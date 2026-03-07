@@ -101,7 +101,8 @@ pub use vote_processor::{
 };
 pub use vote_state::{
     AuthorizedVoters, BlockTimestamp, EpochCredits, LandedVote, PriorVoters, VoteError,
-    VoteLockout, VoteState, MAX_EPOCH_CREDITS,
+    VoteLockout, VoteState, DEFAULT_BLOCK_REVENUE_COMMISSION_BPS, MAX_EPOCH_CREDITS,
+    VOTE_STATE_V3_SIZE, VOTE_STATE_V4_SIZE,
 };
 
 pub use sysvars::SysvarCache;
