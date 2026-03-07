@@ -1,0 +1,12 @@
+target/
+.git/
+.github/
+.vscode/
+.cargo/
+docs/
+assets/
+*.md
+!README.md
+.DS_Store
+.editorconfig
+.githooks/
