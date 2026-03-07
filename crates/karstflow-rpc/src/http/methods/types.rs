@@ -34,10 +34,10 @@ impl<T: Serialize> RpcResponse<T> {
 
 #[derive(Serialize, Debug, Clone)]
 pub struct GetVersionResponse {
-    #[serde(rename = "karstflow-core")]
-    pub karstflow_core: String,
+    #[serde(rename = "solana-core")]
+    pub solana_core: String,
     #[serde(rename = "feature-set")]
-    pub feature_set: String,
+    pub feature_set: u32,
 }
 
 #[derive(Serialize, Debug, Clone)]
@@ -433,12 +433,12 @@ mod tests {
     #[test]
     fn to_value_serializes_struct() {
         let resp = GetVersionResponse {
-            karstflow_core: "0.1.0".into(),
-            feature_set: "12345".into(),
+            solana_core: "2.2.0".into(),
+            feature_set: 4_215_500_110,
         };
         let val = to_value(&resp);
-        assert_eq!(val["karstflow-core"], "0.1.0");
-        assert_eq!(val["feature-set"], "12345");
+        assert_eq!(val["solana-core"], "2.2.0");
+        assert_eq!(val["feature-set"], 4_215_500_110_u64);
     }
 
     #[test]

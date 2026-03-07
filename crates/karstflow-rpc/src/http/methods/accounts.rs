@@ -750,13 +750,15 @@ fn parse_program_accounts_request(
 
     let with_context = config_object
         .and_then(|cfg| cfg.get("withContext"))
-        .map(|value| value.as_bool().ok_or(RpcMethodError::InvalidParams))
+        .map(params::optional_bool)
         .transpose()?
+        .flatten()
         .unwrap_or(false);
     let min_context_slot = config_object
         .and_then(|cfg| cfg.get("minContextSlot"))
-        .map(|value| value.as_u64().ok_or(RpcMethodError::InvalidParams))
-        .transpose()?;
+        .map(params::optional_u64)
+        .transpose()?
+        .flatten();
     Ok((program_id, with_context, min_context_slot))
 }
 
@@ -791,8 +793,9 @@ fn parse_token_accounts_query(
     let config_object = params.get(2).and_then(serde_json::Value::as_object);
     let min_context_slot = config_object
         .and_then(|cfg| cfg.get("minContextSlot"))
-        .map(|value| value.as_u64().ok_or(RpcMethodError::InvalidParams))
-        .transpose()?;
+        .map(params::optional_u64)
+        .transpose()?
+        .flatten();
     Ok((account_key, selector, min_context_slot))
 }
 
@@ -857,8 +860,9 @@ fn parse_supply_exclude_non_circulating_flag(
     let config_object = params::first_config_object(params);
     let exclude_non_circulating_accounts = config_object
         .and_then(|cfg| cfg.get("excludeNonCirculatingAccountsList"))
-        .map(|value| value.as_bool().ok_or(RpcMethodError::InvalidParams))
+        .map(params::optional_bool)
         .transpose()?
+        .flatten()
         .unwrap_or(false);
     Ok(exclude_non_circulating_accounts)
 }
@@ -926,13 +930,15 @@ fn parse_signature_statuses_config(
 
     let search_transaction_history = config_object
         .and_then(|cfg| cfg.get("searchTransactionHistory"))
-        .map(|value| value.as_bool().ok_or(RpcMethodError::InvalidParams))
+        .map(params::optional_bool)
         .transpose()?
+        .flatten()
         .unwrap_or(false);
     let min_context_slot = config_object
         .and_then(|cfg| cfg.get("minContextSlot"))
-        .map(|value| value.as_u64().ok_or(RpcMethodError::InvalidParams))
-        .transpose()?;
+        .map(params::optional_u64)
+        .transpose()?
+        .flatten();
 
     Ok(SignatureStatusesConfig {
         search_transaction_history,

@@ -641,6 +641,7 @@ fn parse_bool_value(
     default: bool,
 ) -> Result<bool, RpcMethodError> {
     match value {
+        Some(value) if value.is_null() => Ok(default),
         Some(value) => value.as_bool().ok_or(RpcMethodError::InvalidParams),
         None => Ok(default),
     }
@@ -680,18 +681,15 @@ fn min_context_slot_from_config(
     let config = raw_config
         .as_object()
         .ok_or(RpcMethodError::InvalidParams)?;
-    config
-        .get("minContextSlot")
-        .map(|value| value.as_u64().ok_or(RpcMethodError::InvalidParams))
-        .transpose()
+    match config.get("minContextSlot") {
+        Some(value) => params::optional_u64(value),
+        None => Ok(None),
+    }
 }
 
 fn parse_u64_value(value: Option<&serde_json::Value>) -> Result<Option<u64>, RpcMethodError> {
     match value {
-        Some(value) => value
-            .as_u64()
-            .map(Some)
-            .ok_or(RpcMethodError::InvalidParams),
+        Some(value) => params::optional_u64(value),
         None => Ok(None),
     }
 }

@@ -1,4 +1,4 @@
-FROM rust:1.77-slim AS builder
+FROM rust:1.84-slim AS builder
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     pkg-config libssl-dev build-essential cmake clang \

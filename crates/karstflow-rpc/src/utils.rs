@@ -181,9 +181,8 @@ pub fn get_inflation_governor() -> Value {
 /// Generate version info
 pub fn get_version_info() -> Value {
     serde_json::json!({
-        "karstflow-core": "0.1.0",
-        "protocol-version": "solana-2.1-compatible",
-        "feature-set": 3580551974u32
+        "solana-core": "2.2.0",
+        "feature-set": 4215500110u32
     })
 }
 

@@ -406,20 +406,23 @@ fn parse_vote_accounts_config(
 
     let keep_unstaked_delinquents = config_object
         .and_then(|cfg| cfg.get("keepUnstakedDelinquents"))
-        .map(|value| value.as_bool().ok_or(RpcMethodError::InvalidParams))
+        .map(params::optional_bool)
         .transpose()?
+        .flatten()
         .unwrap_or(false);
 
     let delinquent_slot_distance = config_object
         .and_then(|cfg| cfg.get("delinquentSlotDistance"))
-        .map(|value| value.as_u64().ok_or(RpcMethodError::InvalidParams))
+        .map(params::optional_u64)
         .transpose()?
+        .flatten()
         .unwrap_or(128);
 
     let min_context_slot = config_object
         .and_then(|cfg| cfg.get("minContextSlot"))
-        .map(|value| value.as_u64().ok_or(RpcMethodError::InvalidParams))
-        .transpose()?;
+        .map(params::optional_u64)
+        .transpose()?
+        .flatten();
 
     Ok(VoteAccountsConfig {
         vote_pubkey,
@@ -643,14 +646,16 @@ fn parse_signatures_for_address_params(
         .transpose()?;
     let limit = config_object
         .and_then(|cfg| cfg.get("limit"))
-        .map(|value| value.as_u64().ok_or(RpcMethodError::InvalidParams))
+        .map(params::optional_u64)
         .transpose()?
+        .flatten()
         .unwrap_or(SIGNATURES_FOR_ADDRESS_DEFAULT_LIMIT)
         .clamp(1, SIGNATURES_FOR_ADDRESS_MAX_LIMIT);
     let min_context_slot = config_object
         .and_then(|cfg| cfg.get("minContextSlot"))
-        .map(|value| value.as_u64().ok_or(RpcMethodError::InvalidParams))
-        .transpose()?;
+        .map(params::optional_u64)
+        .transpose()?
+        .flatten();
     Ok((address, before, until, limit, min_context_slot))
 }
 
@@ -684,12 +689,14 @@ fn parse_slot_range_from_params(
 
     let first_slot = range
         .and_then(|range| range.get("firstSlot"))
-        .map(|value| value.as_u64().ok_or(RpcMethodError::InvalidParams))
-        .transpose()?;
+        .map(params::optional_u64)
+        .transpose()?
+        .flatten();
     let last_slot = range
         .and_then(|range| range.get("lastSlot"))
-        .map(|value| value.as_u64().ok_or(RpcMethodError::InvalidParams))
-        .transpose()?;
+        .map(params::optional_u64)
+        .transpose()?
+        .flatten();
     Ok((first_slot, last_slot))
 }
 

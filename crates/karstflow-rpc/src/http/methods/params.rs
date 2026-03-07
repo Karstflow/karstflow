@@ -68,9 +68,39 @@ pub(super) fn min_context_slot_from_params(request: &Value) -> Result<Option<u64
     let config_object = first_config_object(params);
     let min_context_slot = config_object
         .and_then(|cfg| cfg.get("minContextSlot"))
-        .map(|value| value.as_u64().ok_or(RpcMethodError::InvalidParams))
+        .and_then(|value| {
+            if value.is_null() {
+                None
+            } else {
+                Some(value.as_u64().ok_or(RpcMethodError::InvalidParams))
+            }
+        })
         .transpose()?;
     Ok(min_context_slot)
+}
+
+/// Parse an optional u64 from a JSON value, treating null as None.
+pub(super) fn optional_u64(value: &Value) -> Result<Option<u64>, RpcMethodError> {
+    if value.is_null() {
+        Ok(None)
+    } else {
+        value
+            .as_u64()
+            .map(Some)
+            .ok_or(RpcMethodError::InvalidParams)
+    }
+}
+
+/// Parse an optional bool from a JSON value, treating null as None.
+pub(super) fn optional_bool(value: &Value) -> Result<Option<bool>, RpcMethodError> {
+    if value.is_null() {
+        Ok(None)
+    } else {
+        value
+            .as_bool()
+            .map(Some)
+            .ok_or(RpcMethodError::InvalidParams)
+    }
 }
 
 #[cfg(test)]
@@ -206,5 +236,41 @@ mod tests {
     fn min_context_slot_invalid_type() {
         let req = json!({"params": [{"minContextSlot": "not_a_number"}]});
         assert!(min_context_slot_from_params(&req).is_err());
+    }
+
+    #[test]
+    fn min_context_slot_null_treated_as_none() {
+        let req = json!({"params": ["addr", {"minContextSlot": null}]});
+        assert_eq!(min_context_slot_from_params(&req).unwrap(), None);
+    }
+
+    #[test]
+    fn optional_u64_null() {
+        assert_eq!(optional_u64(&json!(null)).unwrap(), None);
+    }
+
+    #[test]
+    fn optional_u64_value() {
+        assert_eq!(optional_u64(&json!(42)).unwrap(), Some(42));
+    }
+
+    #[test]
+    fn optional_u64_invalid() {
+        assert!(optional_u64(&json!("not_a_number")).is_err());
+    }
+
+    #[test]
+    fn optional_bool_null() {
+        assert_eq!(optional_bool(&json!(null)).unwrap(), None);
+    }
+
+    #[test]
+    fn optional_bool_value() {
+        assert_eq!(optional_bool(&json!(true)).unwrap(), Some(true));
+    }
+
+    #[test]
+    fn optional_bool_invalid() {
+        assert!(optional_bool(&json!(42)).is_err());
     }
 }

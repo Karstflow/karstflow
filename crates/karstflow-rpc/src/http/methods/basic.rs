@@ -20,7 +20,7 @@ pub(super) fn handle(
     request: &serde_json::Value,
     snapshot: RpcRuntimeSnapshot,
     commitment: RpcCommitment,
-    full_api: bool,
+    _full_api: bool,
     bank_access: Option<&Arc<dyn BankAccessProvider>>,
 ) -> Result<serde_json::Value, RpcMethodError> {
     match method {
@@ -34,8 +34,8 @@ pub(super) fn handle(
         }
         RpcMethod::GetVersion => {
             let response = GetVersionResponse {
-                karstflow_core: env!("CARGO_PKG_VERSION").to_string(),
-                feature_set: if full_api { "full_api" } else { "subset_api" }.to_string(),
+                solana_core: "2.2.0".to_string(),
+                feature_set: 4_215_500_110,
             };
             Ok(types::to_value(&response))
         }

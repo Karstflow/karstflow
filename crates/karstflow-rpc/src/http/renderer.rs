@@ -277,8 +277,8 @@ mod tests {
             None,
             None,
         );
-        assert!(payload.contains(r#""karstflow-core":"0.1.0""#));
-        assert!(payload.contains(r#""feature-set":"full_api""#));
+        assert!(payload.contains(r#""solana-core":"2.2.0""#));
+        assert!(payload.contains(r#""feature-set":4215500110"#));
     }
 
     #[test]

@@ -375,19 +375,22 @@ fn parse_send_transaction_config(
 
     let skip_preflight = config
         .and_then(|config| config.get("skipPreflight"))
-        .map(|value| value.as_bool().ok_or(RpcMethodError::InvalidParams))
+        .map(params::optional_bool)
         .transpose()?
+        .flatten()
         .unwrap_or(false);
 
     let max_retries = config
         .and_then(|config| config.get("maxRetries"))
-        .map(|value| value.as_u64().ok_or(RpcMethodError::InvalidParams))
-        .transpose()?;
+        .map(params::optional_u64)
+        .transpose()?
+        .flatten();
 
     let min_context_slot = config
         .and_then(|config| config.get("minContextSlot"))
-        .map(|value| value.as_u64().ok_or(RpcMethodError::InvalidParams))
-        .transpose()?;
+        .map(params::optional_u64)
+        .transpose()?
+        .flatten();
 
     let encoding = parse_transaction_encoding(
         config.and_then(|config| config.get("encoding")),
@@ -416,18 +419,21 @@ fn parse_simulate_transaction_config(
 
     let sig_verify = config
         .and_then(|config| config.get("sigVerify"))
-        .map(|value| value.as_bool().ok_or(RpcMethodError::InvalidParams))
+        .map(params::optional_bool)
         .transpose()?
+        .flatten()
         .unwrap_or(false);
     let replace_recent_blockhash = config
         .and_then(|config| config.get("replaceRecentBlockhash"))
-        .map(|value| value.as_bool().ok_or(RpcMethodError::InvalidParams))
+        .map(params::optional_bool)
         .transpose()?
+        .flatten()
         .unwrap_or(false);
     let min_context_slot = config
         .and_then(|config| config.get("minContextSlot"))
-        .map(|value| value.as_u64().ok_or(RpcMethodError::InvalidParams))
-        .transpose()?;
+        .map(params::optional_u64)
+        .transpose()?
+        .flatten();
     let encoding = parse_transaction_encoding(
         config.and_then(|config| config.get("encoding")),
         TransactionEncoding::Base64,
