@@ -235,9 +235,13 @@ impl HardForkDetector {
         }
     }
 
-    /// Record our own bank hash for a block after replay.
+    /// Record our own bank hash for a block.
     ///
     /// If `bank_hash` is `None`, the block was marked dead.
+    /// Note: this does NOT mark the block as fully replayed. Call
+    /// `mark_replayed` separately once the entire block has been
+    /// successfully replayed.
+    ///
     /// Returns any hard fork events detected against already-counted votes.
     pub fn record_our_bank_hash(
         &mut self,
@@ -256,24 +260,14 @@ impl HardForkDetector {
         match bank_hash {
             Some(hash) => {
                 block.dead = false;
-                block.replayed = true;
                 block.our_bank_hash = *hash;
             }
             None => {
                 block.dead = true;
-                block.replayed = true;
             }
         }
 
-        // Check all existing candidates for this block_id.
-        let mut events = Vec::new();
-        let observed: Vec<[u8; 32]> = block.observed_bank_hashes.clone();
-        for bh in &observed {
-            if let Some(event) = self.check_divergence(block_id, bh, total_stake) {
-                events.push(event);
-            }
-        }
-        events
+        Vec::new()
     }
 
     /// Advance the root slot, pruning old tracking data.
@@ -358,6 +352,33 @@ impl HardForkDetector {
         }
     }
 
+    /// Mark a block as fully replayed, enabling divergence checks.
+    ///
+    /// Returns any hard fork events detected against already-counted votes.
+    pub fn mark_replayed(
+        &mut self,
+        block_id: &[u8; 32],
+        total_stake: u64,
+    ) -> Vec<HardForkEvent> {
+        if let Some(block) = self.our_blocks.get_mut(block_id) {
+            block.replayed = true;
+        }
+
+        // Check all existing candidates for this block_id.
+        let observed: Vec<[u8; 32]> = self
+            .our_blocks
+            .get(block_id)
+            .map(|b| b.observed_bank_hashes.clone())
+            .unwrap_or_default();
+        let mut events = Vec::new();
+        for bh in &observed {
+            if let Some(event) = self.check_divergence(block_id, bh, total_stake) {
+                events.push(event);
+            }
+        }
+        events
+    }
+
     /// Mark a candidate as checked so it doesn't re-fire.
     pub fn mark_checked(&mut self, block_id: &[u8; 32], bank_hash: &[u8; 32]) {
         let key = (*block_id, *bank_hash);
@@ -385,8 +406,9 @@ mod tests {
         let block_id = hash(1);
         let bank_hash = hash(2);
 
-        // Record our bank hash first.
+        // Record our bank hash and mark replayed.
         det.record_our_bank_hash(&block_id, Some(&bank_hash), 100);
+        det.mark_replayed(&block_id, 100);
 
         // Votes with same bank hash should not trigger.
         let result = det.count_vote(&pk(1), &block_id, &bank_hash, 10, 60, 100);
@@ -401,6 +423,7 @@ mod tests {
         let their_hash = hash(3);
 
         det.record_our_bank_hash(&block_id, Some(&our_hash), 100);
+        det.mark_replayed(&block_id, 100);
 
         // Below threshold: no detection.
         let result = det.count_vote(&pk(1), &block_id, &their_hash, 10, 51, 100);
@@ -423,8 +446,9 @@ mod tests {
         let block_id = hash(1);
         let their_hash = hash(3);
 
-        // We marked the block dead.
+        // We marked the block dead then replayed.
         det.record_our_bank_hash(&block_id, None, 100);
+        det.mark_replayed(&block_id, 100);
 
         // Network voted on it with enough stake.
         let result = det.count_vote(&pk(1), &block_id, &their_hash, 10, 53, 100);
@@ -445,10 +469,32 @@ mod tests {
         det.count_vote(&pk(1), &block_id, &their_hash, 10, 30, 100);
         det.count_vote(&pk(2), &block_id, &their_hash, 11, 25, 100);
 
-        // Now we replay and discover divergence.
+        // Record bank hash (no divergence yet — not replayed).
         let events = det.record_our_bank_hash(&block_id, Some(&our_hash), 100);
+        assert!(events.is_empty());
+
+        // Mark replayed — now divergence is detected retroactively.
+        let events = det.mark_replayed(&block_id, 100);
         assert_eq!(events.len(), 1);
         assert!(events[0].stake_pct >= 52.0);
+    }
+
+    #[test]
+    fn record_our_bank_hash_does_not_trigger_without_replay() {
+        let mut det = HardForkDetector::new(false);
+        let block_id = hash(1);
+        let our_hash = hash(2);
+        let their_hash = hash(3);
+
+        det.count_vote(&pk(1), &block_id, &their_hash, 10, 60, 100);
+
+        // Record bank hash but don't mark replayed.
+        let events = det.record_our_bank_hash(&block_id, Some(&our_hash), 100);
+        assert!(events.is_empty());
+
+        // Count more votes — still no trigger because not replayed.
+        let result = det.count_vote(&pk(2), &block_id, &their_hash, 11, 10, 100);
+        assert!(result.is_none());
     }
 
     #[test]
@@ -471,6 +517,7 @@ mod tests {
         let their_hash = hash(3);
 
         det.record_our_bank_hash(&block_id, Some(&our_hash), 100);
+        det.mark_replayed(&block_id, 100);
         let result = det.count_vote(&pk(1), &block_id, &their_hash, 10, 53, 100);
         assert!(result.is_some());
 
