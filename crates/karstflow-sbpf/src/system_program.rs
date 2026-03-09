@@ -429,6 +429,12 @@ impl SystemProgramExecutor {
             return Err(SystemProgramError::ResultWithNegativeLamports.to_string());
         }
 
+        // Self-transfer is a validated no-op (matches Solana behavior).
+        if from_pubkey == to_pubkey {
+            modified_accounts.insert(from_pubkey, from_account);
+            return Ok(());
+        }
+
         // Perform transfer
         from_account.meta.lamports = from_account.meta.lamports.saturating_sub(lamports);
         to_account.meta.lamports = to_account.meta.lamports.saturating_add(lamports);
@@ -1173,14 +1179,18 @@ impl SystemProgramExecutor {
             return Err(SystemProgramError::ResultWithNegativeLamports.to_string());
         }
 
-        let mut new_from = from_account.clone();
-        new_from.meta.lamports -= lamports;
+        if from_pubkey == to_pubkey {
+            modified_accounts.insert(*from_pubkey, from_account.clone());
+        } else {
+            let mut new_from = from_account.clone();
+            new_from.meta.lamports -= lamports;
 
-        let mut new_to = to_account.clone();
-        new_to.meta.lamports += lamports;
+            let mut new_to = to_account.clone();
+            new_to.meta.lamports += lamports;
 
-        modified_accounts.insert(*from_pubkey, new_from);
-        modified_accounts.insert(*to_pubkey, new_to);
+            modified_accounts.insert(*from_pubkey, new_from);
+            modified_accounts.insert(*to_pubkey, new_to);
+        }
 
         logs.push(format!(
             "Transferred {} lamports from {} to {}",

@@ -624,6 +624,7 @@ fn parse_signatures_for_address_params(
     let config_object = params::first_config_object(params);
     let before = config_object
         .and_then(|cfg| cfg.get("before"))
+        .filter(|v| !v.is_null())
         .map(|value| {
             value
                 .as_str()
@@ -635,6 +636,7 @@ fn parse_signatures_for_address_params(
         .transpose()?;
     let until = config_object
         .and_then(|cfg| cfg.get("until"))
+        .filter(|v| !v.is_null())
         .map(|value| {
             value
                 .as_str()

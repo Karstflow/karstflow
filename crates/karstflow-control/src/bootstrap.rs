@@ -557,7 +557,9 @@ pub fn development_faucet_pubkey() -> Pubkey {
 /// Append native program, SPL program, precompile, and sysvar accounts
 /// to the genesis account list so that `getAccountInfo` returns valid
 /// entries for all builtin addresses.
-fn append_builtin_genesis_accounts(accounts: &mut Vec<(Pubkey, karstflow_storage::GenesisAccount)>) {
+fn append_builtin_genesis_accounts(
+    accounts: &mut Vec<(Pubkey, karstflow_storage::GenesisAccount)>,
+) {
     use karstflow_ids::*;
 
     // Helper: executable program account owned by NativeLoader.
@@ -626,16 +628,16 @@ fn append_builtin_genesis_accounts(accounts: &mut Vec<(Pubkey, karstflow_storage
 
     // ── Sysvars ─────────────────────────────────────────────────────
     // Data sizes match Solana mainnet account sizes.
-    accounts.push(sysvar(CLOCK_SYSVAR_ID, 40));          // Clock: 40 bytes
-    accounts.push(sysvar(RENT_SYSVAR_ID, 17));           // Rent: 17 bytes
+    accounts.push(sysvar(CLOCK_SYSVAR_ID, 40)); // Clock: 40 bytes
+    accounts.push(sysvar(RENT_SYSVAR_ID, 17)); // Rent: 17 bytes
     accounts.push(sysvar(EPOCH_SCHEDULE_SYSVAR_ID, 33)); // EpochSchedule: 33 bytes
     accounts.push(sysvar(SLOT_HASHES_SYSVAR_ID, 20_488)); // SlotHashes: 512 entries × 40 + 8
     accounts.push(sysvar(SLOT_HISTORY_SYSVAR_ID, 131_097)); // SlotHistory: bitvec
     accounts.push(sysvar(STAKE_HISTORY_SYSVAR_ID, 16_392)); // StakeHistory
-    accounts.push(sysvar(INSTRUCTIONS_SYSVAR_ID, 8));    // Instructions: virtual, stub data
+    accounts.push(sysvar(INSTRUCTIONS_SYSVAR_ID, 8)); // Instructions: virtual, stub data
     accounts.push(sysvar(RECENT_BLOCKHASHES_SYSVAR_ID, 6_008)); // RecentBlockhashes (deprecated)
-    accounts.push(sysvar(FEES_SYSVAR_ID, 8));            // Fees (deprecated)
-    accounts.push(sysvar(EPOCH_REWARDS_SYSVAR_ID, 0));   // EpochRewards
+    accounts.push(sysvar(FEES_SYSVAR_ID, 8)); // Fees (deprecated)
+    accounts.push(sysvar(EPOCH_REWARDS_SYSVAR_ID, 0)); // EpochRewards
     accounts.push(sysvar(LAST_RESTART_SLOT_SYSVAR_ID, 8)); // LastRestartSlot
 }
 
@@ -3716,7 +3718,12 @@ impl TransactionSubmitter for DevTransactionSubmitter {
     fn submit_transaction(&self, tx_bytes: &[u8]) -> std::result::Result<[u8; 64], String> {
         // Deserialize the wire-format transaction.
         let deserialized = karstflow_consensus::deserialize_transaction(tx_bytes)?;
-        let sig = deserialized.tx.signatures.first().copied().unwrap_or([0u8; 64]);
+        let sig = deserialized
+            .tx
+            .signatures
+            .first()
+            .copied()
+            .unwrap_or([0u8; 64]);
 
         // Execute directly on the working bank.
         let forks = self

@@ -596,9 +596,19 @@ fn build_signature_statuses_response(
                                     .map(|e| json!({"InstructionError": e}))
                                     .unwrap_or(serde_json::Value::Null)
                             };
+                            let status_value = if status.succeeded {
+                                serde_json::json!({"Ok": null})
+                            } else {
+                                serde_json::json!({"Err": err.clone()})
+                            };
                             SignatureStatus {
                                 slot: status.slot,
-                                confirmations,
+                                confirmations: if confirmation_status == "finalized" {
+                                    None
+                                } else {
+                                    Some(confirmations)
+                                },
+                                status: status_value,
                                 err,
                                 confirmation_status: confirmation_status.to_string(),
                             }
@@ -609,10 +619,16 @@ fn build_signature_statuses_response(
                 let response = RpcResponse::new(slot, statuses);
                 return Ok(types::to_value(&response));
             }
+
+            // Bank is available but none of the signatures were found in the
+            // real transaction cache. Return null for each — this is the
+            // Solana-standard behavior for unknown/not-yet-confirmed signatures.
+            // Note: airdrop signatures are synthetic and never in the tx cache,
+            // so they fall through to the synthetic fallback below.
         }
     }
 
-    // Synthetic fallback.
+    // Synthetic fallback (no bank access).
     let statuses: Vec<Option<SignatureStatus>> = signatures
         .iter()
         .map(|signature| {
@@ -625,13 +641,19 @@ fn build_signature_statuses_response(
             }
 
             let confirmations = checksum % MAX_SIGNATURE_CONFIRMATIONS;
+            let status_label = confirmation_status_label(commitment);
             Some(SignatureStatus {
                 slot: snapshot
                     .slot_for_commitment(commitment)
                     .saturating_sub(confirmations),
-                confirmations,
+                confirmations: if status_label == "finalized" {
+                    None
+                } else {
+                    Some(confirmations)
+                },
+                status: serde_json::json!({"Ok": null}),
                 err: serde_json::Value::Null,
-                confirmation_status: confirmation_status_label(commitment).to_string(),
+                confirmation_status: status_label.to_string(),
             })
         })
         .collect();

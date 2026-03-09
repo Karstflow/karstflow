@@ -181,7 +181,8 @@ pub struct ProgramAccount {
 #[serde(rename_all = "camelCase")]
 pub struct SignatureStatus {
     pub slot: u64,
-    pub confirmations: u64,
+    pub confirmations: Option<u64>,
+    pub status: serde_json::Value,
     pub err: serde_json::Value,
     pub confirmation_status: String,
 }

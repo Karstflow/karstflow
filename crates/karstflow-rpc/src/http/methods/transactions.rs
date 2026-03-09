@@ -69,6 +69,7 @@ const SIMULATE_TRANSACTION_CONFIG_ALLOWED_KEYS: &[&str] = &[
     "encoding",
     "accounts",
     "commitment",
+    "innerInstructions",
 ];
 const SIMULATE_ACCOUNTS_CONFIG_ALLOWED_KEYS: &[&str] = &["encoding", "addresses"];
 
@@ -214,7 +215,7 @@ fn build_real_simulation_response(
     let err_value = sim_result
         .error
         .as_ref()
-        .map(|e| serde_json::to_value(e).unwrap_or(serde_json::Value::Null))
+        .map(|e| format_transaction_error(e, &sim_result.logs))
         .unwrap_or(serde_json::Value::Null);
 
     // Format accounts if requested
@@ -459,6 +460,7 @@ fn parse_simulate_accounts_config(
     config: Option<&serde_json::Map<String, serde_json::Value>>,
 ) -> Result<Option<SimulateAccountsConfig>, RpcMethodError> {
     let accounts = match config.and_then(|config| config.get("accounts")) {
+        Some(accounts) if accounts.is_null() => return Ok(None),
         Some(accounts) => accounts.as_object().ok_or(RpcMethodError::InvalidParams)?,
         None => return Ok(None),
     };
@@ -557,6 +559,82 @@ fn parse_pubkey_and_lookup(
     let array: [u8; 32] = bytes.try_into().ok()?;
     let pubkey = karstflow_types::Pubkey::new(array);
     bank.get_account(&pubkey, commitment)
+}
+
+/// Convert an internal error string to Solana-compatible JSON TransactionError format.
+///
+/// Solana returns errors as structured JSON:
+/// - Top-level errors: `"BlockhashNotFound"`, `"AccountNotFound"`, etc.
+/// - Instruction errors: `{"InstructionError":[ix_index, variant]}`
+///
+/// We extract the instruction index from the last `[ix N]` log entry and map
+/// known error patterns to their Solana-standard variant names.
+fn format_transaction_error(error: &str, logs: &[String]) -> serde_json::Value {
+    // Top-level transaction errors (not instruction-specific)
+    match error {
+        "BlockhashNotFound" => return serde_json::json!("BlockhashNotFound"),
+        "AccountNotFound" => return serde_json::json!("AccountNotFound"),
+        "AlreadyProcessed" => return serde_json::json!("AlreadyProcessed"),
+        "DuplicateTransaction" => return serde_json::json!("DuplicateTransaction"),
+        _ => {}
+    }
+    if error.starts_with("InsufficientFundsForFee") {
+        return serde_json::json!("InsufficientFundsForFee");
+    }
+
+    // Extract instruction index from log entries: "[ix N] ..."
+    let ix_index = logs
+        .iter()
+        .rev()
+        .find_map(|log| {
+            log.strip_prefix("[ix ")
+                .and_then(|rest| rest.split(']').next())
+                .and_then(|n| n.parse::<u64>().ok())
+        })
+        .unwrap_or(0);
+
+    // Map known error patterns to Solana InstructionError variants
+    let variant = map_instruction_error_variant(error);
+    serde_json::json!({"InstructionError": [ix_index, variant]})
+}
+
+/// Map an error string to a Solana-standard InstructionError variant.
+fn map_instruction_error_variant(error: &str) -> serde_json::Value {
+    let lower = error.to_lowercase();
+    if lower.contains("insufficient") && lower.contains("lamports") {
+        serde_json::json!("InsufficientFunds")
+    } else if lower.contains("negative lamports") {
+        serde_json::json!("InsufficientFunds")
+    } else if lower.contains("not enough lamports") {
+        serde_json::json!("InsufficientFunds")
+    } else if lower.contains("missing required signature") || lower.contains("not a signer") {
+        serde_json::json!("MissingRequiredSignature")
+    } else if lower.contains("invalid account data") {
+        serde_json::json!("InvalidAccountData")
+    } else if lower.contains("account already in use") {
+        serde_json::json!("AccountAlreadyInitialized")
+    } else if lower.contains("account data too small") {
+        serde_json::json!("AccountDataTooSmall")
+    } else if lower.contains("compute budget exceeded") {
+        serde_json::json!("ComputationalBudgetExceeded")
+    } else if lower.contains("not rent exempt") {
+        serde_json::json!("InsufficientFunds")
+    } else if lower.contains("invalid instruction data") {
+        serde_json::json!("InvalidInstructionData")
+    } else if lower.contains("incorrect program id") {
+        serde_json::json!("IncorrectProgramId")
+    } else if lower.contains("custom program error") {
+        // Try to extract custom error code
+        if let Some(code) = error.split("Custom program error: ").nth(1) {
+            if let Ok(n) = code.trim().parse::<u32>() {
+                return serde_json::json!({"Custom": n});
+            }
+        }
+        serde_json::json!({"Custom": 0})
+    } else {
+        // Fallback: wrap as Custom(0) so solders can still parse it
+        serde_json::json!({"Custom": 0})
+    }
 }
 
 fn format_simulate_account(
