@@ -19,9 +19,9 @@ use crate::network::NetworkConfig;
 use crate::parts::{
     build_ingress_policy, build_mainnet_readiness_policy, build_metrics_http_bind,
     build_metrics_output_format, build_metrics_output_target, build_network_config, build_rpc_bind,
-    build_rpc_enabled, build_rpc_full_api, build_rpc_private, build_runtime_spec,
-    build_storage_runtime_policy, build_topology_spec, load_node_profile_from_env,
-    validate_rpc_preflight,
+    build_rpc_enabled, build_rpc_full_api, build_rpc_private, build_rpc_ws_bind,
+    build_runtime_spec, build_storage_runtime_policy, build_topology_spec,
+    load_node_profile_from_env, validate_rpc_preflight,
 };
 use crate::profile_loader::load_node_profile_from_file;
 use crate::profile_types::NodeProfileToml;
@@ -83,6 +83,7 @@ pub struct NodeConfig {
     pub metrics_http_bind: Option<SocketAddr>,
     pub rpc_enabled: bool,
     pub rpc_bind: Option<SocketAddr>,
+    pub rpc_ws_bind: Option<SocketAddr>,
     pub rpc_private: bool,
     pub rpc_full_api: bool,
     pub storage_runtime_policy: StorageRuntimePolicy,
@@ -360,6 +361,10 @@ impl NodeConfig {
             metrics_http_bind: build_metrics_http_bind(profile)?,
             rpc_enabled: build_rpc_enabled(profile)?,
             rpc_bind: build_rpc_bind(profile)?,
+            rpc_ws_bind: {
+                let rpc_bind = build_rpc_bind(profile)?;
+                build_rpc_ws_bind(profile, rpc_bind)?
+            },
             rpc_private: build_rpc_private(profile)?,
             rpc_full_api: build_rpc_full_api(profile)?,
             storage_runtime_policy: build_storage_runtime_policy(profile)?,

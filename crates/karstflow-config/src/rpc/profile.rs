@@ -20,3 +20,19 @@ pub(super) fn resolve_rpc_bind(profile: Option<&NodeProfileToml>) -> Result<Opti
         })
         .transpose()
 }
+
+pub(super) fn resolve_rpc_ws_bind(
+    profile: Option<&NodeProfileToml>,
+) -> Result<Option<SocketAddr>> {
+    profile_rpc_toml(profile)
+        .and_then(|rpc| rpc.ws_bind.as_ref())
+        .map(|bind| {
+            bind.parse::<SocketAddr>()
+                .map_err(|source| ConfigError::InvalidSocketAddr {
+                    name: "rpc.ws_bind".to_string(),
+                    value: bind.to_string(),
+                    source,
+                })
+        })
+        .transpose()
+}

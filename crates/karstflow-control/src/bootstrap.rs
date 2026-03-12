@@ -27,7 +27,8 @@ use karstflow_net::{
 };
 use karstflow_observability::spawn_metrics_http_bridge;
 use karstflow_rpc::{
-    metrics_file_provider, spawn_rpc_http_server, BankAccessProvider, TransactionSubmitter,
+    metrics_file_provider, spawn_rpc_http_server, spawn_rpc_ws_server, BankAccessProvider,
+    TransactionSubmitter,
 };
 use karstflow_runtime::{build_pinned_affinity_plan, run_services, Service, ServiceProbeReport};
 use karstflow_stages::{
@@ -2681,10 +2682,21 @@ pub fn maybe_start_rpc_http_server_with_consensus(
         node_config.rpc_full_api,
         node_config.rpc_private,
         dev_mode,
-        runtime_snapshot_provider,
-        bank_access_provider,
+        runtime_snapshot_provider.clone(),
+        bank_access_provider.clone(),
         tx_submitter,
     )?;
+
+    // Spawn dedicated WebSocket server on a separate port (Solana-compatible).
+    if let Some(ws_bind) = node_config.rpc_ws_bind {
+        spawn_rpc_ws_server(
+            ws_bind,
+            node_config.rpc_full_api,
+            runtime_snapshot_provider,
+            bank_access_provider,
+        )?;
+    }
+
     Ok(())
 }
 

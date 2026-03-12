@@ -103,6 +103,70 @@ pub fn spawn_rpc_http_server(
     Ok(())
 }
 
+/// Spawn a dedicated WebSocket-only server on a separate port.
+///
+/// This mirrors Solana's architecture where HTTP RPC runs on port 8899 and
+/// WebSocket subscriptions run on port 8900. The main HTTP server continues
+/// to serve both protocols for backward compatibility.
+pub fn spawn_rpc_ws_server(
+    ws_bind_addr: SocketAddr,
+    full_api: bool,
+    runtime_snapshot_provider: Option<Arc<dyn RuntimeSnapshotProvider>>,
+    bank_access_provider: Option<Arc<dyn BankAccessProvider>>,
+) -> Result<()> {
+    let bind_probe = TcpListener::bind(ws_bind_addr)
+        .map_err(|source| RpcError::RpcHttpBind {
+            bind_addr: ws_bind_addr,
+            source,
+        })?;
+    drop(bind_probe);
+
+    info!(%ws_bind_addr, full_api, "serving WebSocket subscriptions");
+
+    thread::Builder::new()
+        .name("rpc-ws".to_string())
+        .spawn(move || {
+            let runtime = match tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+            {
+                Ok(runtime) => runtime,
+                Err(error) => {
+                    error!(%error, "failed to build tokio runtime for WS");
+                    return;
+                }
+            };
+
+            runtime.block_on(async move {
+                let server = match ServerBuilder::default().build(ws_bind_addr).await {
+                    Ok(server) => server,
+                    Err(error) => {
+                        error!(%error, "failed to start jsonrpsee WS server");
+                        return;
+                    }
+                };
+
+                let mut module = RpcModule::new(());
+
+                if let Err(error) = register_subscription_methods(
+                    &mut module,
+                    full_api,
+                    runtime_snapshot_provider.clone(),
+                    bank_access_provider.clone(),
+                ) {
+                    error!(%error, "failed to register WS subscriptions");
+                    return;
+                }
+
+                let _handle = server.start(module);
+                std::future::pending::<()>().await;
+            });
+        })
+        .map_err(RpcError::RpcHttpThreadSpawn)?;
+
+    Ok(())
+}
+
 fn dispatch_via_legacy_renderer(
     method_name: &str,
     params: Params<'_>,
