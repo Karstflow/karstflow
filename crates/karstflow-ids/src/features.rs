@@ -249,6 +249,13 @@ pub const LIMIT_INSTRUCTION_ACCOUNTS: Pubkey = Pubkey::new([
     0x2C, 0x97, 0x0C, 0xFE, 0x58, 0x24, 0x37, 0x66, 0x9F, 0xDB, 0x3C, 0xA0, 0x86, 0xBC, 0x72, 0x7D,
 ]);
 
+/// Validator Admission Ticket (VAT) — top-K validator selection.
+/// Base58: VATtb1DepUwdPh5bFVasdtkbeDNsftZSRzr2aKpKWJA
+pub const VALIDATOR_ADMISSION_TICKET: Pubkey = Pubkey::new([
+    0x07, 0x36, 0xF6, 0x93, 0xCD, 0x86, 0x07, 0x8B, 0x03, 0x1C, 0xC1, 0x6F, 0xE8, 0x9A, 0x9E, 0xAF,
+    0x04, 0xA6, 0x5E, 0x21, 0xDD, 0xE6, 0xE6, 0x42, 0xFC, 0x5A, 0x4D, 0x39, 0xA9, 0xC6, 0xDE, 0xB7,
+]);
+
 /// Relaxes programdata account ownership check during BPF migration.
 /// Base58: rexav5eNTUSNT1K2N7cfRjnthwhcP5BC25v2tA4rW4h
 pub const RELAX_PROGRAMDATA_ACCOUNT_CHECK_MIGRATION: Pubkey = Pubkey::new([
@@ -314,6 +321,7 @@ mod tests {
             BLS_PUBKEY_MANAGEMENT_IN_VOTE_ACCOUNT,
             REMOVE_SIMPLE_VOTE_FROM_COST_MODEL,
             LIMIT_INSTRUCTION_ACCOUNTS,
+            VALIDATOR_ADMISSION_TICKET,
             RELAX_PROGRAMDATA_ACCOUNT_CHECK_MIGRATION,
         ]
     }

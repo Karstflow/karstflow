@@ -119,4 +119,7 @@ pub enum StorageError {
 
     #[error("Write batch too large: {size} exceeds maximum {max}")]
     WriteBatchTooLarge { size: usize, max: usize },
+
+    #[error("Corrupt snapshot: {0}")]
+    CorruptSnapshot(String),
 }

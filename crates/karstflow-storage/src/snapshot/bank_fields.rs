@@ -598,11 +598,16 @@ fn skip_unused_accounts(r: &mut BincodeReader) -> Result<(), StorageError> {
     Ok(())
 }
 
-/// Skip HashMap<u64, ()> (unused_epoch_stakes).
+/// Parse and enforce that unused_epoch_stakes is empty.
+///
+/// Protocol requires this map to be empty in all valid snapshots.
 fn skip_unused_epoch_stakes(r: &mut BincodeReader) -> Result<(), StorageError> {
     let count = r.read_vec_len()?;
-    // () is zero bytes in bincode, so each entry is just the key (8 bytes)
-    r.skip(count as usize * 8)?;
+    if count != 0 {
+        return Err(StorageError::CorruptSnapshot(format!(
+            "unused_epoch_stakes must be empty, got {count} entries"
+        )));
+    }
     Ok(())
 }
 

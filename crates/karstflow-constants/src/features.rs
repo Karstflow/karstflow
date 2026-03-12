@@ -73,6 +73,9 @@ pub const FEATURE_REMOVE_SIMPLE_VOTE_FROM_COST_MODEL: &str = "remove_simple_vote
 /// Feature: limit the number of accounts per instruction.
 pub const FEATURE_LIMIT_INSTRUCTION_ACCOUNTS: &str = "limit_instruction_accounts";
 
+/// Feature: validator admission ticket (VAT) — top-K validator selection.
+pub const FEATURE_VALIDATOR_ADMISSION_TICKET: &str = "validator_admission_ticket";
+
 /// Feature: relax programdata account ownership check during BPF migration.
 pub const FEATURE_RELAX_PROGRAMDATA_ACCOUNT_CHECK: &str =
     "relax_programdata_account_check_migration";
