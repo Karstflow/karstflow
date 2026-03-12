@@ -6,7 +6,7 @@ pub enum RpcMethodError {
     MinimumContextSlotNotReached,
     TransactionSubmissionFailed {
         message: String,
-        err: Option<String>,
+        err: Option<serde_json::Value>,
         logs: Option<Vec<String>>,
     },
     NodeUnhealthy {
@@ -44,7 +44,7 @@ impl RpcMethodError {
         match self {
             Self::TransactionSubmissionFailed { err, logs, .. } => Some(serde_json::json!({
                 "accounts": null,
-                "err": err.as_deref().unwrap_or("BlockhashNotFound"),
+                "err": err.clone().unwrap_or(serde_json::json!("BlockhashNotFound")),
                 "innerInstructions": null,
                 "logs": logs.as_deref().unwrap_or(&[]),
                 "returnData": null,
@@ -57,16 +57,104 @@ impl RpcMethodError {
         }
     }
 
-    /// Create a transaction submission failure with a valid Solana TransactionError variant.
+    /// Create a transaction submission failure with a Solana-standard error format.
     ///
-    /// Valid `err` values include: `AccountInUse`, `AccountNotFound`,
-    /// `InsufficientFundsForFee`, `BlockhashNotFound`, `AlreadyProcessed`,
-    /// `SignatureFailure`, `SanitizeFailure`, and others from solana TransactionError.
+    /// Parses the Debug-formatted `TransactionExecutionError` string and converts
+    /// it to a JSON value that solders/solana-py can deserialize as a `TransactionError`.
     pub fn transaction_failed(err: &str) -> Self {
+        let err_json = Self::format_send_error(err);
         Self::TransactionSubmissionFailed {
             message: format!("Transaction simulation failed: {err}"),
-            err: Some(err.to_string()),
+            err: Some(err_json),
             logs: None,
+        }
+    }
+
+    /// Convert an internal error string to Solana-compatible JSON TransactionError format.
+    fn format_send_error(error: &str) -> serde_json::Value {
+        // Top-level transaction errors
+        match error {
+            "BlockhashNotFound" => return serde_json::json!("BlockhashNotFound"),
+            "AccountNotFound" => return serde_json::json!("AccountNotFound"),
+            "AlreadyProcessed" => return serde_json::json!("AlreadyProcessed"),
+            "DuplicateTransaction" => return serde_json::json!("DuplicateTransaction"),
+            _ => {}
+        }
+        if error.starts_with("InsufficientFundsForFee") {
+            return serde_json::json!("InsufficientFundsForFee");
+        }
+
+        // Parse Debug-formatted InstructionFailed { index: N, message: "..." }
+        if let Some(rest) = error.strip_prefix("InstructionFailed { index: ") {
+            let ix_index = rest
+                .split(',')
+                .next()
+                .and_then(|n| n.trim().parse::<u64>().ok())
+                .unwrap_or(0);
+            let message = rest
+                .split("message: \"")
+                .nth(1)
+                .and_then(|m| m.strip_suffix("\" }"))
+                .unwrap_or(error);
+            let variant = Self::map_instruction_error_variant(message);
+            return serde_json::json!({"InstructionError": [ix_index, variant]});
+        }
+
+        // Parse Debug-formatted ComputeBudgetExceeded { ... }
+        if error.starts_with("ComputeBudgetExceeded") {
+            return serde_json::json!({"InstructionError": [0, "ComputationalBudgetExceeded"]});
+        }
+
+        // Parse Display-formatted "instruction N failed: ..."
+        if let Some(rest) = error.strip_prefix("instruction ") {
+            let ix_index = rest
+                .split(' ')
+                .next()
+                .and_then(|n| n.parse::<u64>().ok())
+                .unwrap_or(0);
+            let message = rest.split("failed: ").nth(1).unwrap_or(error);
+            let variant = Self::map_instruction_error_variant(message);
+            return serde_json::json!({"InstructionError": [ix_index, variant]});
+        }
+
+        // Generic instruction error fallback
+        let variant = Self::map_instruction_error_variant(error);
+        serde_json::json!({"InstructionError": [0, variant]})
+    }
+
+    /// Map an error message to a Solana-standard InstructionError variant.
+    fn map_instruction_error_variant(error: &str) -> serde_json::Value {
+        let lower = error.to_lowercase();
+        if (lower.contains("insufficient") && lower.contains("lamports"))
+            || lower.contains("negative lamports")
+            || lower.contains("not enough lamports")
+        {
+            serde_json::json!("InsufficientFunds")
+        } else if lower.contains("missing required signature") || lower.contains("not a signer") {
+            serde_json::json!("MissingRequiredSignature")
+        } else if lower.contains("invalid account data") {
+            serde_json::json!("InvalidAccountData")
+        } else if lower.contains("account already in use") || lower.contains("already exists") {
+            serde_json::json!("AccountAlreadyInitialized")
+        } else if lower.contains("account data too small") || lower.contains("data too short") {
+            serde_json::json!("AccountDataTooSmall")
+        } else if lower.contains("compute budget exceeded") {
+            serde_json::json!("ComputationalBudgetExceeded")
+        } else if lower.contains("not rent exempt") {
+            serde_json::json!("InsufficientFunds")
+        } else if lower.contains("invalid instruction data") {
+            serde_json::json!("InvalidInstructionData")
+        } else if lower.contains("incorrect program id") {
+            serde_json::json!("IncorrectProgramId")
+        } else if lower.contains("custom program error") {
+            if let Some(code) = error.split("Custom program error: ").nth(1) {
+                if let Ok(n) = code.trim().parse::<u32>() {
+                    return serde_json::json!({"Custom": n});
+                }
+            }
+            serde_json::json!({"Custom": 0})
+        } else {
+            serde_json::json!({"Custom": 0})
         }
     }
 
@@ -175,7 +263,18 @@ mod tests {
         let err = RpcMethodError::transaction_failed("InsufficientFundsForFee");
         assert!(err.data().is_some());
         let data = err.data().unwrap();
-        assert_eq!(data["err"], "InsufficientFundsForFee");
+        assert_eq!(data["err"], serde_json::json!("InsufficientFundsForFee"));
+    }
+
+    #[test]
+    fn transaction_failed_instruction_error_format() {
+        let err = RpcMethodError::transaction_failed(
+            r#"InstructionFailed { index: 1, message: "Program failed: Nonce account data too short" }"#,
+        );
+        let data = err.data().unwrap();
+        let err_val = &data["err"];
+        assert!(err_val["InstructionError"].is_array());
+        assert_eq!(err_val["InstructionError"][0], 1);
     }
 
     #[test]

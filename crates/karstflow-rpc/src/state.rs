@@ -383,6 +383,10 @@ pub struct RpcTransactionData {
     pub signatures: Vec<String>,
     /// Raw transaction bytes.
     pub raw_bytes: Vec<u8>,
+    /// Pre-execution account balances (lamports, in account key order).
+    pub pre_balances: Vec<u64>,
+    /// Post-execution account balances (lamports, in account key order).
+    pub post_balances: Vec<u64>,
 }
 
 /// A signature entry for `getSignaturesForAddress` responses.

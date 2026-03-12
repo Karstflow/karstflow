@@ -6,7 +6,7 @@ use karstflow_constants::economics::{BASE_NETWORK_SUPPLY_LAMPORTS, TOKEN_UI_DECI
 use karstflow_constants::rpc::{
     DEFAULT_TOKEN_ACCOUNT_SPACE, MAX_SIGNATURE_CONFIRMATIONS, SPL_MINT_DECIMALS_OFFSET,
     SPL_MINT_MIN_LEN, SPL_MINT_SUPPLY_OFFSET, SPL_TOKEN_ACCOUNT_AMOUNT_OFFSET,
-    SPL_TOKEN_ACCOUNT_MIN_LEN,
+    SPL_TOKEN_ACCOUNT_MINT_OFFSET, SPL_TOKEN_ACCOUNT_MIN_LEN,
 };
 
 use super::super::method_error::RpcMethodError;
@@ -137,9 +137,14 @@ fn build_token_account_balance_response(
     if let Some(bank) = bank_access {
         let pubkey = parse_pubkey(&token_account_str)?;
         if let Some(account) = bank.get_account(&pubkey, commitment) {
-            if let Some((amount, decimals)) =
-                parse_spl_token_account_balance(account.data.as_slice())
-            {
+            let data = account.data.as_slice();
+            if let Some(amount) = parse_spl_token_account_amount(data) {
+                // Look up the mint account to get decimals
+                let decimals = parse_spl_token_account_mint(data)
+                    .and_then(|mint_pk| bank.get_account(&mint_pk, commitment))
+                    .and_then(|mint_acct| parse_spl_mint_supply(mint_acct.data.as_slice()))
+                    .map(|(_, d)| d)
+                    .unwrap_or(0);
                 let value = token_amount_with_decimals(amount, decimals);
                 let response = RpcResponse::new(slot, value);
                 return Ok(types::to_value(&response));
@@ -455,13 +460,14 @@ fn build_account_info_response(
     ensure_min_context_slot_satisfied(request, snapshot, commitment)?;
     let pubkey_str = params::first_param_non_empty_string(request)?;
     let encoding = parse_encoding(request);
+    let data_slice = parse_data_slice(request);
     let slot = resolve_slot(snapshot, commitment, bank_access);
 
     if let Some(bank) = bank_access {
         let pubkey = parse_pubkey(&pubkey_str)?;
         let value: Option<AccountValue> = bank
             .get_account(&pubkey, commitment)
-            .map(|account| format_account_value(&account, &encoding));
+            .map(|account| format_account_value_with_slice(&account, &encoding, data_slice));
         let response = RpcResponse::new(slot, value);
         Ok(types::to_value(&response))
     } else {
@@ -487,8 +493,9 @@ fn build_multiple_accounts_response(
     bank_access: Option<&Arc<dyn BankAccessProvider>>,
 ) -> Result<serde_json::Value, RpcMethodError> {
     ensure_min_context_slot_satisfied(request, snapshot, commitment)?;
-    let pubkeys = params::first_param_non_empty_string_array(request)?;
+    let pubkeys = params::first_param_string_array(request)?;
     let encoding = parse_encoding(request);
+    let data_slice = parse_data_slice(request);
     let slot = resolve_slot(snapshot, commitment, bank_access);
 
     let accounts: Vec<Option<AccountValue>> = if let Some(bank) = bank_access {
@@ -496,9 +503,9 @@ fn build_multiple_accounts_response(
             .iter()
             .map(|pubkey_str| {
                 let pubkey = parse_pubkey(pubkey_str)?;
-                Ok(bank
-                    .get_account(&pubkey, commitment)
-                    .map(|account| format_account_value(&account, &encoding)))
+                Ok(bank.get_account(&pubkey, commitment).map(|account| {
+                    format_account_value_with_slice(&account, &encoding, data_slice)
+                }))
             })
             .collect::<Result<Vec<_>, RpcMethodError>>()?
     } else {
@@ -621,10 +628,9 @@ fn build_signature_statuses_response(
             }
 
             // Bank is available but none of the signatures were found in the
-            // real transaction cache. Return null for each — this is the
-            // Solana-standard behavior for unknown/not-yet-confirmed signatures.
-            // Note: airdrop signatures are synthetic and never in the tx cache,
-            // so they fall through to the synthetic fallback below.
+            // real transaction cache. Fall through to synthetic fallback —
+            // airdrop signatures are synthetic and never in the real tx cache,
+            // so they need the synthetic fallback to return "confirmed" status.
         }
     }
 
@@ -710,7 +716,7 @@ fn token_amount_with_decimals(amount: u64, decimals: u8) -> TokenAmount {
 }
 
 /// Parse the token balance from an SPL Token account's raw data.
-fn parse_spl_token_account_balance(data: &[u8]) -> Option<(u64, u8)> {
+fn parse_spl_token_account_amount(data: &[u8]) -> Option<u64> {
     if data.len() < SPL_TOKEN_ACCOUNT_MIN_LEN {
         return None;
     }
@@ -718,8 +724,18 @@ fn parse_spl_token_account_balance(data: &[u8]) -> Option<(u64, u8)> {
         [SPL_TOKEN_ACCOUNT_AMOUNT_OFFSET..SPL_TOKEN_ACCOUNT_AMOUNT_OFFSET + 8]
         .try_into()
         .ok()?;
-    let amount = u64::from_le_bytes(amount_bytes);
-    Some((amount, 0))
+    Some(u64::from_le_bytes(amount_bytes))
+}
+
+fn parse_spl_token_account_mint(data: &[u8]) -> Option<karstflow_types::Pubkey> {
+    if data.len() < SPL_TOKEN_ACCOUNT_MIN_LEN {
+        return None;
+    }
+    let mint_bytes: [u8; 32] = data
+        [SPL_TOKEN_ACCOUNT_MINT_OFFSET..SPL_TOKEN_ACCOUNT_MINT_OFFSET + 32]
+        .try_into()
+        .ok()?;
+    Some(karstflow_types::Pubkey::new(mint_bytes))
 }
 
 /// Parse supply and decimals from an SPL Mint account's raw data.
@@ -908,6 +924,15 @@ fn parse_encoding(request: &serde_json::Value) -> String {
         .to_string()
 }
 
+fn parse_data_slice(request: &serde_json::Value) -> Option<(usize, usize)> {
+    let params = params::params_array_or_empty(request);
+    let cfg = params::first_config_object(params)?;
+    let ds = cfg.get("dataSlice")?;
+    let offset = ds.get("offset")?.as_u64()? as usize;
+    let length = ds.get("length")?.as_u64()? as usize;
+    Some((offset, length))
+}
+
 fn resolve_slot(
     snapshot: RpcRuntimeSnapshot,
     commitment: RpcCommitment,
@@ -919,7 +944,23 @@ fn resolve_slot(
 }
 
 fn format_account_value(account: &karstflow_types::Account, encoding: &str) -> AccountValue {
-    let data = encode_account_data(account.data.as_slice(), encoding);
+    format_account_value_with_slice(account, encoding, None)
+}
+
+fn format_account_value_with_slice(
+    account: &karstflow_types::Account,
+    encoding: &str,
+    data_slice: Option<(usize, usize)>,
+) -> AccountValue {
+    let full_data = account.data.as_slice();
+    let sliced = if let Some((offset, length)) = data_slice {
+        let start = offset.min(full_data.len());
+        let end = start.saturating_add(length).min(full_data.len());
+        &full_data[start..end]
+    } else {
+        full_data
+    };
+    let data = encode_account_data(sliced, encoding);
     AccountValue {
         lamports: account.meta.lamports,
         owner: account.meta.owner.to_string(),

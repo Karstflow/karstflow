@@ -3291,6 +3291,8 @@ impl BankAccessProvider for ConsensusBankAccessProvider {
                         error: status.error.clone(),
                         signatures: sig_strings,
                         raw_bytes: tx_bytes.clone(),
+                        pre_balances: Vec::new(),
+                        post_balances: Vec::new(),
                     });
                 }
             }
@@ -3305,6 +3307,8 @@ impl BankAccessProvider for ConsensusBankAccessProvider {
             error: status.error,
             signatures: vec![sig_b58],
             raw_bytes: Vec::new(),
+            pre_balances: Vec::new(),
+            post_balances: Vec::new(),
         })
     }
 

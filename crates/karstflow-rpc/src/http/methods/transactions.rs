@@ -601,11 +601,10 @@ fn format_transaction_error(error: &str, logs: &[String]) -> serde_json::Value {
 /// Map an error string to a Solana-standard InstructionError variant.
 fn map_instruction_error_variant(error: &str) -> serde_json::Value {
     let lower = error.to_lowercase();
-    if lower.contains("insufficient") && lower.contains("lamports") {
-        serde_json::json!("InsufficientFunds")
-    } else if lower.contains("negative lamports") {
-        serde_json::json!("InsufficientFunds")
-    } else if lower.contains("not enough lamports") {
+    if (lower.contains("insufficient") && lower.contains("lamports"))
+        || lower.contains("negative lamports")
+        || lower.contains("not enough lamports")
+    {
         serde_json::json!("InsufficientFunds")
     } else if lower.contains("missing required signature") || lower.contains("not a signer") {
         serde_json::json!("MissingRequiredSignature")

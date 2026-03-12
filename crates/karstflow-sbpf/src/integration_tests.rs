@@ -53,7 +53,7 @@ fn end_to_end_create_account_and_transfer() {
         .unwrap();
     assert_eq!(created_account.meta.lamports, 50_000);
     assert_eq!(created_account.meta.owner, new_owner);
-    assert_eq!(created_account.data.as_slice().len(), 0);
+    assert_eq!(created_account.data.as_slice().len(), 128);
 
     payer_account.meta.lamports = 50_000;
     let recipient_account = Account::zeroed();

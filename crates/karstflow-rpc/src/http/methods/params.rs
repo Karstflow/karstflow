@@ -35,6 +35,29 @@ pub(super) fn first_param_non_empty_string(request: &Value) -> Result<String, Rp
         .ok_or(RpcMethodError::InvalidParams)
 }
 
+/// Parse the first parameter as a string array, allowing empty arrays.
+pub(super) fn first_param_string_array(request: &Value) -> Result<Vec<String>, RpcMethodError> {
+    let values = params_array(request)?
+        .first()
+        .and_then(Value::as_array)
+        .ok_or(RpcMethodError::InvalidParams)?;
+    if values.is_empty() {
+        return Ok(vec![]);
+    }
+
+    values
+        .iter()
+        .map(|value| {
+            value
+                .as_str()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(str::to_string)
+                .ok_or(RpcMethodError::InvalidParams)
+        })
+        .collect()
+}
+
 pub(super) fn first_param_non_empty_string_array(
     request: &Value,
 ) -> Result<Vec<String>, RpcMethodError> {

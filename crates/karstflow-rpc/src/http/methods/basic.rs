@@ -48,7 +48,7 @@ pub(super) fn handle(
         RpcMethod::GetIdentity => {
             let identity = bank_access
                 .and_then(|bank| bank.get_identity())
-                .unwrap_or_else(|| "ParaDancer11111111111111111111111111111111".to_string());
+                .unwrap_or_else(|| "Karstflow111111111111111111111111111111111".to_string());
             let response = GetIdentityResponse { identity };
             Ok(types::to_value(&response))
         }

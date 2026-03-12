@@ -371,6 +371,9 @@ fn build_transaction_response(
                 ));
             }
         }
+        // Bank is available but transaction not found — fall through to
+        // synthetic fallback. Airdrop transactions are synthetic and won't
+        // be in the blockstore, so they need the fallback path.
     }
 
     // Synthetic fallback.
@@ -484,8 +487,8 @@ fn format_real_transaction_response(
         "meta": {
             "err": err,
             "fee": LAMPORTS_PER_SIGNATURE,
-            "preBalances": [],
-            "postBalances": [],
+            "preBalances": tx_data.pre_balances,
+            "postBalances": tx_data.post_balances,
             "status": status
         },
         "transaction": transaction,
