@@ -27,16 +27,19 @@ pub fn decode_compact_u16(data: &[u8]) -> Result<(usize, usize), String> {
         return Err("unexpected end of data for compact-u16".to_string());
     }
 
-    let first = data[0] as usize;
-    if first <= 0x7F {
-        Ok((first, 1))
-    } else {
-        if data.len() < 2 {
+    // Solana compact-u16: little-endian variable-length encoding.
+    // Each byte contributes 7 value bits; bit 7 is a continuation flag.
+    let mut val: usize = 0;
+    for (i, byte) in data.iter().take(3).enumerate() {
+        val |= ((*byte as usize) & 0x7F) << (i * 7);
+        if *byte & 0x80 == 0 {
+            return Ok((val, i + 1));
+        }
+        if i + 1 >= data.len() {
             return Err("truncated compact-u16".to_string());
         }
-        let value = ((first & 0x7F) << 8) | (data[1] as usize);
-        Ok((value, 2))
     }
+    Err("compact-u16 too long".to_string())
 }
 
 /// Deserialize raw binary transaction data into a `SanitizedTransaction`.
@@ -266,11 +269,17 @@ mod tests {
 
     /// Encode a compact-u16 value into a byte buffer (for test transaction construction).
     fn encode_compact_u16(buf: &mut Vec<u8>, value: usize) {
-        if value <= 0x7F {
-            buf.push(value as u8);
-        } else {
-            buf.push(((value >> 8) as u8) | 0x80);
-            buf.push(value as u8);
+        let mut val = value;
+        loop {
+            let mut byte = (val & 0x7F) as u8;
+            val >>= 7;
+            if val > 0 {
+                byte |= 0x80;
+            }
+            buf.push(byte);
+            if val == 0 {
+                break;
+            }
         }
     }
 

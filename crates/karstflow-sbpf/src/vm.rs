@@ -204,11 +204,20 @@ impl BytecodeVm {
     /// Load and validate a program from raw ELF bytes.
     fn load_program(&self, elf_bytes: &[u8]) -> Result<LoadedProgram, SbpfExecutionError> {
         let program = crate::elf_loader::load_elf(elf_bytes)
-            .map_err(|e| SbpfExecutionError::InvalidProgram)?;
+            .map_err(|e| {
+                SbpfExecutionError::ExecutionFailed {
+                    message: format!("ELF load: {e}"),
+                }
+            })?;
 
         let syscall_ids = self.syscall_dispatch.registered_ids();
         validation::validate(&program, &syscall_ids)
-            .map_err(|errors| SbpfExecutionError::InvalidProgram)?;
+            .map_err(|errors| {
+                let sample: Vec<String> = errors.iter().take(3).map(|e| e.to_string()).collect();
+                SbpfExecutionError::ExecutionFailed {
+                    message: format!("validation: {} errors — {}", errors.len(), sample.join("; ")),
+                }
+            })?;
 
         Ok(program)
     }

@@ -774,11 +774,17 @@ fn serialize_transaction(tx: &SanitizedTransaction) -> Vec<u8> {
 /// Encode a value as Solana compact-u16.
 #[cfg(test)]
 fn encode_compact_u16(buf: &mut Vec<u8>, value: usize) {
-    if value <= 0x7F {
-        buf.push(value as u8);
-    } else {
-        buf.push(((value >> 8) & 0x7F) as u8 | 0x80);
-        buf.push((value & 0xFF) as u8);
+    let mut val = value;
+    loop {
+        let mut byte = (val & 0x7F) as u8;
+        val >>= 7;
+        if val > 0 {
+            byte |= 0x80;
+        }
+        buf.push(byte);
+        if val == 0 {
+            break;
+        }
     }
 }
 

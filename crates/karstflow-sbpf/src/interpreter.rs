@@ -1052,6 +1052,15 @@ pub fn execute(
             }
 
             // =================================================================
+            // SYSCALL (SBPFv2) — dedicated syscall invocation
+            // =================================================================
+            Opcode::Syscall => {
+                checkpoint_cu(&mut vm, &mut segment_cu)?;
+                let target_id = imm as u32;
+                syscall_dispatch.dispatch(target_id, &mut vm)?;
+            }
+
+            // =================================================================
             // EXIT — return from function or halt
             // =================================================================
             Opcode::Exit => {

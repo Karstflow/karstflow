@@ -157,7 +157,7 @@ pub fn validate(
         validate_registers(insn, op, i, &mut errors);
 
         // Validate jump targets
-        if op.is_jump() && op != Opcode::Call && op != Opcode::Exit {
+        if op.is_jump() && op != Opcode::Call && op != Opcode::Syscall && op != Opcode::Exit {
             let target = (i as isize) + 1 + (insn.offset as isize);
             if target < 0 || target >= instructions.len() as isize {
                 errors.push(ValidationError::JumpOutOfBounds { pc: i, target });
@@ -180,6 +180,10 @@ pub fn validate(
                 });
             }
         }
+
+        // Note: Syscall (0x8D, SBPFv2) targets are small integer indices
+        // resolved at runtime via the syscall dispatch table. No static
+        // validation against hash-based registered_syscalls.
 
         i += 1;
     }

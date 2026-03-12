@@ -2189,6 +2189,17 @@ impl Bank {
                 break 'sim_execution;
             }
 
+            // Inject the program account if not already present so the
+            // execution backend can locate and run the bytecode.
+            if !instr_accounts.iter().any(|(pk, _, _, _)| *pk == program_id) {
+                let program_account = modified
+                    .get(&program_id)
+                    .or_else(|| account_state.get(&program_id))
+                    .cloned()
+                    .unwrap_or_default();
+                instr_accounts.push((program_id, program_account, false, false));
+            }
+
             let instruction_data = instruction.data.clone();
 
             let info = InstructionInfo {

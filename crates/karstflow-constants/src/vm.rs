@@ -236,6 +236,9 @@ pub const ELF_MACHINE_SBF: u16 = 0x00F7;
 /// ELF machine type for classic BPF (older programs).
 pub const ELF_MACHINE_BPF: u16 = 0x00F3;
 
+/// ELF machine type for SBPFv2+ (used by cargo-build-sbf 4.x / solana-program 2.x).
+pub const ELF_MACHINE_SBPF_V2: u16 = 0x0107;
+
 /// ELF header size for 64-bit ELF files.
 pub const ELF64_HEADER_SIZE: usize = 64;
 
