@@ -2255,19 +2255,36 @@ fn scan_input_region(input: &[u8]) -> Vec<InputRegionEntry> {
     }
 
     let account_count = u64::from_le_bytes(input[..8].try_into().unwrap()) as usize;
-    let mut entries = Vec::with_capacity(account_count);
+    let mut entries: Vec<InputRegionEntry> = Vec::with_capacity(account_count);
     let mut offset = 8;
 
     for _ in 0..account_count {
-        if offset + karstflow_constants::vm::ACCOUNT_SERIALIZED_META_SIZE > input.len() {
+        if offset >= input.len() {
             break;
         }
 
-        // Record offset for this account (points to is_signer byte)
-        let entry_offset = offset;
+        let marker = input[offset];
+        if marker != karstflow_constants::vm::NON_DUP_MARKER {
+            // Duplicate account — 8 bytes total, first byte is index to original
+            let first_idx = marker as usize;
+            if first_idx < entries.len() {
+                entries.push(InputRegionEntry {
+                    pubkey: entries[first_idx].pubkey,
+                    offset: entries[first_idx].offset,
+                });
+            }
+            offset += 8;
+            continue;
+        }
 
-        // Skip is_signer(1) + is_writable(1) = 2
-        offset += 2;
+        // Non-duplicate: aligned format
+        // NON_DUP_MARKER(1) + is_signer(1) + is_writable(1) + is_executable(1) + padding(4)
+        let entry_offset = offset;
+        let header_size = 8; // 1+1+1+1+4
+        if offset + header_size + 32 > input.len() {
+            break;
+        }
+        offset += header_size;
 
         // Read pubkey (32 bytes)
         let mut pk = [0u8; 32];
@@ -2284,13 +2301,15 @@ fn scan_input_region(input: &[u8]) -> Vec<InputRegionEntry> {
         let data_len = u64::from_le_bytes(input[offset..offset + 8].try_into().unwrap()) as usize;
         offset += 8;
 
-        // Skip data + padding
+        // Skip data + realloc buffer + alignment padding + rent_epoch
         if offset + data_len > input.len() {
             break;
         }
         offset += data_len;
-        let padding = (8 - (offset % 8)) % 8;
-        offset += padding;
+        offset += karstflow_constants::vm::MAX_PERMITTED_DATA_INCREASE;
+        let align_offset = data_len.wrapping_neg() & (karstflow_constants::vm::ALIGN_OF_U128 - 1);
+        offset += align_offset;
+        offset += 8; // rent_epoch
 
         entries.push(InputRegionEntry {
             pubkey: Pubkey::new(pk),
@@ -2302,14 +2321,20 @@ fn scan_input_region(input: &[u8]) -> Vec<InputRegionEntry> {
 }
 
 /// Read an Account from the input region at the given byte offset.
+/// Offset must point to the NON_DUP_MARKER byte of a non-duplicate account.
 fn read_account_from_input(input: &[u8], offset: usize) -> Option<(bool, Account)> {
-    if offset + karstflow_constants::vm::ACCOUNT_SERIALIZED_META_SIZE > input.len() {
+    // Aligned format: NON_DUP_MARKER(1) + is_signer(1) + is_writable(1) + is_executable(1) + padding(4)
+    //                 + pubkey(32) + owner(32) + lamports(8) + data_len(8) + data
+    let header_size = 8; // 1+1+1+1+4
+    if offset + header_size + 32 + 32 + 8 + 8 > input.len() {
         return None;
     }
 
-    let _is_signer = input[offset];
-    let is_writable = input[offset + 1] != 0;
-    let pos = offset + 2;
+    let _marker = input[offset]; // NON_DUP_MARKER
+    let _is_signer = input[offset + 1];
+    let is_writable = input[offset + 2] != 0;
+    let is_executable = input[offset + 3] != 0;
+    let pos = offset + header_size;
 
     // Skip pubkey (32 bytes) — caller already knows it
     let pos = pos + 32;
@@ -2339,7 +2364,7 @@ fn read_account_from_input(input: &[u8], offset: usize) -> Option<(bool, Account
             meta: TypesAccountMeta {
                 lamports,
                 owner: Pubkey::new(owner),
-                executable: false,
+                executable: is_executable,
                 rent_epoch: 0,
             },
             data: AccountData::new(data.to_vec()),
@@ -2348,14 +2373,15 @@ fn read_account_from_input(input: &[u8], offset: usize) -> Option<(bool, Account
 }
 
 /// Write modified account data back to the input region after CPI.
-/// Only updates lamports, owner, and data bytes (pubkey and data_len unchanged).
-/// Returns error if the callee's data exceeds the original allocation.
+/// Updates lamports, owner, data_len, and data bytes.
+/// Account data may grow within the realloc buffer (MAX_PERMITTED_DATA_INCREASE).
 fn writeback_account_to_input(
     input: &mut [u8],
     offset: usize,
     account: &Account,
 ) -> Result<(), VmError> {
-    let pos = offset + 2 + 32; // skip is_signer(1) + is_writable(1) + pubkey(32)
+    // Aligned format: skip NON_DUP_MARKER(1) + is_signer(1) + is_writable(1) + is_executable(1) + padding(4) + pubkey(32)
+    let pos = offset + 8 + 32;
 
     // Write owner (32 bytes)
     input[pos..pos + 32].copy_from_slice(account.meta.owner.as_ref());
@@ -2365,18 +2391,23 @@ fn writeback_account_to_input(
     input[pos..pos + 8].copy_from_slice(&account.meta.lamports.to_le_bytes());
     let pos = pos + 8;
 
-    // Read original data_len to check bounds
+    // Read original data_len to check growth bounds
     let original_data_len = u64::from_le_bytes(input[pos..pos + 8].try_into().unwrap()) as usize;
-    let pos = pos + 8;
 
     let new_data = account.data.as_slice();
-    if new_data.len() > original_data_len {
+    let max_allowed =
+        original_data_len.saturating_add(karstflow_constants::vm::MAX_PERMITTED_DATA_INCREASE);
+    if new_data.len() > max_allowed {
         return Err(VmError::MemoryError(
-            "CPI callee cannot grow account data".to_string(),
+            "CPI callee cannot grow account data beyond realloc limit".to_string(),
         ));
     }
 
-    // Write data (may be shorter; zero-fill remainder)
+    // Update data_len to new size
+    input[pos..pos + 8].copy_from_slice(&(new_data.len() as u64).to_le_bytes());
+    let pos = pos + 8;
+
+    // Write data (may be shorter or longer than original; zero-fill remainder within original allocation)
     input[pos..pos + new_data.len()].copy_from_slice(new_data);
     if new_data.len() < original_data_len {
         input[pos + new_data.len()..pos + original_data_len].fill(0);
@@ -2461,7 +2492,17 @@ fn derive_pda_signers(vm: &mut VmState, r4: u64, r5: u64) -> PdaSignerResult {
     PdaSignerResult::Ok(pda_signers)
 }
 
+/// Which ABI the CPI caller uses — determines how to update AccountInfo after CPI.
+enum CpiCallerAbi {
+    /// C ABI: SolAccountInfo has `data_len` at offset 16 and each struct is 56 bytes.
+    C,
+    /// Rust ABI: AccountInfo has Rc<RefCell<&mut [u8]>> at offset 16; data len is
+    /// inside the RcBox at +32 from the Rc pointer.
+    Rust,
+}
+
 /// Common CPI execution: resolve accounts, dispatch, writeback.
+#[allow(clippy::too_many_arguments)]
 fn execute_cpi(
     executor: &Arc<dyn InstructionExecutor>,
     vm: &mut VmState,
@@ -2469,6 +2510,9 @@ fn execute_cpi(
     instruction_data: Vec<u8>,
     cpi_account_metas: &[(Pubkey, bool, bool)], // (pubkey, is_signer, is_writable)
     pda_signers: std::collections::HashSet<Pubkey>,
+    caller_abi: CpiCallerAbi,
+    account_infos_addr: u64,
+    account_infos_count: usize,
 ) -> Result<u64, VmError> {
     // Scan the input region to build an offset table for account lookup
     let input_data = vm.memory.input_data().to_vec();
@@ -2482,16 +2526,20 @@ fn execute_cpi(
         }
     }
 
-    // Build execution accounts from the input region
+    // Capture original data lengths before CPI for writeback comparison
+    let mut original_data_lens: Vec<(Pubkey, usize)> = Vec::new();
     let mut accounts = Vec::new();
     for (pubkey, _is_signer, is_writable) in cpi_account_metas {
         let account = if let Some(entry) = input_entries.iter().find(|e| e.pubkey == *pubkey) {
             if let Some((_is_wr, acct)) = read_account_from_input(&input_data, entry.offset) {
+                original_data_lens.push((*pubkey, acct.data.as_slice().len()));
                 acct
             } else {
+                original_data_lens.push((*pubkey, 0));
                 Account::default()
             }
         } else {
+            original_data_lens.push((*pubkey, 0));
             Account::default()
         };
         accounts.push((*pubkey, account, *is_writable));
@@ -2513,15 +2561,38 @@ fn execute_cpi(
                     std::slice::from_raw_parts_mut(ptr, len)
                 };
 
+                // Collect data len changes for caller account update
+                let mut data_len_changes: Vec<(Pubkey, usize)> = Vec::new();
+
                 for (pubkey, modified_account) in &outcome.modified_accounts {
                     if let Some(entry) = input_entries.iter().find(|e| e.pubkey == *pubkey) {
                         let is_writable = cpi_account_metas
                             .iter()
                             .any(|(pk, _, w)| pk == pubkey && *w);
                         if is_writable {
+                            let new_data_len = modified_account.data.as_slice().len();
+                            let old_data_len = original_data_lens
+                                .iter()
+                                .find(|(pk, _)| pk == pubkey)
+                                .map(|(_, len)| *len)
+                                .unwrap_or(0);
+                            if new_data_len != old_data_len {
+                                data_len_changes.push((*pubkey, new_data_len));
+                            }
                             writeback_account_to_input(input_mut, entry.offset, modified_account)?;
                         }
                     }
+                }
+
+                // Update caller's AccountInfo data lengths in BPF memory
+                if !data_len_changes.is_empty() {
+                    update_caller_account_data_lens(
+                        vm,
+                        &caller_abi,
+                        account_infos_addr,
+                        account_infos_count,
+                        &data_len_changes,
+                    );
                 }
             }
 
@@ -2550,6 +2621,94 @@ fn execute_cpi(
         }
         Err(_) => Ok(1),
     }
+}
+
+/// Update the caller BPF program's AccountInfo data lengths after CPI changed them.
+///
+/// For C ABI: `SolAccountInfo.data_len` is a plain u64 field at offset 16 in a 56-byte struct.
+/// For Rust ABI: `AccountInfo.data` is `Rc<RefCell<&mut [u8]>>` at offset 16; the fat pointer
+/// length lives at RcBox + 32 (after strong:8 + weak:8 + borrow_flag:8 + data_ptr:8).
+fn update_caller_account_data_lens(
+    vm: &mut VmState,
+    caller_abi: &CpiCallerAbi,
+    account_infos_addr: u64,
+    account_infos_count: usize,
+    data_len_changes: &[(Pubkey, usize)],
+) {
+    for i in 0..account_infos_count {
+        let (pubkey, key_ok) = match caller_abi {
+            CpiCallerAbi::C => read_c_account_info_pubkey(vm, account_infos_addr, i),
+            CpiCallerAbi::Rust => read_rust_account_info_pubkey(vm, account_infos_addr, i),
+        };
+        if !key_ok {
+            continue;
+        }
+
+        if let Some((_, new_len)) = data_len_changes.iter().find(|(pk, _)| *pk == pubkey) {
+            match caller_abi {
+                CpiCallerAbi::C => {
+                    // SolAccountInfo is 56 bytes; data_len at offset 16
+                    let data_len_addr = account_infos_addr + (i as u64) * 56 + 16;
+                    let _ = vm
+                        .memory
+                        .write_slice(data_len_addr, &(*new_len as u64).to_le_bytes());
+                }
+                CpiCallerAbi::Rust => {
+                    // AccountInfo is 48 bytes; Rc pointer at offset 16
+                    let rc_ptr_addr = account_infos_addr + (i as u64) * 48 + 16;
+                    if let Ok(rc_ptr_bytes) = vm.memory.read_slice(rc_ptr_addr, 8) {
+                        let rc_ptr = u64::from_le_bytes(rc_ptr_bytes.try_into().unwrap());
+                        // RcBox layout: strong(8) + weak(8) + borrow_flag(8) + data_ptr(8) + len(8)
+                        // len is at rc_ptr + 32
+                        let len_addr = rc_ptr + 32;
+                        let _ = vm
+                            .memory
+                            .write_slice(len_addr, &(*new_len as u64).to_le_bytes());
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Read pubkey from C ABI SolAccountInfo at index `i`.
+fn read_c_account_info_pubkey(vm: &VmState, account_infos_addr: u64, i: usize) -> (Pubkey, bool) {
+    // SolAccountInfo is 56 bytes; key pointer at offset 0
+    let info_addr = account_infos_addr + (i as u64) * 56;
+    let key_ptr_bytes = match vm.memory.read_slice(info_addr, 8) {
+        Ok(b) => b,
+        Err(_) => return (Pubkey::default(), false),
+    };
+    let key_ptr = u64::from_le_bytes(key_ptr_bytes.try_into().unwrap());
+    let pk_bytes = match vm.memory.read_slice(key_ptr, 32) {
+        Ok(b) => b,
+        Err(_) => return (Pubkey::default(), false),
+    };
+    let mut pk = [0u8; 32];
+    pk.copy_from_slice(&pk_bytes);
+    (Pubkey::new(pk), true)
+}
+
+/// Read pubkey from Rust ABI AccountInfo at index `i`.
+fn read_rust_account_info_pubkey(
+    vm: &VmState,
+    account_infos_addr: u64,
+    i: usize,
+) -> (Pubkey, bool) {
+    // AccountInfo is 48 bytes; key pointer at offset 0
+    let info_addr = account_infos_addr + (i as u64) * 48;
+    let key_ptr_bytes = match vm.memory.read_slice(info_addr, 8) {
+        Ok(b) => b,
+        Err(_) => return (Pubkey::default(), false),
+    };
+    let key_ptr = u64::from_le_bytes(key_ptr_bytes.try_into().unwrap());
+    let pk_bytes = match vm.memory.read_slice(key_ptr, 32) {
+        Ok(b) => b,
+        Err(_) => return (Pubkey::default(), false),
+    };
+    let mut pk = [0u8; 32];
+    pk.copy_from_slice(&pk_bytes);
+    (Pubkey::new(pk), true)
 }
 
 impl SyscallHandler for SolInvokeCHandler {
@@ -2647,6 +2806,9 @@ impl SyscallHandler for SolInvokeCHandler {
             instruction_data,
             &cpi_account_metas,
             pda_signers,
+            CpiCallerAbi::C,
+            r2,
+            account_count,
         )
     }
 }
@@ -2739,6 +2901,9 @@ impl SyscallHandler for SolInvokeRustHandler {
             instruction_data,
             &cpi_account_metas,
             pda_signers,
+            CpiCallerAbi::Rust,
+            r2,
+            account_count,
         )
     }
 }
@@ -3710,7 +3875,7 @@ mod tests {
     // CPI input region tests
     // -----------------------------------------------------------------------
 
-    /// Build a minimal serialized input region with one account.
+    /// Build a minimal serialized input region with one account (aligned format).
     fn make_input_region(
         pubkey: &Pubkey,
         owner: &Pubkey,
@@ -3721,10 +3886,16 @@ mod tests {
         let mut buf = Vec::new();
         // account_count = 1
         buf.extend_from_slice(&1u64.to_le_bytes());
+        // NON_DUP_MARKER
+        buf.push(karstflow_constants::vm::NON_DUP_MARKER);
         // is_signer
         buf.push(0);
         // is_writable
         buf.push(if is_writable { 1 } else { 0 });
+        // is_executable
+        buf.push(0);
+        // padding (4 bytes)
+        buf.extend_from_slice(&0u32.to_le_bytes());
         // pubkey
         buf.extend_from_slice(pubkey.as_ref());
         // owner
@@ -3732,12 +3903,20 @@ mod tests {
         // lamports
         buf.extend_from_slice(&lamports.to_le_bytes());
         // data_len
-        buf.extend_from_slice(&(data.len() as u64).to_le_bytes());
+        let data_len = data.len();
+        buf.extend_from_slice(&(data_len as u64).to_le_bytes());
         // data
         buf.extend_from_slice(data);
-        // padding
-        let padding = (8 - (buf.len() % 8)) % 8;
-        buf.extend(std::iter::repeat_n(0u8, padding));
+        // realloc buffer (MAX_PERMITTED_DATA_INCREASE bytes, zeroed)
+        buf.resize(
+            buf.len() + karstflow_constants::vm::MAX_PERMITTED_DATA_INCREASE,
+            0,
+        );
+        // alignment padding
+        let align_offset = data_len.wrapping_neg() & (karstflow_constants::vm::ALIGN_OF_U128 - 1);
+        buf.resize(buf.len() + align_offset, 0);
+        // rent_epoch (8 bytes)
+        buf.extend_from_slice(&u64::MAX.to_le_bytes());
         buf
     }
 
@@ -3796,14 +3975,14 @@ mod tests {
     }
 
     #[test]
-    fn writeback_rejects_data_growth() {
+    fn writeback_allows_data_growth_within_realloc_limit() {
         let pk = Pubkey::new([1u8; 32]);
         let owner = Pubkey::new([2u8; 32]);
         let mut input = make_input_region(&pk, &owner, 1000, &[0; 8], true);
 
         let entries = scan_input_region(&input);
 
-        // Try to write back with larger data
+        // Growing from 8 to 16 bytes is within realloc buffer (MAX_PERMITTED_DATA_INCREASE)
         let modified = Account {
             meta: TypesAccountMeta {
                 lamports: 1000,
@@ -3811,7 +3990,33 @@ mod tests {
                 executable: false,
                 rent_epoch: 0,
             },
-            data: AccountData::new(vec![0; 16]), // 16 > original 8
+            data: AccountData::new(vec![0xCC; 16]),
+        };
+
+        writeback_account_to_input(&mut input, entries[0].offset, &modified).unwrap();
+
+        let (_, readback) = read_account_from_input(&input, entries[0].offset).unwrap();
+        assert_eq!(readback.data.as_slice(), &[0xCC; 16]);
+    }
+
+    #[test]
+    fn writeback_rejects_data_growth_beyond_realloc_limit() {
+        let pk = Pubkey::new([1u8; 32]);
+        let owner = Pubkey::new([2u8; 32]);
+        let mut input = make_input_region(&pk, &owner, 1000, &[0; 8], true);
+
+        let entries = scan_input_region(&input);
+
+        // Exceeding original + MAX_PERMITTED_DATA_INCREASE should fail
+        let too_large = vec![0; 8 + karstflow_constants::vm::MAX_PERMITTED_DATA_INCREASE + 1];
+        let modified = Account {
+            meta: TypesAccountMeta {
+                lamports: 1000,
+                owner,
+                executable: false,
+                rent_epoch: 0,
+            },
+            data: AccountData::new(too_large),
         };
 
         let result = writeback_account_to_input(&mut input, entries[0].offset, &modified);
@@ -3840,9 +4045,8 @@ mod tests {
         writeback_account_to_input(&mut input, entries[0].offset, &modified).unwrap();
 
         let (_, readback) = read_account_from_input(&input, entries[0].offset).unwrap();
-        // First 4 bytes are 0xBB, remaining 12 are zeroed
-        assert_eq!(&readback.data.as_slice()[..4], &[0xBB; 4]);
-        assert_eq!(&readback.data.as_slice()[4..], &[0; 12]);
+        // data_len is updated to 4; only the written bytes are returned
+        assert_eq!(readback.data.as_slice(), &[0xBB; 4]);
     }
 
     #[test]
@@ -3865,28 +4069,45 @@ mod tests {
         let mut buf = Vec::new();
         buf.extend_from_slice(&2u64.to_le_bytes()); // 2 accounts
 
-        // Account 1
-        buf.push(0);
-        buf.push(1); // is_signer=0, is_writable=1
+        // Account 1 (aligned format)
+        buf.push(karstflow_constants::vm::NON_DUP_MARKER);
+        buf.push(0); // is_signer
+        buf.push(1); // is_writable
+        buf.push(0); // is_executable
+        buf.extend_from_slice(&0u32.to_le_bytes()); // padding
         buf.extend_from_slice(pk1.as_ref());
         buf.extend_from_slice(owner.as_ref());
         buf.extend_from_slice(&100u64.to_le_bytes());
-        buf.extend_from_slice(&8u64.to_le_bytes());
+        let data1_len: usize = 8;
+        buf.extend_from_slice(&(data1_len as u64).to_le_bytes());
         buf.extend_from_slice(&[0xAA; 8]);
-        // No padding needed (8 + 2 + 32 + 32 + 8 + 8 + 8 = 98; 98%8=2 → pad 6)
-        let padding = (8 - (buf.len() % 8)) % 8;
-        buf.extend(std::iter::repeat_n(0u8, padding));
+        buf.resize(
+            buf.len() + karstflow_constants::vm::MAX_PERMITTED_DATA_INCREASE,
+            0,
+        );
+        let align1 = data1_len.wrapping_neg() & (karstflow_constants::vm::ALIGN_OF_U128 - 1);
+        buf.resize(buf.len() + align1, 0);
+        buf.extend_from_slice(&u64::MAX.to_le_bytes()); // rent_epoch
 
-        // Account 2
-        buf.push(0);
-        buf.push(0); // is_signer=0, is_writable=0
+        // Account 2 (aligned format)
+        buf.push(karstflow_constants::vm::NON_DUP_MARKER);
+        buf.push(0); // is_signer
+        buf.push(0); // is_writable
+        buf.push(0); // is_executable
+        buf.extend_from_slice(&0u32.to_le_bytes()); // padding
         buf.extend_from_slice(pk2.as_ref());
         buf.extend_from_slice(owner.as_ref());
         buf.extend_from_slice(&200u64.to_le_bytes());
-        buf.extend_from_slice(&4u64.to_le_bytes());
+        let data2_len: usize = 4;
+        buf.extend_from_slice(&(data2_len as u64).to_le_bytes());
         buf.extend_from_slice(&[0xBB; 4]);
-        let padding = (8 - (buf.len() % 8)) % 8;
-        buf.extend(std::iter::repeat_n(0u8, padding));
+        buf.resize(
+            buf.len() + karstflow_constants::vm::MAX_PERMITTED_DATA_INCREASE,
+            0,
+        );
+        let align2 = data2_len.wrapping_neg() & (karstflow_constants::vm::ALIGN_OF_U128 - 1);
+        buf.resize(buf.len() + align2, 0);
+        buf.extend_from_slice(&u64::MAX.to_le_bytes()); // rent_epoch
 
         let entries = scan_input_region(&buf);
         assert_eq!(entries.len(), 2);

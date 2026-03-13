@@ -7,6 +7,76 @@ use karstflow_execution::{
     ExecutionBatch, ExecutionFailureClass, ForkChoiceDirective, RetryDirective,
 };
 use karstflow_runtime::{RuntimeError, RuntimeResult, Service};
+use karstflow_storage::{
+    AccountAccessMode, AccountRef, Instruction as StorageInstruction,
+    Signature as StorageSignature, Transaction as StorageTransaction,
+};
+
+/// Convert a raw wire-format payload into a storage transaction.
+///
+/// Parses the wire bytes via `karstflow_types::parse_transaction`, then expands
+/// the indexed `CompiledInstruction` references into fully resolved `Instruction`
+/// values with actual pubkeys and access modes.
+fn convert_wire_to_storage_transaction(raw_payload: &[u8]) -> Result<StorageTransaction, String> {
+    let wire_tx = karstflow_types::parse_transaction(raw_payload)
+        .map_err(|e| format!("transaction parse error: {e}"))?;
+
+    let signatures = wire_tx
+        .signatures
+        .iter()
+        .map(|sig| StorageSignature::new(*sig.as_bytes()))
+        .collect::<Vec<_>>();
+
+    let mut instructions = Vec::with_capacity(wire_tx.message.instructions.len());
+    for compiled_ix in &wire_tx.message.instructions {
+        let program_id = *wire_tx
+            .message
+            .account_keys
+            .get(compiled_ix.program_id_index as usize)
+            .ok_or_else(|| {
+                format!(
+                    "program_id_index {} out of range ({})",
+                    compiled_ix.program_id_index,
+                    wire_tx.message.account_keys.len()
+                )
+            })?;
+
+        let mut accounts = Vec::with_capacity(compiled_ix.accounts.len());
+        for &account_index in &compiled_ix.accounts {
+            let pubkey = *wire_tx
+                .message
+                .account_keys
+                .get(account_index as usize)
+                .ok_or_else(|| {
+                    format!(
+                        "account_index {} out of range ({})",
+                        account_index,
+                        wire_tx.message.account_keys.len()
+                    )
+                })?;
+            let mode = if wire_tx.message.is_writable(account_index as usize) {
+                AccountAccessMode::Writable
+            } else {
+                AccountAccessMode::ReadOnly
+            };
+            accounts.push(AccountRef::new(pubkey, mode));
+        }
+
+        instructions.push(StorageInstruction::new(
+            program_id,
+            accounts,
+            compiled_ix.data.clone(),
+        ));
+    }
+
+    let recent_blockhash = wire_tx.message.recent_blockhash.to_bytes();
+
+    Ok(StorageTransaction::new(
+        signatures,
+        instructions,
+        recent_blockhash,
+    ))
+}
 
 impl BlockAssembler {
     fn attempt_fragment(
@@ -15,6 +85,7 @@ impl BlockAssembler {
         transaction_count: usize,
         total_cost_units: u64,
         retries_attempted: u8,
+        storage_transactions: Vec<StorageTransaction>,
     ) -> RuntimeResult<()> {
         self.slot_pipeline.on_fragment_execution_start();
         self.refresh_leader_gate_state();
@@ -40,6 +111,7 @@ impl BlockAssembler {
                     retries_attempted,
                     wait_ticks_remaining: Self::delay_to_ticks(retry_delay_millis),
                 });
+                self.pending_retry_transactions = Some(storage_transactions);
                 self.block_assembly_stats.increment_deferred_retries();
                 self.block_assembly_stats.set_pending_retries(1);
                 self.leader_gate_state.next_leader_slot =
@@ -48,13 +120,17 @@ impl BlockAssembler {
             }
         }
 
+        let batch = if storage_transactions.is_empty() {
+            ExecutionBatch::new(fragment_id, transaction_count, total_cost_units)
+        } else {
+            ExecutionBatch::with_transactions(
+                fragment_id,
+                storage_transactions.clone(),
+                total_cost_units,
+            )
+        };
         let (execution_outcome, execution_error) =
-            self.execution_bridge
-                .execute_batch_with_error(&ExecutionBatch::new(
-                    fragment_id,
-                    transaction_count,
-                    total_cost_units,
-                ));
+            self.execution_bridge.execute_batch_with_error(&batch);
         if let Some(error) = execution_error.as_ref() {
             self.block_assembly_stats.record_execution_error(error);
             self.consecutive_execution_errors = self.consecutive_execution_errors.saturating_add(1);
@@ -224,6 +300,7 @@ impl BlockAssembler {
                         transaction_count,
                         total_cost_units,
                         retries_attempted,
+                        storage_transactions,
                     );
                     return Ok(());
                 }
@@ -233,6 +310,7 @@ impl BlockAssembler {
         match retry_directive {
             RetryDirective::NoRetry => {
                 self.pending_retry = None;
+                self.pending_retry_transactions = None;
                 self.block_assembly_stats.set_pending_retries(0);
                 self.consecutive_transient_failures = 0;
                 self.commit_fragment(
@@ -247,6 +325,7 @@ impl BlockAssembler {
             }
             RetryDirective::DropCurrentFragment => {
                 self.pending_retry = None;
+                self.pending_retry_transactions = None;
                 self.block_assembly_stats
                     .increment_dropped_for_failure_class(execution_outcome.failure_class);
                 self.drop_current_fragment();
@@ -261,6 +340,7 @@ impl BlockAssembler {
                     .min(failure_class_retry_budget);
                 if retries_attempted >= effective_retry_budget {
                     self.pending_retry = None;
+                    self.pending_retry_transactions = None;
                     self.block_assembly_stats
                         .increment_dropped_for_failure_class(execution_outcome.failure_class);
                     self.drop_current_fragment();
@@ -281,6 +361,7 @@ impl BlockAssembler {
                         retries_attempted: retries_attempted.saturating_add(1),
                         wait_ticks_remaining: Self::delay_to_ticks(capped_retry_delay),
                     });
+                    self.pending_retry_transactions = Some(storage_transactions);
                     self.slot_pipeline.on_retry_scheduled();
                     self.block_assembly_stats.increment_deferred_retries();
                     self.block_assembly_stats
@@ -396,10 +477,12 @@ impl BlockAssembler {
         transaction_count: usize,
         total_cost_units: u64,
         retries_attempted: u8,
+        storage_transactions: Vec<StorageTransaction>,
     ) {
         let policy = self.storage_runtime_policy.fork_choice_runtime_policy;
         if retries_attempted >= policy.max_reorg_retry_attempts {
             self.pending_retry = None;
+            self.pending_retry_transactions = None;
             self.block_assembly_stats
                 .increment_dropped_reorg_retry_exhausted();
             self.drop_current_fragment();
@@ -413,6 +496,7 @@ impl BlockAssembler {
             retries_attempted: retries_attempted.saturating_add(1),
             wait_ticks_remaining: Self::delay_to_ticks(policy.reorg_retry_delay_millis),
         });
+        self.pending_retry_transactions = Some(storage_transactions);
         self.slot_pipeline.on_retry_scheduled();
         self.block_assembly_stats.increment_deferred_retries();
         self.block_assembly_stats.set_pending_retries(1);
@@ -440,6 +524,7 @@ impl BlockAssembler {
         self.dropped_fragments = self.dropped_fragments.saturating_add(1);
         self.block_assembly_stats.increment_dropped_fragments();
         self.block_assembly_stats.set_pending_retries(0);
+        self.pending_retry_transactions = None;
     }
 
     pub(super) fn process_pending_retry(&mut self) -> RuntimeResult<()> {
@@ -456,11 +541,13 @@ impl BlockAssembler {
             return Ok(());
         }
 
+        let retry_transactions = self.pending_retry_transactions.take().unwrap_or_default();
         self.attempt_fragment(
             pending.fragment_id,
             pending.transaction_count,
             pending.total_cost_units,
             pending.retries_attempted,
+            retry_transactions,
         )
     }
 
@@ -486,11 +573,27 @@ impl BlockAssembler {
             fragment_id: self.fragment_counter,
             transaction_count: self.buffered_transactions,
         };
+
+        let payloads = std::mem::take(&mut self.buffered_transaction_payloads);
+        let mut storage_transactions = Vec::with_capacity(payloads.len());
+        for payload in &payloads {
+            if payload.raw_payload.is_empty() {
+                continue;
+            }
+            match convert_wire_to_storage_transaction(&payload.raw_payload) {
+                Ok(tx) => storage_transactions.push(tx),
+                Err(_) => {
+                    // Malformed transaction — skip it, don't block the fragment.
+                }
+            }
+        }
+
         self.attempt_fragment(
             assembled_fragment.fragment_id,
             assembled_fragment.transaction_count,
             self.buffered_cost_units,
             0,
+            storage_transactions,
         )?;
         self.buffered_transactions = 0;
         self.buffered_cost_units = 0;

@@ -50,6 +50,7 @@ impl Service for BlockAssembler {
                         .buffered_cost_units
                         .saturating_add(transaction.estimated_cost_units);
                     self.buffered_ticks = 0;
+                    self.buffered_transaction_payloads.push(transaction);
                 }
                 self.try_assemble_buffered_fragment()?;
                 Ok(())
