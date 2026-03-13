@@ -468,6 +468,10 @@ impl Default for RuntimeSyscallDispatch {
 }
 
 impl SyscallDispatch for RuntimeSyscallDispatch {
+    fn has_handler(&self, syscall_id: u32) -> bool {
+        self.handlers.contains_key(&syscall_id)
+    }
+
     fn dispatch(&self, syscall_id: u32, vm: &mut VmState) -> Result<(), VmError> {
         let handler = self
             .handlers
@@ -480,6 +484,11 @@ impl SyscallDispatch for RuntimeSyscallDispatch {
         let r4 = vm.registers[4];
         let r5 = vm.registers[5];
 
+        #[cfg(test)]
+        eprintln!(
+            "[SYSCALL] PC={} id=0x{:08X} r1=0x{:X} r2=0x{:X} r3=0x{:X} r4=0x{:X} r5=0x{:X}",
+            vm.pc, syscall_id, r1, r2, r3, r4, r5
+        );
         let result = handler.call(vm, r1, r2, r3, r4, r5)?;
         vm.registers[0] = result;
         Ok(())
@@ -733,13 +742,22 @@ impl SyscallHandler for SolMemcpyHandler {
         let cost = syscalls::MEMCPY_BASE_COST + (len as u64) * syscalls::MEMCPY_PER_BYTE_COST;
         deduct_compute(vm, cost)?;
 
-        let data = vm
-            .memory
-            .read_slice(r2, len)
-            .map_err(|e| VmError::MemoryError(e.to_string()))?;
-        vm.memory
-            .write_slice(r1, &data)
-            .map_err(|e| VmError::MemoryError(e.to_string()))?;
+        let data = vm.memory.read_slice(r2, len).map_err(|e| {
+            #[cfg(test)]
+            eprintln!(
+                "[MEMCPY] read fail: src=0x{:X} len={} err={e} PC={}",
+                r2, len, vm.pc
+            );
+            VmError::MemoryError(e.to_string())
+        })?;
+        vm.memory.write_slice(r1, &data).map_err(|e| {
+            #[cfg(test)]
+            eprintln!(
+                "[MEMCPY] write fail: dst=0x{:X} len={} err={e} PC={}",
+                r1, len, vm.pc
+            );
+            VmError::MemoryError(e.to_string())
+        })?;
 
         Ok(0)
     }

@@ -289,6 +289,7 @@ mod tests {
             call_targets: HashMap::new(),
             sbpf_version: SbpfVersion::V0,
             text_bytes: Vec::new(),
+            text_file_offset: 0,
         }
     }
 

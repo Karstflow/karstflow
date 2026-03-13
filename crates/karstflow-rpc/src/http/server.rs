@@ -114,11 +114,10 @@ pub fn spawn_rpc_ws_server(
     runtime_snapshot_provider: Option<Arc<dyn RuntimeSnapshotProvider>>,
     bank_access_provider: Option<Arc<dyn BankAccessProvider>>,
 ) -> Result<()> {
-    let bind_probe = TcpListener::bind(ws_bind_addr)
-        .map_err(|source| RpcError::RpcHttpBind {
-            bind_addr: ws_bind_addr,
-            source,
-        })?;
+    let bind_probe = TcpListener::bind(ws_bind_addr).map_err(|source| RpcError::RpcHttpBind {
+        bind_addr: ws_bind_addr,
+        source,
+    })?;
     drop(bind_probe);
 
     info!(%ws_bind_addr, full_api, "serving WebSocket subscriptions");

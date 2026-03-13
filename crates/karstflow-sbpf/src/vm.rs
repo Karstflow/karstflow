@@ -11,7 +11,7 @@ use crate::program_cache::ProgramCache;
 use crate::syscall_dispatch::{InstructionExecutor, RuntimeSyscallDispatch};
 use crate::sysvar_snapshot::SysvarSnapshot;
 use crate::validation;
-use karstflow_constants::vm::DEFAULT_HEAP_SIZE;
+use karstflow_constants::vm::{DEFAULT_HEAP_SIZE, TOTAL_STACK_SIZE};
 use karstflow_ids::{
     BPF_LOADER_DEPRECATED_PROGRAM_ID, BPF_LOADER_PROGRAM_ID, BPF_LOADER_V2_PROGRAM_ID,
     LOADER_V4_PROGRAM_ID, SYSTEM_PROGRAM_ID, VOTE_PROGRAM_ID,
@@ -203,21 +203,23 @@ impl BytecodeVm {
 
     /// Load and validate a program from raw ELF bytes.
     fn load_program(&self, elf_bytes: &[u8]) -> Result<LoadedProgram, SbpfExecutionError> {
-        let program = crate::elf_loader::load_elf(elf_bytes)
-            .map_err(|e| {
-                SbpfExecutionError::ExecutionFailed {
-                    message: format!("ELF load: {e}"),
-                }
-            })?;
+        let program = crate::elf_loader::load_elf(elf_bytes).map_err(|e| {
+            SbpfExecutionError::ExecutionFailed {
+                message: format!("ELF load: {e}"),
+            }
+        })?;
 
         let syscall_ids = self.syscall_dispatch.registered_ids();
-        validation::validate(&program, &syscall_ids)
-            .map_err(|errors| {
-                let sample: Vec<String> = errors.iter().take(3).map(|e| e.to_string()).collect();
-                SbpfExecutionError::ExecutionFailed {
-                    message: format!("validation: {} errors — {}", errors.len(), sample.join("; ")),
-                }
-            })?;
+        validation::validate(&program, &syscall_ids).map_err(|errors| {
+            let sample: Vec<String> = errors.iter().take(3).map(|e| e.to_string()).collect();
+            SbpfExecutionError::ExecutionFailed {
+                message: format!(
+                    "validation: {} errors — {}",
+                    errors.len(),
+                    sample.join("; ")
+                ),
+            }
+        })?;
 
         Ok(program)
     }
@@ -327,7 +329,8 @@ impl BytecodeVm {
             &program.rodata
         };
 
-        let memory = MemoryMap::new(rodata, DEFAULT_HEAP_SIZE, DEFAULT_HEAP_SIZE, input_buffer);
+        let mut memory = MemoryMap::new(rodata, TOTAL_STACK_SIZE, DEFAULT_HEAP_SIZE, input_buffer);
+        memory.set_dynamic_frames(true);
 
         // Use the context's snapshot if provided, falling back to the VM default.
         let snapshot = context
@@ -1150,5 +1153,73 @@ mod tests {
             result.is_err(),
             "Without deplete feature, VM error should return Err"
         );
+    }
+
+    #[test]
+    fn bytecode_vm_loads_and_runs_hello_log_so() {
+        use crate::bpf_serialization;
+        use crate::interpreter;
+        use crate::memory::MemoryMap;
+        use karstflow_constants::vm::{DEFAULT_HEAP_SIZE, TOTAL_STACK_SIZE};
+
+        // Load the real hello_log.so fixture (compiled Solana program)
+        let fixture_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .join("karstflow-tests/fixtures/programs/hello_log.so");
+
+        if !fixture_path.exists() {
+            return;
+        }
+
+        let elf_bytes = std::fs::read(&fixture_path).unwrap();
+
+        // Load and validate the ELF
+        let program = crate::elf_loader::load_elf(&elf_bytes).unwrap();
+        let inner_dispatch =
+            crate::syscall_dispatch::RuntimeSyscallDispatch::with_standard_syscalls();
+        let syscall_ids = inner_dispatch.registered_ids();
+        crate::validation::validate(&program, &syscall_ids).unwrap();
+
+        // Serialize minimal input (no accounts, empty instruction data)
+        let program_id = Pubkey::new_unique();
+        let serialized = bpf_serialization::serialize_aligned(
+            &[], // no accounts
+            &[], // empty instruction data
+            &program_id,
+        )
+        .unwrap();
+
+        // program.rodata is the full ELF image with relocations applied.
+        // It must be mapped at REGION_PROGRAM_BASE so relocated addresses resolve correctly.
+        let memory = MemoryMap::new(
+            &program.rodata,
+            TOTAL_STACK_SIZE,
+            DEFAULT_HEAP_SIZE,
+            serialized.buffer,
+        );
+
+        let result = interpreter::execute(
+            &program,
+            memory,
+            1_000_000,
+            &inner_dispatch,
+            crate::sysvar_snapshot::SysvarSnapshot::default(),
+        );
+
+        match result {
+            Ok(r) => {
+                assert_eq!(r.return_value, 0, "hello_log should return 0");
+                assert!(r.logs.iter().any(|l| l.contains("hello-log: program_id=")));
+                assert!(r.logs.iter().any(|l| l.contains("hello-log: success")));
+            }
+            Err(ref e) => {
+                panic!("hello_log execution failed: {e}");
+            }
+        }
     }
 }

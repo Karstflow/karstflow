@@ -6,7 +6,7 @@
 /// a distinct 4 GB range identified by the high nibble of the address.
 use karstflow_constants::vm::{
     MAX_CALL_DEPTH, REGION_HEAP_BASE, REGION_INDEX_MASK, REGION_INPUT_BASE, REGION_OFFSET_MASK,
-    REGION_PROGRAM_BASE, REGION_STACK_BASE, STACK_FRAME_SIZE, STACK_GUARD_SIZE,
+    REGION_PROGRAM_BASE, REGION_STACK_BASE, STACK_FRAME_SIZE,
 };
 
 // ---------------------------------------------------------------------------
@@ -170,6 +170,8 @@ pub struct MemoryMap {
     input: MemoryRegion,
     /// Current stack frame index (0-based).
     frame_index: usize,
+    /// V1+ dynamic stack frames (downward growth) vs V0 fixed (upward growth).
+    dynamic_frames: bool,
 }
 
 impl MemoryMap {
@@ -191,43 +193,59 @@ impl MemoryMap {
             heap: MemoryRegion::new(REGION_HEAP_BASE, vec![0u8; heap_size], true),
             input: MemoryRegion::new(REGION_INPUT_BASE, input_data, true),
             frame_index: 0,
+            dynamic_frames: false,
         }
+    }
+
+    /// Set whether dynamic stack frames are enabled (V1+).
+    pub fn set_dynamic_frames(&mut self, dynamic: bool) {
+        self.dynamic_frames = dynamic;
+    }
+
+    /// Whether dynamic stack frames are enabled.
+    pub fn has_dynamic_frames(&self) -> bool {
+        self.dynamic_frames
     }
 
     /// Get the current stack frame pointer address.
     ///
-    /// Points to the top of the current frame (highest address in frame).
+    /// **V0 (dynamic_frames=false):** Stack grows upward from bottom.
+    /// Initial fp = STACK_BASE + FRAME_SIZE. Each CALL increases fp by FRAME_SIZE.
+    /// Matches Solana rbpf V0 behavior.
+    ///
+    /// **V1+ (dynamic_frames=true):** Stack grows downward from top.
+    /// Initial fp = STACK_BASE + stack_size. Each CALL decreases fp by FRAME_SIZE.
+    ///
+    /// Programs always use negative offsets from r10: `[r10 - offset]`.
     pub fn frame_pointer(&self) -> u64 {
-        REGION_STACK_BASE + ((self.frame_index + 1) as u64) * (STACK_FRAME_SIZE as u64)
+        if self.dynamic_frames {
+            // V1+: downward from top
+            REGION_STACK_BASE + self.stack.len() as u64
+                - (self.frame_index as u64) * (STACK_FRAME_SIZE as u64)
+        } else {
+            // V0: upward from bottom
+            REGION_STACK_BASE + ((self.frame_index + 1) as u64) * (STACK_FRAME_SIZE as u64)
+        }
     }
 
     /// Push a new stack frame, returning the new frame pointer.
     ///
-    /// When `dynamic_frames` is false (V0), each call consumes
-    /// `STACK_FRAME_SIZE + STACK_GUARD_SIZE` bytes (frame + guard zone).
-    /// When `dynamic_frames` is true (V1+), frames are contiguous with
-    /// no guard zone, consuming only `STACK_FRAME_SIZE` bytes.
-    pub fn push_frame(&mut self, dynamic_frames: bool) -> Result<u64, MemoryError> {
-        let advance = if dynamic_frames {
-            1
-        } else {
-            // V0: frame + guard zone = 2 frame slots
-            2
-        };
-        if self.frame_index + advance >= self.max_frames() {
+    /// Both V0 and V1+ advance by one frame slot per call.
+    /// V0: fp increases (upward). V1+: fp decreases (downward).
+    pub fn push_frame(&mut self) -> Result<u64, MemoryError> {
+        if self.frame_index + 1 >= self.max_frames() {
             return Err(MemoryError::StackOverflow);
         }
-        self.frame_index += advance;
+        self.frame_index += 1;
         Ok(self.frame_pointer())
     }
 
     /// Pop the current stack frame, returning the restored frame pointer.
-    pub fn pop_frame(&mut self, dynamic_frames: bool) -> Result<u64, MemoryError> {
-        let retreat = if dynamic_frames { 1 } else { 2 };
-        if self.frame_index < retreat {
+    pub fn pop_frame(&mut self) -> Result<u64, MemoryError> {
+        if self.frame_index < 1 {
             return Err(MemoryError::StackUnderflow);
         }
-        self.frame_index -= retreat;
+        self.frame_index -= 1;
         Ok(self.frame_pointer())
     }
 
@@ -596,67 +614,74 @@ mod tests {
     }
 
     #[test]
-    fn push_pop_frames_dynamic() {
-        // V1+ dynamic frames: 1 frame slot per push
+    fn push_pop_frames_v0_upward() {
+        // V0 fixed frames: upward growth, 1 frame per push
         let mut map = MemoryMap::new(&[], 256 * 1024, 1024, vec![]);
+        // dynamic_frames=false (default) → V0 upward
         assert_eq!(map.frame_depth(), 0);
+        // Initial fp = STACK_BASE + 1 * FRAME_SIZE
+        assert_eq!(
+            map.frame_pointer(),
+            REGION_STACK_BASE + STACK_FRAME_SIZE as u64
+        );
 
-        let fp1 = map.push_frame(true).unwrap();
+        let fp1 = map.push_frame().unwrap();
         assert_eq!(map.frame_depth(), 1);
         assert_eq!(fp1, REGION_STACK_BASE + 2 * STACK_FRAME_SIZE as u64);
 
-        let fp2 = map.push_frame(true).unwrap();
+        let fp2 = map.push_frame().unwrap();
         assert_eq!(map.frame_depth(), 2);
         assert_eq!(fp2, REGION_STACK_BASE + 3 * STACK_FRAME_SIZE as u64);
 
-        let fp_after_pop = map.pop_frame(true).unwrap();
+        let fp_after_pop = map.pop_frame().unwrap();
         assert_eq!(map.frame_depth(), 1);
         assert_eq!(fp_after_pop, fp1);
     }
 
     #[test]
-    fn push_pop_frames_v0_with_guard() {
-        // V0 fixed frames: 2 frame slots per push (frame + guard)
-        let mut map = MemoryMap::new(&[], 256 * 1024, 1024, vec![]);
+    fn push_pop_frames_v1_downward() {
+        // V1+ dynamic frames: downward growth
+        let stack_size = 256 * 1024;
+        let mut map = MemoryMap::new(&[], stack_size, 1024, vec![]);
+        map.set_dynamic_frames(true);
         assert_eq!(map.frame_depth(), 0);
+        // Initial fp = STACK_BASE + stack_size
+        assert_eq!(map.frame_pointer(), REGION_STACK_BASE + stack_size as u64);
 
-        let fp1 = map.push_frame(false).unwrap();
-        assert_eq!(map.frame_depth(), 2); // Advanced by 2
-        assert_eq!(fp1, REGION_STACK_BASE + 3 * STACK_FRAME_SIZE as u64);
+        let fp1 = map.push_frame().unwrap();
+        assert_eq!(map.frame_depth(), 1);
+        // fp decreases: STACK_BASE + stack_size - 1 * FRAME_SIZE
+        assert_eq!(
+            fp1,
+            REGION_STACK_BASE + stack_size as u64 - STACK_FRAME_SIZE as u64
+        );
 
-        let fp_after_pop = map.pop_frame(false).unwrap();
-        assert_eq!(map.frame_depth(), 0);
-        assert_eq!(fp_after_pop, REGION_STACK_BASE + STACK_FRAME_SIZE as u64);
+        let fp2 = map.push_frame().unwrap();
+        assert_eq!(map.frame_depth(), 2);
+        assert_eq!(
+            fp2,
+            REGION_STACK_BASE + stack_size as u64 - 2 * STACK_FRAME_SIZE as u64
+        );
+
+        let fp_after_pop = map.pop_frame().unwrap();
+        assert_eq!(map.frame_depth(), 1);
+        assert_eq!(fp_after_pop, fp1);
     }
 
     #[test]
-    fn stack_overflow_dynamic() {
+    fn stack_overflow() {
         let mut map = MemoryMap::new(&[], MAX_CALL_DEPTH * STACK_FRAME_SIZE, 1024, vec![]);
         for _ in 0..MAX_CALL_DEPTH - 1 {
-            map.push_frame(true).unwrap();
+            map.push_frame().unwrap();
         }
-        let result = map.push_frame(true);
-        assert!(matches!(result, Err(MemoryError::StackOverflow)));
-    }
-
-    #[test]
-    fn stack_overflow_v0() {
-        // V0 uses 2 slots per push, so half the call depth
-        let total_frames = MAX_CALL_DEPTH;
-        let mut map = MemoryMap::new(&[], total_frames * STACK_FRAME_SIZE, 1024, vec![]);
-        // Each push consumes 2 frame slots; we can do (total_frames - 1) / 2 pushes
-        let max_pushes = (total_frames - 1) / 2;
-        for _ in 0..max_pushes {
-            map.push_frame(false).unwrap();
-        }
-        let result = map.push_frame(false);
+        let result = map.push_frame();
         assert!(matches!(result, Err(MemoryError::StackOverflow)));
     }
 
     #[test]
     fn stack_underflow() {
         let mut map = make_map();
-        let result = map.pop_frame(true);
+        let result = map.pop_frame();
         assert!(matches!(result, Err(MemoryError::StackUnderflow)));
     }
 
