@@ -449,13 +449,13 @@ impl RuntimeSyscallDispatch {
         let mut dispatch = Self::with_standard_syscalls();
         dispatch.register_by_name(
             "sol_invoke_signed_c",
-            Box::new(SolInvokeHandler {
+            Box::new(SolInvokeCHandler {
                 executor: executor.clone(),
             }),
         );
         dispatch.register_by_name(
             "sol_invoke_signed_rust",
-            Box::new(SolInvokeHandler { executor }),
+            Box::new(SolInvokeRustHandler { executor }),
         );
         dispatch
     }
@@ -2222,9 +2222,16 @@ impl SyscallHandler for SolAllocHandler {
 ///
 /// Reads a CPI instruction from VM memory, validates privileges and depth,
 /// then executes the target program through the InstructionExecutor.
+/// CPI handler for the C ABI (`sol_invoke_signed_c`).
 /// Account data is read from the caller's serialized input region and
 /// written back after execution for writable accounts.
-struct SolInvokeHandler {
+struct SolInvokeCHandler {
+    executor: Arc<dyn InstructionExecutor>,
+}
+
+/// CPI handler for the Rust ABI (`sol_invoke_signed_rust`).
+/// Rust programs compiled with solana-program SDK use this variant.
+struct SolInvokeRustHandler {
     executor: Arc<dyn InstructionExecutor>,
 }
 
@@ -2378,31 +2385,194 @@ fn writeback_account_to_input(
     Ok(())
 }
 
-impl SyscallHandler for SolInvokeHandler {
+/// Result of PDA signer derivation from CPI signer seeds.
+enum PdaSignerResult {
+    /// Successfully derived PDA signers.
+    Ok(std::collections::HashSet<Pubkey>),
+    /// Validation failure — return this value to the caller program.
+    Failed(u64),
+    /// VM-level error (memory access violation).
+    VmError(VmError),
+}
+
+/// Derive PDA signers from signer seeds in VM memory.
+/// Layout: r4 points to array of (addr: u64, len: u64) = 16 bytes each.
+/// Each entry points to an array of seed slices (addr: u64, len: u64).
+fn derive_pda_signers(vm: &mut VmState, r4: u64, r5: u64) -> PdaSignerResult {
+    let signer_seeds_count = r5 as usize;
+    let mut pda_signers = std::collections::HashSet::new();
+    if signer_seeds_count == 0 || signer_seeds_count > syscalls::MAX_CPI_SIGNERS {
+        return PdaSignerResult::Ok(pda_signers);
+    }
+    let caller_program_id = vm.program_id;
+    for s in 0..signer_seeds_count {
+        let entry_offset = r4 + (s as u64) * 16;
+        let entry_bytes = match vm.memory.read_slice(entry_offset, 16) {
+            Ok(b) => b,
+            Err(e) => return PdaSignerResult::VmError(VmError::MemoryError(e.to_string())),
+        };
+        let seeds_ptr = u64::from_le_bytes(entry_bytes[0..8].try_into().unwrap());
+        let seeds_len = u64::from_le_bytes(entry_bytes[8..16].try_into().unwrap()) as usize;
+
+        if seeds_len > syscalls::MAX_SIGNER_SEEDS {
+            try_append_log(vm, "Too many seeds for PDA signer".to_string());
+            return PdaSignerResult::Failed(1);
+        }
+
+        let mut seed_data = Vec::with_capacity(seeds_len);
+        for i in 0..seeds_len {
+            let pair_offset = seeds_ptr + (i as u64) * 16;
+            let ptr_bytes = match vm.memory.read_slice(pair_offset, 8) {
+                Ok(b) => b,
+                Err(e) => return PdaSignerResult::VmError(VmError::MemoryError(e.to_string())),
+            };
+            let len_bytes = match vm.memory.read_slice(pair_offset + 8, 8) {
+                Ok(b) => b,
+                Err(e) => return PdaSignerResult::VmError(VmError::MemoryError(e.to_string())),
+            };
+            let ptr = u64::from_le_bytes(ptr_bytes.try_into().unwrap());
+            let len = u64::from_le_bytes(len_bytes.try_into().unwrap()) as usize;
+            if len > syscalls::MAX_SEED_BYTES {
+                try_append_log(vm, "Seed too long for PDA signer".to_string());
+                return PdaSignerResult::Failed(1);
+            }
+            let seed = match vm.memory.read_slice(ptr, len) {
+                Ok(b) => b,
+                Err(e) => return PdaSignerResult::VmError(VmError::MemoryError(e.to_string())),
+            };
+            seed_data.push(seed);
+        }
+
+        let mut hasher = Sha256::new();
+        for seed in &seed_data {
+            hasher.update(seed);
+        }
+        hasher.update(caller_program_id.as_ref());
+        hasher.update(b"ProgramDerivedAddress");
+        let hash: [u8; 32] = hasher.finalize().into();
+
+        if is_on_ed25519_curve(&hash) {
+            try_append_log(vm, "Derived address is on ed25519 curve".to_string());
+            return PdaSignerResult::Failed(1);
+        }
+
+        pda_signers.insert(Pubkey::new(hash));
+    }
+    PdaSignerResult::Ok(pda_signers)
+}
+
+/// Common CPI execution: resolve accounts, dispatch, writeback.
+fn execute_cpi(
+    executor: &Arc<dyn InstructionExecutor>,
+    vm: &mut VmState,
+    target_program_id: Pubkey,
+    instruction_data: Vec<u8>,
+    cpi_account_metas: &[(Pubkey, bool, bool)], // (pubkey, is_signer, is_writable)
+    pda_signers: std::collections::HashSet<Pubkey>,
+) -> Result<u64, VmError> {
+    // Scan the input region to build an offset table for account lookup
+    let input_data = vm.memory.input_data().to_vec();
+    let input_entries = scan_input_region(&input_data);
+
+    // Build the signers set: accounts marked as signer + PDA-derived signers
+    let mut signers = pda_signers;
+    for (pubkey, is_signer, _is_writable) in cpi_account_metas {
+        if *is_signer {
+            signers.insert(*pubkey);
+        }
+    }
+
+    // Build execution accounts from the input region
+    let mut accounts = Vec::new();
+    for (pubkey, _is_signer, is_writable) in cpi_account_metas {
+        let account = if let Some(entry) = input_entries.iter().find(|e| e.pubkey == *pubkey) {
+            if let Some((_is_wr, acct)) = read_account_from_input(&input_data, entry.offset) {
+                acct
+            } else {
+                Account::default()
+            }
+        } else {
+            Account::default()
+        };
+        accounts.push((*pubkey, account, *is_writable));
+    }
+
+    let context =
+        ExecutionContext::new(target_program_id, accounts, instruction_data).with_signers(signers);
+
+    vm.cpi_depth += 1;
+    let result = executor.execute_instruction(context);
+    vm.cpi_depth -= 1;
+
+    match result {
+        Ok(outcome) => {
+            if outcome.success {
+                let input_mut = unsafe {
+                    let ptr = vm.memory.input_data().as_ptr() as *mut u8;
+                    let len = vm.memory.input_data().len();
+                    std::slice::from_raw_parts_mut(ptr, len)
+                };
+
+                for (pubkey, modified_account) in &outcome.modified_accounts {
+                    if let Some(entry) = input_entries.iter().find(|e| e.pubkey == *pubkey) {
+                        let is_writable = cpi_account_metas
+                            .iter()
+                            .any(|(pk, _, w)| pk == pubkey && *w);
+                        if is_writable {
+                            writeback_account_to_input(input_mut, entry.offset, modified_account)?;
+                        }
+                    }
+                }
+            }
+
+            for log in &outcome.logs {
+                if !try_append_log(vm, log.clone()) {
+                    break;
+                }
+            }
+
+            if let Some(data) = outcome.return_data {
+                vm.return_data = Some(data);
+            }
+
+            if vm.compute_meter >= outcome.compute_units_consumed {
+                vm.compute_meter -= outcome.compute_units_consumed;
+            } else {
+                vm.compute_meter = 0;
+                return Err(VmError::ComputeBudgetExceeded);
+            }
+
+            if outcome.success {
+                Ok(0)
+            } else {
+                Ok(1)
+            }
+        }
+        Err(_) => Ok(1),
+    }
+}
+
+impl SyscallHandler for SolInvokeCHandler {
     fn call(
         &self,
         vm: &mut VmState,
-        r1: u64, // instruction pointer
+        r1: u64, // instruction pointer (C ABI)
         r2: u64, // account infos pointer
         r3: u64, // account infos count
-        r4: u64, // signer seeds pointer (unused for now)
-        r5: u64, // signer seeds count (unused for now)
+        r4: u64, // signer seeds pointer
+        r5: u64, // signer seeds count
     ) -> Result<u64, VmError> {
         let account_count = r3 as usize;
-
-        // Compute cost proportional to accounts and data
         let base_cost =
             syscalls::CPI_BASE_COST + syscalls::CPI_PER_ACCOUNT_COST * account_count as u64;
         deduct_compute(vm, base_cost)?;
 
-        // Enforce CPI depth limit using dedicated counter
         if vm.cpi_depth >= syscalls::MAX_CPI_DEPTH {
             try_append_log(vm, "CPI depth limit exceeded".to_string());
             return Ok(1);
         }
 
-        // Read instruction from VM memory:
-        // C ABI layout: program_id_ptr(8) + accounts_ptr(8) + accounts_len(8) + data_ptr(8) + data_len(8)
+        // C ABI layout: program_id_ptr(8) + accounts_ptr(8) + accounts_len(8) + data_ptr(8) + data_len(8) = 40
         let instr_bytes = vm
             .memory
             .read_slice(r1, 40)
@@ -2414,7 +2584,6 @@ impl SyscallHandler for SolInvokeHandler {
         let data_ptr = u64::from_le_bytes(instr_bytes[24..32].try_into().unwrap());
         let data_len = u64::from_le_bytes(instr_bytes[32..40].try_into().unwrap()) as usize;
 
-        // Enforce limits
         if acct_metas_len > syscalls::MAX_CPI_INSTRUCTION_ACCOUNTS {
             try_append_log(vm, "Too many CPI instruction accounts".to_string());
             return Ok(1);
@@ -2424,7 +2593,6 @@ impl SyscallHandler for SolInvokeHandler {
             return Ok(1);
         }
 
-        // Read program ID (32 bytes)
         let program_id_bytes = vm
             .memory
             .read_slice(program_id_ptr, 32)
@@ -2433,7 +2601,6 @@ impl SyscallHandler for SolInvokeHandler {
         pid.copy_from_slice(&program_id_bytes);
         let target_program_id = Pubkey::new(pid);
 
-        // Read instruction data
         let instruction_data = if data_len > 0 {
             vm.memory
                 .read_slice(data_ptr, data_len)
@@ -2441,23 +2608,20 @@ impl SyscallHandler for SolInvokeHandler {
         } else {
             vec![]
         };
+        deduct_compute(vm, syscalls::CPI_PER_DATA_BYTE_COST * data_len as u64)?;
 
-        // Deduct per-data-byte cost
-        let data_cost = syscalls::CPI_PER_DATA_BYTE_COST * data_len as u64;
-        deduct_compute(vm, data_cost)?;
-
-        // Read account metas: each is (pubkey_ptr:8, is_signer:8, is_writable:8) = 24 bytes
+        // C ABI AccountMeta: (pubkey_addr:u64, is_writable:u8, is_signer:u8, pad[6]) = 16 bytes
         let mut cpi_account_metas = Vec::with_capacity(acct_metas_len);
         for i in 0..acct_metas_len {
-            let meta_offset = acct_metas_ptr + (i as u64) * 24;
+            let meta_offset = acct_metas_ptr + (i as u64) * 16;
             let meta_bytes = vm
                 .memory
-                .read_slice(meta_offset, 24)
+                .read_slice(meta_offset, 16)
                 .map_err(|e| VmError::MemoryError(e.to_string()))?;
 
             let pk_ptr = u64::from_le_bytes(meta_bytes[0..8].try_into().unwrap());
-            let is_signer = u64::from_le_bytes(meta_bytes[8..16].try_into().unwrap()) != 0;
-            let is_writable = u64::from_le_bytes(meta_bytes[16..24].try_into().unwrap()) != 0;
+            let is_writable = meta_bytes[8] != 0;
+            let is_signer = meta_bytes[9] != 0;
 
             let pk_bytes = vm
                 .memory
@@ -2469,90 +2633,113 @@ impl SyscallHandler for SolInvokeHandler {
             cpi_account_metas.push((Pubkey::new(pk), is_signer, is_writable));
         }
 
-        // Scan the input region to build an offset table for account lookup
-        let input_data = vm.memory.input_data().to_vec();
-        let input_entries = scan_input_region(&input_data);
+        // Derive PDA signers
+        let pda_signers = match derive_pda_signers(vm, r4, r5) {
+            PdaSignerResult::Ok(signers) => signers,
+            PdaSignerResult::Failed(code) => return Ok(code),
+            PdaSignerResult::VmError(e) => return Err(e),
+        };
 
-        // Build execution accounts from the input region
-        let mut accounts = Vec::new();
-        for (pubkey, _is_signer, is_writable) in &cpi_account_metas {
-            // Find this account in the input region
-            let account = if let Some(entry) = input_entries.iter().find(|e| e.pubkey == *pubkey) {
-                if let Some((_is_wr, acct)) = read_account_from_input(&input_data, entry.offset) {
-                    acct
-                } else {
-                    Account::default()
-                }
-            } else {
-                Account::default()
-            };
-            accounts.push((*pubkey, account, *is_writable));
+        execute_cpi(
+            &self.executor,
+            vm,
+            target_program_id,
+            instruction_data,
+            &cpi_account_metas,
+            pda_signers,
+        )
+    }
+}
+
+impl SyscallHandler for SolInvokeRustHandler {
+    fn call(
+        &self,
+        vm: &mut VmState,
+        r1: u64, // instruction pointer (Rust ABI)
+        r2: u64, // account infos pointer (unused — accounts come from input region)
+        r3: u64, // account infos count
+        r4: u64, // signer seeds pointer
+        r5: u64, // signer seeds count
+    ) -> Result<u64, VmError> {
+        let account_count = r3 as usize;
+        let base_cost =
+            syscalls::CPI_BASE_COST + syscalls::CPI_PER_ACCOUNT_COST * account_count as u64;
+        deduct_compute(vm, base_cost)?;
+
+        if vm.cpi_depth >= syscalls::MAX_CPI_DEPTH {
+            try_append_log(vm, "CPI depth limit exceeded".to_string());
+            return Ok(1);
         }
 
-        // Execute the target program
-        let context = ExecutionContext::new(target_program_id, accounts, instruction_data);
+        // Rust ABI Instruction layout (80 bytes):
+        //   [0..24]  accounts Vec: (addr:8, cap:8, len:8)
+        //   [24..48] data Vec:     (addr:8, cap:8, len:8)
+        //   [48..80] program_id:   [u8; 32] inline
+        let instr_bytes = vm
+            .memory
+            .read_slice(r1, 80)
+            .map_err(|e| VmError::MemoryError(e.to_string()))?;
 
-        vm.cpi_depth += 1;
-        let result = self.executor.execute_instruction(context);
-        vm.cpi_depth -= 1;
+        let acct_metas_ptr = u64::from_le_bytes(instr_bytes[0..8].try_into().unwrap());
+        let _acct_metas_cap = u64::from_le_bytes(instr_bytes[8..16].try_into().unwrap());
+        let acct_metas_len = u64::from_le_bytes(instr_bytes[16..24].try_into().unwrap()) as usize;
+        let data_ptr = u64::from_le_bytes(instr_bytes[24..32].try_into().unwrap());
+        let _data_cap = u64::from_le_bytes(instr_bytes[32..40].try_into().unwrap());
+        let data_len = u64::from_le_bytes(instr_bytes[40..48].try_into().unwrap()) as usize;
+        let mut pid = [0u8; 32];
+        pid.copy_from_slice(&instr_bytes[48..80]);
+        let target_program_id = Pubkey::new(pid);
 
-        match result {
-            Ok(outcome) => {
-                // Write back modified accounts to the caller's input region
-                if outcome.success {
-                    let input_mut = unsafe {
-                        // The input region is owned by this VM and we have &mut vm.
-                        // We need mutable access to write back account data.
-                        let ptr = vm.memory.input_data().as_ptr() as *mut u8;
-                        let len = vm.memory.input_data().len();
-                        std::slice::from_raw_parts_mut(ptr, len)
-                    };
-
-                    for (pubkey, modified_account) in &outcome.modified_accounts {
-                        if let Some(entry) = input_entries.iter().find(|e| e.pubkey == *pubkey) {
-                            // Only write back if the CPI meta marked it writable
-                            let is_writable = cpi_account_metas
-                                .iter()
-                                .any(|(pk, _, w)| pk == pubkey && *w);
-                            if is_writable {
-                                writeback_account_to_input(
-                                    input_mut,
-                                    entry.offset,
-                                    modified_account,
-                                )?;
-                            }
-                        }
-                    }
-                }
-
-                // Copy logs from callee
-                for log in &outcome.logs {
-                    if !try_append_log(vm, log.clone()) {
-                        break;
-                    }
-                }
-
-                // Store return data if any
-                if let Some(data) = outcome.return_data {
-                    vm.return_data = Some(data);
-                }
-
-                // Deduct compute units consumed by callee
-                if vm.compute_meter >= outcome.compute_units_consumed {
-                    vm.compute_meter -= outcome.compute_units_consumed;
-                } else {
-                    vm.compute_meter = 0;
-                    return Err(VmError::ComputeBudgetExceeded);
-                }
-
-                if outcome.success {
-                    Ok(0)
-                } else {
-                    Ok(1) // Callee returned error
-                }
-            }
-            Err(_) => Ok(1), // Execution error
+        if acct_metas_len > syscalls::MAX_CPI_INSTRUCTION_ACCOUNTS {
+            try_append_log(vm, "Too many CPI instruction accounts".to_string());
+            return Ok(1);
         }
+        if data_len > syscalls::MAX_CPI_INSTRUCTION_SIZE {
+            try_append_log(vm, "CPI instruction data too large".to_string());
+            return Ok(1);
+        }
+
+        let instruction_data = if data_len > 0 {
+            vm.memory
+                .read_slice(data_ptr, data_len)
+                .map_err(|e| VmError::MemoryError(e.to_string()))?
+        } else {
+            vec![]
+        };
+        deduct_compute(vm, syscalls::CPI_PER_DATA_BYTE_COST * data_len as u64)?;
+
+        // Rust ABI AccountMeta: (pubkey:[u8;32], is_signer:u8, is_writable:u8) = 34 bytes packed
+        let mut cpi_account_metas = Vec::with_capacity(acct_metas_len);
+        for i in 0..acct_metas_len {
+            let meta_offset = acct_metas_ptr + (i as u64) * 34;
+            let meta_bytes = vm
+                .memory
+                .read_slice(meta_offset, 34)
+                .map_err(|e| VmError::MemoryError(e.to_string()))?;
+
+            let mut pk = [0u8; 32];
+            pk.copy_from_slice(&meta_bytes[0..32]);
+            let is_signer = meta_bytes[32] != 0;
+            let is_writable = meta_bytes[33] != 0;
+
+            cpi_account_metas.push((Pubkey::new(pk), is_signer, is_writable));
+        }
+
+        // Derive PDA signers
+        let pda_signers = match derive_pda_signers(vm, r4, r5) {
+            PdaSignerResult::Ok(signers) => signers,
+            PdaSignerResult::Failed(code) => return Ok(code),
+            PdaSignerResult::VmError(e) => return Err(e),
+        };
+
+        execute_cpi(
+            &self.executor,
+            vm,
+            target_program_id,
+            instruction_data,
+            &cpi_account_metas,
+            pda_signers,
+        )
     }
 }
 
@@ -2877,6 +3064,7 @@ mod tests {
             10_000,
             &dispatch,
             crate::sysvar_snapshot::SysvarSnapshot::default(),
+            karstflow_types::Pubkey::default(),
         )
         .unwrap();
         assert_eq!(result.return_value, 42);
@@ -2907,6 +3095,7 @@ mod tests {
             100_000,
             &dispatch,
             crate::sysvar_snapshot::SysvarSnapshot::default(),
+            karstflow_types::Pubkey::default(),
         )
         .unwrap();
         assert!(result.logs.iter().any(|l| l.contains("Hi")));
@@ -2956,6 +3145,7 @@ mod tests {
             100_000,
             &dispatch,
             crate::sysvar_snapshot::SysvarSnapshot::default(),
+            karstflow_types::Pubkey::default(),
         )
         .unwrap();
         // Should return the heap base address
@@ -2977,6 +3167,7 @@ mod tests {
             10_000,
             &dispatch,
             crate::sysvar_snapshot::SysvarSnapshot::default(),
+            karstflow_types::Pubkey::default(),
         );
         assert!(matches!(result, Err(VmError::UnknownSyscall { id: 0xBAD })));
     }
@@ -3065,6 +3256,7 @@ mod tests {
             1_000_000,
             &dispatch,
             crate::sysvar_snapshot::SysvarSnapshot::default(),
+            karstflow_types::Pubkey::default(),
         )
         .unwrap();
 
@@ -3151,6 +3343,7 @@ mod tests {
             sysvar_snapshot: snapshot,
             cpi_depth: 0,
             sbpf_version: crate::elf_loader::SbpfVersion::V0,
+            program_id: karstflow_types::Pubkey::default(),
         }
     }
 
@@ -3713,7 +3906,7 @@ mod tests {
     fn cpi_depth_limit_uses_dedicated_field() {
         // Verify that CPI depth uses vm.cpi_depth, not call_stack.len()
         let executor = Arc::new(CountingExecutor::new());
-        let handler = SolInvokeHandler {
+        let handler = SolInvokeCHandler {
             executor: executor.clone(),
         };
 
@@ -3856,6 +4049,7 @@ mod tests {
             sysvar_snapshot: crate::sysvar_snapshot::SysvarSnapshot::default(),
             cpi_depth: 0,
             sbpf_version: crate::elf_loader::SbpfVersion::V0,
+            program_id: karstflow_types::Pubkey::default(),
         }
     }
 
@@ -4140,5 +4334,136 @@ mod tests {
         let result = handler.call(&mut vm, 0, 0, 0, 0, 0).unwrap();
         assert_eq!(result, 0);
         assert_eq!(vm.logs[0], "Program data: ");
+    }
+
+    // -----------------------------------------------------------------------
+    // C ABI CPI handler unit test
+    // -----------------------------------------------------------------------
+
+    /// Executor that captures the context it receives for assertion.
+    struct CapturingExecutor {
+        captured: std::sync::Mutex<Option<crate::ExecutionContext>>,
+    }
+
+    impl CapturingExecutor {
+        fn new() -> Self {
+            Self {
+                captured: std::sync::Mutex::new(None),
+            }
+        }
+
+        fn take(&self) -> Option<crate::ExecutionContext> {
+            self.captured.lock().unwrap().take()
+        }
+    }
+
+    impl InstructionExecutor for CapturingExecutor {
+        fn execute_instruction(
+            &self,
+            context: crate::ExecutionContext,
+        ) -> Result<crate::ExecutionOutcome, crate::SbpfExecutionError> {
+            *self.captured.lock().unwrap() = Some(context);
+            Ok(crate::ExecutionOutcome::success(50))
+        }
+    }
+
+    #[test]
+    fn cpi_c_abi_parses_instruction_correctly() {
+        use karstflow_constants::vm::REGION_INPUT_BASE;
+
+        let executor = Arc::new(CapturingExecutor::new());
+        let handler = SolInvokeCHandler {
+            executor: executor.clone(),
+        };
+
+        // --- Lay out C ABI structures in heap memory ---
+        // Heap layout:
+        //   0x000: target program_id (32 bytes)
+        //   0x020: account pubkey (32 bytes)
+        //   0x040: C ABI AccountMeta[1] (16 bytes)
+        //   0x050: instruction data (4 bytes)
+        //   0x060: C ABI Instruction (40 bytes)
+        let base = REGION_HEAP_BASE;
+        let program_id_addr = base; // 0x000
+        let acct_pubkey_addr = base + 0x20; // 0x020
+        let acct_metas_addr = base + 0x40; // 0x040
+        let idata_addr = base + 0x50; // 0x050
+        let instr_addr = base + 0x60; // 0x060
+
+        let target_pid = Pubkey::new([0xAA; 32]);
+        let acct_pk = Pubkey::new([0xBB; 32]);
+        let idata = [1u8, 2, 3, 4];
+
+        // Build input region with one account matching acct_pk
+        let owner = Pubkey::new([0xCC; 32]);
+        let input_data = make_input_region(&acct_pk, &owner, 5000, &[0; 8], true);
+
+        // Create VM with input region
+        let mut vm = VmState {
+            registers: [0u64; 11],
+            pc: 0,
+            instruction_count: 0,
+            memory: MemoryMap::new(&[], TOTAL_STACK_SIZE, DEFAULT_HEAP_SIZE, input_data),
+            call_stack: Vec::new(),
+            compute_meter: 10_000_000,
+            logs: Vec::new(),
+            log_bytes_written: 0,
+            log_truncated: false,
+            return_data: None,
+            heap_position: REGION_HEAP_BASE,
+            sysvar_snapshot: crate::sysvar_snapshot::SysvarSnapshot::default(),
+            cpi_depth: 0,
+            sbpf_version: crate::elf_loader::SbpfVersion::V0,
+            program_id: karstflow_types::Pubkey::default(),
+        };
+
+        // Write target program ID
+        vm.memory
+            .write_slice(program_id_addr, target_pid.as_ref())
+            .unwrap();
+
+        // Write account pubkey
+        vm.memory
+            .write_slice(acct_pubkey_addr, acct_pk.as_ref())
+            .unwrap();
+
+        // Write C ABI AccountMeta: pubkey_addr(8) + is_writable(1) + is_signer(1) + pad(6) = 16
+        let mut meta_buf = [0u8; 16];
+        meta_buf[0..8].copy_from_slice(&acct_pubkey_addr.to_le_bytes());
+        meta_buf[8] = 1; // is_writable
+        meta_buf[9] = 1; // is_signer
+        vm.memory.write_slice(acct_metas_addr, &meta_buf).unwrap();
+
+        // Write instruction data
+        vm.memory.write_slice(idata_addr, &idata).unwrap();
+
+        // Write C ABI Instruction: program_id_ptr(8) + accounts_ptr(8) + accounts_len(8) + data_ptr(8) + data_len(8) = 40
+        let mut instr_buf = [0u8; 40];
+        instr_buf[0..8].copy_from_slice(&program_id_addr.to_le_bytes());
+        instr_buf[8..16].copy_from_slice(&acct_metas_addr.to_le_bytes());
+        instr_buf[16..24].copy_from_slice(&1u64.to_le_bytes()); // 1 account meta
+        instr_buf[24..32].copy_from_slice(&idata_addr.to_le_bytes());
+        instr_buf[32..40].copy_from_slice(&(idata.len() as u64).to_le_bytes());
+        vm.memory.write_slice(instr_addr, &instr_buf).unwrap();
+
+        // --- Call the handler (no signer seeds: r4=0, r5=0) ---
+        let ret = handler
+            .call(&mut vm, instr_addr, REGION_INPUT_BASE, 1, 0, 0)
+            .unwrap();
+        assert_eq!(ret, 0, "CPI should succeed");
+
+        // --- Verify the executor received correctly parsed data ---
+        let ctx = executor.take().expect("executor should have been called");
+        assert_eq!(ctx.program_id, target_pid);
+        assert_eq!(ctx.instruction_data, idata.to_vec());
+        assert_eq!(ctx.accounts.len(), 1);
+        let (pk, acct, writable) = &ctx.accounts[0];
+        assert_eq!(*pk, acct_pk);
+        assert!(writable);
+        assert_eq!(acct.meta.lamports, 5000);
+        assert_eq!(acct.meta.owner, owner);
+
+        // Verify signer was tracked
+        assert!(ctx.signers.contains(&acct_pk));
     }
 }

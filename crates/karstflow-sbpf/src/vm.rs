@@ -363,6 +363,7 @@ impl BytecodeVm {
             context.compute_budget,
             &self.syscall_dispatch,
             snapshot,
+            context.program_id,
         ) {
             Ok(result) => {
                 let modified_accounts = Self::collect_modified_accounts(
@@ -1212,6 +1213,7 @@ mod tests {
             1_000_000,
             &inner_dispatch,
             crate::sysvar_snapshot::SysvarSnapshot::default(),
+            karstflow_types::Pubkey::default(),
         );
 
         match result {

@@ -325,6 +325,16 @@ impl SystemProgramExecutor {
             return Err("CreateAccount requires writable accounts".to_string());
         }
 
+        // Both from and to must be signers (to can be a PDA signer via invoke_signed)
+        if !context.signers.is_empty() {
+            if !context.is_signer(&from_pubkey) {
+                return Err("CreateAccount: from account must be a signer".to_string());
+            }
+            if !context.is_signer(&to_pubkey) {
+                return Err("CreateAccount: to account must be a signer".to_string());
+            }
+        }
+
         // Check if target account is already in use
         if !to_account.data.as_ref().is_empty() || to_account.meta.lamports > 0 {
             return Err(SystemProgramError::AccountAlreadyInUse.to_string());

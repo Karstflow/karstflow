@@ -292,6 +292,12 @@ impl TransactionProcessor {
                 instruction_accounts.push((pubkey, account, writable));
             }
 
+            // Build the set of transaction signers
+            let tx_signers: std::collections::HashSet<Pubkey> =
+                (0..transaction.message.header.num_required_signatures as usize)
+                    .filter_map(|i| transaction.message.account_keys.get(i).copied())
+                    .collect();
+
             // Create execution context
             let remaining_compute = self.max_compute_units.saturating_sub(total_compute_units);
             let context = ExecutionContext::new(
@@ -300,7 +306,8 @@ impl TransactionProcessor {
                 compiled_instruction.data.clone(),
             )
             .with_compute_budget(remaining_compute)
-            .with_heap_size(heap_size);
+            .with_heap_size(heap_size)
+            .with_signers(tx_signers);
 
             // Execute instruction
             let outcome = self.execute_instruction(&context);

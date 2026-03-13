@@ -79,6 +79,8 @@ pub struct VmState {
     pub cpi_depth: usize,
     /// sBPF version determining available features and instruction semantics.
     pub sbpf_version: SbpfVersion,
+    /// Program ID of the currently executing program (needed for PDA derivation in CPI).
+    pub program_id: karstflow_types::Pubkey,
 }
 
 /// A saved function call frame.
@@ -223,6 +225,7 @@ pub fn execute(
     compute_budget: u64,
     syscall_dispatch: &dyn SyscallDispatch,
     sysvar_snapshot: SysvarSnapshot,
+    program_id: karstflow_types::Pubkey,
 ) -> Result<VmResult, VmError> {
     let instructions = &program.instructions;
 
@@ -247,6 +250,7 @@ pub fn execute(
         sysvar_snapshot,
         cpi_depth: 0,
         sbpf_version,
+        program_id,
     };
 
     // Set initial frame pointer (r10)
@@ -1224,6 +1228,7 @@ mod tests {
             10_000,
             &NoSyscalls,
             SysvarSnapshot::default(),
+            karstflow_types::Pubkey::default(),
         )
     }
 
@@ -1403,6 +1408,7 @@ mod tests {
             10_000,
             &NoSyscalls,
             SysvarSnapshot::default(),
+            karstflow_types::Pubkey::default(),
         )
         .unwrap();
         assert_eq!(result.return_value, 0xBEEF);
@@ -1456,6 +1462,7 @@ mod tests {
             budget,
             &NoSyscalls,
             SysvarSnapshot::default(),
+            karstflow_types::Pubkey::default(),
         )
     }
 
@@ -1509,6 +1516,7 @@ mod tests {
             10_000,
             &NoSyscalls,
             SysvarSnapshot::default(),
+            karstflow_types::Pubkey::default(),
         )
         .unwrap();
         assert_eq!(result.return_value, 15); // 10 + 5
@@ -1561,6 +1569,7 @@ mod tests {
             10_000,
             &NoSyscalls,
             SysvarSnapshot::default(),
+            karstflow_types::Pubkey::default(),
         )
     }
 
@@ -1655,6 +1664,7 @@ mod tests {
             10_000,
             &NoSyscalls,
             SysvarSnapshot::default(),
+            karstflow_types::Pubkey::default(),
         )
         .unwrap();
         assert_eq!(result.return_value, 0);
@@ -1799,6 +1809,7 @@ mod tests {
             10_000,
             &NoSyscalls,
             SysvarSnapshot::default(),
+            karstflow_types::Pubkey::default(),
         )
         .unwrap();
         assert_eq!(result.return_value, 10);
@@ -1824,6 +1835,7 @@ mod tests {
             10_000,
             &NoSyscalls,
             SysvarSnapshot::default(),
+            karstflow_types::Pubkey::default(),
         )
         .unwrap();
         assert_eq!(
