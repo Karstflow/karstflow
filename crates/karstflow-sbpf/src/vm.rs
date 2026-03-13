@@ -330,7 +330,7 @@ impl BytecodeVm {
         };
 
         let mut memory = MemoryMap::new(rodata, TOTAL_STACK_SIZE, DEFAULT_HEAP_SIZE, input_buffer);
-        memory.set_dynamic_frames(true);
+        memory.set_dynamic_frames(program.sbpf_version.has_dynamic_stack_frames());
 
         // Use the context's snapshot if provided, falling back to the VM default.
         let snapshot = context
