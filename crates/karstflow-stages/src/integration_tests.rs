@@ -534,7 +534,7 @@ mod execution_pipeline_tests {
 
     #[test]
     fn adapter_with_shared_processor() {
-        let processor = Arc::new(TransactionProcessor::new());
+        let processor = TransactionProcessor::new_with_cpi();
         let adapter = SbpfExecutionAdapter::new(processor);
 
         // Run both builtin and BPF through the same shared processor

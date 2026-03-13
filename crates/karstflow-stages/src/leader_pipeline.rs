@@ -43,7 +43,7 @@ pub struct SbpfExecutionEngine {
 impl SbpfExecutionEngine {
     pub fn new() -> Self {
         Self {
-            processor: Arc::new(TransactionProcessor::new()),
+            processor: TransactionProcessor::new_with_cpi(),
             account_state: HashMap::new(),
         }
     }

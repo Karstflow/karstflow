@@ -19,10 +19,10 @@ impl SbpfExecutionAdapter {
         Self { processor }
     }
 
-    /// Create an adapter with a default transaction processor.
+    /// Create an adapter with a default transaction processor (CPI enabled).
     pub fn with_defaults() -> Self {
         Self {
-            processor: Arc::new(TransactionProcessor::new()),
+            processor: TransactionProcessor::new_with_cpi(),
         }
     }
 }

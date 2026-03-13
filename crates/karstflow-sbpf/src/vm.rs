@@ -11,7 +11,7 @@ use crate::program_cache::ProgramCache;
 use crate::syscall_dispatch::{InstructionExecutor, RuntimeSyscallDispatch};
 use crate::sysvar_snapshot::SysvarSnapshot;
 use crate::validation;
-use karstflow_constants::vm::{DEFAULT_HEAP_SIZE, TOTAL_STACK_SIZE};
+use karstflow_constants::vm::TOTAL_STACK_SIZE;
 use karstflow_ids::{
     BPF_LOADER_DEPRECATED_PROGRAM_ID, BPF_LOADER_PROGRAM_ID, BPF_LOADER_V2_PROGRAM_ID,
     LOADER_V4_PROGRAM_ID, SYSTEM_PROGRAM_ID, VOTE_PROGRAM_ID,
@@ -329,7 +329,12 @@ impl BytecodeVm {
             &program.rodata
         };
 
-        let mut memory = MemoryMap::new(rodata, TOTAL_STACK_SIZE, DEFAULT_HEAP_SIZE, input_buffer);
+        let mut memory = MemoryMap::new(
+            rodata,
+            TOTAL_STACK_SIZE,
+            context.heap_size as usize,
+            input_buffer,
+        );
         memory.set_dynamic_frames(program.sbpf_version.has_dynamic_stack_frames());
 
         // Use the context's snapshot if provided, falling back to the VM default.
@@ -1102,13 +1107,12 @@ mod tests {
         ]);
 
         let budget = 100_000u64;
-        let context = ExecutionContext {
+        let context = ExecutionContext::new(
             program_id,
-            accounts: vec![(program_id, program_account(elf), false)],
-            instruction_data: vec![],
-            compute_budget: budget,
-            sysvar_snapshot: None,
-        };
+            vec![(program_id, program_account(elf), false)],
+            vec![],
+        )
+        .with_compute_budget(budget);
 
         let result = vm.execute(context);
         match result {
@@ -1140,13 +1144,12 @@ mod tests {
             Instruction::new(Opcode::Exit as u8, 0, 0, 0, 0),
         ]);
 
-        let context = ExecutionContext {
+        let context = ExecutionContext::new(
             program_id,
-            accounts: vec![(program_id, program_account(elf), false)],
-            instruction_data: vec![],
-            compute_budget: 100_000,
-            sysvar_snapshot: None,
-        };
+            vec![(program_id, program_account(elf), false)],
+            vec![],
+        )
+        .with_compute_budget(100_000);
 
         let result = vm.execute(context);
         assert!(

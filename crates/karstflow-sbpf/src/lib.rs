@@ -93,6 +93,9 @@ pub struct ExecutionContext {
     pub accounts: Vec<(Pubkey, Account, bool)>,
     pub instruction_data: Vec<u8>,
     pub compute_budget: u64,
+    /// Heap size in bytes for BPF program execution.
+    /// Set via `ComputeBudgetInstruction::RequestHeapFrame`.
+    pub heap_size: u32,
     /// Sysvar state for this execution (slot, epoch, rent, etc.).
     pub sysvar_snapshot: Option<SysvarSnapshot>,
 }
@@ -108,12 +111,18 @@ impl ExecutionContext {
             accounts,
             instruction_data,
             compute_budget: MAX_COMPUTE_UNITS,
+            heap_size: karstflow_constants::vm::DEFAULT_HEAP_SIZE as u32,
             sysvar_snapshot: None,
         }
     }
 
     pub fn with_compute_budget(mut self, budget: u64) -> Self {
         self.compute_budget = budget.min(MAX_COMPUTE_UNITS);
+        self
+    }
+
+    pub fn with_heap_size(mut self, heap_size: u32) -> Self {
+        self.heap_size = heap_size;
         self
     }
 

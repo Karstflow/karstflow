@@ -7,6 +7,9 @@
 
 use crate::{ExecutionContext, ExecutionOutcome};
 use karstflow_constants::address_lookup_table as constants;
+use karstflow_constants::economics::{
+    RENT_EXEMPTION_BASE_LAMPORTS, RENT_EXEMPTION_LAMPORTS_PER_BYTE,
+};
 use karstflow_ids::ADDRESS_LOOKUP_TABLE_PROGRAM_ID;
 use karstflow_types::{Account, AccountData, Pubkey};
 
@@ -126,7 +129,7 @@ impl AddressLookupTableExecutor {
 
         let (table_pubkey, table_account, table_writable) = &ctx.accounts[0];
         let (authority_pubkey, _authority_account, _) = &ctx.accounts[1];
-        let (_payer_pubkey, _payer_account, payer_writable) = &ctx.accounts[2];
+        let (payer_pubkey, payer_account, payer_writable) = &ctx.accounts[2];
 
         if !table_writable {
             return Err(LookupTableError::AccountNotWritable.message().to_string());
@@ -152,9 +155,24 @@ impl AddressLookupTableExecutor {
         table_data.push(0u8); // last_extended_slot_start_index
         table_data.extend_from_slice(&[0u8; 7]); // padding
 
+        // Fund the table account with rent-exempt minimum from the payer.
+        // Without funding, zero-lamport accounts get their data/owner wiped
+        // by reclaim_zero_lamport_accounts during bank processing.
+        let required_lamports = RENT_EXEMPTION_BASE_LAMPORTS.saturating_add(
+            (table_data.len() as u64).saturating_mul(RENT_EXEMPTION_LAMPORTS_PER_BYTE),
+        );
+
+        if payer_account.meta.lamports < required_lamports {
+            return Err("Payer has insufficient funds for rent-exempt table".to_string());
+        }
+
+        let mut new_payer = payer_account.clone();
+        new_payer.meta.lamports = new_payer.meta.lamports.saturating_sub(required_lamports);
+
         let mut new_table = table_account.clone();
         new_table.data = AccountData::new(table_data);
         new_table.meta.owner = ADDRESS_LOOKUP_TABLE_PROGRAM_ID;
+        new_table.meta.lamports = required_lamports;
 
         let compute_used = self
             .base_cost
@@ -162,6 +180,7 @@ impl AddressLookupTableExecutor {
 
         let mut outcome = ExecutionOutcome::success(compute_used);
         outcome.modified_accounts.insert(*table_pubkey, new_table);
+        outcome.modified_accounts.insert(*payer_pubkey, new_payer);
         outcome
             .logs
             .push(format!("Created lookup table {}", table_pubkey));
@@ -499,7 +518,7 @@ mod tests {
     fn make_authority_account() -> Account {
         Account {
             meta: AccountMeta {
-                lamports: 1_000_000,
+                lamports: 10_000_000,
                 owner: Pubkey::zeroed(),
                 executable: false,
                 rent_epoch: 0,

@@ -12,27 +12,28 @@ use karstflow_consensus::{
 use karstflow_sbpf::{
     ExecutionContext, ExecutionOutcome, SiblingInstruction, SysvarSnapshot, TransactionProcessor,
 };
+use std::sync::Arc;
 
 /// Instruction execution backend backed by the sBPF `TransactionProcessor`.
 ///
 /// Wraps all 14 builtin program executors plus the `BytecodeVm` for deployed
 /// BPF programs behind the consensus-defined `ExecutionBackend` trait.
 pub struct SbpfBackend {
-    processor: TransactionProcessor,
+    processor: Arc<TransactionProcessor>,
 }
 
 impl SbpfBackend {
-    /// Create a backend with default compute limits.
+    /// Create a backend with default compute limits (CPI enabled).
     pub fn new() -> Self {
         Self {
-            processor: TransactionProcessor::new(),
+            processor: TransactionProcessor::new_with_cpi(),
         }
     }
 
-    /// Create a backend with a custom compute unit ceiling.
+    /// Create a backend with a custom compute unit ceiling (CPI enabled).
     pub fn with_compute_limit(max_compute_units: u64) -> Self {
         Self {
-            processor: TransactionProcessor::new().with_compute_limit(max_compute_units),
+            processor: TransactionProcessor::new_with_cpi_and_compute_limit(max_compute_units),
         }
     }
 }

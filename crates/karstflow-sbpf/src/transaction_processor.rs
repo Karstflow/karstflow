@@ -23,6 +23,7 @@ use karstflow_ids::{
 };
 use karstflow_types::{Account, Pubkey};
 use std::collections::HashMap;
+use std::sync::{Arc, Weak};
 
 /// Transaction instruction to be executed
 #[derive(Debug, Clone)]
@@ -146,8 +147,33 @@ pub struct TransactionProcessor {
 }
 
 impl TransactionProcessor {
-    /// Create a new transaction processor
+    /// Create a new transaction processor without CPI support.
+    ///
+    /// For production use, prefer `new_with_cpi()` which enables
+    /// cross-program invocation via `sol_invoke_signed`.
     pub fn new() -> Self {
+        Self::build(BytecodeVm::new(), MAX_COMPUTE_UNITS)
+    }
+
+    /// Create a new processor with CPI support enabled.
+    ///
+    /// Returns `Arc<Self>` because the VM holds a back-reference to the
+    /// processor for nested `sol_invoke_signed` dispatch.
+    pub fn new_with_cpi() -> Arc<Self> {
+        Self::new_with_cpi_and_compute_limit(MAX_COMPUTE_UNITS)
+    }
+
+    /// Create a CPI-enabled processor with a custom compute unit ceiling.
+    pub fn new_with_cpi_and_compute_limit(max_compute_units: u64) -> Arc<Self> {
+        Arc::new_cyclic(|weak: &Weak<TransactionProcessor>| {
+            let proxy: Arc<dyn crate::syscall_dispatch::InstructionExecutor> =
+                Arc::new(CpiProxy { weak: weak.clone() });
+            Self::build(BytecodeVm::with_cpi(proxy), max_compute_units)
+        })
+    }
+
+    /// Internal constructor shared by `new()` and `new_with_cpi()`.
+    fn build(bytecode_vm: BytecodeVm, max_compute_units: u64) -> Self {
         Self {
             system_program: SystemProgramExecutor::new(150),
             vote_program: VoteProgramExecutor::new(200),
@@ -168,8 +194,8 @@ impl TransactionProcessor {
             zk_elgamal_proof: ZkElGamalProofExecutor::new(200),
             feature_gate_program: FeatureGateProgramExecutor::new(750),
             slashing_program: SlashingProgramExecutor::new(2500),
-            bytecode_vm: BytecodeVm::new(),
-            max_compute_units: MAX_COMPUTE_UNITS,
+            bytecode_vm,
+            max_compute_units,
         }
     }
 
@@ -193,6 +219,27 @@ impl TransactionProcessor {
         let mut total_compute_units = 0u64;
         let mut modified_accounts = HashMap::new();
         let mut all_logs = Vec::new();
+
+        // Pre-scan compute budget instructions to extract heap_size.
+        let instructions_for_budget: Vec<(Pubkey, Vec<u8>)> = transaction
+            .message
+            .instructions
+            .iter()
+            .filter_map(|ci| {
+                let pid = transaction
+                    .message
+                    .account_keys
+                    .get(ci.program_id_index as usize)?;
+                Some((*pid, ci.data.clone()))
+            })
+            .collect();
+        let heap_size = crate::compute_budget_program::extract_compute_budget(
+            &instructions_for_budget,
+            &COMPUTE_BUDGET_PROGRAM_ID,
+        )
+        .ok()
+        .and_then(|b| b.heap_size)
+        .unwrap_or(karstflow_constants::vm::DEFAULT_HEAP_SIZE as u32);
 
         // Process each instruction in sequence
         for (idx, compiled_instruction) in transaction.message.instructions.iter().enumerate() {
@@ -252,7 +299,8 @@ impl TransactionProcessor {
                 instruction_accounts,
                 compiled_instruction.data.clone(),
             )
-            .with_compute_budget(remaining_compute);
+            .with_compute_budget(remaining_compute)
+            .with_heap_size(heap_size);
 
             // Execute instruction
             let outcome = self.execute_instruction(&context);
@@ -524,6 +572,35 @@ impl TransactionProcessor {
 impl Default for TransactionProcessor {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+// ---------------------------------------------------------------------------
+// CpiProxy — weak-reference adapter for self-referential CPI dispatch
+// ---------------------------------------------------------------------------
+
+/// Proxy that enables CPI from within the `BytecodeVm`.
+///
+/// Holds a `Weak<TransactionProcessor>` back-pointer created via
+/// `Arc::new_cyclic`. When a BPF program calls `sol_invoke_signed`,
+/// the syscall handler invokes this proxy, which upgrades the weak
+/// reference and delegates to the full processor routing logic.
+struct CpiProxy {
+    weak: Weak<TransactionProcessor>,
+}
+
+impl crate::syscall_dispatch::InstructionExecutor for CpiProxy {
+    fn execute_instruction(
+        &self,
+        context: ExecutionContext,
+    ) -> Result<ExecutionOutcome, crate::vm::SbpfExecutionError> {
+        let processor =
+            self.weak
+                .upgrade()
+                .ok_or_else(|| crate::vm::SbpfExecutionError::ExecutionFailed {
+                    message: "CPI executor dropped".into(),
+                })?;
+        Ok(processor.execute_instruction(&context))
     }
 }
 
