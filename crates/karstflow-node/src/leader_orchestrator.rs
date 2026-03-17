@@ -35,16 +35,21 @@ pub(crate) fn spawn_leader_orchestrator(
             while let Ok(signal) = leader_signal_rx.recv() {
                 match signal {
                     karstflow_stages::ReplaySignal::BecameLeader(info) => {
-                        info!(
-                            start_slot = info.start_slot,
-                            end_slot = info.end_slot,
-                            epoch = info.epoch,
-                            "activating block production for leader range",
-                        );
-                        handle.begin_slot(info.start_slot);
+                        // Only begin if not already leading (prevents double begin)
+                        if !handle.is_leading() {
+                            info!(
+                                start_slot = info.start_slot,
+                                end_slot = info.end_slot,
+                                epoch = info.epoch,
+                                "activating block production for leader range",
+                            );
+                            handle.begin_slot(info.start_slot);
+                        }
                     }
                     karstflow_stages::ReplaySignal::SlotCompleted(info) => {
-                        if handle.is_leading() && info.slot == handle.current_slot() {
+                        let leading = handle.is_leading();
+                        let cur = handle.current_slot();
+                        if leading && info.slot == cur {
                             let slot = info.slot;
                             handle.end_slot();
                             // Register the new blockhash so the resolv
@@ -55,6 +60,11 @@ pub(crate) fn spawn_leader_orchestrator(
                             // The take_entries() call blocks briefly until
                             // the pipeline service processes the request.
                             let entry_batches = handle.take_entries();
+                            info!(
+                                slot,
+                                entries = entry_batches.len(),
+                                "slot completed, took entries",
+                            );
                             if !entry_batches.is_empty() {
                                 shred_produced_entries(
                                     slot,
@@ -71,6 +81,10 @@ pub(crate) fn spawn_leader_orchestrator(
                                         .as_ref(),
                                 );
                             }
+
+                            // Begin next slot in the leader range.
+                            let next_slot = slot + 1;
+                            handle.begin_slot(next_slot);
                         }
                     }
                     karstflow_stages::ReplaySignal::RootAdvanced(info) => {

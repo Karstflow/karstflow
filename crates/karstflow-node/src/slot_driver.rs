@@ -11,7 +11,6 @@ pub(crate) fn spawn_cluster_slot_driver(
     identity_pubkey: karstflow_storage::Pubkey,
     bank_forks: std::sync::Arc<std::sync::RwLock<karstflow_consensus::BankForks>>,
     signal_bus: std::sync::Arc<std::sync::Mutex<karstflow_stages::SignalBus>>,
-    cluster_handle: std::sync::Arc<karstflow_stages::PipelineHandle>,
 ) {
     std::thread::Builder::new()
         .name("cluster-slot-driver".into())
@@ -89,14 +88,11 @@ pub(crate) fn spawn_cluster_slot_driver(
 
             // Step 4: Slot timer loop — advance slots every 400ms.
             let slot_duration = std::time::Duration::from_millis(400);
+            let mut currently_leading = is_leader_for(current_slot);
             loop {
                 std::thread::sleep(slot_duration);
 
                 let completed_slot = current_slot;
-
-                // Track if we were leading — orchestrator handles end_slot on
-                // SlotCompleted, but we need to know for signal emission.
-                let was_leading = cluster_handle.is_leading();
 
                 // Tick, finalize, and root the bank for the completed slot.
                 {
@@ -113,26 +109,25 @@ pub(crate) fn spawn_cluster_slot_driver(
                     let bank_hash = bank.last_blockhash();
                     let _ = bank.mark_rooted();
 
-                    // Emit SlotCompleted so leader orchestrator shreds + broadcasts.
-                    if was_leading {
-                        let mut bus = signal_bus.lock().expect("signal_bus lock poisoned");
-                        bus.emit(karstflow_stages::ReplaySignal::SlotCompleted(
-                            karstflow_stages::SlotCompletedInfo {
-                                slot: completed_slot,
-                                parent_slot: completed_slot.saturating_sub(1),
-                                bank_hash,
-                                block_hash: bank_hash,
-                                parent_blockhash: [0u8; 32],
-                                epoch: 0,
-                                is_epoch_boundary: false,
-                                transaction_count: 0,
-                                executed_count: 0,
-                                fee_lamports_collected: 0,
-                                capitalization: 0,
-                                timestamp: 0,
-                            },
-                        ));
-                    }
+                    // Emit SlotCompleted for every slot. Orchestrator decides
+                    // whether to shred based on its own pipeline leading state.
+                    let mut bus = signal_bus.lock().expect("signal_bus lock poisoned");
+                    bus.emit(karstflow_stages::ReplaySignal::SlotCompleted(
+                        karstflow_stages::SlotCompletedInfo {
+                            slot: completed_slot,
+                            parent_slot: completed_slot.saturating_sub(1),
+                            bank_hash,
+                            block_hash: bank_hash,
+                            parent_blockhash: [0u8; 32],
+                            epoch: 0,
+                            is_epoch_boundary: false,
+                            transaction_count: 0,
+                            executed_count: 0,
+                            fee_lamports_collected: 0,
+                            capitalization: 0,
+                            timestamp: 0,
+                        },
+                    ));
                 }
 
                 // Create child bank for next slot.
@@ -154,15 +149,19 @@ pub(crate) fn spawn_cluster_slot_driver(
                     }
                 }
 
-                // Check if this validator is leader for the new slot.
-                if is_leader_for(current_slot) {
+                // Emit BecameLeader only on transition (not-leading → leading).
+                let next_is_leader = is_leader_for(current_slot);
+                if next_is_leader && !currently_leading {
                     let mut end = current_slot + 1;
-                    while is_leader_for(end) { end += 1; }
+                    while is_leader_for(end) {
+                        end += 1;
+                    }
                     info!(
-                        completed = completed_slot, next = current_slot, end_slot = end,
+                        completed = completed_slot,
+                        next = current_slot,
+                        end_slot = end,
                         "cluster-slot-driver: became leader",
                     );
-                    cluster_handle.begin_slot(current_slot);
                     let mut bus = signal_bus.lock().expect("signal_bus lock poisoned");
                     bus.emit(karstflow_stages::ReplaySignal::BecameLeader(
                         karstflow_stages::BecameLeaderInfo {
@@ -172,12 +171,14 @@ pub(crate) fn spawn_cluster_slot_driver(
                             identity_pubkey: *identity_pubkey.as_bytes(),
                         },
                     ));
-                } else {
+                } else if !next_is_leader && currently_leading {
                     info!(
-                        completed = completed_slot, next = current_slot,
-                        "cluster-slot-driver: not leader, waiting",
+                        completed = completed_slot,
+                        next = current_slot,
+                        "cluster-slot-driver: no longer leader",
                     );
                 }
+                currently_leading = next_is_leader;
             }
         })
         .expect("failed to spawn cluster-slot-driver thread");

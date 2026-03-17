@@ -472,7 +472,6 @@ fn run_with_node_config(
             identity_pubkey,
             consensus.bank_forks.clone(),
             replay_bundle.signal_bus.clone(),
-            pipeline_bundle.handle.clone(),
         );
     }
 
