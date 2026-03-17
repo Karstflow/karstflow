@@ -1,146 +1,29 @@
+mod diagnostics;
+mod leader_orchestrator;
 mod plugin_notifier;
+mod shredding;
+mod slot_driver;
 
 use karstflow_observability::{init_tracing, TracingConfig};
 use karstflow_plugin::PluginService;
 use tracing::{info, warn};
 
 use karstflow_control::{
-    bootstrap_from_development_genesis, bootstrap_from_genesis_file,
-    build_diagnostics_summary_from_probe, build_pipeline_service, build_repair_service,
-    build_replay_service_with_consensus, build_storage_maintenance_service, build_turbine_service,
-    build_vote_broadcast_service, build_vote_sender_service, dispatch_command,
-    ensure_mainnet_readiness, evaluate_mainnet_readiness, materialize_service_pair_from_config,
-    materialize_services_from_config, maybe_spawn_quic_bridge, parse_command,
-    render_diagnostics_cluster_mode_line, render_diagnostics_lane_capacity_line,
-    render_diagnostics_ok_line, render_diagnostics_probe_line,
-    render_diagnostics_readiness_issue_line, render_diagnostics_readiness_line,
-    render_diagnostics_services_line, render_diagnostics_stage_mix_line,
-    render_diagnostics_topology_line, render_preflight_readiness_issue_line,
-    render_preflight_readiness_line, render_readiness_policy_line, resolve_validator_identity,
-    restore_from_snapshot_archive, run_diagnostics_phase, run_preflight_phase,
-    run_preflight_phase_with_probe_report, run_runtime_phase_with_consensus, save_tower_to_disk,
-    start_gossip_service, BlockstoreShredProvider, ServiceBundle,
+    bootstrap_from_development_genesis, bootstrap_from_genesis_file, build_pipeline_service,
+    build_repair_service, build_replay_service_with_consensus, build_storage_maintenance_service,
+    build_turbine_service, build_vote_broadcast_service, build_vote_sender_service,
+    dispatch_command, materialize_service_pair_from_config, maybe_spawn_quic_bridge, parse_command,
+    resolve_validator_identity, restore_from_snapshot_archive, run_runtime_phase_with_consensus,
+    save_tower_to_disk, start_gossip_service, BlockstoreShredProvider, ServiceBundle,
 };
-
-/// Shred produced entries, store in blockstore, and feed to self-replay.
-///
-/// Called by the leader orchestrator after a slot completes. Converts
-/// PohEntries into data + coding shreds, persists them in the blockstore
-/// for repair serving, and sends data shreds to the ShredCollector for
-/// self-replay of the produced block.
-#[allow(clippy::too_many_arguments)]
-fn shred_produced_entries(
-    slot: u64,
-    entry_batches: &[Vec<karstflow_stages::PohEntry>],
-    leader_pubkey: karstflow_storage::Pubkey,
-    signing_key: &ed25519_dalek::SigningKey,
-    shred_version: u16,
-    blockstore: Option<&std::sync::Arc<karstflow_storage::Blockstore>>,
-    direct_shred_sender: &mut Option<karstflow_mesh::DualSender<karstflow_types::shred::Shred>>,
-    turbine_retransmit: Option<&std::sync::Arc<karstflow_net::RetransmitService>>,
-) {
-    let config = karstflow_stages::ShredderConfig {
-        shred_version,
-        ..Default::default()
-    };
-    let mut shredder = match karstflow_stages::EntryShredder::new(
-        leader_pubkey,
-        Some(signing_key.clone()),
-        slot,
-        config,
-    ) {
-        Ok(s) => s,
-        Err(e) => {
-            warn!(slot, error = %e, "failed to create shredder for produced block");
-            return;
-        }
-    };
-
-    let mut total_data = 0u64;
-    let mut total_coding = 0u64;
-
-    for batch in entry_batches {
-        if batch.is_empty() {
-            continue;
-        }
-
-        let data_shreds = match shredder.create_data_shreds(batch) {
-            Ok(shreds) => shreds,
-            Err(e) => {
-                warn!(slot, error = %e, "failed to create data shreds");
-                continue;
-            }
-        };
-        let coding_shreds = match shredder.create_coding_shreds(&data_shreds) {
-            Ok(shreds) => shreds,
-            Err(e) => {
-                warn!(slot, error = %e, "failed to create coding shreds");
-                // Still process data shreds even if coding fails.
-                for shred in &data_shreds {
-                    if let Some(bs) = blockstore {
-                        if let Err(e) = bs.insert_shred(shred) {
-                            warn!(slot, error = %e, "blockstore insert failed for produced shred");
-                        }
-                    }
-                    if let Some(ref mut sender) = direct_shred_sender {
-                        if let Err(e) = sender.try_send(shred.clone()) {
-                            warn!(slot, error = ?e, "self-replay channel full, shred dropped");
-                        }
-                    }
-                }
-                total_data += data_shreds.len() as u64;
-                continue;
-            }
-        };
-
-        total_data += data_shreds.len() as u64;
-        total_coding += coding_shreds.len() as u64;
-
-        // Store all shreds in blockstore for repair serving.
-        if let Some(bs) = blockstore {
-            for shred in data_shreds.iter().chain(coding_shreds.iter()) {
-                if let Err(e) = bs.insert_shred(shred) {
-                    warn!(slot, error = %e, "blockstore insert failed for produced shred");
-                }
-            }
-        }
-
-        // Feed data shreds to ShredCollector for self-replay.
-        // This closes the loop: leader produces → shreds → block assembled → replay.
-        if let Some(ref mut sender) = direct_shred_sender {
-            for shred in &data_shreds {
-                if let Err(e) = sender.try_send(shred.clone()) {
-                    warn!(slot, error = ?e, "self-replay channel full, shred dropped");
-                }
-            }
-        }
-
-        // Broadcast data shreds to turbine tree peers.
-        if let Some(retransmit) = turbine_retransmit {
-            for shred in &data_shreds {
-                let wire_bytes = &shred.payload;
-                retransmit.forward_raw(wire_bytes);
-            }
-        }
-    }
-
-    if total_data > 0 || total_coding > 0 {
-        info!(
-            slot,
-            data_shreds = total_data,
-            coding_shreds = total_coding,
-            "produced and broadcast block shreds",
-        );
-    }
-}
 
 fn main() -> karstflow_control::Result<()> {
     let parsed_command = parse_command(std::env::args())?;
     dispatch_command(
         parsed_command,
         run_with_node_config,
-        preflight_with_node_config,
-        diagnostics_with_node_config,
+        diagnostics::preflight_with_node_config,
+        diagnostics::diagnostics_with_node_config,
     )
 }
 
@@ -209,8 +92,8 @@ fn run_with_node_config(
     let runtime_topology = topology_pair.runtime;
 
     // Connect the shred collection pipeline to the replay service.
-    // Assembled blocks from the TVU receive path (EdgeIntake → ShredFilter →
-    // ShredNetworkService → ShredCollector) feed directly into replay for
+    // Assembled blocks from the TVU receive path (EdgeIntake -> ShredFilter ->
+    // ShredNetworkService -> ShredCollector) feed directly into replay for
     // consensus processing.
     let shred_block_input = runtime_topology
         .shred_block_receiver
@@ -224,7 +107,7 @@ fn run_with_node_config(
         .shred_arrival_receiver
         .unwrap_or_else(|| crossbeam_channel::bounded(1).1);
 
-    // Choose bootstrap path: snapshot archive → genesis file → empty genesis.
+    // Choose bootstrap path: snapshot archive -> genesis file -> empty genesis.
     let is_dev_mode =
         node_config.snapshot_archive_path.is_none() && node_config.genesis_path.is_none();
     let replay_bundle = if let Some(ref archive_path) = node_config.snapshot_archive_path {
@@ -439,7 +322,7 @@ fn run_with_node_config(
 
     // Wire replay signals to the plugin service.
     // Subscribe to the SignalBus, then start the plugin observer that
-    // translates ReplaySignal → PluginEvent for all loaded plugins.
+    // translates ReplaySignal -> PluginEvent for all loaded plugins.
     {
         let (plugin_tx, plugin_rx) = crossbeam_channel::bounded(256);
         let signal_rx = replay_bundle
@@ -449,7 +332,7 @@ fn run_with_node_config(
             .subscribe()
             .expect("signal bus subscriber limit not reached");
 
-        // Bridge thread: ReplaySignal → PluginEvent conversion.
+        // Bridge thread: ReplaySignal -> PluginEvent conversion.
         std::thread::Builder::new()
             .name("plugin-bridge".into())
             .spawn(move || {
@@ -563,408 +446,45 @@ fn run_with_node_config(
         std::sync::RwLock<Option<std::sync::Arc<karstflow_net::RetransmitService>>>,
     > = std::sync::Arc::new(std::sync::RwLock::new(None));
 
-    // Wire leader slot orchestration: subscribe to replay signals and
-    // drive the pipeline handle when this validator becomes leader.
-    // After each leader slot completes, entries are shredded and broadcast
-    // to the turbine tree, stored in the blockstore, and fed back to the
-    // shred collector for self-replay.
+    // Wire leader slot orchestration.
     {
-        let leader_signal_rx = replay_bundle
-            .signal_bus
-            .lock()
-            .expect("signal_bus lock poisoned")
-            .subscribe()
-            .expect("signal bus subscriber limit not reached");
-        let handle = pipeline_bundle.handle.clone();
-
-        // Identity for shred signing.
         let leader_pubkey = karstflow_storage::Pubkey::from(*identity.pubkey());
         let leader_signing_key = ed25519_dalek::SigningKey::from_bytes(identity.secret_key());
         let shred_version = node_config.expected_shred_version.unwrap_or(1);
 
-        // Clone shared resources for the orchestrator thread.
-        let orchestrator_retransmit = deferred_retransmit.clone();
-        let orchestrator_blockstore = shared_blockstore.clone();
-        let mut orchestrator_shred_sender = direct_shred_sender;
-
-        std::thread::Builder::new()
-            .name("leader-orchestrator".into())
-            .spawn(move || {
-                while let Ok(signal) = leader_signal_rx.recv() {
-                    match signal {
-                        karstflow_stages::ReplaySignal::BecameLeader(info) => {
-                            info!(
-                                start_slot = info.start_slot,
-                                end_slot = info.end_slot,
-                                epoch = info.epoch,
-                                "activating block production for leader range",
-                            );
-                            handle.begin_slot(info.start_slot);
-                        }
-                        karstflow_stages::ReplaySignal::SlotCompleted(info) => {
-                            if handle.is_leading() && info.slot == handle.current_slot() {
-                                let slot = info.slot;
-                                handle.end_slot();
-                                // Register the new blockhash so the resolv
-                                // stage can validate transactions referencing it.
-                                handle.register_blockhash(info.bank_hash, slot);
-
-                                // Extract produced entries and shred them.
-                                // The take_entries() call blocks briefly until
-                                // the pipeline service processes the request.
-                                let entry_batches = handle.take_entries();
-                                if !entry_batches.is_empty() {
-                                    shred_produced_entries(
-                                        slot,
-                                        &entry_batches,
-                                        leader_pubkey,
-                                        &leader_signing_key,
-                                        shred_version,
-                                        orchestrator_blockstore.as_ref(),
-                                        &mut orchestrator_shred_sender,
-                                        orchestrator_retransmit
-                                            .read()
-                                            .ok()
-                                            .and_then(|g| g.as_ref().cloned())
-                                            .as_ref(),
-                                    );
-                                }
-                            }
-                        }
-                        karstflow_stages::ReplaySignal::RootAdvanced(info) => {
-                            // Advance the resolv slot so stale transactions
-                            // referencing blockhashes older than the root are
-                            // expired.
-                            handle.advance_slot(info.new_root);
-                        }
-                        _ => {}
-                    }
-                }
-            })
-            .expect("failed to spawn leader orchestrator thread");
+        leader_orchestrator::spawn_leader_orchestrator(
+            &replay_bundle.signal_bus,
+            pipeline_bundle.handle.clone(),
+            leader_pubkey,
+            leader_signing_key,
+            shred_version,
+            deferred_retransmit.clone(),
+            shared_blockstore.clone(),
+            direct_shred_sender,
+        );
     }
 
     // Cluster slot driver for genesis-file mode.
-    // Analogous to dev-slot-driver but with leader schedule awareness:
-    // - Ticks genesis bank and freezes it
-    // - Enters timer loop that advances slots every 400ms
-    // - Only produces blocks when this validator is the scheduled leader
-    // - Non-leader slots are still ticked to keep bank state advancing
     let has_genesis_file = node_config.genesis_path.is_some();
     if has_genesis_file && !is_dev_mode {
         let identity_pubkey = karstflow_storage::Pubkey::from(*identity.pubkey());
-        let bank_forks = consensus.bank_forks.clone();
-        let signal_bus = replay_bundle.signal_bus.clone();
-        let cluster_handle = pipeline_bundle.handle.clone();
-
-        std::thread::Builder::new()
-            .name("cluster-slot-driver".into())
-            .spawn(move || {
-                // Small delay to let leader orchestrator subscribe to signal bus.
-                std::thread::sleep(std::time::Duration::from_millis(100));
-
-                // Step 1: Tick and freeze the genesis bank.
-                let forks = bank_forks.read().expect("bank_forks lock poisoned");
-                let genesis_bank = forks.working_bank();
-                let ticks_needed = genesis_bank
-                    .max_tick_height()
-                    .saturating_sub(genesis_bank.tick_height());
-                for _ in 0..ticks_needed {
-                    if let Err(e) = genesis_bank.register_tick() {
-                        warn!(error = ?e, "cluster-slot-driver: failed to register tick");
-                        return;
-                    }
-                }
-                if let Err(e) = genesis_bank.freeze() {
-                    warn!(error = ?e, "cluster-slot-driver: failed to freeze genesis");
-                    return;
-                }
-                let genesis_slot = genesis_bank.slot();
-                info!(slot = genesis_slot, "cluster-slot-driver: genesis bank frozen");
-                drop(forks);
-
-                // Step 2: Create child bank for slot 1.
-                let mut current_slot = genesis_slot + 1;
-                {
-                    let mut forks = bank_forks.write().expect("bank_forks lock poisoned");
-                    let parent = forks.working_bank();
-                    let ls = parent.leader_schedule();
-                    let child = karstflow_consensus::Bank::new_from_parent(
-                        &parent, current_slot, ls.clone(),
-                    );
-                    if let Err(e) = forks.insert(child) {
-                        warn!(error = ?e, "cluster-slot-driver: insert child failed");
-                        return;
-                    }
-                    let _ = forks.set_working_bank(current_slot);
-                }
-
-                // Helper: check if identity is leader for a slot.
-                let is_leader_for = |slot: u64| -> bool {
-                    let forks = bank_forks.read().expect("bank_forks lock poisoned");
-                    let bank = forks.working_bank();
-                    let schedule = bank.leader_schedule();
-                    let es_config = bank.epoch_schedule().config();
-                    let es = karstflow_consensus::EpochSchedule::new(*es_config);
-                    schedule
-                        .leader_for_absolute_slot(slot, &es)
-                        .map(|l| l == identity_pubkey)
-                        .unwrap_or(false)
-                };
-
-                // Step 3: If leader for slot 1, emit BecameLeader.
-                if is_leader_for(current_slot) {
-                    let mut end = current_slot + 1;
-                    while is_leader_for(end) { end += 1; }
-                    info!(
-                        start_slot = current_slot, end_slot = end,
-                        "cluster-slot-driver: leader for first slot, emitting BecameLeader",
-                    );
-                    let mut bus = signal_bus.lock().expect("signal_bus lock poisoned");
-                    bus.emit(karstflow_stages::ReplaySignal::BecameLeader(
-                        karstflow_stages::BecameLeaderInfo {
-                            start_slot: current_slot,
-                            end_slot: end,
-                            epoch: 0,
-                            identity_pubkey: *identity_pubkey.as_bytes(),
-                        },
-                    ));
-                }
-
-                // Step 4: Slot timer loop — advance slots every 400ms.
-                let slot_duration = std::time::Duration::from_millis(400);
-                loop {
-                    std::thread::sleep(slot_duration);
-
-                    let completed_slot = current_slot;
-
-                    // If we were leading, end the slot.
-                    if cluster_handle.is_leading() {
-                        cluster_handle.end_slot();
-                    }
-
-                    // Tick, finalize, and root the bank for the completed slot.
-                    {
-                        let forks = bank_forks.read().expect("bank_forks lock poisoned");
-                        let bank = forks.working_bank();
-                        let ticks_needed =
-                            bank.max_tick_height().saturating_sub(bank.tick_height());
-                        for _ in 0..ticks_needed {
-                            let _ = bank.register_tick();
-                        }
-                        if let Err(e) = bank.finish_slot() {
-                            warn!(error = ?e, slot = completed_slot, "cluster-slot-driver: finish_slot failed");
-                        }
-                        let _ = bank.mark_rooted();
-                    }
-
-                    // Create child bank for next slot.
-                    current_slot = completed_slot + 1;
-                    {
-                        let mut forks = bank_forks.write().expect("bank_forks lock poisoned");
-                        let parent = forks.working_bank();
-                        let ls = parent.leader_schedule();
-                        let child = karstflow_consensus::Bank::new_from_parent(
-                            &parent, current_slot, ls.clone(),
-                        );
-                        if let Err(e) = forks.insert(child) {
-                            warn!(error = ?e, slot = current_slot, "cluster-slot-driver: insert failed");
-                            break;
-                        }
-                        let _ = forks.set_working_bank(current_slot);
-                        if let Err(e) = forks.set_root(completed_slot) {
-                            warn!(error = ?e, "cluster-slot-driver: set_root failed");
-                        }
-                    }
-
-                    // Check if this validator is leader for the new slot.
-                    if is_leader_for(current_slot) {
-                        let mut end = current_slot + 1;
-                        while is_leader_for(end) { end += 1; }
-                        info!(
-                            completed = completed_slot, next = current_slot, end_slot = end,
-                            "cluster-slot-driver: became leader",
-                        );
-                        cluster_handle.begin_slot(current_slot);
-                        let mut bus = signal_bus.lock().expect("signal_bus lock poisoned");
-                        bus.emit(karstflow_stages::ReplaySignal::BecameLeader(
-                            karstflow_stages::BecameLeaderInfo {
-                                start_slot: current_slot,
-                                end_slot: end,
-                                epoch: 0,
-                                identity_pubkey: *identity_pubkey.as_bytes(),
-                            },
-                        ));
-                    } else {
-                        info!(
-                            completed = completed_slot, next = current_slot,
-                            "cluster-slot-driver: not leader, waiting",
-                        );
-                    }
-                }
-            })
-            .expect("failed to spawn cluster-slot-driver thread");
+        slot_driver::spawn_cluster_slot_driver(
+            identity_pubkey,
+            consensus.bank_forks.clone(),
+            replay_bundle.signal_bus.clone(),
+            pipeline_bundle.handle.clone(),
+        );
     }
 
-    // Dev mode genesis completion: tick + freeze genesis bank, then emit
-    // BecameLeader to bootstrap the block production cycle. Without this,
-    // the leader orchestrator never receives a signal because SlotCompleted
-    // is only emitted after replay_block(), and no blocks exist at genesis.
+    // Dev mode genesis completion.
     if is_dev_mode {
         let identity_pubkey = karstflow_storage::Pubkey::from(*identity.pubkey());
-        let bank_forks = consensus.bank_forks.clone();
-        let signal_bus = replay_bundle.signal_bus.clone();
-        let dev_handle = pipeline_bundle.handle.clone();
-
-        std::thread::Builder::new()
-            .name("dev-slot-driver".into())
-            .spawn(move || {
-                // Small delay to let leader orchestrator subscribe to signal bus.
-                std::thread::sleep(std::time::Duration::from_millis(100));
-
-                // Step 1: Tick the genesis bank to completion (TICKS_PER_SLOT ticks).
-                let forks = bank_forks.read().expect("bank_forks lock poisoned");
-                let genesis_bank = forks.working_bank();
-                let ticks_needed = genesis_bank
-                    .max_tick_height()
-                    .saturating_sub(genesis_bank.tick_height());
-                for _ in 0..ticks_needed {
-                    if let Err(e) = genesis_bank.register_tick() {
-                        warn!(error = ?e, "failed to register genesis tick");
-                        return;
-                    }
-                }
-
-                // Step 2: Freeze the genesis bank.
-                if let Err(e) = genesis_bank.freeze() {
-                    warn!(error = ?e, "failed to freeze genesis bank");
-                    return;
-                }
-                let genesis_slot = genesis_bank.slot();
-                info!(
-                    slot = genesis_slot,
-                    tick_height = genesis_bank.tick_height(),
-                    "dev mode: genesis bank ticked and frozen",
-                );
-                drop(forks);
-
-                // Step 3: Create child bank for slot 1 and start leading.
-                let mut current_slot = genesis_slot + 1;
-                {
-                    let mut forks = bank_forks.write().expect("bank_forks lock poisoned");
-                    let parent = forks.working_bank();
-                    let leader_schedule = parent.leader_schedule();
-                    let child = karstflow_consensus::Bank::new_from_parent(
-                        &parent,
-                        current_slot,
-                        leader_schedule.clone(),
-                    );
-                    if let Err(e) = forks.insert(child) {
-                        warn!(error = ?e, slot = current_slot, "failed to insert child bank");
-                        return;
-                    }
-                    if let Err(e) = forks.set_working_bank(current_slot) {
-                        warn!(error = ?e, slot = current_slot, "failed to set working bank");
-                        return;
-                    }
-                    info!(
-                        slot = current_slot,
-                        "dev mode: created child bank for first leader slot"
-                    );
-                }
-
-                // Step 4: Emit initial BecameLeader to bootstrap block production.
-                {
-                    info!(
-                        start_slot = current_slot,
-                        "dev mode: emitting BecameLeader to bootstrap block production",
-                    );
-                    let mut bus = signal_bus.lock().expect("signal_bus lock poisoned");
-                    bus.emit(karstflow_stages::ReplaySignal::BecameLeader(
-                        karstflow_stages::BecameLeaderInfo {
-                            start_slot: current_slot,
-                            end_slot: current_slot + 1,
-                            epoch: 0,
-                            identity_pubkey: *identity_pubkey.as_bytes(),
-                        },
-                    ));
-                }
-
-                // Step 5: Dev slot driver loop — complete slots on a timer.
-                // The pipeline service advances PoH each tick. This thread
-                // periodically completes the slot and starts the next one.
-                let slot_duration = std::time::Duration::from_millis(400);
-                loop {
-                    std::thread::sleep(slot_duration);
-
-                    if !dev_handle.is_leading() {
-                        continue;
-                    }
-
-                    let completed_slot = current_slot;
-
-                    // End the current slot — pipeline service will call
-                    // finish_slot() and collect entries.
-                    dev_handle.end_slot();
-
-                    // Tick, finalize, and root the bank for the completed slot.
-                    {
-                        let forks = bank_forks.read().expect("bank_forks lock poisoned");
-                        let bank = forks.working_bank();
-                        let ticks_needed =
-                            bank.max_tick_height().saturating_sub(bank.tick_height());
-                        for _ in 0..ticks_needed {
-                            let _ = bank.register_tick();
-                        }
-                        if let Err(e) = bank.finish_slot() {
-                            warn!(error = ?e, slot = completed_slot, "dev slot driver: finish_slot failed");
-                        }
-                        let _ = bank.mark_rooted();
-                    }
-
-                    // Create child bank for next slot and advance root.
-                    current_slot = completed_slot + 1;
-                    {
-                        let mut forks = bank_forks.write().expect("bank_forks lock poisoned");
-                        let parent = forks.working_bank();
-                        let leader_schedule = parent.leader_schedule();
-                        let child = karstflow_consensus::Bank::new_from_parent(
-                            &parent,
-                            current_slot,
-                            leader_schedule.clone(),
-                        );
-                        if let Err(e) = forks.insert(child) {
-                            warn!(
-                                error = ?e,
-                                slot = current_slot,
-                                "dev slot driver: failed to insert bank"
-                            );
-                            break;
-                        }
-                        let _ = forks.set_working_bank(current_slot);
-
-                        // Advance root to the completed slot so RPC
-                        // sees finalized/confirmed state progressing.
-                        if let Err(e) = forks.set_root(completed_slot) {
-                            warn!(
-                                error = ?e,
-                                slot = completed_slot,
-                                "dev slot driver: failed to set root"
-                            );
-                        }
-                    }
-
-                    info!(
-                        completed = completed_slot,
-                        next = current_slot,
-                        "dev mode: slot completed, starting next"
-                    );
-
-                    // Begin next slot.
-                    dev_handle.begin_slot(current_slot);
-                }
-            })
-            .expect("failed to spawn dev slot driver thread");
+        slot_driver::spawn_dev_slot_driver(
+            identity_pubkey,
+            consensus.bank_forks.clone(),
+            replay_bundle.signal_bus.clone(),
+            pipeline_bundle.handle.clone(),
+        );
     }
 
     // Build the turbine retransmit service for shred propagation.
@@ -1117,7 +637,7 @@ fn run_with_node_config(
                         continue;
                     }
 
-                    // Lock vote processor to resolve identity → vote account
+                    // Lock vote processor to resolve identity -> vote account
                     // and process each gossip vote.
                     let mut vp = gv_vote_processor
                         .lock()
@@ -1292,139 +812,4 @@ fn run_with_node_config(
     // Cleanly shut down plugin service after runtime exits.
     plugin_service.shutdown();
     result
-}
-
-fn preflight_with_node_config(
-    node_config: karstflow_config::NodeConfig,
-    probe_ticks: u32,
-    mainnet_readiness: bool,
-) -> karstflow_control::Result<()> {
-    let _tracing_guard = init_tracing_from_config(&node_config)?;
-    let mut materialized_topology = materialize_services_from_config(&node_config)?;
-    // Push reporter into services (no aggregator needed for preflight).
-    if let Some(rpt) = materialized_topology.reporter.take() {
-        materialized_topology.services.push(Box::new(rpt));
-    }
-    if !mainnet_readiness {
-        return run_preflight_phase(
-            &node_config,
-            materialized_topology.services.as_mut_slice(),
-            probe_ticks,
-        );
-    }
-
-    let startup_probe_report = run_preflight_phase_with_probe_report(
-        &node_config,
-        materialized_topology.services.as_mut_slice(),
-        probe_ticks,
-    )?;
-    let diagnostics_summary = build_diagnostics_summary_from_probe(
-        &node_config,
-        materialized_topology.topology_spec.topology_name.clone(),
-        materialized_topology.topology_spec.stages.len(),
-        materialized_topology.topology_spec.links.len(),
-        materialized_topology.services.as_slice(),
-        startup_probe_report,
-    );
-    let readiness_report = evaluate_mainnet_readiness(&node_config, &diagnostics_summary);
-    println!(
-        "{}",
-        render_readiness_policy_line("preflight", &node_config.mainnet_readiness_policy)
-    );
-    println!(
-        "{}",
-        render_preflight_readiness_line(
-            readiness_report.checks_passed,
-            readiness_report.checks_failed,
-        )
-    );
-    for issue in &readiness_report.failed_checks {
-        println!("{}", render_preflight_readiness_issue_line(issue));
-    }
-    ensure_mainnet_readiness(&readiness_report)
-}
-
-fn diagnostics_with_node_config(
-    node_config: karstflow_config::NodeConfig,
-    probe_ticks: u32,
-    mainnet_readiness: bool,
-) -> karstflow_control::Result<()> {
-    let _tracing_guard = init_tracing_from_config(&node_config)?;
-    let mut materialized_topology = materialize_services_from_config(&node_config)?;
-    // Push reporter into services (no aggregator needed for diagnostics).
-    if let Some(rpt) = materialized_topology.reporter.take() {
-        materialized_topology.services.push(Box::new(rpt));
-    }
-    let diagnostics_summary = run_diagnostics_phase(
-        &node_config,
-        materialized_topology.topology_spec.topology_name.clone(),
-        materialized_topology.topology_spec.stages.len(),
-        materialized_topology.topology_spec.links.len(),
-        materialized_topology.services.as_mut_slice(),
-        probe_ticks,
-    )?;
-    println!(
-        "{}",
-        render_diagnostics_cluster_mode_line(node_config.cluster_mode)
-    );
-    println!(
-        "{}",
-        render_diagnostics_topology_line(
-            &diagnostics_summary.topology_name,
-            diagnostics_summary.stage_count,
-            diagnostics_summary.link_count,
-        )
-    );
-    println!(
-        "{}",
-        render_diagnostics_probe_line(
-            probe_ticks,
-            diagnostics_summary.startup_probe_report.started_ok,
-            diagnostics_summary.startup_probe_report.ticked_ok,
-            diagnostics_summary.startup_probe_report.stopped_ok,
-            diagnostics_summary.startup_probe_report.failures.len()
-        )
-    );
-    println!(
-        "{}",
-        render_diagnostics_stage_mix_line(
-            diagnostics_summary.ingress_gateway_stages,
-            diagnostics_summary.transaction_sanitizer_stages,
-            diagnostics_summary.shred_sanitizer_stages,
-            diagnostics_summary.block_builder_stages,
-            diagnostics_summary.telemetry_stages,
-        )
-    );
-    println!(
-        "{}",
-        render_diagnostics_lane_capacity_line(
-            diagnostics_summary.packet_stream_capacity,
-            diagnostics_summary.shred_stream_capacity,
-            diagnostics_summary.transaction_stream_capacity,
-        )
-    );
-    println!(
-        "{}",
-        render_diagnostics_services_line(&diagnostics_summary.runtime_service_names)
-    );
-    if mainnet_readiness {
-        let readiness_report = evaluate_mainnet_readiness(&node_config, &diagnostics_summary);
-        println!(
-            "{}",
-            render_readiness_policy_line("diagnostics", &node_config.mainnet_readiness_policy)
-        );
-        println!(
-            "{}",
-            render_diagnostics_readiness_line(
-                readiness_report.checks_passed,
-                readiness_report.checks_failed,
-            )
-        );
-        for issue in &readiness_report.failed_checks {
-            println!("{}", render_diagnostics_readiness_issue_line(issue));
-        }
-        ensure_mainnet_readiness(&readiness_report)?;
-    }
-    println!("{}", render_diagnostics_ok_line());
-    Ok(())
 }
