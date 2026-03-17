@@ -622,25 +622,26 @@ fn run_with_node_config(
             .expect("failed to spawn leader orchestrator thread");
     }
 
-    // Genesis leader bootstrap for cluster mode (genesis file path).
-    // When booting from a genesis.bin file, the genesis bank must be ticked
-    // and frozen before block production can begin. If this validator is the
-    // leader for slot 1 according to the leader schedule, emit BecameLeader
-    // to kick-start the pipeline. Non-leader nodes wait for blocks from the
-    // network via gossip/turbine.
+    // Cluster slot driver for genesis-file mode.
+    // Analogous to dev-slot-driver but with leader schedule awareness:
+    // - Ticks genesis bank and freezes it
+    // - Enters timer loop that advances slots every 400ms
+    // - Only produces blocks when this validator is the scheduled leader
+    // - Non-leader slots are still ticked to keep bank state advancing
     let has_genesis_file = node_config.genesis_path.is_some();
     if has_genesis_file && !is_dev_mode {
         let identity_pubkey = karstflow_storage::Pubkey::from(*identity.pubkey());
         let bank_forks = consensus.bank_forks.clone();
         let signal_bus = replay_bundle.signal_bus.clone();
+        let cluster_handle = pipeline_bundle.handle.clone();
 
         std::thread::Builder::new()
-            .name("genesis-leader-bootstrap".into())
+            .name("cluster-slot-driver".into())
             .spawn(move || {
                 // Small delay to let leader orchestrator subscribe to signal bus.
                 std::thread::sleep(std::time::Duration::from_millis(100));
 
-                // Tick and freeze the genesis bank.
+                // Step 1: Tick and freeze the genesis bank.
                 let forks = bank_forks.read().expect("bank_forks lock poisoned");
                 let genesis_bank = forks.working_bank();
                 let ticks_needed = genesis_bank
@@ -648,87 +649,139 @@ fn run_with_node_config(
                     .saturating_sub(genesis_bank.tick_height());
                 for _ in 0..ticks_needed {
                     if let Err(e) = genesis_bank.register_tick() {
-                        warn!(error = ?e, "genesis-leader: failed to register tick");
+                        warn!(error = ?e, "cluster-slot-driver: failed to register tick");
                         return;
                     }
                 }
                 if let Err(e) = genesis_bank.freeze() {
-                    warn!(error = ?e, "genesis-leader: failed to freeze genesis bank");
+                    warn!(error = ?e, "cluster-slot-driver: failed to freeze genesis");
                     return;
                 }
                 let genesis_slot = genesis_bank.slot();
-                let leader_schedule = genesis_bank.leader_schedule();
-                let epoch_schedule = genesis_bank.epoch_schedule().config();
-                info!(
-                    slot = genesis_slot,
-                    "genesis-leader: genesis bank ticked and frozen",
-                );
+                info!(slot = genesis_slot, "cluster-slot-driver: genesis bank frozen");
                 drop(forks);
 
-                // Check if this validator is the leader for slot 1.
-                let next_slot = genesis_slot + 1;
-                let is_leader = leader_schedule
-                    .leader_for_absolute_slot(
-                        next_slot,
-                        &karstflow_consensus::EpochSchedule::new(*epoch_schedule),
-                    )
-                    .map(|leader| leader == identity_pubkey)
-                    .unwrap_or(false);
-
-                if is_leader {
-                    // Create child bank and emit BecameLeader.
+                // Step 2: Create child bank for slot 1.
+                let mut current_slot = genesis_slot + 1;
+                {
                     let mut forks = bank_forks.write().expect("bank_forks lock poisoned");
                     let parent = forks.working_bank();
                     let ls = parent.leader_schedule();
                     let child = karstflow_consensus::Bank::new_from_parent(
-                        &parent,
-                        next_slot,
-                        ls.clone(),
+                        &parent, current_slot, ls.clone(),
                     );
                     if let Err(e) = forks.insert(child) {
-                        warn!(error = ?e, slot = next_slot, "genesis-leader: failed to insert child");
+                        warn!(error = ?e, "cluster-slot-driver: insert child failed");
                         return;
                     }
-                    if let Err(e) = forks.set_working_bank(next_slot) {
-                        warn!(error = ?e, slot = next_slot, "genesis-leader: failed to set working bank");
-                        return;
-                    }
-                    drop(forks);
+                    let _ = forks.set_working_bank(current_slot);
+                }
 
-                    // Scan forward for contiguous leader range.
-                    let mut end_slot = next_slot + 1;
-                    while leader_schedule
-                        .leader_for_absolute_slot(
-                            end_slot,
-                            &karstflow_consensus::EpochSchedule::new(*epoch_schedule),
-                        )
+                // Helper: check if identity is leader for a slot.
+                let is_leader_for = |slot: u64| -> bool {
+                    let forks = bank_forks.read().expect("bank_forks lock poisoned");
+                    let bank = forks.working_bank();
+                    let schedule = bank.leader_schedule();
+                    let es_config = bank.epoch_schedule().config();
+                    let es = karstflow_consensus::EpochSchedule::new(*es_config);
+                    schedule
+                        .leader_for_absolute_slot(slot, &es)
                         .map(|l| l == identity_pubkey)
                         .unwrap_or(false)
-                    {
-                        end_slot += 1;
-                    }
+                };
 
+                // Step 3: If leader for slot 1, emit BecameLeader.
+                if is_leader_for(current_slot) {
+                    let mut end = current_slot + 1;
+                    while is_leader_for(end) { end += 1; }
                     info!(
-                        start_slot = next_slot,
-                        end_slot,
-                        "genesis-leader: this node is leader, emitting BecameLeader",
+                        start_slot = current_slot, end_slot = end,
+                        "cluster-slot-driver: leader for first slot, emitting BecameLeader",
                     );
                     let mut bus = signal_bus.lock().expect("signal_bus lock poisoned");
                     bus.emit(karstflow_stages::ReplaySignal::BecameLeader(
                         karstflow_stages::BecameLeaderInfo {
-                            start_slot: next_slot,
-                            end_slot,
+                            start_slot: current_slot,
+                            end_slot: end,
                             epoch: 0,
                             identity_pubkey: *identity_pubkey.as_bytes(),
                         },
                     ));
-                } else {
-                    info!(
-                        "genesis-leader: this node is NOT leader for slot 1, waiting for blocks from network",
-                    );
+                }
+
+                // Step 4: Slot timer loop — advance slots every 400ms.
+                let slot_duration = std::time::Duration::from_millis(400);
+                loop {
+                    std::thread::sleep(slot_duration);
+
+                    let completed_slot = current_slot;
+
+                    // If we were leading, end the slot.
+                    if cluster_handle.is_leading() {
+                        cluster_handle.end_slot();
+                    }
+
+                    // Tick, finalize, and root the bank for the completed slot.
+                    {
+                        let forks = bank_forks.read().expect("bank_forks lock poisoned");
+                        let bank = forks.working_bank();
+                        let ticks_needed =
+                            bank.max_tick_height().saturating_sub(bank.tick_height());
+                        for _ in 0..ticks_needed {
+                            let _ = bank.register_tick();
+                        }
+                        if let Err(e) = bank.finish_slot() {
+                            warn!(error = ?e, slot = completed_slot, "cluster-slot-driver: finish_slot failed");
+                        }
+                        let _ = bank.mark_rooted();
+                    }
+
+                    // Create child bank for next slot.
+                    current_slot = completed_slot + 1;
+                    {
+                        let mut forks = bank_forks.write().expect("bank_forks lock poisoned");
+                        let parent = forks.working_bank();
+                        let ls = parent.leader_schedule();
+                        let child = karstflow_consensus::Bank::new_from_parent(
+                            &parent, current_slot, ls.clone(),
+                        );
+                        if let Err(e) = forks.insert(child) {
+                            warn!(error = ?e, slot = current_slot, "cluster-slot-driver: insert failed");
+                            break;
+                        }
+                        let _ = forks.set_working_bank(current_slot);
+                        if let Err(e) = forks.set_root(completed_slot) {
+                            warn!(error = ?e, "cluster-slot-driver: set_root failed");
+                        }
+                    }
+
+                    // Check if this validator is leader for the new slot.
+                    if is_leader_for(current_slot) {
+                        let mut end = current_slot + 1;
+                        while is_leader_for(end) { end += 1; }
+                        info!(
+                            completed = completed_slot, next = current_slot, end_slot = end,
+                            "cluster-slot-driver: became leader",
+                        );
+                        cluster_handle.begin_slot(current_slot);
+                        let mut bus = signal_bus.lock().expect("signal_bus lock poisoned");
+                        bus.emit(karstflow_stages::ReplaySignal::BecameLeader(
+                            karstflow_stages::BecameLeaderInfo {
+                                start_slot: current_slot,
+                                end_slot: end,
+                                epoch: 0,
+                                identity_pubkey: *identity_pubkey.as_bytes(),
+                            },
+                        ));
+                    } else {
+                        info!(
+                            completed = completed_slot, next = current_slot,
+                            "cluster-slot-driver: not leader, waiting",
+                        );
+                    }
                 }
             })
-            .expect("failed to spawn genesis-leader-bootstrap thread");
+            .expect("failed to spawn cluster-slot-driver thread");
     }
 
     // Dev mode genesis completion: tick + freeze genesis bank, then emit
