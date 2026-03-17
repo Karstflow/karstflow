@@ -474,7 +474,7 @@ fn run_genesis_cluster(params: GenesisClusterParams) -> Result<()> {
              \n\
              [cluster]\n\
              mode = \"dev\"\n\
-             gossip_bind_addr = \"0.0.0.0:{gossip_port}\"\n\
+             gossip_bind_addr = \"127.0.0.1:{gossip_port}\"\n\
              gossip_allow_private_addresses = true\n\
              entrypoints = [\"{bootstrap_gossip}\"]\n\
              genesis_path = \"{abs_dir}/genesis.bin\"\n\
@@ -490,8 +490,8 @@ fn run_genesis_cluster(params: GenesisClusterParams) -> Result<()> {
              \n\
              [ingress_policy]\n\
              ingress_mode = \"udp\"\n\
-             udp_bind_address = \"0.0.0.0:{tpu_port}\"\n\
-             tvu_bind_address = \"0.0.0.0:{tvu_port}\"\n\
+             udp_bind_address = \"127.0.0.1:{tpu_port}\"\n\
+             tvu_bind_address = \"127.0.0.1:{tvu_port}\"\n\
              \n\
              [logging]\n\
              stderr_level = \"info\"\n"

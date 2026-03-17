@@ -94,8 +94,10 @@ pub(crate) fn spawn_cluster_slot_driver(
 
                 let completed_slot = current_slot;
 
-                // If we were leading, end the slot.
-                if cluster_handle.is_leading() {
+                // If we were leading, end the slot and emit SlotCompleted
+                // so the leader orchestrator can shred and broadcast entries.
+                let was_leading = cluster_handle.is_leading();
+                if was_leading {
                     cluster_handle.end_slot();
                 }
 
@@ -111,7 +113,29 @@ pub(crate) fn spawn_cluster_slot_driver(
                     if let Err(e) = bank.finish_slot() {
                         warn!(error = ?e, slot = completed_slot, "cluster-slot-driver: finish_slot failed");
                     }
+                    let bank_hash = bank.last_blockhash();
                     let _ = bank.mark_rooted();
+
+                    // Emit SlotCompleted so leader orchestrator shreds + broadcasts.
+                    if was_leading {
+                        let mut bus = signal_bus.lock().expect("signal_bus lock poisoned");
+                        bus.emit(karstflow_stages::ReplaySignal::SlotCompleted(
+                            karstflow_stages::SlotCompletedInfo {
+                                slot: completed_slot,
+                                parent_slot: completed_slot.saturating_sub(1),
+                                bank_hash,
+                                block_hash: bank_hash,
+                                parent_blockhash: [0u8; 32],
+                                epoch: 0,
+                                is_epoch_boundary: false,
+                                transaction_count: 0,
+                                executed_count: 0,
+                                fee_lamports_collected: 0,
+                                capitalization: 0,
+                                timestamp: 0,
+                            },
+                        ));
+                    }
                 }
 
                 // Create child bank for next slot.
