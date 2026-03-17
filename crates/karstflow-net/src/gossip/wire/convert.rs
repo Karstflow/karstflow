@@ -37,8 +37,8 @@ pub fn contact_info_to_wire_value(ci: &ContactInfo) -> WireCrdsValue {
     let legacy = WireLegacyContactInfo {
         id: ci.node_id.0,
         gossip: ci.gossip_addr,
-        tvu: UNSPECIFIED_ADDR,
-        tvu_quic: UNSPECIFIED_ADDR,
+        tvu: ci.tvu_addr,
+        tvu_quic: ci.tvu_quic_addr,
         serve_repair_quic: UNSPECIFIED_ADDR,
         tpu: ci.tpu_addr,
         tpu_forwards: UNSPECIFIED_ADDR,
@@ -78,6 +78,16 @@ pub fn wire_value_to_contact_info(wv: &WireCrdsValue) -> Option<ContactInfo> {
                 } else {
                     // TPU QUIC is typically TPU port + 6
                     lci.tpu
+                },
+                tvu_addr: if lci.tvu.ip().is_unspecified() {
+                    lci.gossip
+                } else {
+                    lci.tvu
+                },
+                tvu_quic_addr: if lci.tvu_quic.ip().is_unspecified() {
+                    lci.gossip
+                } else {
+                    lci.tvu_quic
                 },
                 repair_addr: if lci.serve_repair.ip().is_unspecified() {
                     lci.gossip
@@ -120,6 +130,8 @@ pub fn wire_value_to_contact_info(wv: &WireCrdsValue) -> Option<ContactInfo> {
                 gossip_addr,
                 tpu_addr: resolved_sockets[gossip::SOCKET_TPU].unwrap_or(gossip_addr),
                 tpu_quic_addr: resolved_sockets[gossip::SOCKET_TPU_QUIC].unwrap_or(gossip_addr),
+                tvu_addr: resolved_sockets[gossip::SOCKET_TVU].unwrap_or(gossip_addr),
+                tvu_quic_addr: resolved_sockets[gossip::SOCKET_TVU_QUIC].unwrap_or(gossip_addr),
                 repair_addr: resolved_sockets[gossip::SOCKET_SERVE_REPAIR].unwrap_or(gossip_addr),
                 rpc_addr: resolved_sockets[gossip::SOCKET_RPC],
                 version: ci.version.major as u64,
@@ -511,6 +523,8 @@ mod tests {
             gossip_addr: addr,
             tpu_addr: SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), port + 1),
             tpu_quic_addr: SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), port + 2),
+            tvu_addr: SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), port + 5),
+            tvu_quic_addr: SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), port + 6),
             repair_addr: SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), port + 3),
             rpc_addr: Some(SocketAddr::new(
                 IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)),

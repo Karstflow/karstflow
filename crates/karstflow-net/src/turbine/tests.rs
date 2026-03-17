@@ -13,7 +13,7 @@ fn create_node_id(byte: u8) -> NodeId {
 
 fn create_contact_info(node_id: NodeId, port: u16) -> ContactInfo {
     let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), port);
-    ContactInfo::new(node_id, addr, addr, addr, addr, 1)
+    ContactInfo::new(node_id, addr, addr, addr, addr, addr, addr, 1)
 }
 
 fn create_validator(node_id: NodeId, stake: u64, port: u16) -> ValidatorInfo {

@@ -228,7 +228,8 @@ mod tests {
     fn test_cluster_info(pubkey: [u8; 32]) -> Arc<ClusterInfo> {
         let node_id = karstflow_net::NodeId::new(pubkey);
         let addr: SocketAddr = "127.0.0.1:8000".parse().unwrap();
-        let contact_info = karstflow_net::ContactInfo::new(node_id, addr, addr, addr, addr, 0);
+        let contact_info =
+            karstflow_net::ContactInfo::new(node_id, addr, addr, addr, addr, addr, addr, 0);
         Arc::new(ClusterInfo::new(
             node_id,
             contact_info,

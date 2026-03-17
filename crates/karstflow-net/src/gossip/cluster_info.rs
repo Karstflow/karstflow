@@ -76,6 +76,8 @@ pub struct ContactInfo {
     pub gossip_addr: SocketAddr,
     pub tpu_addr: SocketAddr,
     pub tpu_quic_addr: SocketAddr,
+    pub tvu_addr: SocketAddr,
+    pub tvu_quic_addr: SocketAddr,
     pub repair_addr: SocketAddr,
     pub rpc_addr: Option<SocketAddr>,
     pub version: u64,
@@ -84,11 +86,14 @@ pub struct ContactInfo {
 }
 
 impl ContactInfo {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         node_id: NodeId,
         gossip_addr: SocketAddr,
         tpu_addr: SocketAddr,
         tpu_quic_addr: SocketAddr,
+        tvu_addr: SocketAddr,
+        tvu_quic_addr: SocketAddr,
         repair_addr: SocketAddr,
         shred_version: u16,
     ) -> Self {
@@ -97,6 +102,8 @@ impl ContactInfo {
             gossip_addr,
             tpu_addr,
             tpu_quic_addr,
+            tvu_addr,
+            tvu_quic_addr,
             repair_addr,
             rpc_addr: None,
             version: 0,
@@ -127,6 +134,8 @@ impl ContactInfo {
         sockets[gossip::SOCKET_GOSSIP] = Some(self.gossip_addr);
         sockets[gossip::SOCKET_TPU] = Some(self.tpu_addr);
         sockets[gossip::SOCKET_TPU_QUIC] = Some(self.tpu_quic_addr);
+        sockets[gossip::SOCKET_TVU] = Some(self.tvu_addr);
+        sockets[gossip::SOCKET_TVU_QUIC] = Some(self.tvu_quic_addr);
         sockets[gossip::SOCKET_SERVE_REPAIR] = Some(self.repair_addr);
         if let Some(rpc) = self.rpc_addr {
             sockets[gossip::SOCKET_RPC] = Some(rpc);
@@ -157,11 +166,16 @@ impl ContactInfo {
 
         let wallclock_ms = (ci.wallclock_nanos / 1_000_000) as u64;
 
+        let tvu_addr = ci.sockets[gossip::SOCKET_TVU].unwrap_or(gossip_addr);
+        let tvu_quic_addr = ci.sockets[gossip::SOCKET_TVU_QUIC].unwrap_or(gossip_addr);
+
         let mut info = ContactInfo {
             node_id: NodeId(ci.pubkey),
             gossip_addr,
             tpu_addr,
             tpu_quic_addr,
+            tvu_addr,
+            tvu_quic_addr,
             repair_addr,
             rpc_addr,
             version: 0,
@@ -599,6 +613,8 @@ impl ClusterInfo {
             gossip_addr,
             gossip_addr, // placeholder TPU
             gossip_addr, // placeholder QUIC
+            gossip_addr, // placeholder TVU
+            gossip_addr, // placeholder TVU QUIC
             gossip_addr, // placeholder repair
             0,           // shred_version unknown until handshake
         );
@@ -909,7 +925,7 @@ mod tests {
 
     fn create_test_contact_info(node_id: NodeId, port: u16) -> ContactInfo {
         let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), port);
-        ContactInfo::new(node_id, addr, addr, addr, addr, 1)
+        ContactInfo::new(node_id, addr, addr, addr, addr, addr, addr, 1)
     }
 
     #[test]
@@ -1028,7 +1044,9 @@ mod tests {
         let tpu = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)), 9001);
         let quic = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)), 9002);
         let repair = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)), 9003);
-        let info = ContactInfo::new(node_id, addr, tpu, quic, repair, 42);
+        let tvu = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)), 9004);
+        let tvu_quic = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)), 9005);
+        let info = ContactInfo::new(node_id, addr, tpu, quic, tvu, tvu_quic, repair, 42);
 
         let crds_value = info.to_crds_value();
         let crds_ci = crds_value.data.as_contact_info().unwrap();
@@ -1300,6 +1318,8 @@ mod tests {
             SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)), 9000),
             SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)), 9001),
             SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)), 9002),
+            SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)), 9004),
+            SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)), 9005),
             repair_addr,
             1,
         );

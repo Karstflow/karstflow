@@ -407,6 +407,26 @@ impl NodeConfig {
         )
     }
 
+    /// TVU (turbine/shred receiver) bind address.
+    ///
+    /// Defaults to gossip port + 8, following Solana port conventions.
+    pub fn tvu_bind_addr(&self) -> SocketAddr {
+        SocketAddr::new(
+            self.gossip_bind_addr.ip(),
+            self.gossip_bind_addr.port().wrapping_add(8),
+        )
+    }
+
+    /// TVU QUIC bind address.
+    ///
+    /// Defaults to gossip port + 10, following Solana port conventions.
+    pub fn tvu_quic_bind_addr(&self) -> SocketAddr {
+        SocketAddr::new(
+            self.gossip_bind_addr.ip(),
+            self.gossip_bind_addr.port().wrapping_add(10),
+        )
+    }
+
     /// Repair protocol bind address.
     ///
     /// Defaults to gossip port + 6, following Solana port conventions.

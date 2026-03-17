@@ -1010,6 +1010,8 @@ pub fn start_gossip_service(
         gossip_bind_addr,
         node_config.tpu_bind_addr(),
         node_config.tpu_quic_bind_addr(),
+        node_config.tvu_bind_addr(),
+        node_config.tvu_quic_bind_addr(),
         node_config.repair_bind_addr(),
         shred_version,
     );
