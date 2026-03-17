@@ -28,6 +28,7 @@ use karstflow_control::{
 /// PohEntries into data + coding shreds, persists them in the blockstore
 /// for repair serving, and sends data shreds to the ShredCollector for
 /// self-replay of the produced block.
+#[allow(clippy::too_many_arguments)]
 fn shred_produced_entries(
     slot: u64,
     entry_batches: &[Vec<karstflow_stages::PohEntry>],
@@ -36,6 +37,7 @@ fn shred_produced_entries(
     shred_version: u16,
     blockstore: Option<&std::sync::Arc<karstflow_storage::Blockstore>>,
     direct_shred_sender: &mut Option<karstflow_mesh::DualSender<karstflow_types::shred::Shred>>,
+    turbine_retransmit: Option<&std::sync::Arc<karstflow_net::RetransmitService>>,
 ) {
     let config = karstflow_stages::ShredderConfig {
         shred_version,
@@ -110,6 +112,14 @@ fn shred_produced_entries(
                 if let Err(e) = sender.try_send(shred.clone()) {
                     warn!(slot, error = ?e, "self-replay channel full, shred dropped");
                 }
+            }
+        }
+
+        // Broadcast data shreds to turbine tree peers.
+        if let Some(retransmit) = turbine_retransmit {
+            for shred in &data_shreds {
+                let wire_bytes = &shred.payload;
+                retransmit.forward_raw(wire_bytes);
             }
         }
     }
@@ -547,6 +557,12 @@ fn run_with_node_config(
         pipeline_inputs,
         Some(leader_exec_engine),
     );
+    // Deferred turbine retransmit handle — populated after turbine service
+    // is built, read by the leader orchestrator during block production.
+    let deferred_retransmit: std::sync::Arc<
+        std::sync::RwLock<Option<std::sync::Arc<karstflow_net::RetransmitService>>>,
+    > = std::sync::Arc::new(std::sync::RwLock::new(None));
+
     // Wire leader slot orchestration: subscribe to replay signals and
     // drive the pipeline handle when this validator becomes leader.
     // After each leader slot completes, entries are shredded and broadcast
@@ -567,6 +583,7 @@ fn run_with_node_config(
         let shred_version = node_config.expected_shred_version.unwrap_or(1);
 
         // Clone shared resources for the orchestrator thread.
+        let orchestrator_retransmit = deferred_retransmit.clone();
         let orchestrator_blockstore = shared_blockstore.clone();
         let mut orchestrator_shred_sender = direct_shred_sender;
 
@@ -605,6 +622,11 @@ fn run_with_node_config(
                                         shred_version,
                                         orchestrator_blockstore.as_ref(),
                                         &mut orchestrator_shred_sender,
+                                        orchestrator_retransmit
+                                            .read()
+                                            .ok()
+                                            .and_then(|g| g.as_ref().cloned())
+                                            .as_ref(),
                                     );
                                 }
                             }
@@ -955,6 +977,11 @@ fn run_with_node_config(
         &node_config.network_config,
     )?;
     let retransmit_service = turbine_bundle.retransmit;
+
+    // Wire turbine retransmit into the leader orchestrator (deferred).
+    if let Ok(mut guard) = deferred_retransmit.write() {
+        *guard = Some(retransmit_service.clone());
+    }
 
     // Build the repair service for slot recovery from peers.
     // The coordinator runs poll-driven in the node runtime; background I/O
