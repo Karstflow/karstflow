@@ -216,8 +216,11 @@ impl BytecodeVm {
             }
         })?;
 
-        let dispatch = RuntimeSyscallDispatch::with_active_feature_ids(active_features);
-        let syscall_ids = dispatch.registered_ids();
+        // Merge the VM's base syscall IDs (including CPI handlers) with
+        // feature-gated syscall IDs to get the full set of valid call targets.
+        let feature_dispatch = RuntimeSyscallDispatch::with_active_feature_ids(active_features);
+        let mut syscall_ids = self.syscall_dispatch.registered_ids();
+        syscall_ids.extend(feature_dispatch.registered_ids());
         validation::validate(&program, &syscall_ids).map_err(|errors| {
             let sample: Vec<String> = errors.iter().take(3).map(|e| e.to_string()).collect();
             SbpfExecutionError::ExecutionFailed {
@@ -351,11 +354,6 @@ impl BytecodeVm {
             .clone()
             .unwrap_or_else(|| self.sysvar_snapshot.clone());
 
-        // Build feature-aware syscall dispatch from the active feature set.
-        // This ensures feature-gated syscalls (blake3, remaining_compute_units,
-        // curve ops, etc.) are available when features are active.
-        let dispatch = RuntimeSyscallDispatch::with_active_feature_ids(&snapshot.active_features);
-
         // Re-assemble metadata struct for deserialization (buffer comes from VM result).
         let deser_meta = bpf_serialization::SerializedInput {
             buffer: Vec::new(), // not used by collect_modified_accounts
@@ -374,7 +372,7 @@ impl BytecodeVm {
             program,
             memory,
             context.compute_budget,
-            &dispatch,
+            &self.syscall_dispatch,
             snapshot,
             context.program_id,
         ) {
