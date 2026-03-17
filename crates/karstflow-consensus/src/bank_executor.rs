@@ -5020,16 +5020,16 @@ mod tests {
     }
 
     #[test]
-    fn child_bank_inherits_derived_fee_rate() {
+    fn child_bank_uses_fixed_fee_rate() {
         let bank = create_test_bank();
 
-        // Simulate heavy load
+        // Simulate heavy load — should not affect child fee rate
         bank.add_signatures(DEFAULT_TARGET_SIGNATURES_PER_SLOT * 3);
 
         let child = Bank::new_from_parent(&bank, bank.slot() + 1, bank.leader_schedule().clone());
 
-        // Child's fee rate should be higher than the default
-        assert!(child.lamports_per_signature() > LAMPORTS_PER_SIGNATURE);
+        // Fee rate is always the fixed constant (matches Solana mainnet behavior)
+        assert_eq!(child.lamports_per_signature(), LAMPORTS_PER_SIGNATURE);
     }
 
     // ── account reclamation tests ─────────────────────────────────────

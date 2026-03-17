@@ -897,8 +897,8 @@ impl SyscallHandler for SolSha256Handler {
         vm: &mut VmState,
         r1: u64, // input pairs pointer
         r2: u64, // pair count
-        _r3: u64,
-        r4: u64, // result pointer (32 bytes)
+        r3: u64, // result pointer (32 bytes)
+        _r4: u64,
         _r5: u64,
     ) -> Result<u64, VmError> {
         let pair_count = r2 as usize;
@@ -912,7 +912,7 @@ impl SyscallHandler for SolSha256Handler {
         let hash: [u8; 32] = hasher.finalize().into();
 
         vm.memory
-            .write_slice(r4, &hash)
+            .write_slice(r3, &hash)
             .map_err(|e| VmError::MemoryError(e.to_string()))?;
 
         Ok(0)
@@ -928,8 +928,8 @@ impl SyscallHandler for SolKeccak256Handler {
         vm: &mut VmState,
         r1: u64, // input pairs pointer
         r2: u64, // pair count
-        _r3: u64,
-        r4: u64, // result pointer (32 bytes)
+        r3: u64, // result pointer (32 bytes)
+        _r4: u64,
         _r5: u64,
     ) -> Result<u64, VmError> {
         let pair_count = r2 as usize;
@@ -945,7 +945,7 @@ impl SyscallHandler for SolKeccak256Handler {
         hasher.finalize(&mut hash);
 
         vm.memory
-            .write_slice(r4, &hash)
+            .write_slice(r3, &hash)
             .map_err(|e| VmError::MemoryError(e.to_string()))?;
 
         Ok(0)
@@ -961,8 +961,8 @@ impl SyscallHandler for SolBlake3Handler {
         vm: &mut VmState,
         r1: u64, // input pairs pointer
         r2: u64, // pair count
-        _r3: u64,
-        r4: u64, // result pointer (32 bytes)
+        r3: u64, // result pointer (32 bytes)
+        _r4: u64,
         _r5: u64,
     ) -> Result<u64, VmError> {
         let pair_count = r2 as usize;
@@ -975,7 +975,7 @@ impl SyscallHandler for SolBlake3Handler {
         let hash_bytes: [u8; 32] = *hash.as_bytes();
 
         vm.memory
-            .write_slice(r4, &hash_bytes)
+            .write_slice(r3, &hash_bytes)
             .map_err(|e| VmError::MemoryError(e.to_string()))?;
 
         Ok(0)
@@ -3400,11 +3400,11 @@ mod tests {
             Instruction::new(Opcode::StxDword as u8, 3, 1, 0, 0), // store heap_base at pair[0]
             Instruction::new(Opcode::Mov64Imm as u8, 4, 0, 0, 5),
             Instruction::new(Opcode::StxDword as u8, 3, 4, 8, 0), // store len=5 at pair[1]
-            // Call sha256: r1=pair_ptr(heap+64), r2=1(count), r4=result(heap+128)
+            // Call sha256: r1=pair_ptr(heap+64), r2=1(count), r3=result(heap+128)
             Instruction::new(Opcode::Lddw as u8, 1, 0, 0, (REGION_HEAP_BASE + 64) as i32),
             Instruction::new(0, 0, 0, 0, ((REGION_HEAP_BASE + 64) >> 32) as i32),
             Instruction::new(Opcode::Mov64Imm as u8, 2, 0, 0, 1), // 1 pair
-            Instruction::new(Opcode::Lddw as u8, 4, 0, 0, (REGION_HEAP_BASE + 128) as i32),
+            Instruction::new(Opcode::Lddw as u8, 3, 0, 0, (REGION_HEAP_BASE + 128) as i32),
             Instruction::new(0, 0, 0, 0, ((REGION_HEAP_BASE + 128) >> 32) as i32),
             Instruction::new(Opcode::Call as u8, 0, 0, 0, sha_id as i32),
             // Read first 8 bytes of hash into r0 for validation

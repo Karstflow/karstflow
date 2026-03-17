@@ -396,10 +396,10 @@ impl Bank {
             signature_status_cache: parent.signature_status_cache.clone(),
             cost_tracker: Arc::new(crate::cost_tracker::CostTracker::new()),
             accounts_data_size: AtomicI64::new(parent.accounts_data_size.load(Ordering::Acquire)),
-            lamports_per_signature: AtomicU64::new(derive_fee_rate(
-                parent.lamports_per_signature.load(Ordering::Relaxed),
-                parent.signature_count.load(Ordering::Relaxed),
-            )),
+            // Use fixed fee rate matching Solana mainnet behavior.
+            // The dynamic fee rate governor (derive_fee_rate) is not active
+            // on Solana mainnet — lamports_per_signature is always the constant.
+            lamports_per_signature: AtomicU64::new(LAMPORTS_PER_SIGNATURE),
             next_leader_schedule: RwLock::new(None),
             stake_tracker: parent.stake_tracker.clone(),
             stake_history: parent.stake_history.clone(),
@@ -1786,6 +1786,10 @@ pub enum BankFeeError {
 /// Uses an adjustment step of target/20 (5%) per slot, clamped between
 /// target/2 and target*10. This matches the protocol's gradual fee
 /// adjustment to prevent sudden fee spikes.
+///
+/// Note: currently unused — Solana mainnet uses a fixed fee rate.
+/// Retained for potential future dynamic fee activation.
+#[allow(dead_code)]
 pub(crate) fn derive_fee_rate(current_rate: u64, parent_signature_count: u64) -> u64 {
     let target = LAMPORTS_PER_SIGNATURE;
     let target_sigs = DEFAULT_TARGET_SIGNATURES_PER_SLOT;
