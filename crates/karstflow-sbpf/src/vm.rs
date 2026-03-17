@@ -202,14 +202,22 @@ impl BytecodeVm {
     }
 
     /// Load and validate a program from raw ELF bytes.
-    fn load_program(&self, elf_bytes: &[u8]) -> Result<LoadedProgram, SbpfExecutionError> {
+    ///
+    /// Uses the provided active feature set to determine which syscalls are
+    /// valid call targets during validation.
+    fn load_program(
+        &self,
+        elf_bytes: &[u8],
+        active_features: &std::collections::HashSet<[u8; 32]>,
+    ) -> Result<LoadedProgram, SbpfExecutionError> {
         let program = crate::elf_loader::load_elf(elf_bytes).map_err(|e| {
             SbpfExecutionError::ExecutionFailed {
                 message: format!("ELF load: {e}"),
             }
         })?;
 
-        let syscall_ids = self.syscall_dispatch.registered_ids();
+        let dispatch = RuntimeSyscallDispatch::with_active_feature_ids(active_features);
+        let syscall_ids = dispatch.registered_ids();
         validation::validate(&program, &syscall_ids).map_err(|errors| {
             let sample: Vec<String> = errors.iter().take(3).map(|e| e.to_string()).collect();
             SbpfExecutionError::ExecutionFailed {
@@ -343,6 +351,11 @@ impl BytecodeVm {
             .clone()
             .unwrap_or_else(|| self.sysvar_snapshot.clone());
 
+        // Build feature-aware syscall dispatch from the active feature set.
+        // This ensures feature-gated syscalls (blake3, remaining_compute_units,
+        // curve ops, etc.) are available when features are active.
+        let dispatch = RuntimeSyscallDispatch::with_active_feature_ids(&snapshot.active_features);
+
         // Re-assemble metadata struct for deserialization (buffer comes from VM result).
         let deser_meta = bpf_serialization::SerializedInput {
             buffer: Vec::new(), // not used by collect_modified_accounts
@@ -361,7 +374,7 @@ impl BytecodeVm {
             program,
             memory,
             context.compute_budget,
-            &self.syscall_dispatch,
+            &dispatch,
             snapshot,
             context.program_id,
         ) {
@@ -457,8 +470,15 @@ impl SbpfVm for BytecodeVm {
             }
         }
 
+        // Resolve active features for syscall registration during validation.
+        let active_features = context
+            .sysvar_snapshot
+            .as_ref()
+            .map(|s| &s.active_features)
+            .unwrap_or(&self.sysvar_snapshot.active_features);
+
         // Load, validate, cache, and execute.
-        let program = self.load_program(elf_bytes)?;
+        let program = self.load_program(elf_bytes, active_features)?;
 
         // Compute effective_slot: if this program was recently deployed,
         // apply DELAY_VISIBILITY_SLOT_OFFSET; otherwise it's always visible.
