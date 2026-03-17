@@ -94,12 +94,9 @@ pub(crate) fn spawn_cluster_slot_driver(
 
                 let completed_slot = current_slot;
 
-                // If we were leading, end the slot and emit SlotCompleted
-                // so the leader orchestrator can shred and broadcast entries.
+                // Track if we were leading — orchestrator handles end_slot on
+                // SlotCompleted, but we need to know for signal emission.
                 let was_leading = cluster_handle.is_leading();
-                if was_leading {
-                    cluster_handle.end_slot();
-                }
 
                 // Tick, finalize, and root the bank for the completed slot.
                 {
