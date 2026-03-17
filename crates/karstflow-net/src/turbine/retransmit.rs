@@ -214,9 +214,7 @@ impl RetransmitService {
         }
         for child_id in &children {
             if let Some(node) = current_tree.get_node(child_id) {
-                let _ = self
-                    .transport
-                    .send_to(data, node.contact_info.tpu_quic_addr);
+                let _ = self.transport.send_to(data, node.contact_info.tvu_addr);
             }
         }
         self.stats.record_retransmit(1, data.len() as u64);
@@ -325,7 +323,7 @@ impl RetransmitService {
         let mut child_addrs = Vec::new();
         for child_id in &children {
             if let Some(node) = current_tree.get_node(child_id) {
-                child_addrs.push((*child_id, node.contact_info.tpu_quic_addr));
+                child_addrs.push((*child_id, node.contact_info.tvu_addr));
             }
         }
 

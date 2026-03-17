@@ -15,6 +15,7 @@ fn encode_ingress_source(source: IngressSource) -> u8 {
         IngressSource::Gossip => 1,
         IngressSource::Bundle => 2,
         IngressSource::Rpc => 3,
+        IngressSource::Tvu => 4,
     }
 }
 
@@ -23,7 +24,8 @@ fn decode_ingress_source(byte: u8) -> IngressSource {
         0 => IngressSource::Quic,
         1 => IngressSource::Gossip,
         2 => IngressSource::Bundle,
-        _ => IngressSource::Rpc,
+        3 => IngressSource::Rpc,
+        _ => IngressSource::Tvu,
     }
 }
 
@@ -176,6 +178,7 @@ mod tests {
             IngressSource::Gossip,
             IngressSource::Bundle,
             IngressSource::Rpc,
+            IngressSource::Tvu,
         ] {
             let frame = InboundFrame {
                 packet_id: 0,

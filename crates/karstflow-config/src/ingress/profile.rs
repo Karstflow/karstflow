@@ -41,6 +41,16 @@ pub(super) fn apply_profile(
                 }
             })?);
     }
+    if let Some(value) = profile.tvu_bind_address.as_deref() {
+        ingress_policy.tvu_bind_address =
+            Some(value.parse::<std::net::SocketAddr>().map_err(|source| {
+                ConfigError::InvalidSocketAddr {
+                    name: "ingress.tvu_bind_address".to_string(),
+                    value: value.to_string(),
+                    source,
+                }
+            })?);
+    }
     if let Some(value) = profile.udp_quic_source_port {
         ingress_policy.udp_quic_source_port = Some(value);
     }

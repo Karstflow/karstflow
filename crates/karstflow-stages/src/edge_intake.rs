@@ -14,6 +14,7 @@ pub struct EdgeIntake {
     packets_sent_in_batch: u32,
     idle_ticks_remaining: u32,
     udp_socket: Option<UdpSocket>,
+    tvu_socket: Option<UdpSocket>,
     next_tx_route_index: usize,
     next_shred_route_index: usize,
 }
@@ -60,13 +61,16 @@ impl EdgeIntake {
             synthetic_source_cursor: 0,
             idle_ticks_remaining: 0,
             udp_socket: None,
+            tvu_socket: None,
             next_tx_route_index: 0,
             next_shred_route_index: 0,
         }
     }
 
     fn should_route_to_shred_path(&self, source: karstflow_net::IngressSource) -> bool {
-        !self.outgoing_shred_packets.is_empty() && source == karstflow_net::IngressSource::Gossip
+        !self.outgoing_shred_packets.is_empty()
+            && (source == karstflow_net::IngressSource::Gossip
+                || source == karstflow_net::IngressSource::Tvu)
     }
 
     fn try_send_to_routes(
@@ -281,6 +285,47 @@ impl EdgeIntake {
 
         Ok(())
     }
+
+    fn tick_tvu(&mut self, context: &ServiceContext) -> RuntimeResult<()> {
+        if self.tvu_socket.is_none() {
+            return Ok(());
+        }
+
+        let mut buffer = [0_u8; 65_536];
+
+        for _ in 0..self.ingress_policy.udp_max_packets_per_tick {
+            let recv_result = {
+                let socket = self.tvu_socket.as_ref().ok_or_else(|| {
+                    RuntimeError::service_failure(self.name(), "tvu socket is not initialized")
+                })?;
+                socket.recv_from(&mut buffer)
+            };
+            match recv_result {
+                Ok((packet_len, _source_addr)) => {
+                    let packet = InboundPacket {
+                        packet_id: self.next_packet_id,
+                        payload_bytes: packet_len,
+                        source: IngressSource::Tvu,
+                        data: buffer[..packet_len].to_vec(),
+                    };
+                    self.next_packet_id = self.next_packet_id.saturating_add(1);
+
+                    if !self.try_send_packet(context, packet)? {
+                        break;
+                    }
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => break,
+                Err(error) => {
+                    return Err(RuntimeError::service_failure(
+                        self.name(),
+                        &format!("tvu recv failed: {error}"),
+                    ))
+                }
+            }
+        }
+
+        Ok(())
+    }
 }
 
 impl Service for EdgeIntake {
@@ -314,18 +359,37 @@ impl Service for EdgeIntake {
             })?;
             self.udp_socket = Some(socket);
         }
+        if let Some(tvu_addr) = self.ingress_policy.tvu_bind_address {
+            let socket = UdpSocket::bind(tvu_addr).map_err(|error| {
+                RuntimeError::service_failure(
+                    self.name(),
+                    &format!("failed to bind tvu socket {tvu_addr}: {error}"),
+                )
+            })?;
+            socket.set_nonblocking(true).map_err(|error| {
+                RuntimeError::service_failure(
+                    self.name(),
+                    &format!("failed to set tvu socket nonblocking mode: {error}"),
+                )
+            })?;
+            self.tvu_socket = Some(socket);
+        }
         Ok(())
     }
 
     fn tick(&mut self, context: &ServiceContext) -> RuntimeResult<()> {
         match self.ingress_policy.ingress_mode {
             IngressMode::Synthetic => self.tick_synthetic(context),
-            IngressMode::Udp => self.tick_udp(context),
+            IngressMode::Udp => {
+                self.tick_udp(context)?;
+                self.tick_tvu(context)
+            }
         }
     }
 
     fn on_stop(&mut self, _context: &ServiceContext) -> RuntimeResult<()> {
         self.udp_socket = None;
+        self.tvu_socket = None;
         Ok(())
     }
 }

@@ -4,6 +4,7 @@ pub enum IngressSource {
     Gossip,
     Bundle,
     Rpc,
+    Tvu,
 }
 
 #[derive(Debug, Clone)]

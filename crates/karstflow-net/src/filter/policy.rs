@@ -64,6 +64,7 @@ pub struct IngressPolicy {
     pub synthetic_source_weight_gossip: u32,
     pub synthetic_source_weight_bundle: u32,
     pub synthetic_source_weight_rpc: u32,
+    pub tvu_bind_address: Option<SocketAddr>,
 }
 
 impl IngressPolicy {
@@ -116,6 +117,7 @@ impl IngressPolicy {
             IngressSource::Gossip => self.allow_gossip_source,
             IngressSource::Bundle => self.allow_bundle_source,
             IngressSource::Rpc => self.allow_rpc_source,
+            IngressSource::Tvu => true,
         }
     }
 
@@ -125,6 +127,7 @@ impl IngressPolicy {
             IngressSource::Gossip => self.gossip_min_gap_ticks,
             IngressSource::Bundle => self.bundle_min_gap_ticks,
             IngressSource::Rpc => self.rpc_min_gap_ticks,
+            IngressSource::Tvu => 0,
         }
     }
 
@@ -134,6 +137,7 @@ impl IngressPolicy {
             IngressSource::Gossip => self.gossip_burst_capacity,
             IngressSource::Bundle => self.bundle_burst_capacity,
             IngressSource::Rpc => self.rpc_burst_capacity,
+            IngressSource::Tvu => 0,
         }
     }
 
@@ -143,6 +147,7 @@ impl IngressPolicy {
             IngressSource::Gossip => self.gossip_burst_refill_ticks,
             IngressSource::Bundle => self.bundle_burst_refill_ticks,
             IngressSource::Rpc => self.rpc_burst_refill_ticks,
+            IngressSource::Tvu => 1,
         }
     }
 
@@ -152,6 +157,7 @@ impl IngressPolicy {
             IngressSource::Gossip => self.gossip_cost_budget_per_window,
             IngressSource::Bundle => self.bundle_cost_budget_per_window,
             IngressSource::Rpc => self.rpc_cost_budget_per_window,
+            IngressSource::Tvu => 0,
         }
     }
 
@@ -161,6 +167,7 @@ impl IngressPolicy {
             IngressSource::Gossip => self.gossip_cost_budget_window_ticks,
             IngressSource::Bundle => self.bundle_cost_budget_window_ticks,
             IngressSource::Rpc => self.rpc_cost_budget_window_ticks,
+            IngressSource::Tvu => 1,
         }
     }
 
@@ -264,6 +271,7 @@ impl Default for IngressPolicy {
             synthetic_source_weight_gossip: 0,
             synthetic_source_weight_bundle: 0,
             synthetic_source_weight_rpc: 0,
+            tvu_bind_address: None,
         }
     }
 }

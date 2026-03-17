@@ -14,6 +14,9 @@ pub(super) fn apply_env_overrides(ingress_policy: &mut IngressPolicy) -> Result<
     if let Some(value) = parse_optional_socket_addr_env("KARSTFLOW_INGRESS_UDP_BIND")? {
         ingress_policy.udp_bind_address = Some(value);
     }
+    if let Some(value) = parse_optional_socket_addr_env("KARSTFLOW_INGRESS_TVU_BIND")? {
+        ingress_policy.tvu_bind_address = Some(value);
+    }
     if let Some(value) = parse_optional_u16_env("KARSTFLOW_INGRESS_UDP_QUIC_SOURCE_PORT")? {
         ingress_policy.udp_quic_source_port = Some(value);
     }

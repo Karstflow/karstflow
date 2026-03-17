@@ -13,6 +13,7 @@ fn map_ingress_to_transaction_source(source: IngressSource) -> TransactionSource
         IngressSource::Gossip => TransactionSource::Gossip,
         IngressSource::Bundle => TransactionSource::Bundle,
         IngressSource::Rpc => TransactionSource::Forwarded,
+        IngressSource::Tvu => TransactionSource::Gossip,
     }
 }
 

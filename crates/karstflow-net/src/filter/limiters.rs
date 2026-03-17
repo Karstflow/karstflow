@@ -6,6 +6,7 @@ pub struct SourceRateLimiter {
     gossip: SourceRateState,
     bundle: SourceRateState,
     rpc: SourceRateState,
+    tvu: SourceRateState,
 }
 
 #[derive(Default)]
@@ -14,6 +15,7 @@ pub struct SourceCostBudgetLimiter {
     gossip: SourceCostBudgetState,
     bundle: SourceCostBudgetState,
     rpc: SourceCostBudgetState,
+    tvu: SourceCostBudgetState,
 }
 
 #[derive(Default)]
@@ -88,6 +90,7 @@ impl SourceRateLimiter {
             IngressSource::Gossip => &mut self.gossip,
             IngressSource::Bundle => &mut self.bundle,
             IngressSource::Rpc => &mut self.rpc,
+            IngressSource::Tvu => &mut self.tvu,
         }
     }
 }
@@ -136,6 +139,7 @@ impl SourceCostBudgetLimiter {
             IngressSource::Gossip => &mut self.gossip,
             IngressSource::Bundle => &mut self.bundle,
             IngressSource::Rpc => &mut self.rpc,
+            IngressSource::Tvu => &mut self.tvu,
         }
     }
 }
