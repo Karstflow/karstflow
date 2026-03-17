@@ -431,12 +431,12 @@ fn run_with_node_config(
             backend,
         ))
     };
+    // Use dev config (hashes_per_tick=1) for all modes until PoH tick
+    // service is implemented for real-time hashing. Without this, cluster
+    // mode pipeline never produces entries.
+    // TODO: implement PoH tick service, then use default config for cluster mode.
     let pipeline_bundle = build_pipeline_service(
-        if is_dev_mode {
-            karstflow_stages::PipelineServiceConfig::dev()
-        } else {
-            karstflow_stages::PipelineServiceConfig::default()
-        },
+        karstflow_stages::PipelineServiceConfig::dev(),
         pipeline_inputs,
         Some(leader_exec_engine),
     );
