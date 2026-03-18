@@ -36,14 +36,30 @@ pub(crate) fn spawn_cluster_slot_driver(
                 return;
             }
             let genesis_slot = genesis_bank.slot();
+            let genesis_hash = genesis_bank.last_blockhash();
             info!(slot = genesis_slot, "cluster-slot-driver: genesis bank frozen");
             drop(forks);
 
-            // Register genesis blockhash with pipeline resolv.
+            // Emit SlotCompleted for genesis so the resolv-blockhash thread
+            // registers the genesis hash in the blockhash ring.
             {
-                let forks = bank_forks.read().expect("bank_forks lock poisoned");
-                let genesis_hash = forks.working_bank().last_blockhash();
-                pipeline_handle.register_blockhash(genesis_hash, 0);
+                let mut bus = signal_bus.lock().expect("signal_bus lock poisoned");
+                bus.emit(karstflow_stages::ReplaySignal::SlotCompleted(
+                    karstflow_stages::SlotCompletedInfo {
+                        slot: genesis_slot,
+                        parent_slot: 0,
+                        bank_hash: genesis_hash,
+                        block_hash: genesis_hash,
+                        parent_blockhash: [0u8; 32],
+                        epoch: 0,
+                        is_epoch_boundary: false,
+                        transaction_count: 0,
+                        executed_count: 0,
+                        fee_lamports_collected: 0,
+                        capitalization: 0,
+                        timestamp: 0,
+                    },
+                ));
             }
 
             // Helper: check if identity is leader for a slot.
@@ -137,10 +153,8 @@ pub(crate) fn spawn_cluster_slot_driver(
                     let hash = bank.last_blockhash();
                     drop(forks);
 
-                    // Register completed slot's blockhash with resolv.
-                    pipeline_handle.register_blockhash(hash, completed_slot);
-
-                    // Emit SlotCompleted so orchestrator shreds the block.
+                    // Emit SlotCompleted — the resolv-blockhash thread picks
+                    // this up and registers the hash in the blockhash ring.
                     let mut bus = signal_bus.lock().expect("signal_bus lock poisoned");
                     bus.emit(karstflow_stages::ReplaySignal::SlotCompleted(
                         karstflow_stages::SlotCompletedInfo {
@@ -165,17 +179,19 @@ pub(crate) fn spawn_cluster_slot_driver(
                 // replay's bank creation and ensures the parent chain stays
                 // consistent (frozen parent → child).
 
-                current_slot = completed_slot + 1;
-                let next_is_leader = is_leader_for(current_slot);
+                let next_slot = completed_slot + 1;
+                let next_is_leader = is_leader_for(next_slot);
 
                 // Create child bank ONLY for leader slots.
                 if next_is_leader {
-                    // Wait for the direct parent (current_slot - 1) to be
-                    // replayed and frozen. The parent slot was produced by
-                    // another leader; replay creates and freezes its bank
-                    // when shreds arrive via turbine. We poll briefly to
-                    // allow replay time to catch up.
-                    let parent_slot = current_slot.saturating_sub(1);
+                    // Wait for the direct parent to be replayed and frozen.
+                    // The parent was produced by another leader; replay
+                    // creates and freezes its bank when shreds arrive via
+                    // turbine. We poll briefly, but if the parent isn't
+                    // ready, we DON'T advance current_slot — we retry on
+                    // the next timer tick. This handles startup delays
+                    // (gossip discovery, turbine delivery).
+                    let parent_slot = next_slot.saturating_sub(1);
                     let mut parent_ready = false;
                     for wait in 0..20 {
                         let forks = bank_forks.read().expect("bank_forks lock poisoned");
@@ -191,7 +207,15 @@ pub(crate) fn spawn_cluster_slot_driver(
                         }
                     }
 
-                    let created = if parent_ready {
+                    if !parent_ready {
+                        // Don't advance — retry this slot on next tick.
+                        // Parent will arrive via turbine when gossip
+                        // discovers the peer.
+                        continue;
+                    }
+
+                    current_slot = next_slot;
+                    let created = {
                         let mut forks = bank_forks.write().expect("bank_forks lock poisoned");
                         let parent_bank = forks.get(parent_slot).expect("parent confirmed above");
                         let ls = parent_bank.leader_schedule();
@@ -209,9 +233,6 @@ pub(crate) fn spawn_cluster_slot_driver(
                             pipeline_handle.register_blockhash(child_hash, current_slot);
                             true
                         }
-                    } else {
-                        warn!(slot = current_slot, parent = parent_slot, "cluster-slot-driver: parent not frozen, skipping leader slot");
-                        false
                     };
 
                     if created && !currently_leading {
@@ -240,12 +261,16 @@ pub(crate) fn spawn_cluster_slot_driver(
                             },
                         ));
                     }
-                } else if currently_leading {
-                    info!(
-                        completed = completed_slot,
-                        next = current_slot,
-                        "cluster-slot-driver: no longer leader",
-                    );
+                } else {
+                    // Non-leader slot: advance counter, replay handles banks.
+                    current_slot = next_slot;
+                    if currently_leading {
+                        info!(
+                            completed = completed_slot,
+                            next = current_slot,
+                            "cluster-slot-driver: no longer leader",
+                        );
+                    }
                 }
                 currently_leading = next_is_leader;
             }
