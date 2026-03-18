@@ -398,13 +398,10 @@ impl BankExecutionEngine {
 
         let sanitized = deserialized.tx;
 
-        // Register the transaction's blockhash with the bank so it passes
-        // the recent blockhash check. In cluster mode, the bank's blockhash
-        // queue may not include the exact hash from get_latest_blockhash
-        // due to rapid slot changes and tick-level hash updates.
-        bank.register_recent_blockhash(sanitized.recent_blockhash);
-
         // Execute through the full bank pipeline.
+        // The bank's blockhash queue is inherited from the frozen parent
+        // bank. Transactions reference recent blockhashes from previous
+        // slots which are already in the queue.
         let result = bank.process_transaction(&sanitized, self.backend.as_ref(), MAX_COMPUTE_UNITS);
 
         // Apply modified accounts to the bank's account database.
