@@ -70,9 +70,16 @@ pub(crate) fn spawn_cluster_slot_driver(
             // Step 3: If leader for slot 1, emit BecameLeader.
             if is_leader_for(current_slot) {
                 let mut end = current_slot + 1;
-                while is_leader_for(end) { end += 1; }
+                while is_leader_for(end) {
+                    end += 1;
+                }
+                let parent_hash = {
+                    let forks = bank_forks.read().expect("bank_forks lock poisoned");
+                    forks.working_bank().last_blockhash()
+                };
                 info!(
-                    start_slot = current_slot, end_slot = end,
+                    start_slot = current_slot,
+                    end_slot = end,
                     "cluster-slot-driver: leader for first slot, emitting BecameLeader",
                 );
                 let mut bus = signal_bus.lock().expect("signal_bus lock poisoned");
@@ -82,6 +89,7 @@ pub(crate) fn spawn_cluster_slot_driver(
                         end_slot: end,
                         epoch: 0,
                         identity_pubkey: *identity_pubkey.as_bytes(),
+                        parent_blockhash: parent_hash,
                     },
                 ));
             }
@@ -165,6 +173,10 @@ pub(crate) fn spawn_cluster_slot_driver(
                     while is_leader_for(end) {
                         end += 1;
                     }
+                    let parent_hash = {
+                        let forks = bank_forks.read().expect("bank_forks lock poisoned");
+                        forks.working_bank().last_blockhash()
+                    };
                     info!(
                         completed = completed_slot,
                         next = current_slot,
@@ -178,6 +190,7 @@ pub(crate) fn spawn_cluster_slot_driver(
                             end_slot: end,
                             epoch: 0,
                             identity_pubkey: *identity_pubkey.as_bytes(),
+                            parent_blockhash: parent_hash,
                         },
                     ));
                 } else if !next_is_leader && currently_leading {
@@ -275,6 +288,7 @@ pub(crate) fn spawn_dev_slot_driver(
                         end_slot: current_slot + 1,
                         epoch: 0,
                         identity_pubkey: *identity_pubkey.as_bytes(),
+                        parent_blockhash: [0u8; 32],
                     },
                 ));
             }

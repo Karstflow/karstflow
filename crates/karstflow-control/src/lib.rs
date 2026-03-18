@@ -30,6 +30,13 @@ pub use bootstrap::{
     spawn_snapshot_thread, spawn_snapshot_thread_with_gossip, start_gossip_service,
     BlockstoreShredProvider, ConsensusBundle, ConsensusLeaderLookup, DiagnosticsSummary,
     GossipHandle, LocalTransactionSubmitter, MainnetReadinessReport, MaterializedServicePair,
+};
+
+// Re-export TransactionSubmitter trait so downstream crates can cast submitters.
+pub use karstflow_rpc::TransactionSubmitter;
+
+// Continue bootstrap re-exports (split to avoid merge conflict).
+pub use bootstrap::{
     PipelineBundle, RepairBundle, ReplayBundle, ReplayBundleWithExternalInput, ServiceBundle,
     ShredPipelineBundle, StorageMaintenanceBundle, TurbineBundle, VoteBroadcastBundle,
 };

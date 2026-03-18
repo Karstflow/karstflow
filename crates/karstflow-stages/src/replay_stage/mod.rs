@@ -466,6 +466,7 @@ impl ReplayStage {
                             end_slot,
                             epoch: finalization.epoch,
                             identity_pubkey: identity,
+                            parent_blockhash: bank.last_blockhash(),
                         }));
                     }
                 }

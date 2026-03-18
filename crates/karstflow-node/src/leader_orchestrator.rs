@@ -43,6 +43,12 @@ pub(crate) fn spawn_leader_orchestrator(
                                 epoch = info.epoch,
                                 "activating block production for leader range",
                             );
+                            // Register parent blockhash so resolv accepts
+                            // transactions signed with latest blockhash.
+                            handle.register_blockhash(
+                                info.parent_blockhash,
+                                info.start_slot.saturating_sub(1),
+                            );
                             handle.begin_slot(info.start_slot);
                         }
                     }

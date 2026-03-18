@@ -415,6 +415,23 @@ fn run_with_node_config(
         }
     };
 
+    // For cluster mode (genesis file), create a LocalTransactionSubmitter
+    // that injects transactions directly into the pipeline. This ensures
+    // sendTransaction goes through pack → exec → PoH → entries → shreds → turbine
+    // instead of bypassing the pipeline (DevTransactionSubmitter) or forwarding
+    // via UDP (ConsensusTransactionSubmitter).
+    // For cluster mode (genesis file), create a LocalTransactionSubmitter
+    // that injects sendTransaction directly into the pipeline so transactions
+    // appear in entries → shreds → turbine → cross-node propagation.
+    let local_tx_submitter = if node_config.genesis_path.is_some() {
+        let (submitter, rx) = karstflow_control::build_local_transaction_submitter();
+        pipeline_inputs.push(rx);
+        info!("cluster mode: LocalTransactionSubmitter wired to pipeline");
+        Some(submitter as std::sync::Arc<dyn karstflow_control::TransactionSubmitter>)
+    } else {
+        None
+    };
+
     // Open the blockstore early so it is available for both block production
     // (leader orchestrator shred storage) and the repair/RPC services below.
     let storage_engine_for_maintenance = consensus.storage_engine.clone();
@@ -814,6 +831,7 @@ fn run_with_node_config(
         Some(rpc_cluster_info),
         *identity.pubkey(),
         shared_blockstore,
+        local_tx_submitter,
     );
 
     // Save tower state to disk before shutdown so lockouts survive restarts.

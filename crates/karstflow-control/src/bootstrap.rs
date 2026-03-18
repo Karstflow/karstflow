@@ -2613,7 +2613,16 @@ pub fn maybe_spawn_quic_bridge(
 
 #[cfg(test)]
 pub(crate) fn maybe_start_rpc_http_server(node_config: &NodeConfig) -> Result<()> {
-    maybe_start_rpc_http_server_with_consensus(node_config, None, None, None, [0u8; 32], None, None)
+    maybe_start_rpc_http_server_with_consensus(
+        node_config,
+        None,
+        None,
+        None,
+        [0u8; 32],
+        None,
+        None,
+        None,
+    )
 }
 
 /// Start the RPC HTTP server with optional live consensus data.
@@ -2628,6 +2637,7 @@ pub(crate) fn maybe_start_rpc_http_server(node_config: &NodeConfig) -> Result<()
 /// When `cluster_info` is provided alongside `bank_forks`, the RPC
 /// server can forward `sendTransaction` requests to the current
 /// leader's TPU socket via UDP.
+#[allow(clippy::too_many_arguments)]
 pub fn maybe_start_rpc_http_server_with_consensus(
     node_config: &NodeConfig,
     bank_forks: Option<Arc<RwLock<BankForks>>>,
@@ -2636,6 +2646,7 @@ pub fn maybe_start_rpc_http_server_with_consensus(
     identity_pubkey: [u8; 32],
     blockstore: Option<Arc<Blockstore>>,
     health_status: Option<SharedHealthStatus>,
+    tx_submitter_override: Option<Arc<dyn TransactionSubmitter>>,
 ) -> Result<()> {
     if !node_config.rpc_enabled {
         return Ok(());
@@ -2659,18 +2670,21 @@ pub fn maybe_start_rpc_http_server_with_consensus(
                     health_status,
                 )));
             let dev_mode = node_config.cluster_mode == karstflow_config::ClusterMode::Dev;
-            // In single-node dev mode (no genesis file), process transactions
-            // directly on the bank. In cluster dev mode (genesis file) or live
-            // mode, forward via gossip/TPU to the leader so transactions appear
-            // in block entries and propagate through turbine to peers.
+            // Transaction submitter priority:
+            // 1. Override (e.g., LocalTransactionSubmitter from pipeline)
+            // 2. Single-node dev: DevTransactionSubmitter (bank-direct)
+            // 3. Cluster/live: ConsensusTransactionSubmitter (gossip/TPU)
             let has_genesis = node_config.genesis_path.is_some();
-            let submitter: Option<Arc<dyn TransactionSubmitter>> = if dev_mode && !has_genesis {
-                Some(Arc::new(DevTransactionSubmitter::new(forks.clone())))
-            } else {
-                cluster_info.map(|ci| -> Arc<dyn TransactionSubmitter> {
-                    Arc::new(ConsensusTransactionSubmitter::new(forks.clone(), ci))
-                })
-            };
+            let submitter: Option<Arc<dyn TransactionSubmitter>> =
+                if let Some(override_sub) = tx_submitter_override {
+                    Some(override_sub)
+                } else if dev_mode && !has_genesis {
+                    Some(Arc::new(DevTransactionSubmitter::new(forks.clone())))
+                } else {
+                    cluster_info.map(|ci| -> Arc<dyn TransactionSubmitter> {
+                        Arc::new(ConsensusTransactionSubmitter::new(forks.clone(), ci))
+                    })
+                };
             (snap, bank, submitter)
         } else {
             let snapshot_provider: Option<Arc<dyn karstflow_rpc::RuntimeSnapshotProvider>> =
@@ -3805,6 +3819,7 @@ pub fn run_runtime_phase(
         None,
         [0u8; 32],
         None,
+        None,
     )
 }
 
@@ -3816,6 +3831,7 @@ pub fn run_runtime_phase(
 /// commitment-level resolution for confirmed slots. When `cluster_info`
 /// is provided, the RPC server can forward transactions to leaders.
 #[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments)]
 pub fn run_runtime_phase_with_consensus(
     node_config: &NodeConfig,
     startup_services: &mut [Box<dyn Service>],
@@ -3825,6 +3841,7 @@ pub fn run_runtime_phase_with_consensus(
     cluster_info: Option<Arc<ClusterInfo>>,
     identity_pubkey: [u8; 32],
     blockstore: Option<Arc<Blockstore>>,
+    tx_submitter_override: Option<Arc<dyn TransactionSubmitter>>,
 ) -> Result<()> {
     run_startup_checks(node_config, startup_services, "startup", 0)?;
     maybe_start_metrics_http_bridge(
@@ -3840,6 +3857,7 @@ pub fn run_runtime_phase_with_consensus(
         identity_pubkey,
         blockstore,
         runtime_bundle.health_status.clone(),
+        tx_submitter_override,
     )?;
     println!(
         "{}",
