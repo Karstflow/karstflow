@@ -94,10 +94,11 @@ pub(crate) fn shred_produced_entries(
         }
 
         // Broadcast data shreds to turbine tree peers.
+        // Use payload bytes as wire format. Coding shreds excluded for now
+        // (receiver's ShredParser handles data shred format only).
         if let Some(retransmit) = turbine_retransmit {
             for shred in &data_shreds {
-                let wire_bytes = &shred.payload;
-                retransmit.forward_raw(wire_bytes);
+                retransmit.forward_raw(&shred.payload);
             }
         }
     }
