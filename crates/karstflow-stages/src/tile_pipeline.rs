@@ -578,8 +578,6 @@ pub struct PipelineConfig {
     pub link_mtu: usize,
     /// Ring depth for inter-tile links.
     pub link_depth: usize,
-    /// Accept transactions with unknown blockhashes in resolv.
-    pub accept_unknown_blockhash: bool,
 }
 
 impl Default for PipelineConfig {
@@ -587,7 +585,6 @@ impl Default for PipelineConfig {
         Self {
             link_mtu: karstflow_constants::ipc::DATA_REGION_DEFAULT_MTU,
             link_depth: karstflow_constants::ipc::META_RING_DEFAULT_DEPTH,
-            accept_unknown_blockhash: false,
         }
     }
 }
@@ -650,7 +647,6 @@ impl TransactionPipeline {
         // SAFETY: dedup's stem outlives resolv (both owned by this struct).
         let resolv_input = unsafe { dedup.output_stem().create_input(0, 0) };
         let mut resolv_stage = ResolvStage::new();
-        resolv_stage.accept_unknown_blockhash = config.accept_unknown_blockhash;
         let resolv = unsafe { ResolvTile::new(resolv_stage, resolv_input, link_config.clone()) };
 
         // Output consumer: reads resolved transactions from resolv's output.
@@ -1147,7 +1143,6 @@ mod tests {
         let config = PipelineConfig {
             link_mtu: 1280,
             link_depth: 4, // Small depth for testing.
-            accept_unknown_blockhash: false,
         };
         let mut pipeline = TransactionPipeline::with_config(config);
         let key = SigningKey::from_bytes(&[2u8; 32]);

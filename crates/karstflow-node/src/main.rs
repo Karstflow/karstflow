@@ -456,6 +456,33 @@ fn run_with_node_config(
         pipeline_inputs,
         Some(leader_exec_engine),
     );
+    // Wire replay slot completions to the resolv stage's blockhash ring.
+    // This follows the reference implementation pattern: when replay freezes
+    // a bank (for both leader and non-leader slots), the resulting blockhash
+    // is registered with resolv so future transactions referencing it can
+    // be validated.
+    {
+        let resolv_signal_rx = replay_bundle
+            .signal_bus
+            .lock()
+            .expect("signal_bus lock poisoned")
+            .subscribe()
+            .expect("signal bus subscriber limit not reached");
+        let resolv_pipeline = pipeline_bundle.handle.clone();
+
+        std::thread::Builder::new()
+            .name("resolv-blockhash".into())
+            .spawn(move || {
+                while let Ok(signal) = resolv_signal_rx.recv() {
+                    if let karstflow_stages::ReplaySignal::SlotCompleted(info) = signal {
+                        resolv_pipeline.register_blockhash(info.bank_hash, info.slot);
+                        resolv_pipeline.advance_slot(info.slot);
+                    }
+                }
+            })
+            .expect("failed to spawn resolv-blockhash thread");
+    }
+
     // Deferred turbine retransmit handle — populated after turbine service
     // is built, read by the leader orchestrator during block production.
     let deferred_retransmit: std::sync::Arc<

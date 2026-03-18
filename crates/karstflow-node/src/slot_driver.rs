@@ -290,12 +290,36 @@ pub(crate) fn spawn_dev_slot_driver(
                 return;
             }
             let genesis_slot = genesis_bank.slot();
+            let genesis_hash = genesis_bank.last_blockhash();
             info!(
                 slot = genesis_slot,
                 tick_height = genesis_bank.tick_height(),
                 "dev mode: genesis bank ticked and frozen",
             );
             drop(forks);
+
+            // Emit SlotCompleted for genesis so resolv registers the genesis
+            // blockhash. Transactions signed with the genesis hash must be
+            // resolvable from the first leader slot.
+            {
+                let mut bus = signal_bus.lock().expect("signal_bus lock poisoned");
+                bus.emit(karstflow_stages::ReplaySignal::SlotCompleted(
+                    karstflow_stages::SlotCompletedInfo {
+                        slot: genesis_slot,
+                        parent_slot: 0,
+                        bank_hash: genesis_hash,
+                        block_hash: genesis_hash,
+                        parent_blockhash: [0u8; 32],
+                        epoch: 0,
+                        is_epoch_boundary: false,
+                        transaction_count: 0,
+                        executed_count: 0,
+                        fee_lamports_collected: 0,
+                        capitalization: 0,
+                        timestamp: 0,
+                    },
+                ));
+            }
 
             // Step 3: Create child bank for slot 1 and start leading.
             let mut current_slot = genesis_slot + 1;
@@ -358,7 +382,7 @@ pub(crate) fn spawn_dev_slot_driver(
                 dev_handle.end_slot();
 
                 // Tick, finalize, and root the bank for the completed slot.
-                {
+                let completed_hash = {
                     let forks = bank_forks.read().expect("bank_forks lock poisoned");
                     let bank = forks.working_bank();
                     let ticks_needed =
@@ -370,6 +394,31 @@ pub(crate) fn spawn_dev_slot_driver(
                         warn!(error = ?e, slot = completed_slot, "dev slot driver: finish_slot failed");
                     }
                     let _ = bank.mark_rooted();
+                    bank.last_blockhash()
+                };
+
+                // Emit SlotCompleted so the resolv-blockhash thread registers
+                // this slot's hash in the blockhash ring. Without this, resolv
+                // would never learn about dev-mode slot hashes and transactions
+                // would fail blockhash validation.
+                {
+                    let mut bus = signal_bus.lock().expect("signal_bus lock poisoned");
+                    bus.emit(karstflow_stages::ReplaySignal::SlotCompleted(
+                        karstflow_stages::SlotCompletedInfo {
+                            slot: completed_slot,
+                            parent_slot: completed_slot.saturating_sub(1),
+                            bank_hash: completed_hash,
+                            block_hash: completed_hash,
+                            parent_blockhash: [0u8; 32],
+                            epoch: 0,
+                            is_epoch_boundary: false,
+                            transaction_count: 0,
+                            executed_count: 0,
+                            fee_lamports_collected: 0,
+                            capitalization: 0,
+                            timestamp: 0,
+                        },
+                    ));
                 }
 
                 // Create child bank for next slot and advance root.

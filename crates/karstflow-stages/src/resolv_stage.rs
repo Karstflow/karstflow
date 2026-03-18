@@ -141,10 +141,6 @@ pub struct ResolvStage {
     stash_capacity: usize,
     /// LRU counter for stash eviction.
     stash_order_counter: u64,
-    /// Accept transactions with unknown blockhashes (dev/cluster mode).
-    /// When true, resolv passes all transactions regardless of blockhash.
-    /// Production validators should set this to false.
-    pub accept_unknown_blockhash: bool,
     /// Statistics.
     stats: Arc<ResolvStats>,
 }
@@ -167,7 +163,6 @@ impl ResolvStage {
             stash_count: 0,
             stash_capacity: config.stash_capacity,
             stash_order_counter: 0,
-            accept_unknown_blockhash: false,
             stats: Arc::new(ResolvStats::default()),
         }
     }
@@ -241,9 +236,6 @@ impl ResolvStage {
             .fetch_add(1, Ordering::Relaxed);
 
         // Look up the blockhash in the ring.
-        // If not found, accept anyway for dev/cluster mode compatibility.
-        // TODO: implement production-grade blockhash ring (2^22 entries)
-        // populated from every PoH tick, not just slot boundaries.
         if let Some(&blockhash_slot) = self.blockhash_map.get(&tx.blockhash) {
             let expires_at = blockhash_slot.saturating_add(self.lifetime_slots);
 
@@ -262,18 +254,9 @@ impl ResolvStage {
             };
         }
 
-        // Blockhash not in ring. In dev/cluster mode, accept anyway
-        // since tick-level blockhash registration is not yet implemented.
-        // TODO: implement production-grade blockhash ring (2^22 entries)
-        // populated from every PoH tick for production-grade resolution.
-        if self.accept_unknown_blockhash {
-            self.stats
-                .transactions_resolved
-                .fetch_add(1, Ordering::Relaxed);
-            return ResolvOutcome::Valid {
-                expires_at_slot: self.current_slot.saturating_add(self.lifetime_slots),
-            };
-        }
+        // Blockhash not in ring — stash for later resolution.
+        // The blockhash will arrive when the producing slot completes and
+        // the resolv-blockhash thread registers it via register_blockhash().
 
         // Stash for later if there's room.
         if self.stash_count >= self.stash_capacity {
