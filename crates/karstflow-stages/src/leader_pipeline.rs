@@ -285,6 +285,7 @@ impl LeaderPipeline {
     /// Start a new leader slot. Resets pack limits and configures PoH.
     pub fn begin_slot(&mut self, slot: u64) {
         self.pack.new_block(slot);
+        self.poh.begin_leader(slot);
         self.entries.clear();
         self.shred_entries.clear();
         self.microblocks_executed = 0;
