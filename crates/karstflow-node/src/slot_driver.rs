@@ -147,8 +147,9 @@ pub(crate) fn spawn_cluster_slot_driver(
                     }
                     let _ = forks.set_working_bank(current_slot);
                 }
-                // Root advancement for all completed slots.
-                {
+                // Root advancement only for leader-produced slots.
+                // Non-leader slot roots are advanced when replay confirms blocks.
+                if currently_leading {
                     let mut forks = bank_forks.write().expect("bank_forks lock poisoned");
                     if let Err(e) = forks.set_root(completed_slot) {
                         warn!(error = ?e, "cluster-slot-driver: set_root failed");

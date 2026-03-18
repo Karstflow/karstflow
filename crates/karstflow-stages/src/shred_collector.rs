@@ -271,6 +271,9 @@ impl ShredCollector {
         }
 
         let received_any = !batch.is_empty();
+        if received_any {
+            tracing::info!(count = batch.len(), "shred-collector: drain_incoming batch");
+        }
         for shred in batch {
             self.stats.shreds_received += 1;
             let slot = shred.slot();
@@ -306,6 +309,11 @@ impl ShredCollector {
 
         for slot in complete_slots {
             if let Some(buffer) = self.slot_buffers.remove(&slot) {
+                tracing::info!(
+                    slot,
+                    shreds = buffer.shreds.len(),
+                    "shred-collector: emitting block for complete slot",
+                );
                 self.emit_block(context, buffer.shreds)?;
             }
         }
