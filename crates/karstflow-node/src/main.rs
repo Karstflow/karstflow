@@ -3,6 +3,7 @@ mod leader_orchestrator;
 mod plugin_notifier;
 mod shredding;
 mod slot_driver;
+mod turbine_receiver;
 
 use karstflow_observability::{init_tracing, TracingConfig};
 use karstflow_plugin::PluginService;
@@ -100,7 +101,15 @@ fn run_with_node_config(
         .expect("topology must provide shred block receiver");
     // Direct shred sender feeds produced shreds into ShredCollector for
     // self-replay. Used by the leader orchestrator during block production.
+    // Clone for TVU receive path (cross-node shred injection).
     let direct_shred_sender = runtime_topology.direct_shred_sender;
+    let tvu_shred_sender = direct_shred_sender.as_ref().and_then(|s| {
+        if let karstflow_mesh::DualSender::Channel(ref port) = s {
+            Some(karstflow_mesh::DualSender::Channel(port.clone()))
+        } else {
+            None
+        }
+    });
     // Shred arrival receiver feeds the repair coordinator with turbine
     // progress information so it avoids requesting shreds already received.
     let shred_arrival_rx = runtime_topology
@@ -500,6 +509,13 @@ fn run_with_node_config(
     // Wire turbine retransmit into the leader orchestrator (deferred).
     if let Ok(mut guard) = deferred_retransmit.write() {
         *guard = Some(retransmit_service.clone());
+    }
+
+    // Spawn turbine receiver: listens on TVU port and feeds received
+    // shreds directly into ShredCollector for cross-node block propagation.
+    if let Some(tvu_sender) = tvu_shred_sender {
+        let tvu_addr = node_config.tvu_bind_addr();
+        turbine_receiver::spawn_turbine_receiver(tvu_addr, tvu_sender);
     }
 
     // Build the repair service for slot recovery from peers.

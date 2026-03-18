@@ -491,7 +491,6 @@ fn run_genesis_cluster(params: GenesisClusterParams) -> Result<()> {
              [ingress_policy]\n\
              ingress_mode = \"udp\"\n\
              udp_bind_address = \"127.0.0.1:{tpu_port}\"\n\
-             tvu_bind_address = \"127.0.0.1:{tvu_port}\"\n\
              \n\
              [logging]\n\
              stderr_level = \"info\"\n"
