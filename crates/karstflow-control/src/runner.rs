@@ -465,7 +465,7 @@ fn run_genesis_cluster(params: GenesisClusterParams) -> Result<()> {
         let gossip_port = BASE_GOSSIP_PORT + i as u16 * PORT_STEP;
         let rpc_port = BASE_RPC_PORT + i as u16 * PORT_STEP;
         let tpu_port = BASE_TPU_PORT + i as u16 * PORT_STEP;
-        let tvu_port = gossip_port + 8;
+        let _tvu_port = gossip_port + 8;
 
         // Write per-node TOML config with absolute paths.
         let abs_dir = output_dir.display();

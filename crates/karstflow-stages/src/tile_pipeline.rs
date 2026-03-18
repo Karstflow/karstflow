@@ -1147,6 +1147,7 @@ mod tests {
         let config = PipelineConfig {
             link_mtu: 1280,
             link_depth: 4, // Small depth for testing.
+            accept_unknown_blockhash: false,
         };
         let mut pipeline = TransactionPipeline::with_config(config);
         let key = SigningKey::from_bytes(&[2u8; 32]);

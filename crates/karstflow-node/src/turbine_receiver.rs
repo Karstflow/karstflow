@@ -17,7 +17,6 @@ use tracing::{info, warn};
 pub(crate) fn spawn_turbine_receiver(
     bind_addr: SocketAddr,
     mut shred_sender: DualSender<Shred>,
-    own_leader_slots: std::sync::Arc<std::sync::RwLock<std::collections::HashSet<u64>>>,
 ) -> Option<std::thread::JoinHandle<()>> {
     let socket = match UdpSocket::bind(bind_addr) {
         Ok(s) => {
@@ -42,7 +41,7 @@ pub(crate) fn spawn_turbine_receiver(
                     Ok((len, _src)) if len >= 64 => {
                         if let Ok(shred) = ShredParser::parse(&buf[..len]) {
                             received += 1;
-                            if received <= 5 || received % 100 == 0 {
+                            if received <= 5 || received.is_multiple_of(100) {
                                 info!(
                                     received,
                                     slot = shred.slot(),

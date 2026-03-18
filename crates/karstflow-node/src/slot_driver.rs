@@ -39,22 +39,10 @@ pub(crate) fn spawn_cluster_slot_driver(
             info!(slot = genesis_slot, "cluster-slot-driver: genesis bank frozen");
             drop(forks);
 
-            // Step 2: Create child bank for slot 1.
-            let mut current_slot = genesis_slot + 1;
+            // Register genesis blockhash with pipeline resolv.
             {
-                let mut forks = bank_forks.write().expect("bank_forks lock poisoned");
-                let parent = forks.working_bank();
-                let ls = parent.leader_schedule();
-                let child = karstflow_consensus::Bank::new_from_parent(
-                    &parent, current_slot, ls.clone(),
-                );
-                if let Err(e) = forks.insert(child) {
-                    warn!(error = ?e, "cluster-slot-driver: insert child failed");
-                    return;
-                }
-                let _ = forks.set_working_bank(current_slot);
-                // Register genesis blockhash with pipeline resolv.
-                let genesis_hash = parent.last_blockhash();
+                let forks = bank_forks.read().expect("bank_forks lock poisoned");
+                let genesis_hash = forks.working_bank().last_blockhash();
                 pipeline_handle.register_blockhash(genesis_hash, 0);
             }
 
@@ -71,8 +59,26 @@ pub(crate) fn spawn_cluster_slot_driver(
                     .unwrap_or(false)
             };
 
-            // Step 3: If leader for slot 1, emit BecameLeader.
+            // Step 2: Create child bank for slot 1 only if we are leader.
+            // Non-leader slots are handled by replay when blocks arrive
+            // from the leader peer via turbine.
+            let mut current_slot = genesis_slot + 1;
             if is_leader_for(current_slot) {
+                {
+                    let mut forks = bank_forks.write().expect("bank_forks lock poisoned");
+                    let parent = forks.working_bank();
+                    let ls = parent.leader_schedule();
+                    let child = karstflow_consensus::Bank::new_from_parent(
+                        &parent, current_slot, ls.clone(),
+                    );
+                    if let Err(e) = forks.insert(child) {
+                        warn!(error = ?e, "cluster-slot-driver: insert child failed");
+                        return;
+                    }
+                    let _ = forks.set_working_bank(current_slot);
+                }
+
+                // Step 3: Emit BecameLeader for our leader range.
                 let mut end = current_slot + 1;
                 while is_leader_for(end) {
                     end += 1;
@@ -96,9 +102,19 @@ pub(crate) fn spawn_cluster_slot_driver(
                         parent_blockhash: parent_hash,
                     },
                 ));
+            } else {
+                info!(
+                    slot = current_slot,
+                    "cluster-slot-driver: not leader for slot 1, waiting for blocks from peer",
+                );
             }
 
             // Step 4: Slot timer loop — advance slots every 400ms.
+            //
+            // Only creates banks for leader slots. Non-leader slot banks
+            // are created by replay when blocks arrive from peers.
+            // This follows the reference implementation pattern where replay
+            // owns bank lifecycle for received blocks.
             let slot_duration = std::time::Duration::from_millis(400);
             let mut currently_leading = is_leader_for(current_slot);
             loop {
@@ -106,9 +122,8 @@ pub(crate) fn spawn_cluster_slot_driver(
 
                 let completed_slot = current_slot;
 
-                // Leader slot: tick → finish_slot (freeze) → root → emit SlotCompleted.
-                // Non-leader slot: skip freeze (replay handles received blocks).
-                let bank_hash = if currently_leading {
+                // Leader slot: tick → finish_slot (freeze) → emit SlotCompleted.
+                if currently_leading {
                     let forks = bank_forks.read().expect("bank_forks lock poisoned");
                     let bank = forks.working_bank();
                     let ticks_needed =
@@ -120,11 +135,10 @@ pub(crate) fn spawn_cluster_slot_driver(
                         warn!(error = ?e, slot = completed_slot, "cluster-slot-driver: finish_slot failed");
                     }
                     let hash = bank.last_blockhash();
-                    // Don't mark_rooted or set_root here — root advancement
-                    // should be consensus-driven (after confirmation), not
-                    // timer-driven. Immediate rooting causes BankNotProcessing
-                    // when RPC tries to use the working bank.
                     drop(forks);
+
+                    // Register completed slot's blockhash with resolv.
+                    pipeline_handle.register_blockhash(hash, completed_slot);
 
                     // Emit SlotCompleted so orchestrator shreds the block.
                     let mut bus = signal_bus.lock().expect("signal_bus lock poisoned");
@@ -144,70 +158,88 @@ pub(crate) fn spawn_cluster_slot_driver(
                             timestamp: 0,
                         },
                     ));
-                    hash
-                } else {
-                    // Non-leader: don't freeze bank. Replay will handle
-                    // received blocks and manage bank lifecycle.
-                    let forks = bank_forks.read().expect("bank_forks lock poisoned");
-                    forks.working_bank().last_blockhash()
-                };
-
-                // Always create child bank for next slot so RPC has a
-                // Processing bank available for simulate/preflight.
-                current_slot = completed_slot + 1;
-                {
-                    let mut forks = bank_forks.write().expect("bank_forks lock poisoned");
-                    let parent = forks.working_bank();
-                    let ls = parent.leader_schedule();
-                    let child = karstflow_consensus::Bank::new_from_parent(
-                        &parent, current_slot, ls.clone(),
-                    );
-                    if let Err(e) = forks.insert(child) {
-                        warn!(error = ?e, slot = current_slot, "cluster-slot-driver: insert failed");
-                        break;
-                    }
-                    let _ = forks.set_working_bank(current_slot);
-                    // Register child bank's blockhash so transactions signed
-                    // with get_latest_blockhash (which returns working bank hash)
-                    // are accepted by resolv.
-                    let child_hash = forks
-                        .working_bank()
-                        .last_blockhash();
-                    pipeline_handle.register_blockhash(child_hash, current_slot);
                 }
+                // Non-leader: do NOT create a bank or freeze. Replay will
+                // create the bank when the block arrives from the leader
+                // peer via turbine. This prevents slot driver from blocking
+                // replay's bank creation and ensures the parent chain stays
+                // consistent (frozen parent → child).
 
-                // Register completed slot's blockhash with resolv.
-                // This follows reference pattern: replay → resolv on each slot.
-                pipeline_handle.register_blockhash(bank_hash, completed_slot);
-
-                // Emit BecameLeader only on transition (not-leading → leading).
+                current_slot = completed_slot + 1;
                 let next_is_leader = is_leader_for(current_slot);
-                if next_is_leader && !currently_leading {
-                    let mut end = current_slot + 1;
-                    while is_leader_for(end) {
-                        end += 1;
-                    }
-                    let parent_hash = {
-                        let forks = bank_forks.read().expect("bank_forks lock poisoned");
-                        forks.working_bank().last_blockhash()
+
+                // Create child bank ONLY for leader slots.
+                if next_is_leader {
+                    // Find the latest frozen bank as parent. The parent
+                    // might be several slots back if non-leader blocks
+                    // haven't been replayed yet. Walk back from the
+                    // expected parent slot to find a frozen bank.
+                    let created = {
+                        let mut forks = bank_forks.write().expect("bank_forks lock poisoned");
+                        let mut parent_slot = current_slot.saturating_sub(1);
+                        let mut parent = None;
+                        // Walk back up to 32 slots to find a frozen parent.
+                        for _ in 0..32 {
+                            if let Some(bank) = forks.get(parent_slot) {
+                                if bank.is_frozen() {
+                                    parent = Some(bank);
+                                    break;
+                                }
+                            }
+                            if parent_slot == 0 {
+                                break;
+                            }
+                            parent_slot = parent_slot.saturating_sub(1);
+                        }
+                        if let Some(parent_bank) = parent {
+                            let ls = parent_bank.leader_schedule();
+                            let child = karstflow_consensus::Bank::new_from_parent(
+                                &parent_bank, current_slot, ls.clone(),
+                            );
+                            if let Err(e) = forks.insert(child) {
+                                warn!(error = ?e, slot = current_slot, "cluster-slot-driver: insert failed");
+                                false
+                            } else {
+                                let _ = forks.set_working_bank(current_slot);
+                                let child_hash = forks
+                                    .working_bank()
+                                    .last_blockhash();
+                                pipeline_handle.register_blockhash(child_hash, current_slot);
+                                true
+                            }
+                        } else {
+                            warn!(slot = current_slot, "cluster-slot-driver: no frozen parent found, skipping leader slot");
+                            false
+                        }
                     };
-                    info!(
-                        completed = completed_slot,
-                        next = current_slot,
-                        end_slot = end,
-                        "cluster-slot-driver: became leader",
-                    );
-                    let mut bus = signal_bus.lock().expect("signal_bus lock poisoned");
-                    bus.emit(karstflow_stages::ReplaySignal::BecameLeader(
-                        karstflow_stages::BecameLeaderInfo {
-                            start_slot: current_slot,
-                            end_slot: end,
-                            epoch: 0,
-                            identity_pubkey: *identity_pubkey.as_bytes(),
-                            parent_blockhash: parent_hash,
-                        },
-                    ));
-                } else if !next_is_leader && currently_leading {
+
+                    if created && !currently_leading {
+                        let mut end = current_slot + 1;
+                        while is_leader_for(end) {
+                            end += 1;
+                        }
+                        let parent_hash = {
+                            let forks = bank_forks.read().expect("bank_forks lock poisoned");
+                            forks.working_bank().last_blockhash()
+                        };
+                        info!(
+                            completed = completed_slot,
+                            next = current_slot,
+                            end_slot = end,
+                            "cluster-slot-driver: became leader",
+                        );
+                        let mut bus = signal_bus.lock().expect("signal_bus lock poisoned");
+                        bus.emit(karstflow_stages::ReplaySignal::BecameLeader(
+                            karstflow_stages::BecameLeaderInfo {
+                                start_slot: current_slot,
+                                end_slot: end,
+                                epoch: 0,
+                                identity_pubkey: *identity_pubkey.as_bytes(),
+                                parent_blockhash: parent_hash,
+                            },
+                        ));
+                    }
+                } else if currently_leading {
                     info!(
                         completed = completed_slot,
                         next = current_slot,

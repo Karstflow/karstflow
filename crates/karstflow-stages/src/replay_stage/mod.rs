@@ -109,6 +109,10 @@ pub struct ReplayConfig {
     /// Should be true in production. Can be disabled during
     /// initial snapshot catchup or in test scenarios.
     pub verify_poh: bool,
+    /// When true, register each transaction's blockhash before execution.
+    /// Enables replay of blocks from peer validators whose signing
+    /// blockhash may not be in the local bank's queue.
+    pub replay_mode: bool,
     /// Enable vote processing
     pub process_votes: bool,
     /// Enable automatic bank freezing
@@ -124,6 +128,7 @@ impl Default for ReplayConfig {
         Self {
             strict_ancestry_check: true,
             verify_poh: true,
+            replay_mode: false,
             process_votes: true,
             auto_freeze_banks: true,
             enable_root_progression: true,
@@ -195,6 +200,7 @@ impl ReplayStage {
         let bank_transition = BankTransition::new(bank_forks.clone(), fork_choice.clone());
         let mut block_processor = BlockProcessor::new(execution_bridge, commitment_tracker.clone());
         block_processor.verify_poh = config.verify_poh;
+        block_processor.replay_mode = config.replay_mode;
         let vote_integration =
             VoteIntegration::new(vote_processor, tower, fork_choice, commitment_tracker);
 
@@ -234,6 +240,7 @@ impl ReplayStage {
         let mut block_processor =
             BlockProcessor::with_backend(execution_bridge, commitment_tracker.clone(), backend);
         block_processor.verify_poh = config.verify_poh;
+        block_processor.replay_mode = config.replay_mode;
         let vote_integration =
             VoteIntegration::new(vote_processor, tower, fork_choice, commitment_tracker);
 

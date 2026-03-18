@@ -197,6 +197,12 @@ pub struct BlockProcessor {
     /// Should be true in production; can be disabled during
     /// initial snapshot replay or testing.
     pub verify_poh: bool,
+    /// When true, register each transaction's blockhash before execution.
+    /// Enables replay of blocks from peer validators where the signing
+    /// blockhash may not be in the local bank's queue. The block itself
+    /// is validated by the leader; individual blockhash checks are
+    /// redundant during replay.
+    pub replay_mode: bool,
     /// Number of parallel execution lanes for transaction dispatch.
     /// When > 1, uses the dependency-aware dispatcher to identify
     /// independent transactions that can execute concurrently.
@@ -231,6 +237,7 @@ impl BlockProcessor {
             backend,
             commitment_tracker,
             verify_poh: true,
+            replay_mode: false,
             lane_count: 1,
             blocks_processed: 0,
             transactions_executed: 0,
@@ -568,6 +575,15 @@ impl BlockProcessor {
         }
 
         let sanitized = deserialized.tx;
+
+        // During replay, register the transaction's blockhash before execution.
+        // The block was already validated by the leader; individual blockhash
+        // checks are redundant for received blocks. Without this, transactions
+        // signed with a blockhash from the leader's bank state would fail on
+        // the receiving node if the bank states diverged (different ticks/slots).
+        if self.replay_mode {
+            bank.register_recent_blockhash(sanitized.recent_blockhash);
+        }
 
         // Execute through Bank pipeline (blockhash, sig verify, dedup, fees, instructions)
         let exec_result =

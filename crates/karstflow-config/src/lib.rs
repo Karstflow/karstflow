@@ -389,12 +389,16 @@ impl NodeConfig {
 
     /// TPU (transaction processing unit) bind address.
     ///
-    /// Defaults to gossip port + 2, following Solana port conventions.
+    /// Uses the ingress policy's UDP bind address when configured (this is
+    /// where EdgeIntake actually listens). Falls back to gossip port + 2,
+    /// following Solana port conventions.
     pub fn tpu_bind_addr(&self) -> SocketAddr {
-        SocketAddr::new(
-            self.gossip_bind_addr.ip(),
-            self.gossip_bind_addr.port().wrapping_add(2),
-        )
+        self.ingress_policy.udp_bind_address.unwrap_or_else(|| {
+            SocketAddr::new(
+                self.gossip_bind_addr.ip(),
+                self.gossip_bind_addr.port().wrapping_add(2),
+            )
+        })
     }
 
     /// TPU QUIC bind address for client connections.

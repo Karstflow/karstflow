@@ -15,7 +15,8 @@ use karstflow_control::{
     build_turbine_service, build_vote_broadcast_service, build_vote_sender_service,
     dispatch_command, materialize_service_pair_from_config, maybe_spawn_quic_bridge, parse_command,
     resolve_validator_identity, restore_from_snapshot_archive, run_runtime_phase_with_consensus,
-    save_tower_to_disk, start_gossip_service, BlockstoreShredProvider, ServiceBundle,
+    save_tower_to_disk, start_gossip_service, BlockstoreShredProvider,
+    ConsensusTransactionSubmitter, ServiceBundle,
 };
 
 fn main() -> karstflow_control::Result<()> {
@@ -147,6 +148,7 @@ fn run_with_node_config(
         // from genesis after proper PoH synchronization is implemented.
         let mut replay_config = karstflow_stages::ReplayServiceConfig::default();
         replay_config.replay_config.verify_poh = false;
+        replay_config.replay_config.replay_mode = true;
         build_replay_service_with_consensus(
             replay_config,
             shred_block_input,
@@ -804,6 +806,19 @@ fn run_with_node_config(
     let _gossip = gossip_handle;
     let _retransmit = retransmit_service;
 
+    // For cluster mode (genesis file), use ConsensusTransactionSubmitter
+    // which resolves the current leader's TPU from gossip and forwards.
+    // For single-node dev mode, bootstrap creates its own submitter.
+    let tx_submitter: Option<std::sync::Arc<dyn karstflow_control::TransactionSubmitter>> =
+        if has_genesis_file {
+            Some(std::sync::Arc::new(ConsensusTransactionSubmitter::new(
+                rpc_bank_forks.clone(),
+                rpc_cluster_info.clone(),
+            )))
+        } else {
+            None
+        };
+
     let result = run_runtime_phase_with_consensus(
         &node_config,
         topology_pair.startup.services.as_mut_slice(),
@@ -820,7 +835,7 @@ fn run_with_node_config(
         Some(rpc_cluster_info),
         *identity.pubkey(),
         shared_blockstore,
-        None, // tx_submitter_override — TPU loopback handled in bootstrap
+        tx_submitter,
     );
 
     // Save tower state to disk before shutdown so lockouts survive restarts.

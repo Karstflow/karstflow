@@ -3619,14 +3619,14 @@ impl TransactionSubmitter for TpuLoopbackSubmitter {
 /// their TPU socket address via `ClusterInfo`. The raw transaction
 /// bytes are sent as a single UDP datagram. This is the standard
 /// Solana transaction forwarding path used by validators and RPC nodes.
-struct ConsensusTransactionSubmitter {
+pub struct ConsensusTransactionSubmitter {
     bank_forks: Arc<RwLock<BankForks>>,
     cluster_info: Arc<ClusterInfo>,
     socket: std::net::UdpSocket,
 }
 
 impl ConsensusTransactionSubmitter {
-    fn new(bank_forks: Arc<RwLock<BankForks>>, cluster_info: Arc<ClusterInfo>) -> Self {
+    pub fn new(bank_forks: Arc<RwLock<BankForks>>, cluster_info: Arc<ClusterInfo>) -> Self {
         let socket = std::net::UdpSocket::bind("0.0.0.0:0")
             .expect("failed to bind ephemeral UDP socket for transaction forwarding — check OS limits (ulimit -n)");
         Self {
@@ -3880,7 +3880,6 @@ pub fn run_runtime_phase(
 /// file on disk. The optional `commitment_tracker` enables proper
 /// commitment-level resolution for confirmed slots. When `cluster_info`
 /// is provided, the RPC server can forward transactions to leaders.
-#[allow(clippy::too_many_arguments)]
 #[allow(clippy::too_many_arguments)]
 pub fn run_runtime_phase_with_consensus(
     node_config: &NodeConfig,
