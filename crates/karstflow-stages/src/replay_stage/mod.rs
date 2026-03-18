@@ -318,7 +318,14 @@ impl ReplayStage {
             }
         }
 
-        // Step 4: Apply transactions and process block
+        // Step 4: Apply transactions and process block.
+        // If the bank is already frozen (e.g., we produced this block as
+        // leader and received our own shreds back via turbine retransmit),
+        // skip processing — the block is already applied.
+        if bank.is_frozen() {
+            return Ok(BlockOutcome::new(block.slot, bank.hash()));
+        }
+
         let outcome = match self
             .block_processor
             .process_block(block.clone(), bank.clone())

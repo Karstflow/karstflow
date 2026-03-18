@@ -170,47 +170,48 @@ pub(crate) fn spawn_cluster_slot_driver(
 
                 // Create child bank ONLY for leader slots.
                 if next_is_leader {
-                    // Find the latest frozen bank as parent. The parent
-                    // might be several slots back if non-leader blocks
-                    // haven't been replayed yet. Walk back from the
-                    // expected parent slot to find a frozen bank.
-                    let created = {
-                        let mut forks = bank_forks.write().expect("bank_forks lock poisoned");
-                        let mut parent_slot = current_slot.saturating_sub(1);
-                        let mut parent = None;
-                        // Walk back up to 32 slots to find a frozen parent.
-                        for _ in 0..32 {
-                            if let Some(bank) = forks.get(parent_slot) {
-                                if bank.is_frozen() {
-                                    parent = Some(bank);
-                                    break;
-                                }
-                            }
-                            if parent_slot == 0 {
+                    // Wait for the direct parent (current_slot - 1) to be
+                    // replayed and frozen. The parent slot was produced by
+                    // another leader; replay creates and freezes its bank
+                    // when shreds arrive via turbine. We poll briefly to
+                    // allow replay time to catch up.
+                    let parent_slot = current_slot.saturating_sub(1);
+                    let mut parent_ready = false;
+                    for wait in 0..20 {
+                        let forks = bank_forks.read().expect("bank_forks lock poisoned");
+                        if let Some(bank) = forks.get(parent_slot) {
+                            if bank.is_frozen() {
+                                parent_ready = true;
                                 break;
                             }
-                            parent_slot = parent_slot.saturating_sub(1);
                         }
-                        if let Some(parent_bank) = parent {
-                            let ls = parent_bank.leader_schedule();
-                            let child = karstflow_consensus::Bank::new_from_parent(
-                                &parent_bank, current_slot, ls.clone(),
-                            );
-                            if let Err(e) = forks.insert(child) {
-                                warn!(error = ?e, slot = current_slot, "cluster-slot-driver: insert failed");
-                                false
-                            } else {
-                                let _ = forks.set_working_bank(current_slot);
-                                let child_hash = forks
-                                    .working_bank()
-                                    .last_blockhash();
-                                pipeline_handle.register_blockhash(child_hash, current_slot);
-                                true
-                            }
-                        } else {
-                            warn!(slot = current_slot, "cluster-slot-driver: no frozen parent found, skipping leader slot");
+                        drop(forks);
+                        if wait < 19 {
+                            std::thread::sleep(std::time::Duration::from_millis(50));
+                        }
+                    }
+
+                    let created = if parent_ready {
+                        let mut forks = bank_forks.write().expect("bank_forks lock poisoned");
+                        let parent_bank = forks.get(parent_slot).expect("parent confirmed above");
+                        let ls = parent_bank.leader_schedule();
+                        let child = karstflow_consensus::Bank::new_from_parent(
+                            &parent_bank, current_slot, ls.clone(),
+                        );
+                        if let Err(e) = forks.insert(child) {
+                            warn!(error = ?e, slot = current_slot, "cluster-slot-driver: insert failed");
                             false
+                        } else {
+                            let _ = forks.set_working_bank(current_slot);
+                            let child_hash = forks
+                                .working_bank()
+                                .last_blockhash();
+                            pipeline_handle.register_blockhash(child_hash, current_slot);
+                            true
                         }
+                    } else {
+                        warn!(slot = current_slot, parent = parent_slot, "cluster-slot-driver: parent not frozen, skipping leader slot");
+                        false
                     };
 
                     if created && !currently_leading {
