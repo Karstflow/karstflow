@@ -108,14 +108,11 @@ pub(crate) fn spawn_cluster_slot_driver(
                         warn!(error = ?e, slot = completed_slot, "cluster-slot-driver: finish_slot failed");
                     }
                     let hash = bank.last_blockhash();
-                    let _ = bank.mark_rooted();
+                    // Don't mark_rooted or set_root here — root advancement
+                    // should be consensus-driven (after confirmation), not
+                    // timer-driven. Immediate rooting causes BankNotProcessing
+                    // when RPC tries to use the working bank.
                     drop(forks);
-
-                    // Root advancement for leader slots.
-                    let mut forks = bank_forks.write().expect("bank_forks lock poisoned");
-                    if let Err(e) = forks.set_root(completed_slot) {
-                        warn!(error = ?e, "cluster-slot-driver: set_root failed");
-                    }
 
                     // Emit SlotCompleted so orchestrator shreds the block.
                     let mut bus = signal_bus.lock().expect("signal_bus lock poisoned");

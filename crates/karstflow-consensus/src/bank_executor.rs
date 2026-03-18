@@ -1264,8 +1264,9 @@ impl Bank {
         backend: &dyn ExecutionBackend,
         compute_limit: u64,
     ) -> TransactionExecutionResult {
-        // Step 1: Bank must be processing
-        if self.status() != BankStatus::Processing {
+        // Step 1: Only reject transactions on Rooted banks.
+        // Processing and Frozen banks accept transactions.
+        if self.status() == BankStatus::Rooted {
             return TransactionExecutionResult {
                 success: false,
                 compute_units_consumed: 0,
@@ -2946,16 +2947,17 @@ mod tests {
     }
 
     #[test]
-    fn process_transaction_rejects_frozen_bank() {
+    fn process_transaction_rejects_rooted_bank() {
         let bank = create_test_bank();
         let backend = PassthroughBackend;
 
-        // Fill ticks and freeze
+        // Fill ticks, freeze, and root
         use karstflow_constants::ledger::TICKS_PER_SLOT;
         for _ in 0..TICKS_PER_SLOT {
             bank.register_tick().unwrap();
         }
         bank.freeze().unwrap();
+        bank.mark_rooted().unwrap();
 
         let payer = Pubkey::new_unique();
         let program = Pubkey::new_unique();
