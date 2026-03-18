@@ -94,8 +94,9 @@ pub(crate) fn spawn_cluster_slot_driver(
 
                 let completed_slot = current_slot;
 
-                // Tick, finalize, and root the bank for the completed slot.
-                {
+                // Leader slot: tick → finish_slot (freeze) → root → emit SlotCompleted.
+                // Non-leader slot: skip freeze (replay handles received blocks).
+                let bank_hash = if currently_leading {
                     let forks = bank_forks.read().expect("bank_forks lock poisoned");
                     let bank = forks.working_bank();
                     let ticks_needed =
@@ -106,18 +107,24 @@ pub(crate) fn spawn_cluster_slot_driver(
                     if let Err(e) = bank.finish_slot() {
                         warn!(error = ?e, slot = completed_slot, "cluster-slot-driver: finish_slot failed");
                     }
-                    let bank_hash = bank.last_blockhash();
+                    let hash = bank.last_blockhash();
                     let _ = bank.mark_rooted();
+                    drop(forks);
 
-                    // Emit SlotCompleted for every slot. Orchestrator decides
-                    // whether to shred based on its own pipeline leading state.
+                    // Root advancement for leader slots.
+                    let mut forks = bank_forks.write().expect("bank_forks lock poisoned");
+                    if let Err(e) = forks.set_root(completed_slot) {
+                        warn!(error = ?e, "cluster-slot-driver: set_root failed");
+                    }
+
+                    // Emit SlotCompleted so orchestrator shreds the block.
                     let mut bus = signal_bus.lock().expect("signal_bus lock poisoned");
                     bus.emit(karstflow_stages::ReplaySignal::SlotCompleted(
                         karstflow_stages::SlotCompletedInfo {
                             slot: completed_slot,
                             parent_slot: completed_slot.saturating_sub(1),
-                            bank_hash,
-                            block_hash: bank_hash,
+                            bank_hash: hash,
+                            block_hash: hash,
                             parent_blockhash: [0u8; 32],
                             epoch: 0,
                             is_epoch_boundary: false,
@@ -128,13 +135,18 @@ pub(crate) fn spawn_cluster_slot_driver(
                             timestamp: 0,
                         },
                     ));
-                }
+                    hash
+                } else {
+                    // Non-leader: don't freeze bank. Replay will handle
+                    // received blocks and manage bank lifecycle.
+                    let forks = bank_forks.read().expect("bank_forks lock poisoned");
+                    forks.working_bank().last_blockhash()
+                };
 
-                // Create child bank for next slot ONLY if we're the leader.
-                // Non-leader slot banks are created by replay when blocks arrive
-                // from the network via turbine.
+                // Always create child bank for next slot so RPC has a
+                // Processing bank available for simulate/preflight.
                 current_slot = completed_slot + 1;
-                if is_leader_for(current_slot) {
+                {
                     let mut forks = bank_forks.write().expect("bank_forks lock poisoned");
                     let parent = forks.working_bank();
                     let ls = parent.leader_schedule();
@@ -147,14 +159,7 @@ pub(crate) fn spawn_cluster_slot_driver(
                     }
                     let _ = forks.set_working_bank(current_slot);
                 }
-                // Root advancement only for leader-produced slots.
-                // Non-leader slot roots are advanced when replay confirms blocks.
-                if currently_leading {
-                    let mut forks = bank_forks.write().expect("bank_forks lock poisoned");
-                    if let Err(e) = forks.set_root(completed_slot) {
-                        warn!(error = ?e, "cluster-slot-driver: set_root failed");
-                    }
-                }
+                let _ = bank_hash; // suppress unused warning
 
                 // Emit BecameLeader only on transition (not-leading → leading).
                 let next_is_leader = is_leader_for(current_slot);
