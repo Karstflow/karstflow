@@ -142,8 +142,13 @@ fn run_with_node_config(
             node_config.data_dir.as_deref(),
             Some(&identity_pubkey),
         )?;
+        // Disable PoH verification for cluster mode — each node generates
+        // independent PoH chains. Production clusters will share PoH chain
+        // from genesis after proper PoH synchronization is implemented.
+        let mut replay_config = karstflow_stages::ReplayServiceConfig::default();
+        replay_config.replay_config.verify_poh = false;
         build_replay_service_with_consensus(
-            karstflow_stages::ReplayServiceConfig::default(),
+            replay_config,
             shred_block_input,
             consensus,
             Some(*identity.pubkey()),

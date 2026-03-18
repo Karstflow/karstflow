@@ -17,6 +17,7 @@ use tracing::{info, warn};
 pub(crate) fn spawn_turbine_receiver(
     bind_addr: SocketAddr,
     mut shred_sender: DualSender<Shred>,
+    own_leader_slots: std::sync::Arc<std::sync::RwLock<std::collections::HashSet<u64>>>,
 ) -> Option<std::thread::JoinHandle<()>> {
     let socket = match UdpSocket::bind(bind_addr) {
         Ok(s) => {
