@@ -336,6 +336,32 @@ fn run_with_node_config(
             .expect("failed to spawn gossip-status thread");
     }
 
+    // Wire SlotCompleted signals to consensus slot channel.
+    // This ensures leader-produced slots (frozen by slot driver, not
+    // by replay_block) still trigger consensus decisions (voting +
+    // root advancement). Without this, the tower never advances and
+    // root stays at 0.
+    {
+        let consensus_signal_rx = replay_bundle
+            .signal_bus
+            .lock()
+            .expect("signal_bus lock poisoned")
+            .subscribe()
+            .expect("signal bus subscriber limit not reached");
+        let consensus_tx = replay_bundle.consensus_slot_tx.clone();
+
+        std::thread::Builder::new()
+            .name("consensus-slot".into())
+            .spawn(move || {
+                while let Ok(signal) = consensus_signal_rx.recv() {
+                    if let karstflow_stages::ReplaySignal::SlotCompleted(info) = signal {
+                        let _ = consensus_tx.try_send(info.slot);
+                    }
+                }
+            })
+            .expect("failed to spawn consensus-slot thread");
+    }
+
     // Wire replay signals to the plugin service.
     // Subscribe to the SignalBus, then start the plugin observer that
     // translates ReplaySignal -> PluginEvent for all loaded plugins.

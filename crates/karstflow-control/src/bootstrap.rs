@@ -691,7 +691,7 @@ pub fn build_replay_service_with_block_input(
     );
 
     let backend = Arc::new(SbpfExecutionAdapter::with_defaults());
-    let service = ReplayService::with_backend(
+    let mut service = ReplayService::with_backend(
         config,
         block_input,
         Arc::clone(&consensus.bank_forks),
@@ -703,12 +703,15 @@ pub fn build_replay_service_with_block_input(
         Arc::clone(&consensus.commitment_tracker),
     );
 
+    let (consensus_slot_tx_alt, consensus_slot_rx_alt) = crossbeam_channel::bounded(256);
+    service.set_consensus_slot_receiver(consensus_slot_rx_alt);
     let signal_bus = service.signal_bus();
 
     ReplayBundleWithExternalInput {
         service: Box::new(service),
         consensus,
         signal_bus,
+        consensus_slot_tx: consensus_slot_tx_alt,
     }
 }
 
@@ -723,6 +726,11 @@ pub struct ReplayBundleWithExternalInput {
     pub consensus: ConsensusBundle,
     /// Signal bus for subscribing to replay events (slot completed, root advanced, etc.).
     pub signal_bus: Arc<Mutex<karstflow_stages::SignalBus>>,
+    /// Sender for consensus slot notifications from leader-produced slots.
+    /// Send completed slot numbers through this channel so the replay
+    /// service runs consensus decisions (voting + root advancement) for
+    /// slots that bypass replay_block (leader-produced slots).
+    pub consensus_slot_tx: crossbeam_channel::Sender<u64>,
 }
 
 /// Build a replay service using pre-built consensus infrastructure.
@@ -753,12 +761,17 @@ pub fn build_replay_service_with_consensus(
         service.set_validator_identity(identity);
     }
 
+    // Create consensus slot channel for leader-produced slots.
+    let (consensus_slot_tx, consensus_slot_rx) = crossbeam_channel::bounded(256);
+    service.set_consensus_slot_receiver(consensus_slot_rx);
+
     let signal_bus = service.signal_bus();
 
     ReplayBundleWithExternalInput {
         service: Box::new(service),
         consensus,
         signal_bus,
+        consensus_slot_tx,
     }
 }
 

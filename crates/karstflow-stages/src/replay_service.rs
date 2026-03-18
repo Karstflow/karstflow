@@ -189,6 +189,10 @@ pub struct ReplayService {
     block_input: Option<DualReceiver<AssembledBlock>>,
     /// Channel receiving raw shred batches for inline assembly.
     shred_input: Option<DualReceiver<ShredBatch>>,
+    /// Channel receiving completed slot numbers for consensus processing.
+    /// Leader-produced slots that bypass replay_block still need consensus
+    /// decisions (voting + root advancement).
+    consensus_slot_rx: Option<crossbeam_channel::Receiver<u64>>,
     /// Blocks waiting to be replayed (buffered across ticks).
     pending_blocks: Vec<AssembledBlock>,
     /// Assembly statistics.
@@ -231,11 +235,17 @@ impl ReplayService {
             assembler: ShredAssembler::new(),
             block_input: Some(block_input),
             shred_input: None,
+            consensus_slot_rx: None,
             pending_blocks: Vec::new(),
             assembly_stats: ShredAssemblyStats::default(),
             orphan_buffer,
             bank_forks,
         }
+    }
+
+    /// Set the consensus slot receiver for leader-produced slots.
+    pub fn set_consensus_slot_receiver(&mut self, rx: crossbeam_channel::Receiver<u64>) {
+        self.consensus_slot_rx = Some(rx);
     }
 
     /// Create a replay service with shred input channel.
@@ -269,6 +279,7 @@ impl ReplayService {
             assembler: ShredAssembler::new(),
             block_input: None,
             shred_input: Some(shred_input),
+            consensus_slot_rx: None,
             pending_blocks: Vec::new(),
             assembly_stats: ShredAssemblyStats::default(),
             orphan_buffer,
@@ -307,6 +318,7 @@ impl ReplayService {
             assembler: ShredAssembler::new(),
             block_input: Some(block_input),
             shred_input: None,
+            consensus_slot_rx: None,
             pending_blocks: Vec::new(),
             assembly_stats: ShredAssemblyStats::default(),
             orphan_buffer,
@@ -398,6 +410,14 @@ impl Service for ReplayService {
 
     fn tick(&mut self, _context: &ServiceContext) -> RuntimeResult<()> {
         self.drain_inputs();
+
+        // Process consensus decisions for leader-produced slots that
+        // bypassed replay_block. This drives voting and root advancement.
+        if let Some(ref rx) = self.consensus_slot_rx {
+            while let Ok(slot) = rx.try_recv() {
+                self.replay_stage.run_consensus_for_slot(slot);
+            }
+        }
 
         let limit = self
             .config
