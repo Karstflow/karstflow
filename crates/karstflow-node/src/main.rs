@@ -473,15 +473,16 @@ fn run_with_node_config(
             backend,
         ))
     };
-    // Dev mode uses hashes_per_tick=1 for instant ticks (fast block production).
-    // Production PoH (62,500 hashes/tick) requires PoH-driven slot boundaries
-    // where the PoH service determines slot timing. The current timer-based
-    // slot driver (400ms sleep) doesn't coordinate with the PoH hash rate,
-    // so we use dev config for all modes until PoH-driven slot boundaries
-    // are implemented.
-    // TODO: implement PoH-driven slot timing, then use production config
-    // for cluster/live modes: PipelineServiceConfig::default()
-    let pipeline_config = karstflow_stages::PipelineServiceConfig::dev();
+    // Dev mode uses hashes_per_tick=1 for instant ticks (fast E2E tests).
+    // Cluster/live mode uses production hashes_per_tick (62,500) with
+    // real-time SHA-256 PoH hashing: ~400ms per slot, 64 ticks per slot.
+    // The PoH service advances one full tick (~6.25ms) per service tick,
+    // matching the slot driver's 400ms timer.
+    let pipeline_config = if is_dev_mode {
+        karstflow_stages::PipelineServiceConfig::dev()
+    } else {
+        karstflow_stages::PipelineServiceConfig::default()
+    };
     let pipeline_bundle =
         build_pipeline_service(pipeline_config, pipeline_inputs, Some(leader_exec_engine));
     // Wire replay slot completions to the resolv stage's blockhash ring.
@@ -553,6 +554,11 @@ fn run_with_node_config(
             consensus.bank_forks.clone(),
             replay_bundle.signal_bus.clone(),
             pipeline_bundle.handle.clone(),
+            if is_dev_mode {
+                1
+            } else {
+                karstflow_constants::ledger::DEFAULT_HASHES_PER_TICK
+            },
         );
     }
 

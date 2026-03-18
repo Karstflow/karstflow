@@ -12,6 +12,7 @@ pub(crate) fn spawn_cluster_slot_driver(
     bank_forks: std::sync::Arc<std::sync::RwLock<karstflow_consensus::BankForks>>,
     signal_bus: std::sync::Arc<std::sync::Mutex<karstflow_stages::SignalBus>>,
     pipeline_handle: std::sync::Arc<karstflow_stages::PipelineHandle>,
+    hashes_per_tick: u64,
 ) {
     std::thread::Builder::new()
         .name("cluster-slot-driver".into())
@@ -131,7 +132,17 @@ pub(crate) fn spawn_cluster_slot_driver(
             // are created by replay when blocks arrive from peers.
             // This follows the reference implementation pattern where replay
             // owns bank lifecycle for received blocks.
-            let slot_duration = std::time::Duration::from_millis(400);
+            //
+            // With production PoH (hashes_per_tick > 1), the pipeline's PoH
+            // service provides the ~400ms slot timing via SHA-256 hashing.
+            // The slot driver uses a short poll interval to check completion.
+            // With dev PoH (hashes_per_tick=1), the driver provides the
+            // 400ms timing via sleep.
+            let slot_duration = if hashes_per_tick > 1 {
+                std::time::Duration::from_millis(50)
+            } else {
+                std::time::Duration::from_millis(400)
+            };
             let mut currently_leading = is_leader_for(current_slot);
             loop {
                 std::thread::sleep(slot_duration);
