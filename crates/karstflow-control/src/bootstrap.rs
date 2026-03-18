@@ -2659,9 +2659,12 @@ pub fn maybe_start_rpc_http_server_with_consensus(
                     health_status,
                 )));
             let dev_mode = node_config.cluster_mode == karstflow_config::ClusterMode::Dev;
-            let submitter: Option<Arc<dyn TransactionSubmitter>> = if dev_mode {
-                // In dev mode, accept transactions and return the signature
-                // without forwarding through TPU/gossip (no real network).
+            // In single-node dev mode (no genesis file), process transactions
+            // directly on the bank. In cluster dev mode (genesis file) or live
+            // mode, forward via gossip/TPU to the leader so transactions appear
+            // in block entries and propagate through turbine to peers.
+            let has_genesis = node_config.genesis_path.is_some();
+            let submitter: Option<Arc<dyn TransactionSubmitter>> = if dev_mode && !has_genesis {
                 Some(Arc::new(DevTransactionSubmitter::new(forks.clone())))
             } else {
                 cluster_info.map(|ci| -> Arc<dyn TransactionSubmitter> {
