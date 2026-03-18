@@ -474,14 +474,14 @@ fn run_with_node_config(
         ))
     };
     // Dev mode uses hashes_per_tick=1 for instant ticks (fast E2E tests).
-    // Cluster/live mode uses production hashes_per_tick (62,500) with
-    // real-time SHA-256 PoH hashing: ~400ms per slot, 64 ticks per slot.
-    // The PoH service advances one full tick (~6.25ms) per service tick,
-    // matching the slot driver's 400ms timer.
+    // Cluster/live mode calibrates hashes_per_tick to the current hardware's
+    // SHA-256 speed, targeting ~400ms per slot (64 ticks × ~6.25ms each).
+    // On fast hardware (mainnet AMD EPYC): hashes_per_tick ≈ 62,500.
+    // On slower hardware (MacBook): auto-adjusted lower for ~400ms slots.
     let pipeline_config = if is_dev_mode {
         karstflow_stages::PipelineServiceConfig::dev()
     } else {
-        karstflow_stages::PipelineServiceConfig::default()
+        karstflow_stages::PipelineServiceConfig::calibrated()
     };
     let pipeline_bundle =
         build_pipeline_service(pipeline_config, pipeline_inputs, Some(leader_exec_engine));

@@ -139,7 +139,7 @@ pub(crate) fn spawn_cluster_slot_driver(
             // With dev PoH (hashes_per_tick=1), the driver provides the
             // 400ms timing via sleep.
             let slot_duration = if hashes_per_tick > 1 {
-                std::time::Duration::from_millis(50)
+                std::time::Duration::from_millis(10)
             } else {
                 std::time::Duration::from_millis(400)
             };
@@ -156,7 +156,7 @@ pub(crate) fn spawn_cluster_slot_driver(
                 if currently_leading {
                     // Wait for PoH to finish all ticks before freezing.
                     if hashes_per_tick > 1 && !pipeline_handle.is_poh_slot_complete() {
-                        continue; // Poll again in 50ms
+                        continue; // Poll again
                     }
 
                     let forks = bank_forks.read().expect("bank_forks lock poisoned");

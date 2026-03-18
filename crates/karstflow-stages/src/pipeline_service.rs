@@ -83,6 +83,47 @@ impl PipelineServiceConfig {
             ..Default::default()
         }
     }
+
+    /// Create a production configuration calibrated to the current hardware.
+    ///
+    /// Measures SHA-256 hash speed and adjusts `hashes_per_tick` so each
+    /// slot takes approximately 400ms (matching Solana mainnet timing).
+    /// This adapts to different CPU speeds and SHA-256 implementations.
+    pub fn calibrated() -> Self {
+        use karstflow_crypto::poh::{poh_append, PohState};
+
+        // Benchmark: hash 100,000 iterations to measure avg time.
+        // Use a large sample to account for cache pressure during sustained hashing.
+        let mut state = PohState { hash: [0u8; 32] };
+        let warmup = 10_000_u64;
+        poh_append(&mut state, warmup); // Warmup
+
+        let benchmark_n = 100_000_u64;
+        let start = std::time::Instant::now();
+        poh_append(&mut state, benchmark_n);
+        let elapsed = start.elapsed();
+        let ns_per_hash = elapsed.as_nanos() as f64 / benchmark_n as f64;
+
+        // Target: 64 ticks per slot, ~400ms per slot → ~6.25ms per tick
+        let target_tick_ns = 6_250_000.0_f64; // 6.25ms
+        let hashes_per_tick = (target_tick_ns / ns_per_hash) as u64;
+        // Clamp to reasonable range: at least 100, at most 62500 (mainnet)
+        let hashes_per_tick = hashes_per_tick
+            .max(100)
+            .min(karstflow_constants::ledger::DEFAULT_HASHES_PER_TICK);
+
+        tracing::info!(
+            ns_per_hash = ns_per_hash as u64,
+            hashes_per_tick,
+            estimated_slot_ms = (hashes_per_tick as f64 * 64.0 * ns_per_hash / 1_000_000.0) as u64,
+            "PoH calibrated to hardware speed",
+        );
+
+        Self {
+            hashes_per_tick,
+            ..Default::default()
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -419,13 +460,8 @@ impl Service for PipelineService {
                         let accepted = self.pipeline.ingest(&raw_tx.payload, raw_tx.source);
                         if accepted {
                             stats.transactions_accepted.fetch_add(1, Ordering::Relaxed);
-                            tracing::info!(
-                                payload_len = raw_tx.payload.len(),
-                                "pipeline: transaction ingested into tile pipeline"
-                            );
                         } else {
                             stats.transactions_dropped.fetch_add(1, Ordering::Relaxed);
-                            tracing::warn!("pipeline: transaction dropped (no credits)");
                         }
                     }
                     Ok(None) => break,
@@ -436,14 +472,6 @@ impl Service for PipelineService {
 
         // Service the pipeline (verify → resolv → pack → exec → PoH).
         let result = self.pipeline.service();
-        if result.ipc_fragments_processed > 0 || result.transactions_resolved > 0 {
-            tracing::info!(
-                ipc = result.ipc_fragments_processed,
-                resolved = result.transactions_resolved,
-                microblock = result.leader_step.is_some(),
-                "pipeline: service result"
-            );
-        }
         stats
             .ipc_fragments_processed
             .fetch_add(result.ipc_fragments_processed as u64, Ordering::Relaxed);
@@ -454,11 +482,21 @@ impl Service for PipelineService {
             stats.microblocks_executed.fetch_add(1, Ordering::Relaxed);
         }
 
-        // Advance PoH ticks when leading. This generates tick entries that
-        // fill the slot's PoH chain even when no transactions arrive.
+        // Advance PoH ticks when leading. Hash multiple ticks per service
+        // tick to minimize per-tick overhead from command processing.
+        // Each advance_poh call hashes one full tick (~6.25ms for production).
+        // We batch 4 ticks per service tick to reduce the 64 tick iterations
+        // to 16 service ticks (16 × overhead instead of 64 × overhead).
         if self.handle.is_leading() {
             let ticks_before = self.pipeline.poh_ticks_completed();
-            self.pipeline.advance_poh(self.hashes_per_poh_advance);
+            for _ in 0..8 {
+                if self.pipeline.poh_ticks_completed()
+                    >= karstflow_constants::ledger::TICKS_PER_SLOT
+                {
+                    break;
+                }
+                self.pipeline.advance_poh(self.hashes_per_poh_advance);
+            }
             let ticks_after = self.pipeline.poh_ticks_completed();
             if ticks_after > ticks_before {
                 self.handle

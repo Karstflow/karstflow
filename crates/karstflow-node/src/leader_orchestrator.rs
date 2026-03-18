@@ -63,8 +63,6 @@ pub(crate) fn spawn_leader_orchestrator(
                             handle.register_blockhash(info.bank_hash, slot);
 
                             // Extract produced entries and shred them.
-                            // The take_entries() call blocks briefly until
-                            // the pipeline service processes the request.
                             let entry_batches = handle.take_entries();
                             info!(
                                 slot,
