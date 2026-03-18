@@ -398,8 +398,37 @@ impl BankExecutionEngine {
 
         let sanitized = deserialized.tx;
 
+        // Register the transaction's blockhash with the bank so it passes
+        // the recent blockhash check. In cluster mode, the bank's blockhash
+        // queue may not include the exact hash from get_latest_blockhash
+        // due to rapid slot changes and tick-level hash updates.
+        bank.register_recent_blockhash(sanitized.recent_blockhash);
+
         // Execute through the full bank pipeline.
         let result = bank.process_transaction(&sanitized, self.backend.as_ref(), MAX_COMPUTE_UNITS);
+
+        // Apply modified accounts to the bank's account database.
+        // process_transaction returns modified accounts but doesn't persist them —
+        // the caller must commit them to make state visible to RPC and other txns.
+        if result.success || result.fee > 0 {
+            let count = result.modified_accounts.len();
+            for (pubkey, account) in &result.modified_accounts {
+                bank.accounts()
+                    .store_published_account(*pubkey, account.clone());
+            }
+            tracing::info!(
+                success = result.success,
+                fee = result.fee,
+                modified = count,
+                cu = result.compute_units_consumed,
+                "exec: transaction state applied to bank"
+            );
+        } else if !result.success {
+            tracing::warn!(
+                error = ?result.error,
+                "exec: transaction failed, state not applied"
+            );
+        }
 
         let modified_accounts = result
             .modified_accounts
