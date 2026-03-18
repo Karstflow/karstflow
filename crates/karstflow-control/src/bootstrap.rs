@@ -3750,6 +3750,11 @@ impl TransactionSubmitter for DevTransactionSubmitter {
             .map_err(|e| format!("bank_forks lock poisoned: {e}"))?;
         let bank = forks.working_bank();
 
+        // In dev/cluster mode, register the transaction's blockhash so it
+        // passes validation. Rapid slot changes mean the bank may not have
+        // the exact blockhash the client got from get_latest_blockhash.
+        bank.register_recent_blockhash(deserialized.tx.recent_blockhash);
+
         let result = bank.process_transaction(
             &deserialized.tx,
             &self.backend,

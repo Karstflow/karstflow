@@ -808,6 +808,21 @@ impl Bank {
             .is_hash_valid(&hash)
     }
 
+    /// Register a blockhash as valid for transaction processing.
+    ///
+    /// Used in dev mode to accept transactions signed with a blockhash
+    /// from a different bank (due to rapid slot changes).
+    pub fn register_recent_blockhash(&self, blockhash: [u8; 32]) {
+        use crate::blockhash_queue::BlockhashInfo;
+        let hash = crate::Hash::new(blockhash);
+        let info = BlockhashInfo::new(hash, self.lamports_per_signature(), self.slot());
+        let mut queue = self
+            .blockhash_queue
+            .write()
+            .expect("blockhash_queue lock poisoned");
+        queue.register_hash(info);
+    }
+
     /// Get a reference to the blockhash queue lock.
     pub fn blockhash_queue(&self) -> &RwLock<BlockhashQueue> {
         &self.blockhash_queue
