@@ -461,6 +461,15 @@ fn run_with_node_config(
         let leader_signing_key = ed25519_dalek::SigningKey::from_bytes(identity.secret_key());
         let shred_version = node_config.expected_shred_version.unwrap_or(1);
 
+        // In cluster mode (genesis file), skip self-replay via ShredCollector.
+        // The slot driver manages bank lifecycle directly for leader slots.
+        // Self-replay would cause BankFrozen → mark_dead → BlockCostLimitExceeded.
+        let orchestrator_shred_sender = if node_config.genesis_path.is_some() {
+            None
+        } else {
+            direct_shred_sender
+        };
+
         leader_orchestrator::spawn_leader_orchestrator(
             &replay_bundle.signal_bus,
             pipeline_bundle.handle.clone(),
@@ -469,7 +478,7 @@ fn run_with_node_config(
             shred_version,
             deferred_retransmit.clone(),
             shared_blockstore.clone(),
-            direct_shred_sender,
+            orchestrator_shred_sender,
         );
     }
 
