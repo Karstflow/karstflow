@@ -136,6 +136,10 @@ pub struct PipelineHandle {
     is_leading: AtomicBool,
     /// Current leader slot (0 if not leading).
     current_slot: AtomicU64,
+    /// Number of PoH ticks completed in the current slot.
+    /// Updated by the pipeline service during advance_poh.
+    /// The slot driver polls this to detect PoH slot completion.
+    poh_ticks_done: AtomicU64,
     /// Pipeline statistics.
     pub stats: Arc<PipelineServiceStats>,
     /// Inner stage stats for metrics aggregation.
@@ -148,15 +152,22 @@ impl PipelineHandle {
             commands: Mutex::new(Vec::new()),
             is_leading: AtomicBool::new(false),
             current_slot: AtomicU64::new(0),
+            poh_ticks_done: AtomicU64::new(0),
             stats,
             stage_stats,
         }
+    }
+
+    /// Check if the PoH service has completed all ticks for the current slot.
+    pub fn is_poh_slot_complete(&self) -> bool {
+        self.poh_ticks_done.load(Ordering::Relaxed) >= karstflow_constants::ledger::TICKS_PER_SLOT
     }
 
     /// Signal the start of a new leader slot.
     pub fn begin_slot(&self, slot: u64) {
         self.is_leading.store(true, Ordering::Relaxed);
         self.current_slot.store(slot, Ordering::Relaxed);
+        self.poh_ticks_done.store(0, Ordering::Relaxed);
         self.commands
             .lock()
             .expect("pipeline commands lock poisoned")
@@ -446,7 +457,14 @@ impl Service for PipelineService {
         // Advance PoH ticks when leading. This generates tick entries that
         // fill the slot's PoH chain even when no transactions arrive.
         if self.handle.is_leading() {
+            let ticks_before = self.pipeline.poh_ticks_completed();
             self.pipeline.advance_poh(self.hashes_per_poh_advance);
+            let ticks_after = self.pipeline.poh_ticks_completed();
+            if ticks_after > ticks_before {
+                self.handle
+                    .poh_ticks_done
+                    .store(ticks_after, Ordering::Relaxed);
+            }
         }
 
         Ok(())

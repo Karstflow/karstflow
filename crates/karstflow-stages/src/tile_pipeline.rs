@@ -937,6 +937,11 @@ impl ValidatorPipeline {
     }
 
     /// Advance PoH ticks.
+    /// Number of completed PoH ticks in the current slot.
+    pub fn poh_ticks_completed(&self) -> u64 {
+        self.leader.poh_ticks_completed()
+    }
+
     pub fn advance_poh(&mut self, target_hashes: u64) {
         self.leader.advance_poh(target_hashes);
     }

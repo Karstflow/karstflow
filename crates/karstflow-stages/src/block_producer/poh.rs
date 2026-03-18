@@ -347,6 +347,14 @@ impl PohService {
         self.hashcnt
     }
 
+    /// Number of completed ticks in the current slot.
+    pub fn ticks_in_slot(&self) -> u64 {
+        if self.hashes_per_tick == 0 {
+            return 0;
+        }
+        self.hashcnt / self.hashes_per_tick
+    }
+
     pub fn is_leader(&self) -> bool {
         self.state == PohState::Leading
     }

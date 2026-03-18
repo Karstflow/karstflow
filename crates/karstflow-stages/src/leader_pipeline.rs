@@ -386,6 +386,11 @@ impl LeaderPipeline {
     }
 
     /// Advance PoH by the given number of hashes, collecting tick entries.
+    /// Number of completed PoH ticks in the current slot.
+    pub fn poh_ticks_completed(&self) -> u64 {
+        self.poh.ticks_in_slot()
+    }
+
     pub fn advance_poh(&mut self, target_hashes: u64) {
         let new_entries = self.poh.advance(target_hashes);
         // Build PohEntries for ticks (no transactions).

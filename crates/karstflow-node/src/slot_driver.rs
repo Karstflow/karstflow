@@ -149,8 +149,16 @@ pub(crate) fn spawn_cluster_slot_driver(
 
                 let completed_slot = current_slot;
 
-                // Leader slot: tick → finish_slot (freeze) → emit SlotCompleted.
+                // Leader slot: wait for PoH to complete all ticks, then
+                // freeze the bank. With production PoH, the pipeline
+                // hashes ~62,500 SHA-256 per tick × 64 ticks = ~400ms.
+                // With dev PoH (hashes_per_tick=1), this is instant.
                 if currently_leading {
+                    // Wait for PoH to finish all ticks before freezing.
+                    if hashes_per_tick > 1 && !pipeline_handle.is_poh_slot_complete() {
+                        continue; // Poll again in 50ms
+                    }
+
                     let forks = bank_forks.read().expect("bank_forks lock poisoned");
                     let bank = forks.working_bank();
                     let ticks_needed =
