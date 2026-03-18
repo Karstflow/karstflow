@@ -30,6 +30,7 @@ pub use bootstrap::{
     spawn_snapshot_thread, spawn_snapshot_thread_with_gossip, start_gossip_service,
     BlockstoreShredProvider, ConsensusBundle, ConsensusLeaderLookup, DiagnosticsSummary,
     GossipHandle, LocalTransactionSubmitter, MainnetReadinessReport, MaterializedServicePair,
+    TpuLoopbackSubmitter,
 };
 
 // Re-export TransactionSubmitter trait so downstream crates can cast submitters.

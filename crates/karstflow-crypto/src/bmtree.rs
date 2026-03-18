@@ -107,7 +107,7 @@ pub fn root_from_proof(
 
 /// Derive root using the shred verifier's index convention.
 ///
-/// This uses Firedancer's `inc_idx` walk which is used by the existing
+/// This uses the reference implementation's `inc_idx` walk which is used by the existing
 /// shred verifier for Merkle shred validation. Proofs in this format
 /// use `leaf_idx * 2` as the starting position with mask-based traversal.
 pub fn root_from_proof_shred(

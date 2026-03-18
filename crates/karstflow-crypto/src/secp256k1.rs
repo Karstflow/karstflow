@@ -12,7 +12,7 @@ use k256::elliptic_curve::ops::Reduce;
 /// Reduce a 32-byte message hash modulo the secp256k1 curve order.
 ///
 /// Matches the behavior of libsecp256k1 (Bitcoin reference) and
-/// Firedancer's fd_secp256k1. The message bytes are interpreted as
+/// the reference implementation's fd_secp256k1. The message bytes are interpreted as
 /// a big-endian unsigned integer and unconditionally reduced modulo
 /// the curve order n. For most hashes this is a no-op (hash < n),
 /// but for values >= n this ensures correct ECDSA math.

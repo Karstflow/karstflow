@@ -61,6 +61,10 @@ pub struct PipelineServiceConfig {
     pub max_drain_per_tick: usize,
     /// Hashes per PoH tick. Set to 1 for dev/low-power mode.
     pub hashes_per_tick: u64,
+    /// Accept transactions with unknown blockhashes in resolv stage.
+    /// Set to true for dev/cluster mode where tick-level blockhash
+    /// registration is not yet implemented.
+    pub accept_unknown_blockhash: bool,
 }
 
 impl Default for PipelineServiceConfig {
@@ -71,6 +75,7 @@ impl Default for PipelineServiceConfig {
             exec: ExecConfig::default(),
             max_drain_per_tick: 256,
             hashes_per_tick: karstflow_constants::ledger::DEFAULT_HASHES_PER_TICK,
+            accept_unknown_blockhash: false,
         }
     }
 }
@@ -80,6 +85,7 @@ impl PipelineServiceConfig {
     pub fn dev() -> Self {
         Self {
             hashes_per_tick: 1,
+            accept_unknown_blockhash: true,
             ..Default::default()
         }
     }
@@ -311,7 +317,9 @@ impl PipelineServiceBuilder {
         let exec_stats = exec.stats();
 
         let leader = LeaderPipeline::new(pack, exec, poh);
-        let validator_pipeline = ValidatorPipeline::new(self.config.pipeline, leader);
+        let mut pipeline_config = self.config.pipeline;
+        pipeline_config.accept_unknown_blockhash = self.config.accept_unknown_blockhash;
+        let validator_pipeline = ValidatorPipeline::new(pipeline_config, leader);
 
         // Capture verify/resolv stats from the transaction pipeline.
         let stage_stats = PipelineStageStats {

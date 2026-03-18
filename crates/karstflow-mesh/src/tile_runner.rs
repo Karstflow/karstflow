@@ -8,7 +8,7 @@
 //! - **Housekeeping**: Jittered timer triggers periodic maintenance
 //! - **Metrics**: Gauges and counters updated on each iteration
 //!
-//! The loop structure mirrors Firedancer's fd_stem run pattern:
+//! The loop structure mirrors the reference implementation's fd_stem run pattern:
 //! ```text
 //! initialize() → signal_run → loop {
 //!     if housekeeping_due { process one housekeeping event }

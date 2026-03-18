@@ -3,7 +3,7 @@
 // Sits in front of the durable file store, caching recently accessed
 // values in memory. Cache-through on reads, invalidation on writes.
 //
-// Inspired by Firedancer's vinyl line cache: fixed-capacity, LRU eviction,
+// Inspired by the reference implementation's vinyl line cache: fixed-capacity, LRU eviction,
 // single-writer invalidation semantics.
 
 use std::collections::HashMap;

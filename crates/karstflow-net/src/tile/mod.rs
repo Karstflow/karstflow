@@ -2,7 +2,7 @@
 ///
 /// Tiles are single-threaded processing units that can be pinned to CPU
 /// cores. Each tile owns its resources and communicates via lock-free
-/// channels, matching Firedancer's tile architecture.
+/// channels, matching the reference implementation's tile architecture.
 pub mod bridge;
 pub mod net_tile;
 pub mod quic_tile;

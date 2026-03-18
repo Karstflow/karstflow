@@ -127,7 +127,7 @@ impl UdpSocket {
         let mut sent = 0;
         for pkt in batch.as_slice() {
             if pkt.is_empty() {
-                sent += 1; // Skip empty packets (same as Firedancer)
+                sent += 1; // Skip empty packets (same as the reference implementation)
                 continue;
             }
             if let Some(addr) = pkt.addr() {

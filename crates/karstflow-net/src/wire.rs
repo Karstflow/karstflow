@@ -1,7 +1,7 @@
 /// Wire format types for Ethernet, IPv4, and UDP headers.
 ///
 /// All headers use host byte order internally with explicit conversion
-/// during encode/decode. This matches Firedancer's approach of parsing
+/// during encode/decode. This matches the reference implementation's approach of parsing
 /// into host-order structs for fast field access.
 use karstflow_constants::network;
 

@@ -207,7 +207,7 @@ pub fn invoke_signed(
 /// flags are merged via logical OR. The deduplicated list contains one entry
 /// per unique account, carrying the union of all requested privileges.
 ///
-/// This mirrors the logic in Firedancer's `fd_vm_prepare_instruction`.
+/// This mirrors the logic in the reference implementation's `fd_vm_prepare_instruction`.
 pub fn deduplicate_accounts(
     instruction: &CpiInstruction,
 ) -> Result<Vec<InstructionAccount>, SyscallError> {

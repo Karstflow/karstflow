@@ -104,7 +104,7 @@ pub enum PohRecord {
 
 /// Current state of the PoH tile.
 ///
-/// Extended state machine matching Firedancer's 6-state model for proper
+/// Extended state machine matching the reference implementation's 6-state model for proper
 /// coordination between PoH, replay, and pack tiles.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PohState {

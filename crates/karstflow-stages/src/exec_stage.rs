@@ -4,7 +4,7 @@
 /// through the sBPF runtime, produces entries with Merkle tree hashing,
 /// and emits execution results back to pack for rebate tracking.
 ///
-/// This corresponds to Firedancer's execle tile which handles actual
+/// This corresponds to the reference implementation's execle tile which handles actual
 /// transaction execution during block production.
 use crate::pack_stage::{Microblock, PackedTransaction};
 use karstflow_consensus::{

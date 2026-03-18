@@ -66,7 +66,7 @@ pub struct NeighborTable {
 impl NeighborTable {
     /// Create a new neighbor table with the given capacity.
     pub fn new(max_entries: usize) -> Self {
-        // Use 3x sparsity like Firedancer for good probe distribution.
+        // Use 3x sparsity like the reference implementation for good probe distribution.
         let capacity = (max_entries * 3).next_power_of_two().max(16);
         Self {
             entries: vec![NeighborEntry::EMPTY; capacity],

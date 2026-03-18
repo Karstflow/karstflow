@@ -2,7 +2,7 @@
 //!
 //! Complements the gossip-based VoteBroadcastAdapter with low-latency
 //! direct delivery of vote transactions to the current and upcoming
-//! leaders' TPU_VOTE sockets. This mirrors Firedancer's txsend tile
+//! leaders' TPU_VOTE sockets. This mirrors the reference implementation's txsend tile
 //! behavior where votes are sent directly for fast consensus participation.
 
 use karstflow_config::ValidatorIdentity;

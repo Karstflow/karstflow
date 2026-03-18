@@ -522,7 +522,7 @@ pub mod transaction {
 
 pub mod vote_sender {
     /// Number of upcoming leaders to send votes to directly.
-    /// Matches Firedancer's FD_TXSEND_TARGET_LEADER_CNT.
+    /// Matches the reference implementation's FD_TXSEND_TARGET_LEADER_CNT.
     pub const TARGET_LEADER_COUNT: usize = 3;
 
     /// Poll interval for checking new votes from the Tower.

@@ -19,7 +19,7 @@ use crate::StorageError;
 const KEY_SLICE_BYTES: usize = 20;
 
 /// Maximum number of slot deltas allowed in a status cache.
-/// Matches Firedancer's FD_SLOT_DELTA_MAX_ENTRIES.
+/// Matches the reference implementation's FD_SLOT_DELTA_MAX_ENTRIES.
 const MAX_SLOT_DELTAS: u64 = 300;
 
 /// Parsed status cache entry.

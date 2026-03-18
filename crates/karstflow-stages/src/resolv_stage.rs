@@ -6,7 +6,7 @@
 /// later resolution when new blockhashes arrive. Valid transactions are
 /// forwarded to the transaction scheduler.
 ///
-/// This corresponds to Firedancer's resolv tile, which sits between
+/// This corresponds to the reference implementation's resolv tile, which sits between
 /// dedup and pack in the transaction pipeline.
 use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -98,7 +98,7 @@ pub struct ResolvConfig {
 impl Default for ResolvConfig {
     fn default() -> Self {
         Self {
-            blockhash_ring_capacity: 1 << 22, // ~4M entries, matching Firedancer
+            blockhash_ring_capacity: 1 << 22, // ~4M entries, matching the reference implementation
             stash_capacity: 65_536,
             transaction_lifetime_slots: 160,
         }
@@ -141,6 +141,10 @@ pub struct ResolvStage {
     stash_capacity: usize,
     /// LRU counter for stash eviction.
     stash_order_counter: u64,
+    /// Accept transactions with unknown blockhashes (dev/cluster mode).
+    /// When true, resolv passes all transactions regardless of blockhash.
+    /// Production validators should set this to false.
+    pub accept_unknown_blockhash: bool,
     /// Statistics.
     stats: Arc<ResolvStats>,
 }
@@ -163,6 +167,7 @@ impl ResolvStage {
             stash_count: 0,
             stash_capacity: config.stash_capacity,
             stash_order_counter: 0,
+            accept_unknown_blockhash: false,
             stats: Arc::new(ResolvStats::default()),
         }
     }
@@ -236,6 +241,9 @@ impl ResolvStage {
             .fetch_add(1, Ordering::Relaxed);
 
         // Look up the blockhash in the ring.
+        // If not found, accept anyway for dev/cluster mode compatibility.
+        // TODO: implement production-grade blockhash ring (2^22 entries)
+        // populated from every PoH tick, not just slot boundaries.
         if let Some(&blockhash_slot) = self.blockhash_map.get(&tx.blockhash) {
             let expires_at = blockhash_slot.saturating_add(self.lifetime_slots);
 
@@ -254,9 +262,21 @@ impl ResolvStage {
             };
         }
 
-        // Blockhash not known — stash for later if there's room.
+        // Blockhash not in ring. In dev/cluster mode, accept anyway
+        // since tick-level blockhash registration is not yet implemented.
+        // TODO: implement production-grade blockhash ring (2^22 entries)
+        // populated from every PoH tick for production-grade resolution.
+        if self.accept_unknown_blockhash {
+            self.stats
+                .transactions_resolved
+                .fetch_add(1, Ordering::Relaxed);
+            return ResolvOutcome::Valid {
+                expires_at_slot: self.current_slot.saturating_add(self.lifetime_slots),
+            };
+        }
+
+        // Stash for later if there's room.
         if self.stash_count >= self.stash_capacity {
-            // Evict oldest stashed transaction.
             self.evict_oldest_stashed();
         }
 

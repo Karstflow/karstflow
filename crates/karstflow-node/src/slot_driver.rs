@@ -11,6 +11,7 @@ pub(crate) fn spawn_cluster_slot_driver(
     identity_pubkey: karstflow_storage::Pubkey,
     bank_forks: std::sync::Arc<std::sync::RwLock<karstflow_consensus::BankForks>>,
     signal_bus: std::sync::Arc<std::sync::Mutex<karstflow_stages::SignalBus>>,
+    pipeline_handle: std::sync::Arc<karstflow_stages::PipelineHandle>,
 ) {
     std::thread::Builder::new()
         .name("cluster-slot-driver".into())
@@ -52,6 +53,9 @@ pub(crate) fn spawn_cluster_slot_driver(
                     return;
                 }
                 let _ = forks.set_working_bank(current_slot);
+                // Register genesis blockhash with pipeline resolv.
+                let genesis_hash = parent.last_blockhash();
+                pipeline_handle.register_blockhash(genesis_hash, 0);
             }
 
             // Helper: check if identity is leader for a slot.
@@ -163,8 +167,18 @@ pub(crate) fn spawn_cluster_slot_driver(
                         break;
                     }
                     let _ = forks.set_working_bank(current_slot);
+                    // Register child bank's blockhash so transactions signed
+                    // with get_latest_blockhash (which returns working bank hash)
+                    // are accepted by resolv.
+                    let child_hash = forks
+                        .working_bank()
+                        .last_blockhash();
+                    pipeline_handle.register_blockhash(child_hash, current_slot);
                 }
-                let _ = bank_hash; // suppress unused warning
+
+                // Register completed slot's blockhash with resolv.
+                // This follows reference pattern: replay → resolv on each slot.
+                pipeline_handle.register_blockhash(bank_hash, completed_slot);
 
                 // Emit BecameLeader only on transition (not-leading → leading).
                 let next_is_leader = is_leader_for(current_slot);

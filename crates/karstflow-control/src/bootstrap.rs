@@ -1383,7 +1383,7 @@ pub struct RepairBundle {
 
 /// Service adapter that wraps the poll-driven RepairCoordinator.
 ///
-/// Mirrors Firedancer's repair tile architecture: the coordinator runs a
+/// Mirrors the reference implementation's repair tile architecture: the coordinator runs a
 /// synchronous `service()` loop that scans the slot forest for missing
 /// shreds, generates repair requests through latency-aware peer selection,
 /// and processes responses. The actual network I/O runs on a separate
@@ -1412,7 +1412,7 @@ impl Service for RepairServiceAdapter {
     }
 
     fn tick_interval(&self) -> std::time::Duration {
-        // Match Firedancer's repair tile tick rate: fast polling for
+        // Match the reference implementation's repair tile tick rate: fast polling for
         // responsive slot recovery.
         std::time::Duration::from_millis(5)
     }
@@ -1758,7 +1758,7 @@ pub struct VoteBroadcastBundle {
 
 /// Service adapter that broadcasts new tower votes via gossip.
 ///
-/// Mirrors Firedancer's vote flow: tower tile (decision) → txsend tile
+/// Mirrors the reference implementation's vote flow: tower tile (decision) → txsend tile
 /// (sign + target leaders) → gossip tile (CRDS broadcast). Here the
 /// adapter combines the signing and gossip insertion steps — it polls
 /// the shared Tower for new vote slots, wraps them in signed CrdsValue
@@ -2669,22 +2669,28 @@ pub fn maybe_start_rpc_http_server_with_consensus(
                     node_config.expected_genesis_hash.clone(),
                     health_status,
                 )));
+            // Transaction submitter: following the reference implementation architecture,
+            // sendTransaction forwards via UDP to the local TPU ingress
+            // port. EdgeIntake receives it and routes through the full
+            // pipeline (verify → resolv → pack → exec → PoH → entries).
+            //
+            // Single-node dev mode (no genesis) uses DevTransactionSubmitter
+            // for backward compatibility with existing E2E tests.
             let dev_mode = node_config.cluster_mode == karstflow_config::ClusterMode::Dev;
-            // Transaction submitter priority:
-            // 1. Override (e.g., LocalTransactionSubmitter from pipeline)
-            // 2. Single-node dev: DevTransactionSubmitter (bank-direct)
-            // 3. Cluster/live: ConsensusTransactionSubmitter (gossip/TPU)
             let has_genesis = node_config.genesis_path.is_some();
-            let submitter: Option<Arc<dyn TransactionSubmitter>> =
-                if let Some(override_sub) = tx_submitter_override {
-                    Some(override_sub)
-                } else if dev_mode && !has_genesis {
-                    Some(Arc::new(DevTransactionSubmitter::new(forks.clone())))
-                } else {
-                    cluster_info.map(|ci| -> Arc<dyn TransactionSubmitter> {
-                        Arc::new(ConsensusTransactionSubmitter::new(forks.clone(), ci))
-                    })
-                };
+            let submitter: Option<Arc<dyn TransactionSubmitter>> = if dev_mode && !has_genesis {
+                Some(Arc::new(DevTransactionSubmitter::new(forks.clone())))
+            } else if let Some(override_sub) = tx_submitter_override {
+                Some(override_sub)
+            } else {
+                // TPU loopback: send to our own ingress UDP port.
+                // EdgeIntake picks it up and routes through pipeline.
+                let tpu_addr = node_config
+                    .ingress_policy
+                    .udp_bind_address
+                    .unwrap_or_else(|| std::net::SocketAddr::from(([127, 0, 0, 1], 9001)));
+                Some(Arc::new(TpuLoopbackSubmitter::new(tpu_addr)))
+            };
             (snap, bank, submitter)
         } else {
             let snapshot_provider: Option<Arc<dyn karstflow_rpc::RuntimeSnapshotProvider>> =
@@ -3565,6 +3571,50 @@ impl karstflow_stages::LeaderLookup for ConsensusLeaderLookup {
 
 /// Forwards transactions to the current leader's TPU socket via UDP.
 ///
+/// TPU loopback submitter: sends transactions via UDP to the local
+/// ingress port (EdgeIntake). This follows the the reference implementation architecture
+/// where sendTransaction goes through the full pipeline: EdgeIntake →
+/// verify → resolv → pack → exec → PoH → entries → shreds.
+///
+/// No shortcuts — transactions are validated and processed exactly
+/// like any externally received transaction.
+pub struct TpuLoopbackSubmitter {
+    socket: std::net::UdpSocket,
+    target_addr: std::net::SocketAddr,
+}
+
+impl TpuLoopbackSubmitter {
+    pub fn new(target_addr: std::net::SocketAddr) -> Self {
+        let socket = std::net::UdpSocket::bind("0.0.0.0:0")
+            .expect("failed to bind ephemeral UDP socket for TPU loopback");
+        tracing::info!(%target_addr, "TPU loopback submitter: sendTransaction → local ingress");
+        Self {
+            socket,
+            target_addr,
+        }
+    }
+}
+
+impl TransactionSubmitter for TpuLoopbackSubmitter {
+    fn submit_transaction(&self, tx_bytes: &[u8]) -> std::result::Result<[u8; 64], String> {
+        if tx_bytes.is_empty() {
+            return Err("empty transaction".to_string());
+        }
+        let num_sigs = tx_bytes[0] as usize;
+        if num_sigs == 0 || tx_bytes.len() < 1 + 64 {
+            return Err("transaction too short".to_string());
+        }
+        let mut sig = [0u8; 64];
+        sig.copy_from_slice(&tx_bytes[1..65]);
+
+        self.socket
+            .send_to(tx_bytes, self.target_addr)
+            .map_err(|e| format!("TPU loopback send failed: {e}"))?;
+
+        Ok(sig)
+    }
+}
+
 /// Resolves the current slot's leader from `BankForks` and looks up
 /// their TPU socket address via `ClusterInfo`. The raw transaction
 /// bytes are sent as a single UDP datagram. This is the standard
