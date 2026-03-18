@@ -3632,16 +3632,27 @@ pub struct ConsensusTransactionSubmitter {
     bank_forks: Arc<RwLock<BankForks>>,
     cluster_info: Arc<ClusterInfo>,
     socket: std::net::UdpSocket,
+    /// Local validator identity (32-byte pubkey).
+    local_identity: [u8; 32],
+    /// Local TPU address for self-forwarding when this node is leader.
+    local_tpu_addr: std::net::SocketAddr,
 }
 
 impl ConsensusTransactionSubmitter {
-    pub fn new(bank_forks: Arc<RwLock<BankForks>>, cluster_info: Arc<ClusterInfo>) -> Self {
+    pub fn new(
+        bank_forks: Arc<RwLock<BankForks>>,
+        cluster_info: Arc<ClusterInfo>,
+        local_identity: [u8; 32],
+        local_tpu_addr: std::net::SocketAddr,
+    ) -> Self {
         let socket = std::net::UdpSocket::bind("0.0.0.0:0")
             .expect("failed to bind ephemeral UDP socket for transaction forwarding — check OS limits (ulimit -n)");
         Self {
             bank_forks,
             cluster_info,
             socket,
+            local_identity,
+            local_tpu_addr,
         }
     }
 }
@@ -3694,7 +3705,12 @@ impl TransactionSubmitter for ConsensusTransactionSubmitter {
                     }
                     seen_leaders.push(leader);
 
-                    if let Some(addr) = self
+                    // For the local node, use the known TPU address
+                    // directly. CRDS only contains peer entries, not
+                    // the node's own ContactInfo.
+                    if *leader.as_bytes() == self.local_identity {
+                        addrs.push(self.local_tpu_addr);
+                    } else if let Some(addr) = self
                         .cluster_info
                         .lookup_socket(leader.as_bytes(), karstflow_constants::gossip::SOCKET_TPU)
                     {

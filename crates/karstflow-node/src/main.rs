@@ -843,6 +843,8 @@ fn run_with_node_config(
             Some(std::sync::Arc::new(ConsensusTransactionSubmitter::new(
                 rpc_bank_forks.clone(),
                 rpc_cluster_info.clone(),
+                *identity.pubkey(),
+                node_config.tpu_bind_addr(),
             )))
         } else {
             None
