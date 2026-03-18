@@ -423,6 +423,23 @@ impl ReplayStage {
                 );
             }
 
+            // Advance working_bank to the newly frozen slot so RPC
+            // queries (getSlot, getBalance with processed commitment)
+            // reflect the latest replayed state. Without this, the
+            // working_bank stays at the last leader slot and non-leader
+            // nodes appear stuck at slot 0.
+            {
+                let mut forks = self
+                    .bank_transition
+                    .bank_forks
+                    .write()
+                    .expect("bank_forks lock poisoned");
+                let current_working = forks.working_bank().slot();
+                if block.slot > current_working {
+                    let _ = forks.set_working_bank(block.slot);
+                }
+            }
+
             // Emit SlotCompleted signal after successful freeze.
             let timestamp = bank
                 .sysvar_cache()
