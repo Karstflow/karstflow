@@ -1022,7 +1022,16 @@ pub fn start_gossip_service(
         ..GossipConfig::default()
     };
 
-    let entrypoint_addrs: Vec<std::net::SocketAddr> = node_config.live_entrypoints.to_vec();
+    // Filter out self-entrypoint: if our own gossip address is in the
+    // entrypoint list, don't add it — we ARE the entrypoint. Adding it
+    // creates a stub ContactInfo with a synthetic pubkey that never gets
+    // replaced and pollutes the cluster nodes view.
+    let entrypoint_addrs: Vec<std::net::SocketAddr> = node_config
+        .live_entrypoints
+        .iter()
+        .filter(|addr| **addr != gossip_bind_addr)
+        .copied()
+        .collect();
 
     let (cluster_tx, cluster_rx) = std::sync::mpsc::sync_channel::<
         std::result::Result<(Arc<ClusterInfo>, GossipServiceStats), String>,
