@@ -31,8 +31,8 @@ pub(crate) fn spawn_cluster_slot_driver(
                     return;
                 }
             }
-            if let Err(e) = genesis_bank.freeze() {
-                warn!(error = ?e, "cluster-slot-driver: failed to freeze genesis");
+            if let Err(e) = genesis_bank.finish_slot() {
+                warn!(error = ?e, "cluster-slot-driver: failed to finalize genesis");
                 return;
             }
             let genesis_slot = genesis_bank.slot();
