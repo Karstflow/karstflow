@@ -206,15 +206,29 @@ impl RetransmitService {
     pub fn forward_raw(&self, data: &[u8]) {
         let tree_guard = self.tree.read();
         let Some(ref current_tree) = *tree_guard else {
+            tracing::debug!("forward_raw: no turbine tree");
             return;
         };
         let children = current_tree.get_children(&self.node_id);
         if children.is_empty() {
+            tracing::debug!("forward_raw: no children in tree");
             return;
         }
         for child_id in &children {
             if let Some(node) = current_tree.get_node(child_id) {
-                let _ = self.transport.send_to(data, node.contact_info.tvu_addr);
+                let target = node.contact_info.tvu_addr;
+                match self.transport.send_to(data, target) {
+                    Ok(_) => {
+                        tracing::debug!(
+                            %target,
+                            len = data.len(),
+                            "forward_raw: sent shred to child"
+                        );
+                    }
+                    Err(e) => {
+                        tracing::warn!(%target, error = %e, "forward_raw: send failed");
+                    }
+                }
             }
         }
         self.stats.record_retransmit(1, data.len() as u64);
