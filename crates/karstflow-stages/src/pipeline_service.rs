@@ -413,10 +413,16 @@ impl Service for PipelineService {
                         stats.transactions_received.fetch_add(1, Ordering::Relaxed);
                         drained += 1;
 
-                        if self.pipeline.ingest(&raw_tx.payload, raw_tx.source) {
+                        let accepted = self.pipeline.ingest(&raw_tx.payload, raw_tx.source);
+                        if accepted {
                             stats.transactions_accepted.fetch_add(1, Ordering::Relaxed);
+                            tracing::info!(
+                                payload_len = raw_tx.payload.len(),
+                                "pipeline: transaction ingested into tile pipeline"
+                            );
                         } else {
                             stats.transactions_dropped.fetch_add(1, Ordering::Relaxed);
+                            tracing::warn!("pipeline: transaction dropped (no credits)");
                         }
                     }
                     Ok(None) => break,
@@ -427,6 +433,14 @@ impl Service for PipelineService {
 
         // Service the pipeline (verify → resolv → pack → exec → PoH).
         let result = self.pipeline.service();
+        if result.ipc_fragments_processed > 0 || result.transactions_resolved > 0 {
+            tracing::info!(
+                ipc = result.ipc_fragments_processed,
+                resolved = result.transactions_resolved,
+                microblock = result.leader_step.is_some(),
+                "pipeline: service result"
+            );
+        }
         stats
             .ipc_fragments_processed
             .fetch_add(result.ipc_fragments_processed as u64, Ordering::Relaxed);
