@@ -3739,8 +3739,7 @@ impl TransactionSubmitter for ConsensusTransactionSubmitter {
             return Err("no TPU address found for any upcoming leader".to_string());
         }
 
-        // Forward to all resolved leader TPU addresses. A single success is
-        // enough — the transaction will propagate through the network.
+        // Forward to all resolved leader TPU addresses.
         let mut send_ok = 0_usize;
         let mut last_err = None;
         for addr in &tpu_addrs {

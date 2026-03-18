@@ -482,11 +482,10 @@ impl Service for PipelineService {
             stats.microblocks_executed.fetch_add(1, Ordering::Relaxed);
         }
 
-        // Advance PoH ticks when leading. Hash multiple ticks per service
-        // tick to minimize per-tick overhead from command processing.
-        // Each advance_poh call hashes one full tick (~6.25ms for production).
-        // We batch 4 ticks per service tick to reduce the 64 tick iterations
-        // to 16 service ticks (16 × overhead instead of 64 × overhead).
+        // Advance PoH and interleave transaction execution.
+        // For each tick, first try to execute a microblock (step), then
+        // advance the PoH by one tick. This ensures transactions get
+        // mixin'd into the PoH chain before the tick boundary.
         if self.handle.is_leading() {
             let ticks_before = self.pipeline.poh_ticks_completed();
             for _ in 0..8 {
@@ -495,6 +494,10 @@ impl Service for PipelineService {
                 {
                     break;
                 }
+                // Execute pending transactions before advancing the tick.
+                // This gives pack → exec → mixin a chance to include
+                // transactions in the PoH chain before the tick boundary.
+                let _ = self.pipeline.service();
                 self.pipeline.advance_poh(self.hashes_per_poh_advance);
             }
             let ticks_after = self.pipeline.poh_ticks_completed();
