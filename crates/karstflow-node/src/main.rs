@@ -447,15 +447,16 @@ fn run_with_node_config(
             backend,
         ))
     };
-    // Use dev config (hashes_per_tick=1) for all modes until PoH tick
-    // service is implemented for real-time hashing. Without this, cluster
-    // mode pipeline never produces entries.
-    // TODO: implement PoH tick service, then use default config for cluster mode.
-    let pipeline_bundle = build_pipeline_service(
-        karstflow_stages::PipelineServiceConfig::dev(),
-        pipeline_inputs,
-        Some(leader_exec_engine),
-    );
+    // Dev mode uses hashes_per_tick=1 for instant ticks (fast E2E tests).
+    // Cluster/live mode uses production hashes_per_tick (62,500) with
+    // real-time PoH hashing — ~400ms per slot, 64 ticks per slot.
+    let pipeline_config = if is_dev_mode {
+        karstflow_stages::PipelineServiceConfig::dev()
+    } else {
+        karstflow_stages::PipelineServiceConfig::default()
+    };
+    let pipeline_bundle =
+        build_pipeline_service(pipeline_config, pipeline_inputs, Some(leader_exec_engine));
     // Wire replay slot completions to the resolv stage's blockhash ring.
     // This follows the reference implementation pattern: when replay freezes
     // a bank (for both leader and non-leader slots), the resulting blockhash
