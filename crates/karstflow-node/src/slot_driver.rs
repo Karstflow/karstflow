@@ -130,9 +130,11 @@ pub(crate) fn spawn_cluster_slot_driver(
                     ));
                 }
 
-                // Create child bank for next slot.
+                // Create child bank for next slot ONLY if we're the leader.
+                // Non-leader slot banks are created by replay when blocks arrive
+                // from the network via turbine.
                 current_slot = completed_slot + 1;
-                {
+                if is_leader_for(current_slot) {
                     let mut forks = bank_forks.write().expect("bank_forks lock poisoned");
                     let parent = forks.working_bank();
                     let ls = parent.leader_schedule();
@@ -144,6 +146,10 @@ pub(crate) fn spawn_cluster_slot_driver(
                         break;
                     }
                     let _ = forks.set_working_bank(current_slot);
+                }
+                // Root advancement for all completed slots.
+                {
+                    let mut forks = bank_forks.write().expect("bank_forks lock poisoned");
                     if let Err(e) = forks.set_root(completed_slot) {
                         warn!(error = ?e, "cluster-slot-driver: set_root failed");
                     }
