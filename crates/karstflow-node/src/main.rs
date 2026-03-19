@@ -645,6 +645,7 @@ fn run_with_node_config(
             &replay_bundle.signal_bus,
             pipeline_bundle.handle.clone(),
             consensus.bank_forks.clone(),
+            consensus.fork_choice.clone(),
             leader_pubkey,
             leader_signing_key,
             shred_version,
@@ -688,6 +689,11 @@ fn run_with_node_config(
                                     continue;
                                 }
                             }
+                            // Mark rooted so BankForks::set_root() can succeed
+                            // when Tower produces a new root via voting.
+                            if let Err(e) = bank.mark_rooted() {
+                                tracing::debug!(error = ?e, slot, "slot-freeze: mark_rooted skipped");
+                            }
                             let hash = bank.last_blockhash();
                             drop(forks);
 
@@ -721,6 +727,7 @@ fn run_with_node_config(
         cluster_bootstrap::bootstrap_genesis_and_start_leading(
             identity_pubkey,
             &consensus.bank_forks,
+            &consensus.fork_choice,
             &replay_bundle.signal_bus,
             &pipeline_bundle.handle,
         );

@@ -578,6 +578,10 @@ impl ReplayStage {
                             .write()
                             .expect("bank_forks lock poisoned");
                         if new_root > bank_forks.root_slot() {
+                            // Mark the target bank as Rooted (required by set_root).
+                            if let Some(root_bank) = bank_forks.get(new_root) {
+                                let _ = root_bank.mark_rooted();
+                            }
                             let previous_root = bank_forks.root_slot();
                             match bank_forks.set_root(new_root) {
                                 Err(e) => {

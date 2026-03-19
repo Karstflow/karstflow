@@ -13,6 +13,7 @@ pub(crate) fn spawn_leader_orchestrator(
     signal_bus: &std::sync::Arc<std::sync::Mutex<karstflow_stages::SignalBus>>,
     handle: std::sync::Arc<karstflow_stages::PipelineHandle>,
     bank_forks: std::sync::Arc<std::sync::RwLock<karstflow_consensus::BankForks>>,
+    fork_choice: std::sync::Arc<std::sync::Mutex<karstflow_consensus::ForkChoice>>,
     leader_pubkey: karstflow_storage::Pubkey,
     leader_signing_key: ed25519_dalek::SigningKey,
     shred_version: u16,
@@ -103,6 +104,11 @@ pub(crate) fn spawn_leader_orchestrator(
                                         );
                                         let _ = forks.insert(child);
                                         let _ = forks.set_working_bank(next_slot);
+                                        // Register in fork choice so consensus can vote.
+                                        fork_choice
+                                            .lock()
+                                            .expect("fork_choice lock poisoned")
+                                            .add_fork(next_slot, Some(slot));
                                     }
                                 }
                                 drop(forks);
