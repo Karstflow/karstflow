@@ -117,22 +117,46 @@ fn run_with_node_config(
         .shred_arrival_receiver
         .unwrap_or_else(|| crossbeam_channel::bounded(1).1);
 
-    // Live mode without snapshot: download snapshot from network peers.
-    // Gossip is already running, so we can discover peers with snapshots.
+    // Live mode without snapshot: auto-download genesis + snapshot from network.
+    // Gossip is already running, so we can discover peers.
     let mut snapshot_archive_path_override: Option<std::path::PathBuf> = None;
+    let mut genesis_path_override: Option<std::path::PathBuf> = None;
     if node_config.cluster_mode == karstflow_config::ClusterMode::Live
         && node_config.snapshot_archive_path.is_none()
         && node_config.genesis_path.is_none()
     {
-        info!("live mode: downloading snapshot from network peers...");
-        let download_config =
-            karstflow_control::snapshot_download::SnapshotDownloadConfig::default();
         let output_dir = node_config
             .data_dir
             .clone()
             .unwrap_or_else(|| std::path::PathBuf::from("/tmp/karstflow-snapshots"));
         std::fs::create_dir_all(&output_dir).ok();
 
+        // Step 1: Download genesis.bin from entrypoint RPC endpoints.
+        // Genesis is immutable per network and served at /genesis.tar.bz2.
+        info!("live mode: downloading genesis from entrypoints...");
+        let entrypoint_rpc_addrs: Vec<std::net::SocketAddr> = node_config
+            .live_entrypoints
+            .iter()
+            .map(|ep| std::net::SocketAddr::new(ep.ip(), 8899))
+            .collect();
+        match karstflow_net::snapshot_download::download_genesis(
+            &entrypoint_rpc_addrs,
+            &output_dir,
+            30,
+        ) {
+            Ok(path) => {
+                info!(path = %path.display(), "genesis.bin downloaded");
+                genesis_path_override = Some(path);
+            }
+            Err(e) => {
+                warn!(error = %e, "genesis download failed — trying without genesis");
+            }
+        }
+
+        // Step 2: Download snapshot from gossip peers.
+        info!("live mode: downloading snapshot from network peers...");
+        let download_config =
+            karstflow_control::snapshot_download::SnapshotDownloadConfig::default();
         let crds_table = gossip_handle.cluster_info.crds_table().clone();
         match karstflow_control::snapshot_download::download_snapshot_from_network(
             &crds_table,
@@ -160,7 +184,10 @@ fn run_with_node_config(
     let effective_snapshot_path = snapshot_archive_path_override
         .as_deref()
         .or(node_config.snapshot_archive_path.as_deref());
-    let is_dev_mode = effective_snapshot_path.is_none() && node_config.genesis_path.is_none();
+    let effective_genesis_path = genesis_path_override
+        .as_deref()
+        .or(node_config.genesis_path.as_deref());
+    let is_dev_mode = effective_snapshot_path.is_none() && effective_genesis_path.is_none();
     let replay_bundle = if let Some(archive_path) = effective_snapshot_path {
         // Path 1: Restore from a Solana snapshot archive to join an existing network.
         let identity_pubkey = karstflow_storage::Pubkey::from(*identity.pubkey());
@@ -176,7 +203,7 @@ fn run_with_node_config(
             consensus,
             Some(*identity.pubkey()),
         )
-    } else if let Some(ref genesis_path) = node_config.genesis_path {
+    } else if let Some(genesis_path) = effective_genesis_path {
         // Path 2: Bootstrap from a genesis.bin file (fresh cluster or dev mode).
         let identity_pubkey = karstflow_storage::Pubkey::from(*identity.pubkey());
         let consensus = bootstrap_from_genesis_file(
@@ -568,11 +595,12 @@ fn run_with_node_config(
         // In cluster mode (genesis file), skip self-replay via ShredCollector.
         // The slot driver manages bank lifecycle directly for leader slots.
         // Self-replay would cause BankFrozen → mark_dead → BlockCostLimitExceeded.
-        let orchestrator_shred_sender = if node_config.genesis_path.is_some() {
-            None
-        } else {
-            direct_shred_sender
-        };
+        let orchestrator_shred_sender =
+            if node_config.genesis_path.is_some() || genesis_path_override.is_some() {
+                None
+            } else {
+                direct_shred_sender
+            };
 
         leader_orchestrator::spawn_leader_orchestrator(
             &replay_bundle.signal_bus,
@@ -587,7 +615,7 @@ fn run_with_node_config(
     }
 
     // Cluster slot driver for genesis-file mode.
-    let has_genesis_file = node_config.genesis_path.is_some();
+    let has_genesis_file = node_config.genesis_path.is_some() || genesis_path_override.is_some();
     if has_genesis_file && !is_dev_mode {
         let identity_pubkey = karstflow_storage::Pubkey::from(*identity.pubkey());
         slot_driver::spawn_cluster_slot_driver(

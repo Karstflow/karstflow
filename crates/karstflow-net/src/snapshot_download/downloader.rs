@@ -325,3 +325,108 @@ mod tests {
         let _downloader = SnapshotDownloader::new(config);
     }
 }
+
+/// Download genesis.tar.bz2 from a peer RPC endpoint and extract genesis.bin.
+///
+/// Tries each provided RPC address in order until one succeeds.
+/// The genesis archive is a bzip2-compressed tar containing genesis.bin.
+pub fn download_genesis(
+    rpc_addrs: &[std::net::SocketAddr],
+    output_dir: &Path,
+    connect_timeout_secs: u64,
+) -> Result<PathBuf, DownloadError> {
+    let genesis_path = output_dir.join("genesis.bin");
+    if genesis_path.exists() {
+        info!(path = %genesis_path.display(), "genesis.bin already exists, skipping download");
+        return Ok(genesis_path);
+    }
+
+    let archive_path = output_dir.join("genesis.tar.bz2");
+
+    for addr in rpc_addrs {
+        let url = format!("http://{}/genesis.tar.bz2", addr);
+        info!(%url, "downloading genesis.tar.bz2");
+
+        let agent = ureq::config::Config::builder()
+            .timeout_connect(Some(std::time::Duration::from_secs(connect_timeout_secs)))
+            .timeout_recv_body(Some(std::time::Duration::from_secs(60)))
+            .build()
+            .new_agent();
+
+        match agent.get(&url).call() {
+            Ok(response) => {
+                let mut reader = response.into_body().into_reader();
+                let mut file = match std::fs::File::create(&archive_path) {
+                    Ok(f) => f,
+                    Err(e) => {
+                        warn!(error = %e, "failed to create genesis archive file");
+                        continue;
+                    }
+                };
+                let mut total = 0u64;
+                let mut buf = vec![0u8; 64 * 1024];
+                loop {
+                    match reader.read(&mut buf) {
+                        Ok(0) => break,
+                        Ok(n) => {
+                            file.write_all(&buf[..n]).map_err(DownloadError::Io)?;
+                            total += n as u64;
+                        }
+                        Err(e) => {
+                            warn!(error = %e, "genesis download read error");
+                            break;
+                        }
+                    }
+                }
+                drop(file);
+                info!(bytes = total, "genesis.tar.bz2 downloaded");
+
+                // Extract genesis.bin from tar.bz2
+                match extract_genesis_archive(&archive_path, output_dir) {
+                    Ok(path) => {
+                        info!(path = %path.display(), "genesis.bin extracted");
+                        return Ok(path);
+                    }
+                    Err(e) => {
+                        warn!(error = %e, "genesis archive extraction failed");
+                        continue;
+                    }
+                }
+            }
+            Err(e) => {
+                warn!(%url, error = %e, "genesis download failed, trying next peer");
+            }
+        }
+    }
+
+    Err(DownloadError::NoPeers)
+}
+
+/// Extract genesis.bin from a genesis.tar.bz2 archive using the system `tar` command.
+fn extract_genesis_archive(
+    archive_path: &Path,
+    output_dir: &Path,
+) -> Result<PathBuf, DownloadError> {
+    let status = std::process::Command::new("tar")
+        .args(["-xjf", &archive_path.to_string_lossy()])
+        .current_dir(output_dir)
+        .status()
+        .map_err(DownloadError::Io)?;
+
+    if !status.success() {
+        return Err(DownloadError::Io(std::io::Error::new(
+            std::io::ErrorKind::Other,
+            format!("tar extraction failed with status {status}"),
+        )));
+    }
+
+    let genesis_path = output_dir.join("genesis.bin");
+    if genesis_path.exists() {
+        Ok(genesis_path)
+    } else {
+        Err(DownloadError::Io(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            "genesis.bin not found after extraction",
+        )))
+    }
+}
