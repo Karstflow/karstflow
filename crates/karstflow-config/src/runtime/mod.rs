@@ -17,7 +17,7 @@ pub fn build_runtime_spec(profile: Option<&NodeProfileToml>) -> Result<RuntimeSp
     let mut runtime_spec = RuntimeSpec {
         mode: ExecutionMode::Tokio,
         workers: 4,
-        run_for_seconds: Some(10),
+        run_for_seconds: None,
         pinned_core_policy: PinnedCorePolicy::Adaptive,
         pinned_allow_core_sharing: true,
         pinned_service_core_ids: None,
