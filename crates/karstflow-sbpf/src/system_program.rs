@@ -325,6 +325,16 @@ impl SystemProgramExecutor {
             return Err("CreateAccount requires writable accounts".to_string());
         }
 
+        // Both from and to must be signers (to can be a PDA signer via invoke_signed)
+        if !context.signers.is_empty() {
+            if !context.is_signer(&from_pubkey) {
+                return Err("CreateAccount: from account must be a signer".to_string());
+            }
+            if !context.is_signer(&to_pubkey) {
+                return Err("CreateAccount: to account must be a signer".to_string());
+            }
+        }
+
         // Check if target account is already in use
         if !to_account.data.as_ref().is_empty() || to_account.meta.lamports > 0 {
             return Err(SystemProgramError::AccountAlreadyInUse.to_string());
@@ -339,7 +349,7 @@ impl SystemProgramExecutor {
         from_account.meta.lamports = from_account.meta.lamports.saturating_sub(lamports);
         to_account.meta.lamports = lamports;
         to_account.meta.owner = owner;
-        to_account.data = AccountData::with_capacity(space as usize);
+        to_account.data = AccountData::new(vec![0u8; space as usize]);
 
         modified_accounts.insert(from_pubkey, from_account);
         modified_accounts.insert(to_pubkey, to_account);
@@ -429,6 +439,12 @@ impl SystemProgramExecutor {
             return Err(SystemProgramError::ResultWithNegativeLamports.to_string());
         }
 
+        // Self-transfer is a validated no-op (matches Solana behavior).
+        if from_pubkey == to_pubkey {
+            modified_accounts.insert(from_pubkey, from_account);
+            return Ok(());
+        }
+
         // Perform transfer
         from_account.meta.lamports = from_account.meta.lamports.saturating_sub(lamports);
         to_account.meta.lamports = to_account.meta.lamports.saturating_add(lamports);
@@ -482,7 +498,7 @@ impl SystemProgramExecutor {
             return Err(SystemProgramError::AccountAlreadyInUse.to_string());
         }
 
-        account.data = AccountData::with_capacity(space as usize);
+        account.data = AccountData::new(vec![0u8; space as usize]);
         modified_accounts.insert(account_pubkey, account);
 
         Ok(())
@@ -523,7 +539,7 @@ impl SystemProgramExecutor {
 
         // Ensure account data is correct size
         if account.data.as_ref().len() != NONCE_ACCOUNT_SIZE {
-            account.data = AccountData::with_capacity(NONCE_ACCOUNT_SIZE);
+            account.data = AccountData::new(vec![0u8; NONCE_ACCOUNT_SIZE]);
         }
 
         // Deserialize current state — must be uninitialized
@@ -1173,14 +1189,18 @@ impl SystemProgramExecutor {
             return Err(SystemProgramError::ResultWithNegativeLamports.to_string());
         }
 
-        let mut new_from = from_account.clone();
-        new_from.meta.lamports -= lamports;
+        if from_pubkey == to_pubkey {
+            modified_accounts.insert(*from_pubkey, from_account.clone());
+        } else {
+            let mut new_from = from_account.clone();
+            new_from.meta.lamports -= lamports;
 
-        let mut new_to = to_account.clone();
-        new_to.meta.lamports += lamports;
+            let mut new_to = to_account.clone();
+            new_to.meta.lamports += lamports;
 
-        modified_accounts.insert(*from_pubkey, new_from);
-        modified_accounts.insert(*to_pubkey, new_to);
+            modified_accounts.insert(*from_pubkey, new_from);
+            modified_accounts.insert(*to_pubkey, new_to);
+        }
 
         logs.push(format!(
             "Transferred {} lamports from {} to {}",

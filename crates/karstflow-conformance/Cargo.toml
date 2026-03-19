@@ -1,0 +1,22 @@
+[package]
+name = "karstflow-conformance"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+
+# Conformance test harnesses for instruction, transaction, and block execution.
+# Tests are marked #[ignore] — run via `just conformance`.
+
+[dependencies]
+karstflow-consensus = { workspace = true }
+karstflow-constants = { workspace = true }
+karstflow-control = { workspace = true }
+karstflow-ids = { workspace = true }
+karstflow-sbpf = { workspace = true }
+karstflow-stages = { workspace = true }
+karstflow-storage = { workspace = true }
+karstflow-types = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+sha2.workspace = true

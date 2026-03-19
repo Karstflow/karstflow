@@ -20,7 +20,7 @@ pub(super) fn handle(
     request: &serde_json::Value,
     snapshot: RpcRuntimeSnapshot,
     commitment: RpcCommitment,
-    full_api: bool,
+    _full_api: bool,
     bank_access: Option<&Arc<dyn BankAccessProvider>>,
 ) -> Result<serde_json::Value, RpcMethodError> {
     match method {
@@ -29,13 +29,13 @@ pub(super) fn handle(
             if healthy {
                 Ok(types::to_value(&"ok"))
             } else {
-                Err(RpcMethodError::NodeUnhealthy)
+                Err(RpcMethodError::node_unhealthy(None))
             }
         }
         RpcMethod::GetVersion => {
             let response = GetVersionResponse {
-                karstflow_core: env!("CARGO_PKG_VERSION").to_string(),
-                feature_set: if full_api { "full_api" } else { "subset_api" }.to_string(),
+                solana_core: "2.2.0".to_string(),
+                feature_set: 4_215_500_110,
             };
             Ok(types::to_value(&response))
         }
@@ -48,7 +48,7 @@ pub(super) fn handle(
         RpcMethod::GetIdentity => {
             let identity = bank_access
                 .and_then(|bank| bank.get_identity())
-                .unwrap_or_else(|| "ParaDancer11111111111111111111111111111111".to_string());
+                .unwrap_or_else(|| "Karstflow111111111111111111111111111111111".to_string());
             let response = GetIdentityResponse { identity };
             Ok(types::to_value(&response))
         }

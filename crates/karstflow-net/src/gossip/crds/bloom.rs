@@ -142,7 +142,7 @@ impl GossipBloomFilter {
 
 /// FNV-1a hash of a 32-byte value with a seed.
 ///
-/// This is the same algorithm used by Firedancer for bloom filter hashing.
+/// This is the same algorithm used by the reference implementation for bloom filter hashing.
 /// FNV-1a is chosen for its speed on short inputs (no need for
 /// cryptographic security in bloom filters).
 fn fnv1a_hash(data: &[u8; 32], seed: u64) -> u64 {

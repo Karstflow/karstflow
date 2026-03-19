@@ -8,9 +8,9 @@ description = "High-performance networking stack for Karstflow validator"
 
 [dependencies]
 karstflow-constants = { workspace = true }
-karstflow-crypto = { path = "../karstflow-crypto" }
-karstflow-mesh = { path = "../karstflow-mesh" }
-karstflow-types = { path = "../karstflow-types" }
+karstflow-crypto = { workspace = true }
+karstflow-mesh = { workspace = true }
+karstflow-types = { workspace = true }
 
 # Low-level system interfaces
 libc = "0.2"

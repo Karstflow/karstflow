@@ -10,5 +10,5 @@ tracing.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
 core_affinity.workspace = true
-karstflow-core = { path = "../karstflow-core" }
-karstflow-mesh = { path = "../karstflow-mesh" }
+karstflow-core = { workspace = true }
+karstflow-mesh = { workspace = true }

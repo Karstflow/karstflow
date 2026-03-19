@@ -45,4 +45,5 @@ pub struct IngressPolicyToml {
     pub synthetic_source_weight_gossip: Option<u32>,
     pub synthetic_source_weight_bundle: Option<u32>,
     pub synthetic_source_weight_rpc: Option<u32>,
+    pub tvu_bind_address: Option<String>,
 }

@@ -375,6 +375,8 @@ pub enum Opcode {
     // --- Call / Exit ---
     /// Call function (immediate = target hash or local function).
     Call = 0x85,
+    /// Syscall (SBPFv2: immediate = syscall hash).
+    Syscall = 0x8D,
     /// Exit current function frame / halt program.
     Exit = 0x95,
 }
@@ -565,8 +567,9 @@ static OPCODE_TABLE: [Option<Opcode>; 256] = {
     table[0xD6] = Some(Opcode::Jsle32Imm);
     table[0xDE] = Some(Opcode::Jsle32Reg);
 
-    // Call / Exit
+    // Call / Exit / Syscall
     table[0x85] = Some(Opcode::Call);
+    table[0x8D] = Some(Opcode::Syscall);
     table[0x95] = Some(Opcode::Exit);
 
     table

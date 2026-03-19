@@ -1336,6 +1336,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "karstflow-conformance"
+version = "0.1.0"
+dependencies = [
+ "karstflow-consensus",
+ "karstflow-constants",
+ "karstflow-control",
+ "karstflow-ids",
+ "karstflow-sbpf",
+ "karstflow-stages",
+ "karstflow-storage",
+ "karstflow-types",
+ "serde",
+ "serde_json",
+ "sha2",
+]
+
+[[package]]
 name = "karstflow-consensus"
 version = "0.1.0"
 dependencies = [

@@ -206,17 +206,29 @@ impl RetransmitService {
     pub fn forward_raw(&self, data: &[u8]) {
         let tree_guard = self.tree.read();
         let Some(ref current_tree) = *tree_guard else {
+            tracing::debug!("forward_raw: no turbine tree");
             return;
         };
         let children = current_tree.get_children(&self.node_id);
         if children.is_empty() {
+            tracing::debug!("forward_raw: no children in tree");
             return;
         }
         for child_id in &children {
             if let Some(node) = current_tree.get_node(child_id) {
-                let _ = self
-                    .transport
-                    .send_to(data, node.contact_info.tpu_quic_addr);
+                let target = node.contact_info.tvu_addr;
+                match self.transport.send_to(data, target) {
+                    Ok(_) => {
+                        tracing::debug!(
+                            %target,
+                            len = data.len(),
+                            "forward_raw: sent shred to child"
+                        );
+                    }
+                    Err(e) => {
+                        tracing::warn!(%target, error = %e, "forward_raw: send failed");
+                    }
+                }
             }
         }
         self.stats.record_retransmit(1, data.len() as u64);
@@ -325,7 +337,7 @@ impl RetransmitService {
         let mut child_addrs = Vec::new();
         for child_id in &children {
             if let Some(node) = current_tree.get_node(child_id) {
-                child_addrs.push((*child_id, node.contact_info.tpu_quic_addr));
+                child_addrs.push((*child_id, node.contact_info.tvu_addr));
             }
         }
 
@@ -604,7 +616,7 @@ mod tests {
 
     fn create_contact_info(node_id: NodeId, port: u16) -> ContactInfo {
         let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), port);
-        ContactInfo::new(node_id, addr, addr, addr, addr, 1)
+        ContactInfo::new(node_id, addr, addr, addr, addr, addr, addr, 1)
     }
 
     #[test]

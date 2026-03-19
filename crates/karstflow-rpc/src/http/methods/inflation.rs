@@ -121,5 +121,5 @@ fn build_inflation_reward_response(
 }
 
 fn parse_pubkey_list_param(request: &serde_json::Value) -> Result<Vec<String>, RpcMethodError> {
-    params::first_param_non_empty_string_array(request)
+    params::first_param_string_array(request)
 }

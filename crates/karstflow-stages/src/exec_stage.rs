@@ -4,7 +4,7 @@
 /// through the sBPF runtime, produces entries with Merkle tree hashing,
 /// and emits execution results back to pack for rebate tracking.
 ///
-/// This corresponds to Firedancer's execle tile which handles actual
+/// This corresponds to the reference implementation's execle tile which handles actual
 /// transaction execution during block production.
 use crate::pack_stage::{Microblock, PackedTransaction};
 use karstflow_consensus::{
@@ -399,7 +399,33 @@ impl BankExecutionEngine {
         let sanitized = deserialized.tx;
 
         // Execute through the full bank pipeline.
+        // The bank's blockhash queue is inherited from the frozen parent
+        // bank. Transactions reference recent blockhashes from previous
+        // slots which are already in the queue.
         let result = bank.process_transaction(&sanitized, self.backend.as_ref(), MAX_COMPUTE_UNITS);
+
+        // Apply modified accounts to the bank's account database.
+        // process_transaction returns modified accounts but doesn't persist them —
+        // the caller must commit them to make state visible to RPC and other txns.
+        if result.success || result.fee > 0 {
+            let count = result.modified_accounts.len();
+            for (pubkey, account) in &result.modified_accounts {
+                bank.accounts()
+                    .store_published_account(*pubkey, account.clone());
+            }
+            tracing::info!(
+                success = result.success,
+                fee = result.fee,
+                modified = count,
+                cu = result.compute_units_consumed,
+                "exec: transaction state applied to bank"
+            );
+        } else if !result.success {
+            tracing::warn!(
+                error = ?result.error,
+                "exec: transaction failed, state not applied"
+            );
+        }
 
         let modified_accounts = result
             .modified_accounts

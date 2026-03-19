@@ -93,8 +93,14 @@ pub struct ExecutionContext {
     pub accounts: Vec<(Pubkey, Account, bool)>,
     pub instruction_data: Vec<u8>,
     pub compute_budget: u64,
+    /// Heap size in bytes for BPF program execution.
+    /// Set via `ComputeBudgetInstruction::RequestHeapFrame`.
+    pub heap_size: u32,
     /// Sysvar state for this execution (slot, epoch, rent, etc.).
     pub sysvar_snapshot: Option<SysvarSnapshot>,
+    /// Set of pubkeys that are valid signers for this instruction.
+    /// Includes transaction signers and PDA-derived signers from CPI.
+    pub signers: std::collections::HashSet<Pubkey>,
 }
 
 impl ExecutionContext {
@@ -108,7 +114,9 @@ impl ExecutionContext {
             accounts,
             instruction_data,
             compute_budget: MAX_COMPUTE_UNITS,
+            heap_size: karstflow_constants::vm::DEFAULT_HEAP_SIZE as u32,
             sysvar_snapshot: None,
+            signers: std::collections::HashSet::new(),
         }
     }
 
@@ -117,9 +125,23 @@ impl ExecutionContext {
         self
     }
 
+    pub fn with_heap_size(mut self, heap_size: u32) -> Self {
+        self.heap_size = heap_size;
+        self
+    }
+
     pub fn with_sysvar_snapshot(mut self, snapshot: SysvarSnapshot) -> Self {
         self.sysvar_snapshot = Some(snapshot);
         self
+    }
+
+    pub fn with_signers(mut self, signers: std::collections::HashSet<Pubkey>) -> Self {
+        self.signers = signers;
+        self
+    }
+
+    pub fn is_signer(&self, pubkey: &Pubkey) -> bool {
+        self.signers.contains(pubkey)
     }
 
     pub fn account_map(&self) -> HashMap<Pubkey, &Account> {

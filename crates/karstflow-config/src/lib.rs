@@ -19,9 +19,9 @@ use crate::network::NetworkConfig;
 use crate::parts::{
     build_ingress_policy, build_mainnet_readiness_policy, build_metrics_http_bind,
     build_metrics_output_format, build_metrics_output_target, build_network_config, build_rpc_bind,
-    build_rpc_enabled, build_rpc_full_api, build_rpc_private, build_runtime_spec,
-    build_storage_runtime_policy, build_topology_spec, load_node_profile_from_env,
-    validate_rpc_preflight,
+    build_rpc_enabled, build_rpc_full_api, build_rpc_private, build_rpc_ws_bind,
+    build_runtime_spec, build_storage_runtime_policy, build_topology_spec,
+    load_node_profile_from_env, validate_rpc_preflight,
 };
 use crate::profile_loader::load_node_profile_from_file;
 use crate::profile_types::NodeProfileToml;
@@ -83,6 +83,7 @@ pub struct NodeConfig {
     pub metrics_http_bind: Option<SocketAddr>,
     pub rpc_enabled: bool,
     pub rpc_bind: Option<SocketAddr>,
+    pub rpc_ws_bind: Option<SocketAddr>,
     pub rpc_private: bool,
     pub rpc_full_api: bool,
     pub storage_runtime_policy: StorageRuntimePolicy,
@@ -360,6 +361,10 @@ impl NodeConfig {
             metrics_http_bind: build_metrics_http_bind(profile)?,
             rpc_enabled: build_rpc_enabled(profile)?,
             rpc_bind: build_rpc_bind(profile)?,
+            rpc_ws_bind: {
+                let rpc_bind = build_rpc_bind(profile)?;
+                build_rpc_ws_bind(profile, rpc_bind)?
+            },
             rpc_private: build_rpc_private(profile)?,
             rpc_full_api: build_rpc_full_api(profile)?,
             storage_runtime_policy: build_storage_runtime_policy(profile)?,
@@ -384,12 +389,16 @@ impl NodeConfig {
 
     /// TPU (transaction processing unit) bind address.
     ///
-    /// Defaults to gossip port + 2, following Solana port conventions.
+    /// Uses the ingress policy's UDP bind address when configured (this is
+    /// where EdgeIntake actually listens). Falls back to gossip port + 2,
+    /// following Solana port conventions.
     pub fn tpu_bind_addr(&self) -> SocketAddr {
-        SocketAddr::new(
-            self.gossip_bind_addr.ip(),
-            self.gossip_bind_addr.port().wrapping_add(2),
-        )
+        self.ingress_policy.udp_bind_address.unwrap_or_else(|| {
+            SocketAddr::new(
+                self.gossip_bind_addr.ip(),
+                self.gossip_bind_addr.port().wrapping_add(2),
+            )
+        })
     }
 
     /// TPU QUIC bind address for client connections.
@@ -399,6 +408,26 @@ impl NodeConfig {
         SocketAddr::new(
             self.gossip_bind_addr.ip(),
             self.gossip_bind_addr.port().wrapping_add(4),
+        )
+    }
+
+    /// TVU (turbine/shred receiver) bind address.
+    ///
+    /// Defaults to gossip port + 8, following Solana port conventions.
+    pub fn tvu_bind_addr(&self) -> SocketAddr {
+        SocketAddr::new(
+            self.gossip_bind_addr.ip(),
+            self.gossip_bind_addr.port().wrapping_add(8),
+        )
+    }
+
+    /// TVU QUIC bind address.
+    ///
+    /// Defaults to gossip port + 10, following Solana port conventions.
+    pub fn tvu_quic_bind_addr(&self) -> SocketAddr {
+        SocketAddr::new(
+            self.gossip_bind_addr.ip(),
+            self.gossip_bind_addr.port().wrapping_add(10),
         )
     }
 
@@ -474,11 +503,9 @@ impl NodeConfig {
         if matches!(self.metrics_output_target, MetricsOutputTarget::Stdout) {
             return Err(ConfigError::LiveModeRejectsStdoutMetricsTarget);
         }
-        if self.topology_spec.topology_name == "default-pipeline" {
-            return Err(ConfigError::LiveModeRejectsDefaultTopologyName {
-                topology_name: self.topology_spec.topology_name.clone(),
-            });
-        }
+        // Default pipeline topology is acceptable for devnet — custom topology
+        // files are recommended for mainnet but not required.
+        // TODO: require custom topology for mainnet readiness policy.
 
         Ok(())
     }

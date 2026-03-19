@@ -27,7 +27,8 @@ use karstflow_net::{
 };
 use karstflow_observability::spawn_metrics_http_bridge;
 use karstflow_rpc::{
-    metrics_file_provider, spawn_rpc_http_server, BankAccessProvider, TransactionSubmitter,
+    metrics_file_provider, spawn_rpc_http_server, spawn_rpc_ws_server, BankAccessProvider,
+    TransactionSubmitter,
 };
 use karstflow_runtime::{build_pinned_affinity_plan, run_services, Service, ServiceProbeReport};
 use karstflow_stages::{
@@ -515,6 +516,9 @@ pub fn bootstrap_from_development_genesis(
         },
     ));
 
+    // Add native programs, SPL programs, precompiles, and sysvars.
+    append_builtin_genesis_accounts(&mut genesis.accounts);
+
     let validators = vec![(identity, 500_000_000)];
     let leader_schedule = Arc::new(
         LeaderSchedule::new(0, &validators).expect("leader schedule from single validator"),
@@ -549,6 +553,93 @@ pub fn development_faucet_pubkey() -> Pubkey {
         0x20, 0xc6, 0x83, 0x2b, 0x5a, 0x55, 0xf3, 0x2e, 0x77, 0x1c, 0x48, 0x3a, 0xf6, 0xe1, 0x13,
         0x5b, 0x7d,
     ])
+}
+
+/// Append native program, SPL program, precompile, and sysvar accounts
+/// to the genesis account list so that `getAccountInfo` returns valid
+/// entries for all builtin addresses.
+fn append_builtin_genesis_accounts(
+    accounts: &mut Vec<(Pubkey, karstflow_storage::GenesisAccount)>,
+) {
+    use karstflow_ids::*;
+
+    // Helper: executable program account owned by NativeLoader.
+    let native_program = |id: Pubkey| {
+        (
+            id,
+            karstflow_storage::GenesisAccount {
+                lamports: 1,
+                data: Vec::new(),
+                owner: NATIVE_LOADER_PROGRAM_ID,
+                executable: true,
+                rent_epoch: u64::MAX,
+            },
+        )
+    };
+
+    // Helper: sysvar account with placeholder data of the given size.
+    let sysvar = |id: Pubkey, data_len: usize| {
+        (
+            id,
+            karstflow_storage::GenesisAccount {
+                lamports: 1,
+                data: vec![0u8; data_len],
+                owner: SYSVAR_PROGRAM_ID,
+                executable: false,
+                rent_epoch: u64::MAX,
+            },
+        )
+    };
+
+    // ── Native programs ─────────────────────────────────────────────
+    accounts.push(native_program(SYSTEM_PROGRAM_ID));
+    accounts.push(native_program(VOTE_PROGRAM_ID));
+    accounts.push(native_program(STAKE_PROGRAM_ID));
+    accounts.push(native_program(CONFIG_PROGRAM_ID));
+    accounts.push(native_program(BPF_LOADER_V2_PROGRAM_ID));
+    accounts.push(native_program(BPF_LOADER_PROGRAM_ID)); // upgradeable
+    accounts.push(native_program(COMPUTE_BUDGET_PROGRAM_ID));
+    accounts.push(native_program(ADDRESS_LOOKUP_TABLE_PROGRAM_ID));
+    accounts.push(native_program(FEATURE_PROGRAM_ID));
+
+    // ── SPL programs ────────────────────────────────────────────────
+    // In Solana, SPL Token and Memo are BPF programs owned by the
+    // upgradeable loader. We mark them executable with an appropriate owner.
+    let spl_program = |id: Pubkey| {
+        (
+            id,
+            karstflow_storage::GenesisAccount {
+                lamports: 1,
+                data: vec![0u8; 36], // minimal program-data stub
+                owner: BPF_LOADER_PROGRAM_ID,
+                executable: true,
+                rent_epoch: u64::MAX,
+            },
+        )
+    };
+    accounts.push(spl_program(TOKEN_PROGRAM_ID));
+    accounts.push(spl_program(TOKEN_2022_PROGRAM_ID));
+    accounts.push(spl_program(ASSOCIATED_TOKEN_PROGRAM_ID));
+    accounts.push(spl_program(MEMO_PROGRAM_ID));
+    accounts.push(spl_program(MEMO_PROGRAM_V3_ID));
+
+    // ── Precompiles ─────────────────────────────────────────────────
+    accounts.push(native_program(ED25519_PROGRAM_ID));
+    accounts.push(native_program(SECP256K1_PROGRAM_ID));
+
+    // ── Sysvars ─────────────────────────────────────────────────────
+    // Data sizes match Solana mainnet account sizes.
+    accounts.push(sysvar(CLOCK_SYSVAR_ID, 40)); // Clock: 40 bytes
+    accounts.push(sysvar(RENT_SYSVAR_ID, 17)); // Rent: 17 bytes
+    accounts.push(sysvar(EPOCH_SCHEDULE_SYSVAR_ID, 33)); // EpochSchedule: 33 bytes
+    accounts.push(sysvar(SLOT_HASHES_SYSVAR_ID, 20_488)); // SlotHashes: 512 entries × 40 + 8
+    accounts.push(sysvar(SLOT_HISTORY_SYSVAR_ID, 131_097)); // SlotHistory: bitvec
+    accounts.push(sysvar(STAKE_HISTORY_SYSVAR_ID, 16_392)); // StakeHistory
+    accounts.push(sysvar(INSTRUCTIONS_SYSVAR_ID, 8)); // Instructions: virtual, stub data
+    accounts.push(sysvar(RECENT_BLOCKHASHES_SYSVAR_ID, 6_008)); // RecentBlockhashes (deprecated)
+    accounts.push(sysvar(FEES_SYSVAR_ID, 8)); // Fees (deprecated)
+    accounts.push(sysvar(EPOCH_REWARDS_SYSVAR_ID, 0)); // EpochRewards
+    accounts.push(sysvar(LAST_RESTART_SLOT_SYSVAR_ID, 8)); // LastRestartSlot
 }
 
 /// Build the replay service for processing assembled blocks through consensus.
@@ -600,7 +691,7 @@ pub fn build_replay_service_with_block_input(
     );
 
     let backend = Arc::new(SbpfExecutionAdapter::with_defaults());
-    let service = ReplayService::with_backend(
+    let mut service = ReplayService::with_backend(
         config,
         block_input,
         Arc::clone(&consensus.bank_forks),
@@ -612,12 +703,15 @@ pub fn build_replay_service_with_block_input(
         Arc::clone(&consensus.commitment_tracker),
     );
 
+    let (consensus_slot_tx_alt, consensus_slot_rx_alt) = crossbeam_channel::bounded(256);
+    service.set_consensus_slot_receiver(consensus_slot_rx_alt);
     let signal_bus = service.signal_bus();
 
     ReplayBundleWithExternalInput {
         service: Box::new(service),
         consensus,
         signal_bus,
+        consensus_slot_tx: consensus_slot_tx_alt,
     }
 }
 
@@ -632,6 +726,11 @@ pub struct ReplayBundleWithExternalInput {
     pub consensus: ConsensusBundle,
     /// Signal bus for subscribing to replay events (slot completed, root advanced, etc.).
     pub signal_bus: Arc<Mutex<karstflow_stages::SignalBus>>,
+    /// Sender for consensus slot notifications from leader-produced slots.
+    /// Send completed slot numbers through this channel so the replay
+    /// service runs consensus decisions (voting + root advancement) for
+    /// slots that bypass replay_block (leader-produced slots).
+    pub consensus_slot_tx: crossbeam_channel::Sender<u64>,
 }
 
 /// Build a replay service using pre-built consensus infrastructure.
@@ -662,12 +761,17 @@ pub fn build_replay_service_with_consensus(
         service.set_validator_identity(identity);
     }
 
+    // Create consensus slot channel for leader-produced slots.
+    let (consensus_slot_tx, consensus_slot_rx) = crossbeam_channel::bounded(256);
+    service.set_consensus_slot_receiver(consensus_slot_rx);
+
     let signal_bus = service.signal_bus();
 
     ReplayBundleWithExternalInput {
         service: Box::new(service),
         consensus,
         signal_bus,
+        consensus_slot_tx,
     }
 }
 
@@ -919,6 +1023,8 @@ pub fn start_gossip_service(
         gossip_bind_addr,
         node_config.tpu_bind_addr(),
         node_config.tpu_quic_bind_addr(),
+        node_config.tvu_bind_addr(),
+        node_config.tvu_quic_bind_addr(),
         node_config.repair_bind_addr(),
         shred_version,
     );
@@ -929,7 +1035,16 @@ pub fn start_gossip_service(
         ..GossipConfig::default()
     };
 
-    let entrypoint_addrs: Vec<std::net::SocketAddr> = node_config.live_entrypoints.to_vec();
+    // Filter out self-entrypoint: if our own gossip address is in the
+    // entrypoint list, don't add it — we ARE the entrypoint. Adding it
+    // creates a stub ContactInfo with a synthetic pubkey that never gets
+    // replaced and pollutes the cluster nodes view.
+    let entrypoint_addrs: Vec<std::net::SocketAddr> = node_config
+        .live_entrypoints
+        .iter()
+        .filter(|addr| **addr != gossip_bind_addr)
+        .copied()
+        .collect();
 
     let (cluster_tx, cluster_rx) = std::sync::mpsc::sync_channel::<
         std::result::Result<(Arc<ClusterInfo>, GossipServiceStats), String>,
@@ -1290,7 +1405,7 @@ pub struct RepairBundle {
 
 /// Service adapter that wraps the poll-driven RepairCoordinator.
 ///
-/// Mirrors Firedancer's repair tile architecture: the coordinator runs a
+/// Mirrors the reference implementation's repair tile architecture: the coordinator runs a
 /// synchronous `service()` loop that scans the slot forest for missing
 /// shreds, generates repair requests through latency-aware peer selection,
 /// and processes responses. The actual network I/O runs on a separate
@@ -1319,7 +1434,7 @@ impl Service for RepairServiceAdapter {
     }
 
     fn tick_interval(&self) -> std::time::Duration {
-        // Match Firedancer's repair tile tick rate: fast polling for
+        // Match the reference implementation's repair tile tick rate: fast polling for
         // responsive slot recovery.
         std::time::Duration::from_millis(5)
     }
@@ -1665,7 +1780,7 @@ pub struct VoteBroadcastBundle {
 
 /// Service adapter that broadcasts new tower votes via gossip.
 ///
-/// Mirrors Firedancer's vote flow: tower tile (decision) → txsend tile
+/// Mirrors the reference implementation's vote flow: tower tile (decision) → txsend tile
 /// (sign + target leaders) → gossip tile (CRDS broadcast). Here the
 /// adapter combines the signing and gossip insertion steps — it polls
 /// the shared Tower for new vote slots, wraps them in signed CrdsValue
@@ -2520,7 +2635,16 @@ pub fn maybe_spawn_quic_bridge(
 
 #[cfg(test)]
 pub(crate) fn maybe_start_rpc_http_server(node_config: &NodeConfig) -> Result<()> {
-    maybe_start_rpc_http_server_with_consensus(node_config, None, None, None, [0u8; 32], None, None)
+    maybe_start_rpc_http_server_with_consensus(
+        node_config,
+        None,
+        None,
+        None,
+        [0u8; 32],
+        None,
+        None,
+        None,
+    )
 }
 
 /// Start the RPC HTTP server with optional live consensus data.
@@ -2535,6 +2659,7 @@ pub(crate) fn maybe_start_rpc_http_server(node_config: &NodeConfig) -> Result<()
 /// When `cluster_info` is provided alongside `bank_forks`, the RPC
 /// server can forward `sendTransaction` requests to the current
 /// leader's TPU socket via UDP.
+#[allow(clippy::too_many_arguments)]
 pub fn maybe_start_rpc_http_server_with_consensus(
     node_config: &NodeConfig,
     bank_forks: Option<Arc<RwLock<BankForks>>>,
@@ -2543,6 +2668,7 @@ pub fn maybe_start_rpc_http_server_with_consensus(
     identity_pubkey: [u8; 32],
     blockstore: Option<Arc<Blockstore>>,
     health_status: Option<SharedHealthStatus>,
+    tx_submitter_override: Option<Arc<dyn TransactionSubmitter>>,
 ) -> Result<()> {
     if !node_config.rpc_enabled {
         return Ok(());
@@ -2565,10 +2691,28 @@ pub fn maybe_start_rpc_http_server_with_consensus(
                     node_config.expected_genesis_hash.clone(),
                     health_status,
                 )));
-            let submitter: Option<Arc<dyn TransactionSubmitter>> =
-                cluster_info.map(|ci| -> Arc<dyn TransactionSubmitter> {
-                    Arc::new(ConsensusTransactionSubmitter::new(forks.clone(), ci))
-                });
+            // Transaction submitter: following the reference implementation architecture,
+            // sendTransaction forwards via UDP to the local TPU ingress
+            // port. EdgeIntake receives it and routes through the full
+            // pipeline (verify → resolv → pack → exec → PoH → entries).
+            //
+            // Single-node dev mode (no genesis) uses DevTransactionSubmitter
+            // for backward compatibility with existing E2E tests.
+            let dev_mode = node_config.cluster_mode == karstflow_config::ClusterMode::Dev;
+            let has_genesis = node_config.genesis_path.is_some();
+            let submitter: Option<Arc<dyn TransactionSubmitter>> = if dev_mode && !has_genesis {
+                Some(Arc::new(DevTransactionSubmitter::new(forks.clone())))
+            } else if let Some(override_sub) = tx_submitter_override {
+                Some(override_sub)
+            } else {
+                // TPU loopback: send to our own ingress UDP port.
+                // EdgeIntake picks it up and routes through pipeline.
+                let tpu_addr = node_config
+                    .ingress_policy
+                    .udp_bind_address
+                    .unwrap_or_else(|| std::net::SocketAddr::from(([127, 0, 0, 1], 9001)));
+                Some(Arc::new(TpuLoopbackSubmitter::new(tpu_addr)))
+            };
             (snap, bank, submitter)
         } else {
             let snapshot_provider: Option<Arc<dyn karstflow_rpc::RuntimeSnapshotProvider>> =
@@ -2585,10 +2729,21 @@ pub fn maybe_start_rpc_http_server_with_consensus(
         node_config.rpc_full_api,
         node_config.rpc_private,
         dev_mode,
-        runtime_snapshot_provider,
-        bank_access_provider,
+        runtime_snapshot_provider.clone(),
+        bank_access_provider.clone(),
         tx_submitter,
     )?;
+
+    // Spawn dedicated WebSocket server on a separate port (Solana-compatible).
+    if let Some(ws_bind) = node_config.rpc_ws_bind {
+        spawn_rpc_ws_server(
+            ws_bind,
+            node_config.rpc_full_api,
+            runtime_snapshot_provider,
+            bank_access_provider,
+        )?;
+    }
+
     Ok(())
 }
 
@@ -2737,7 +2892,7 @@ impl BankAccessProvider for ConsensusBankAccessProvider {
 
     fn get_latest_blockhash(&self, commitment: karstflow_rpc::RpcCommitment) -> [u8; 32] {
         self.bank_for_commitment(commitment)
-            .map(|bank| bank.last_blockhash())
+            .map(|bank| bank.latest_valid_blockhash())
             .unwrap_or([0u8; 32])
     }
 
@@ -3195,6 +3350,8 @@ impl BankAccessProvider for ConsensusBankAccessProvider {
                         error: status.error.clone(),
                         signatures: sig_strings,
                         raw_bytes: tx_bytes.clone(),
+                        pre_balances: Vec::new(),
+                        post_balances: Vec::new(),
                     });
                 }
             }
@@ -3209,6 +3366,8 @@ impl BankAccessProvider for ConsensusBankAccessProvider {
             error: status.error,
             signatures: vec![sig_b58],
             raw_bytes: Vec::new(),
+            pre_balances: Vec::new(),
+            post_balances: Vec::new(),
         })
     }
 
@@ -3434,24 +3593,79 @@ impl karstflow_stages::LeaderLookup for ConsensusLeaderLookup {
 
 /// Forwards transactions to the current leader's TPU socket via UDP.
 ///
+/// TPU loopback submitter: sends transactions via UDP to the local
+/// ingress port (EdgeIntake). This follows the the reference implementation architecture
+/// where sendTransaction goes through the full pipeline: EdgeIntake →
+/// verify → resolv → pack → exec → PoH → entries → shreds.
+///
+/// No shortcuts — transactions are validated and processed exactly
+/// like any externally received transaction.
+pub struct TpuLoopbackSubmitter {
+    socket: std::net::UdpSocket,
+    target_addr: std::net::SocketAddr,
+}
+
+impl TpuLoopbackSubmitter {
+    pub fn new(target_addr: std::net::SocketAddr) -> Self {
+        let socket = std::net::UdpSocket::bind("0.0.0.0:0")
+            .expect("failed to bind ephemeral UDP socket for TPU loopback");
+        tracing::info!(%target_addr, "TPU loopback submitter: sendTransaction → local ingress");
+        Self {
+            socket,
+            target_addr,
+        }
+    }
+}
+
+impl TransactionSubmitter for TpuLoopbackSubmitter {
+    fn submit_transaction(&self, tx_bytes: &[u8]) -> std::result::Result<[u8; 64], String> {
+        if tx_bytes.is_empty() {
+            return Err("empty transaction".to_string());
+        }
+        let num_sigs = tx_bytes[0] as usize;
+        if num_sigs == 0 || tx_bytes.len() < 1 + 64 {
+            return Err("transaction too short".to_string());
+        }
+        let mut sig = [0u8; 64];
+        sig.copy_from_slice(&tx_bytes[1..65]);
+
+        self.socket
+            .send_to(tx_bytes, self.target_addr)
+            .map_err(|e| format!("TPU loopback send failed: {e}"))?;
+
+        Ok(sig)
+    }
+}
+
 /// Resolves the current slot's leader from `BankForks` and looks up
 /// their TPU socket address via `ClusterInfo`. The raw transaction
 /// bytes are sent as a single UDP datagram. This is the standard
 /// Solana transaction forwarding path used by validators and RPC nodes.
-struct ConsensusTransactionSubmitter {
+pub struct ConsensusTransactionSubmitter {
     bank_forks: Arc<RwLock<BankForks>>,
     cluster_info: Arc<ClusterInfo>,
     socket: std::net::UdpSocket,
+    /// Local validator identity (32-byte pubkey).
+    local_identity: [u8; 32],
+    /// Local TPU address for self-forwarding when this node is leader.
+    local_tpu_addr: std::net::SocketAddr,
 }
 
 impl ConsensusTransactionSubmitter {
-    fn new(bank_forks: Arc<RwLock<BankForks>>, cluster_info: Arc<ClusterInfo>) -> Self {
+    pub fn new(
+        bank_forks: Arc<RwLock<BankForks>>,
+        cluster_info: Arc<ClusterInfo>,
+        local_identity: [u8; 32],
+        local_tpu_addr: std::net::SocketAddr,
+    ) -> Self {
         let socket = std::net::UdpSocket::bind("0.0.0.0:0")
             .expect("failed to bind ephemeral UDP socket for transaction forwarding — check OS limits (ulimit -n)");
         Self {
             bank_forks,
             cluster_info,
             socket,
+            local_identity,
+            local_tpu_addr,
         }
     }
 }
@@ -3504,7 +3718,12 @@ impl TransactionSubmitter for ConsensusTransactionSubmitter {
                     }
                     seen_leaders.push(leader);
 
-                    if let Some(addr) = self
+                    // For the local node, use the known TPU address
+                    // directly. CRDS only contains peer entries, not
+                    // the node's own ContactInfo.
+                    if *leader.as_bytes() == self.local_identity {
+                        addrs.push(self.local_tpu_addr);
+                    } else if let Some(addr) = self
                         .cluster_info
                         .lookup_socket(leader.as_bytes(), karstflow_constants::gossip::SOCKET_TPU)
                     {
@@ -3520,8 +3739,7 @@ impl TransactionSubmitter for ConsensusTransactionSubmitter {
             return Err("no TPU address found for any upcoming leader".to_string());
         }
 
-        // Forward to all resolved leader TPU addresses. A single success is
-        // enough — the transaction will propagate through the network.
+        // Forward to all resolved leader TPU addresses.
         let mut send_ok = 0_usize;
         let mut last_err = None;
         for addr in &tpu_addrs {
@@ -3596,6 +3814,80 @@ impl TransactionSubmitter for LocalTransactionSubmitter {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Dev-mode transaction submitter
+// ---------------------------------------------------------------------------
+
+/// Accepts transactions in dev mode and executes them directly on the working bank.
+///
+/// No TPU/gossip/UDP required — transactions are deserialized, validated,
+/// and executed synchronously against the current working bank.
+struct DevTransactionSubmitter {
+    bank_forks: Arc<RwLock<BankForks>>,
+    backend: karstflow_stages::SbpfExecutionAdapter,
+}
+
+impl DevTransactionSubmitter {
+    fn new(bank_forks: Arc<RwLock<BankForks>>) -> Self {
+        Self {
+            bank_forks,
+            backend: karstflow_stages::SbpfExecutionAdapter::with_defaults(),
+        }
+    }
+}
+
+impl TransactionSubmitter for DevTransactionSubmitter {
+    fn submit_transaction(&self, tx_bytes: &[u8]) -> std::result::Result<[u8; 64], String> {
+        // Deserialize the wire-format transaction.
+        let deserialized = karstflow_consensus::deserialize_transaction(tx_bytes)?;
+        let sig = deserialized
+            .tx
+            .signatures
+            .first()
+            .copied()
+            .unwrap_or([0u8; 64]);
+
+        // Execute directly on the working bank.
+        let forks = self
+            .bank_forks
+            .read()
+            .map_err(|e| format!("bank_forks lock poisoned: {e}"))?;
+        let bank = forks.working_bank();
+
+        // In dev/cluster mode, register the transaction's blockhash so it
+        // passes validation. Rapid slot changes mean the bank may not have
+        // the exact blockhash the client got from get_latest_blockhash.
+        bank.register_recent_blockhash(deserialized.tx.recent_blockhash);
+
+        let result = bank.process_transaction(
+            &deserialized.tx,
+            &self.backend,
+            karstflow_constants::execution::MAX_COMPUTE_UNITS,
+        );
+
+        if result.success {
+            tracing::debug!(
+                sig = bs58::encode(&sig).into_string(),
+                slot = bank.slot(),
+                units = result.compute_units_consumed,
+                "dev-mode: transaction executed"
+            );
+            Ok(sig)
+        } else {
+            let err_msg = result
+                .error
+                .map(|e| format!("{e:?}"))
+                .unwrap_or_else(|| "unknown error".to_string());
+            tracing::warn!(
+                sig = bs58::encode(&sig).into_string(),
+                error = %err_msg,
+                "dev-mode: transaction failed"
+            );
+            Err(err_msg)
+        }
+    }
+}
+
 pub fn print_preflight_ok() {
     println!("{}", render_preflight_ok_line());
 }
@@ -3613,6 +3905,7 @@ pub fn run_runtime_phase(
         None,
         None,
         [0u8; 32],
+        None,
         None,
     )
 }
@@ -3634,6 +3927,7 @@ pub fn run_runtime_phase_with_consensus(
     cluster_info: Option<Arc<ClusterInfo>>,
     identity_pubkey: [u8; 32],
     blockstore: Option<Arc<Blockstore>>,
+    tx_submitter_override: Option<Arc<dyn TransactionSubmitter>>,
 ) -> Result<()> {
     run_startup_checks(node_config, startup_services, "startup", 0)?;
     maybe_start_metrics_http_bridge(
@@ -3649,6 +3943,7 @@ pub fn run_runtime_phase_with_consensus(
         identity_pubkey,
         blockstore,
         runtime_bundle.health_status.clone(),
+        tx_submitter_override,
     )?;
     println!(
         "{}",

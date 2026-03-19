@@ -16,7 +16,7 @@ pub use crate::profile_loader::parse_node_profile_toml;
 pub use crate::profile_schema::migrate_node_profile_schema;
 pub use crate::readiness::build_mainnet_readiness_policy;
 pub use crate::rpc::{
-    build_rpc_bind, build_rpc_enabled, build_rpc_full_api, build_rpc_private,
+    build_rpc_bind, build_rpc_enabled, build_rpc_full_api, build_rpc_private, build_rpc_ws_bind,
     validate_rpc_preflight,
 };
 pub use crate::runtime::build_runtime_spec;

@@ -123,6 +123,9 @@ pub struct BecameLeaderInfo {
     pub epoch: u64,
     /// Validator identity pubkey.
     pub identity_pubkey: [u8; 32],
+    /// Parent bank's blockhash — register with resolv so incoming
+    /// transactions signed with this hash are accepted.
+    pub parent_blockhash: [u8; 32],
 }
 
 /// Emitted when optimistic confirmation threshold is reached.
@@ -382,6 +385,7 @@ mod tests {
             end_slot: 1003,
             epoch: 2,
             identity_pubkey: [0x42; 32],
+            parent_blockhash: [0u8; 32],
         };
 
         assert_eq!(info.start_slot, 1000);

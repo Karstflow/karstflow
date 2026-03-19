@@ -157,7 +157,7 @@ pub fn validate(
         validate_registers(insn, op, i, &mut errors);
 
         // Validate jump targets
-        if op.is_jump() && op != Opcode::Call && op != Opcode::Exit {
+        if op.is_jump() && op != Opcode::Call && op != Opcode::Syscall && op != Opcode::Exit {
             let target = (i as isize) + 1 + (insn.offset as isize);
             if target < 0 || target >= instructions.len() as isize {
                 errors.push(ValidationError::JumpOutOfBounds { pc: i, target });
@@ -170,16 +170,29 @@ pub fn validate(
         // Validate call targets
         if op == Opcode::Call {
             let target_id = insn.immediate as u32;
-            // Check if it's a registered syscall or a local function
-            if !registered_syscalls.contains(&target_id)
-                && !program.call_targets.contains_key(&target_id)
-            {
+            // Check if it's a registered syscall, a relocated local function,
+            // or a valid PC-relative target
+            let is_syscall = registered_syscalls.contains(&target_id);
+            let is_relocated = program.call_targets.contains_key(&target_id);
+            let is_relative = {
+                let rel = if insn.immediate >= 0 {
+                    i.wrapping_add(insn.immediate as usize).wrapping_add(1)
+                } else {
+                    i.wrapping_sub((-insn.immediate) as usize).wrapping_add(1)
+                };
+                rel < instructions.len()
+            };
+            if !is_syscall && !is_relocated && !is_relative {
                 errors.push(ValidationError::InvalidCallTarget {
                     pc: i,
                     target: target_id,
                 });
             }
         }
+
+        // Note: Syscall (0x8D, SBPFv2) targets are small integer indices
+        // resolved at runtime via the syscall dispatch table. No static
+        // validation against hash-based registered_syscalls.
 
         i += 1;
     }
@@ -421,6 +434,7 @@ mod tests {
             call_targets: HashMap::new(),
             sbpf_version: crate::elf_loader::SbpfVersion::V0,
             text_bytes: Vec::new(),
+            text_file_offset: 0,
         };
         let result = validate(&program, &empty_syscalls());
         assert!(result.is_err());

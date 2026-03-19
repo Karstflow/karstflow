@@ -262,6 +262,50 @@ impl Shred {
         }
     }
 
+    /// Serialize this shred into wire-format bytes.
+    ///
+    /// If original wire bytes are available (from parsing), returns those.
+    /// Otherwise, serializes common header + variant header + payload.
+    pub fn to_wire_bytes(&self) -> Vec<u8> {
+        if let Some(ref raw) = self.raw {
+            return raw.clone();
+        }
+
+        let mut buf = Vec::with_capacity(SHRED_SIZE);
+
+        // Common header: signature(64) + variant(1) + slot(8) + index(4) + version(2) + fec_set_index(4)
+        buf.extend_from_slice(&self.common_header.signature);
+        buf.push(self.common_header.variant);
+        buf.extend_from_slice(&self.common_header.slot.to_le_bytes());
+        buf.extend_from_slice(&self.common_header.index.to_le_bytes());
+        buf.extend_from_slice(&self.common_header.version.to_le_bytes());
+        buf.extend_from_slice(&self.common_header.fec_set_index.to_le_bytes());
+
+        // Variant-specific header
+        match &self.variant {
+            ShredVariant::LegacyData(h) | ShredVariant::MerkleData(h, _) => {
+                buf.extend_from_slice(&h.parent_offset.to_le_bytes());
+                buf.push(h.flags);
+                buf.extend_from_slice(&h.size.to_le_bytes());
+            }
+            ShredVariant::LegacyCoding(h) | ShredVariant::MerkleCoding(h, _) => {
+                buf.extend_from_slice(&h.num_data_shreds.to_le_bytes());
+                buf.extend_from_slice(&h.num_coding_shreds.to_le_bytes());
+                buf.extend_from_slice(&h.position.to_le_bytes());
+            }
+        }
+
+        // Payload
+        buf.extend_from_slice(&self.payload);
+
+        // Pad to SHRED_SIZE for data shreds
+        if buf.len() < SHRED_SIZE {
+            buf.resize(SHRED_SIZE, 0);
+        }
+
+        buf
+    }
+
     /// Get the slot number.
     pub fn slot(&self) -> u64 {
         self.common_header.slot

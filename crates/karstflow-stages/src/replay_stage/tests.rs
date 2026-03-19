@@ -134,6 +134,7 @@ mod replay_stage_tests {
         let config = ReplayConfig {
             strict_ancestry_check: false,
             verify_poh: false,
+            replay_mode: false,
             process_votes: false,
             auto_freeze_banks: false,
             enable_root_progression: false,
@@ -596,6 +597,7 @@ mod configuration_tests {
         let config = ReplayConfig {
             strict_ancestry_check: false,
             verify_poh: false,
+            replay_mode: false,
             process_votes: true,
             auto_freeze_banks: false,
             enable_root_progression: true,

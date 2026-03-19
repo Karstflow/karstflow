@@ -159,7 +159,7 @@ fn calibrate() -> (f64, f64) {
 
 /// Read the current tick counter (monotonic nanoseconds since process start).
 ///
-/// This is the Rust equivalent of Firedancer's `fd_tickcount()` which reads
+/// This is the Rust equivalent of the reference implementation's `fd_tickcount()` which reads
 /// the TSC register. We use `Instant` for portability. For production
 /// deployments on x86, this could be replaced with an `rdtsc` intrinsic.
 #[inline]

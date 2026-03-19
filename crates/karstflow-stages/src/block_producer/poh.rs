@@ -104,7 +104,7 @@ pub enum PohRecord {
 
 /// Current state of the PoH tile.
 ///
-/// Extended state machine matching Firedancer's 6-state model for proper
+/// Extended state machine matching the reference implementation's 6-state model for proper
 /// coordination between PoH, replay, and pack tiles.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PohState {
@@ -345,6 +345,25 @@ impl PohService {
 
     pub fn hashcnt(&self) -> u64 {
         self.hashcnt
+    }
+
+    /// Number of completed ticks in the current slot.
+    pub fn ticks_in_slot(&self) -> u64 {
+        if self.hashes_per_tick == 0 {
+            return 0;
+        }
+        self.hashcnt / self.hashes_per_tick
+    }
+
+    pub fn state_name(&self) -> &'static str {
+        match self.state {
+            PohState::Uninitialized => "Uninitialized",
+            PohState::Idling => "Idling",
+            PohState::Hashing => "Hashing",
+            PohState::Leading => "Leading",
+            PohState::WaitingForBank => "WaitingForBank",
+            PohState::WaitingForSlot => "WaitingForSlot",
+        }
     }
 
     pub fn is_leader(&self) -> bool {
@@ -779,8 +798,8 @@ impl PohService {
             return None;
         }
 
-        // Can't mixin on a tick boundary (unless low-power mode).
-        if !self.is_low_power() && self.is_tick_boundary() {
+        // Can't mixin at the very end of the slot (hashcnt_per_slot reached).
+        if self.hashcnt >= self.hashcnt_per_slot {
             return None;
         }
 
@@ -1050,15 +1069,22 @@ mod tests {
     }
 
     #[test]
-    fn mixin_rejected_on_tick_boundary() {
+    fn mixin_allowed_at_tick_boundary_but_rejected_at_slot_end() {
         let mut poh = PohService::with_config(zero_hash(), 5, 4, 100);
         reset_as_leader(&mut poh, 0, zero_hash(), 1);
 
+        // Advance to tick boundary — mixin should still be allowed.
         poh.advance(5);
         assert!(poh.is_tick_boundary());
-
         let entry = poh.mixin(&[42u8; 32], 1);
-        assert!(entry.is_none());
+        assert!(entry.is_some(), "mixin should succeed at tick boundary");
+
+        // Advance to slot end — mixin should be rejected.
+        let mut poh2 = PohService::with_config(zero_hash(), 5, 4, 100);
+        reset_as_leader(&mut poh2, 0, zero_hash(), 1);
+        poh2.advance(20); // 5 hashes × 4 ticks = 20 = hashcnt_per_slot
+        let entry2 = poh2.mixin(&[42u8; 32], 1);
+        assert!(entry2.is_none(), "mixin should be rejected at slot end");
     }
 
     #[test]

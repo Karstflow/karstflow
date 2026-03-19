@@ -109,6 +109,10 @@ pub struct ReplayConfig {
     /// Should be true in production. Can be disabled during
     /// initial snapshot catchup or in test scenarios.
     pub verify_poh: bool,
+    /// When true, register each transaction's blockhash before execution.
+    /// Enables replay of blocks from peer validators whose signing
+    /// blockhash may not be in the local bank's queue.
+    pub replay_mode: bool,
     /// Enable vote processing
     pub process_votes: bool,
     /// Enable automatic bank freezing
@@ -124,6 +128,7 @@ impl Default for ReplayConfig {
         Self {
             strict_ancestry_check: true,
             verify_poh: true,
+            replay_mode: false,
             process_votes: true,
             auto_freeze_banks: true,
             enable_root_progression: true,
@@ -195,6 +200,7 @@ impl ReplayStage {
         let bank_transition = BankTransition::new(bank_forks.clone(), fork_choice.clone());
         let mut block_processor = BlockProcessor::new(execution_bridge, commitment_tracker.clone());
         block_processor.verify_poh = config.verify_poh;
+        block_processor.replay_mode = config.replay_mode;
         let vote_integration =
             VoteIntegration::new(vote_processor, tower, fork_choice, commitment_tracker);
 
@@ -234,6 +240,7 @@ impl ReplayStage {
         let mut block_processor =
             BlockProcessor::with_backend(execution_bridge, commitment_tracker.clone(), backend);
         block_processor.verify_poh = config.verify_poh;
+        block_processor.replay_mode = config.replay_mode;
         let vote_integration =
             VoteIntegration::new(vote_processor, tower, fork_choice, commitment_tracker);
 
@@ -311,7 +318,14 @@ impl ReplayStage {
             }
         }
 
-        // Step 4: Apply transactions and process block
+        // Step 4: Apply transactions and process block.
+        // If the bank is already frozen (e.g., we produced this block as
+        // leader and received our own shreds back via turbine retransmit),
+        // skip processing — the block is already applied.
+        if bank.is_frozen() {
+            return Ok(BlockOutcome::new(block.slot, bank.hash()));
+        }
+
         let outcome = match self
             .block_processor
             .process_block(block.clone(), bank.clone())
@@ -409,6 +423,23 @@ impl ReplayStage {
                 );
             }
 
+            // Advance working_bank to the newly frozen slot so RPC
+            // queries (getSlot, getBalance with processed commitment)
+            // reflect the latest replayed state. Without this, the
+            // working_bank stays at the last leader slot and non-leader
+            // nodes appear stuck at slot 0.
+            {
+                let mut forks = self
+                    .bank_transition
+                    .bank_forks
+                    .write()
+                    .expect("bank_forks lock poisoned");
+                let current_working = forks.working_bank().slot();
+                if block.slot > current_working {
+                    let _ = forks.set_working_bank(block.slot);
+                }
+            }
+
             // Emit SlotCompleted signal after successful freeze.
             let timestamp = bank
                 .sysvar_cache()
@@ -466,6 +497,7 @@ impl ReplayStage {
                             end_slot,
                             epoch: finalization.epoch,
                             identity_pubkey: identity,
+                            parent_blockhash: bank.last_blockhash(),
                         }));
                     }
                 }
@@ -473,98 +505,7 @@ impl ReplayStage {
         }
 
         // Step 6: Run consensus decision (vote + root progression)
-        if self.config.process_votes {
-            let bank_forks = self.bank_transition.bank_forks.clone();
-            let is_ancestor = |a: u64, b: u64| {
-                let bf = bank_forks.read().expect("bank_forks lock poisoned");
-                bf.is_ancestor(a, b)
-            };
-
-            match self
-                .vote_integration
-                .run_consensus_decision(block.slot, is_ancestor)
-            {
-                Ok(decision) => {
-                    if decision.vote_slot.is_some() {
-                        self.stats
-                            .lock()
-                            .expect("replay_stats lock poisoned")
-                            .record_vote_processed();
-                    }
-
-                    // Handle root progression
-                    if let Some(new_root) = decision.new_root {
-                        if self.config.enable_root_progression {
-                            let mut bank_forks = self
-                                .bank_transition
-                                .bank_forks
-                                .write()
-                                .expect("bank_forks lock poisoned");
-                            if new_root > bank_forks.root_slot() {
-                                let previous_root = bank_forks.root_slot();
-                                match bank_forks.set_root(new_root) {
-                                    Err(e) => {
-                                        error!(error = ?e, "root progression failed");
-                                    }
-                                    Ok(eviction_report) => {
-                                        let pruned_count = eviction_report.total_evicted() as u64;
-                                        drop(bank_forks);
-                                        // Prune old vote data
-                                        let mut vote_processor = self
-                                            .vote_integration
-                                            .vote_processor
-                                            .lock()
-                                            .expect("vote_processor lock poisoned");
-                                        vote_processor.prune_below_root(new_root);
-
-                                        self.block_processor
-                                            .commitment_tracker
-                                            .lock()
-                                            .expect("commitment_tracker lock poisoned")
-                                            .update_root(new_root);
-
-                                        // Flush account storage at root boundary for
-                                        // crash-consistent durability checkpoint.
-                                        let bank_forks_r = self
-                                            .bank_transition
-                                            .bank_forks
-                                            .read()
-                                            .expect("bank_forks lock poisoned");
-                                        if let Some(root_bank) = bank_forks_r.root_bank() {
-                                            if let Err(e) =
-                                                root_bank.accounts().notify_root_advanced(new_root)
-                                            {
-                                                error!(root = new_root, error = ?e, "storage flush at root failed");
-                                            }
-                                        }
-                                        drop(bank_forks_r);
-
-                                        self.stats
-                                            .lock()
-                                            .expect("replay_stats lock poisoned")
-                                            .record_root_progression();
-
-                                        // Emit RootAdvanced signal.
-                                        self.emit_signal(ReplaySignal::RootAdvanced(
-                                            RootAdvancedInfo {
-                                                new_root,
-                                                previous_root,
-                                                pruned_slot_count: pruned_count,
-                                            },
-                                        ));
-
-                                        info!(new_root, "root progressed");
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-                Err(e) => {
-                    error!(slot = block.slot, error = ?e, "consensus decision failed");
-                }
-            }
-        }
+        self.run_consensus_for_slot(block.slot);
 
         // Record statistics
         let success = outcome.executed_count > 0 || outcome.transactions.is_empty();
@@ -574,6 +515,105 @@ impl ReplayStage {
             .record_block_replay(outcome.transactions.len(), success);
 
         Ok(outcome)
+    }
+
+    /// Run consensus decision for a completed slot (vote + root progression).
+    ///
+    /// Called after both replay-processed blocks AND leader-produced slots.
+    /// This drives the Tower vote chain and root advancement via consensus.
+    pub fn run_consensus_for_slot(&mut self, slot: u64) {
+        if !self.config.process_votes {
+            return;
+        }
+
+        let bank_forks = self.bank_transition.bank_forks.clone();
+        let is_ancestor = |a: u64, b: u64| {
+            let bf = bank_forks.read().expect("bank_forks lock poisoned");
+            bf.is_ancestor(a, b)
+        };
+
+        match self
+            .vote_integration
+            .run_consensus_decision(slot, is_ancestor)
+        {
+            Ok(decision) => {
+                if decision.vote_slot.is_some() {
+                    self.stats
+                        .lock()
+                        .expect("replay_stats lock poisoned")
+                        .record_vote_processed();
+                }
+
+                // Handle root progression
+                if let Some(new_root) = decision.new_root {
+                    if self.config.enable_root_progression {
+                        let mut bank_forks = self
+                            .bank_transition
+                            .bank_forks
+                            .write()
+                            .expect("bank_forks lock poisoned");
+                        if new_root > bank_forks.root_slot() {
+                            let previous_root = bank_forks.root_slot();
+                            match bank_forks.set_root(new_root) {
+                                Err(e) => {
+                                    error!(error = ?e, "root progression failed");
+                                }
+                                Ok(eviction_report) => {
+                                    let pruned_count = eviction_report.total_evicted() as u64;
+                                    drop(bank_forks);
+                                    // Prune old vote data
+                                    let mut vote_processor = self
+                                        .vote_integration
+                                        .vote_processor
+                                        .lock()
+                                        .expect("vote_processor lock poisoned");
+                                    vote_processor.prune_below_root(new_root);
+
+                                    self.block_processor
+                                        .commitment_tracker
+                                        .lock()
+                                        .expect("commitment_tracker lock poisoned")
+                                        .update_root(new_root);
+
+                                    // Flush account storage at root boundary.
+                                    let bank_forks_r = self
+                                        .bank_transition
+                                        .bank_forks
+                                        .read()
+                                        .expect("bank_forks lock poisoned");
+                                    if let Some(root_bank) = bank_forks_r.root_bank() {
+                                        if let Err(e) =
+                                            root_bank.accounts().notify_root_advanced(new_root)
+                                        {
+                                            error!(root = new_root, error = ?e, "storage flush at root failed");
+                                        }
+                                    }
+                                    drop(bank_forks_r);
+
+                                    self.stats
+                                        .lock()
+                                        .expect("replay_stats lock poisoned")
+                                        .record_root_progression();
+
+                                    self.emit_signal(ReplaySignal::RootAdvanced(
+                                        RootAdvancedInfo {
+                                            new_root,
+                                            previous_root,
+                                            pruned_slot_count: pruned_count,
+                                        },
+                                    ));
+
+                                    info!(new_root, "root progressed");
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            Err(e) => {
+                error!(slot, error = ?e, "consensus decision failed");
+            }
+        }
     }
 
     /// Verify that block's parent hash matches expected parent bank

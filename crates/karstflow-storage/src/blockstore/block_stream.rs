@@ -3,7 +3,7 @@
 //! Provides a lightweight publish-subscribe mechanism for blockstore events.
 //! Subscribers receive notifications when slots complete, become rooted, or
 //! when block data is available for consumption. This is the equivalent of
-//! Firedancer's `bstream` tile for streaming block data to downstream
+//! the reference implementation's `bstream` tile for streaming block data to downstream
 //! consumers (RPC, Geyser plugins, archivers).
 
 use std::sync::atomic::{AtomicU64, Ordering};

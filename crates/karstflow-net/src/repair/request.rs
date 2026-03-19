@@ -787,6 +787,6 @@ mod tests {
     fn create_test_contact_info(node_id: NodeId) -> crate::gossip::ContactInfo {
         use std::net::{IpAddr, Ipv4Addr, SocketAddr};
         let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 8000);
-        crate::gossip::ContactInfo::new(node_id, addr, addr, addr, addr, 1)
+        crate::gossip::ContactInfo::new(node_id, addr, addr, addr, addr, addr, addr, 1)
     }
 }

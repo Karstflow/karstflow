@@ -8,23 +8,23 @@ authors.workspace = true
 [dependencies]
 thiserror.workspace = true
 crossbeam-channel = { workspace = true }
-karstflow-config = { path = "../karstflow-config" }
-karstflow-consensus = { path = "../karstflow-consensus" }
-karstflow-constants = { path = "../karstflow-constants" }
-karstflow-crypto = { path = "../karstflow-crypto" }
-karstflow-core = { path = "../karstflow-core" }
-karstflow-execution = { path = "../karstflow-execution" }
-karstflow-ids = { path = "../karstflow-ids" }
-karstflow-mesh = { path = "../karstflow-mesh" }
-karstflow-net = { path = "../karstflow-net" }
-karstflow-runtime = { path = "../karstflow-runtime" }
-karstflow-stages = { path = "../karstflow-stages" }
-karstflow-storage = { path = "../karstflow-storage" }
-karstflow-topology = { path = "../karstflow-topology" }
-karstflow-types = { path = "../karstflow-types" }
+karstflow-config = { workspace = true }
+karstflow-consensus = { workspace = true }
+karstflow-constants = { workspace = true }
+karstflow-crypto = { workspace = true }
+karstflow-core = { workspace = true }
+karstflow-execution = { workspace = true }
+karstflow-ids = { workspace = true }
+karstflow-mesh = { workspace = true }
+karstflow-net = { workspace = true }
+karstflow-runtime = { workspace = true }
+karstflow-stages = { workspace = true }
+karstflow-storage = { workspace = true }
+karstflow-topology = { workspace = true }
+karstflow-types = { workspace = true }
 
-karstflow-observability = { path = "../karstflow-observability" }
-karstflow-rpc = { path = "../karstflow-rpc" }
+karstflow-observability = { workspace = true }
+karstflow-rpc = { workspace = true }
 libc = "0.2"
 bs58.workspace = true
 serde_json.workspace = true

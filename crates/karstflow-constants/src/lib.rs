@@ -190,9 +190,11 @@ pub mod rpc {
     /// SPL Mint: minimum data length (82 bytes).
     pub const SPL_MINT_MIN_LEN: usize = 82;
     /// Byte offset of the u64 `supply` field in an SPL Mint account.
-    pub const SPL_MINT_SUPPLY_OFFSET: usize = 36;
+    /// Layout uses 1-byte COption tags (borsh): tag(1) + pubkey(32) = 33.
+    pub const SPL_MINT_SUPPLY_OFFSET: usize = 33;
     /// Byte offset of the u8 `decimals` field in an SPL Mint account.
-    pub const SPL_MINT_DECIMALS_OFFSET: usize = 44;
+    /// supply(8) ends at 41, decimals immediately follows.
+    pub const SPL_MINT_DECIMALS_OFFSET: usize = 41;
     pub const LEADER_SCHEDULE_ROTATION: u64 = 4;
     pub const LEADER_SCHEDULE_ENTRIES: u64 = 3;
     pub const VOTE_ROOT_SLOT_BACKTRACK: u64 = 32;
@@ -520,7 +522,7 @@ pub mod transaction {
 
 pub mod vote_sender {
     /// Number of upcoming leaders to send votes to directly.
-    /// Matches Firedancer's FD_TXSEND_TARGET_LEADER_CNT.
+    /// Matches the reference implementation's FD_TXSEND_TARGET_LEADER_CNT.
     pub const TARGET_LEADER_COUNT: usize = 3;
 
     /// Poll interval for checking new votes from the Tower.

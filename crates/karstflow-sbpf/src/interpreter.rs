@@ -8,8 +8,8 @@ use crate::instruction::Opcode;
 use crate::memory::{MemoryError, MemoryMap};
 use crate::sysvar_snapshot::SysvarSnapshot;
 use karstflow_constants::vm::{
-    CALLEE_SAVED_COUNT, CU_PER_INSTRUCTION, MAX_CALL_DEPTH, MAX_INSTRUCTIONS, REGISTER_COUNT,
-    REG_CALLEE_SAVED_START,
+    CALLEE_SAVED_COUNT, CU_PER_INSTRUCTION, INSTRUCTION_SIZE, MAX_CALL_DEPTH, MAX_INSTRUCTIONS,
+    REGISTER_COUNT, REG_CALLEE_SAVED_START,
 };
 
 // ---------------------------------------------------------------------------
@@ -27,6 +27,9 @@ pub trait SyscallDispatch: Send + Sync {
     /// Arguments are in r1..r5, return value should be written to r0.
     /// The dispatcher may read/write VM memory and deduct compute units.
     fn dispatch(&self, syscall_id: u32, vm: &mut VmState) -> Result<(), VmError>;
+
+    /// Check whether a handler is registered for this syscall id.
+    fn has_handler(&self, syscall_id: u32) -> bool;
 }
 
 /// No-op syscall dispatcher that rejects all syscalls.
@@ -35,6 +38,10 @@ pub struct NoSyscalls;
 impl SyscallDispatch for NoSyscalls {
     fn dispatch(&self, syscall_id: u32, _vm: &mut VmState) -> Result<(), VmError> {
         Err(VmError::UnknownSyscall { id: syscall_id })
+    }
+
+    fn has_handler(&self, _syscall_id: u32) -> bool {
+        false
     }
 }
 
@@ -72,6 +79,8 @@ pub struct VmState {
     pub cpi_depth: usize,
     /// sBPF version determining available features and instruction semantics.
     pub sbpf_version: SbpfVersion,
+    /// Program ID of the currently executing program (needed for PDA derivation in CPI).
+    pub program_id: karstflow_types::Pubkey,
 }
 
 /// A saved function call frame.
@@ -140,11 +149,7 @@ impl std::fmt::Display for VmError {
         match self {
             Self::ComputeBudgetExceeded => write!(f, "compute budget exceeded"),
             Self::AccessViolation { addr, size, pc } => {
-                write!(
-                    f,
-                    "PC {}: access violation at 0x{:016X} size {}",
-                    pc, addr, size
-                )
+                write!(f, "PC {pc}: access violation at 0x{addr:016X} size {size}")
             }
             Self::DivisionByZero { pc } => write!(f, "PC {}: division by zero", pc),
             Self::CallDepthExceeded { pc } => {
@@ -220,6 +225,7 @@ pub fn execute(
     compute_budget: u64,
     syscall_dispatch: &dyn SyscallDispatch,
     sysvar_snapshot: SysvarSnapshot,
+    program_id: karstflow_types::Pubkey,
 ) -> Result<VmResult, VmError> {
     let instructions = &program.instructions;
 
@@ -244,10 +250,15 @@ pub fn execute(
         sysvar_snapshot,
         cpi_depth: 0,
         sbpf_version,
+        program_id,
     };
 
     // Set initial frame pointer (r10)
     vm.registers[10] = vm.memory.frame_pointer();
+
+    // Set r1 to the start of the input region (serialized accounts + instruction data).
+    // The BPF entrypoint receives r1 as a pointer to the input buffer per the Solana ABI.
+    vm.registers[1] = karstflow_constants::vm::REGION_INPUT_BASE;
 
     // Segment-based CU accounting: accumulate instruction cost within
     // straight-line segments and deduct the batch at control-flow boundaries
@@ -1015,8 +1026,27 @@ pub fn execute(
 
                 let target_id = imm as u32;
 
-                // Check if it's a local call (in call_targets)
-                if let Some(&target_pc) = program.call_targets.get(&target_id) {
+                // Resolve target PC:
+                // 1. Check call_targets (populated by ELF relocations — hash-based)
+                // 2. Fallback: compute PC-relative target (non-relocated calls)
+                //    target = PC + 1 + imm (signed)
+                let resolved_target = if let Some(&tpc) = program.call_targets.get(&target_id) {
+                    Some(tpc)
+                } else {
+                    // PC-relative call (no relocation applied)
+                    let rel_target = if imm >= 0 {
+                        vm.pc.wrapping_add(imm as usize).wrapping_add(1)
+                    } else {
+                        vm.pc.wrapping_sub((-imm) as usize).wrapping_add(1)
+                    };
+                    if rel_target < program.instructions.len() {
+                        Some(rel_target)
+                    } else {
+                        None
+                    }
+                };
+
+                if let Some(target_pc) = resolved_target {
                     // Save callee-saved registers
                     let mut saved = [0u64; CALLEE_SAVED_COUNT];
                     for j in 0..CALLEE_SAVED_COUNT {
@@ -1035,20 +1065,96 @@ pub fn execute(
 
                     vm.call_stack.push(frame);
 
-                    // Advance stack frame.
-                    // V0 uses fixed stack with guard zones; V1+ uses dynamic frames.
-                    let new_fp = vm
-                        .memory
-                        .push_frame(sbpf_version.has_dynamic_stack_frames())
+                    // Advance stack frame tracking.
+                    vm.memory
+                        .push_frame()
                         .map_err(|_| VmError::CallDepthExceeded { pc: vm.pc })?;
-                    vm.registers[10] = new_fp;
 
+                    // Static frames (V0): runtime assigns new fp to r10.
+                    // Dynamic frames (V1+): program manages r10 itself via prologue.
+                    if !vm.memory.has_dynamic_frames() {
+                        vm.registers[10] = vm.memory.frame_pointer();
+                    }
                     vm.pc = target_pc;
                     continue;
                 }
 
-                // Otherwise, it's a syscall
-                syscall_dispatch.dispatch(target_id, &mut vm)?;
+                // No local target found — try as syscall
+                syscall_dispatch
+                    .dispatch(target_id, &mut vm)
+                    .map_err(|e| match e {
+                        VmError::UnknownSyscall { .. } => e,
+                        _ => VmError::SyscallError(format!(
+                            "at CALL PC {}: target_id=0x{:08X}: {e}",
+                            vm.pc, target_id
+                        )),
+                    })?;
+            }
+
+            // =================================================================
+            // SYSCALL (SBPFv2) — dedicated syscall invocation
+            // =================================================================
+            Opcode::Syscall => {
+                checkpoint_cu(&mut vm, &mut segment_cu)?;
+
+                if matches!(sbpf_version, SbpfVersion::V2 | SbpfVersion::V3) {
+                    // V2+: dedicated SYSCALL — imm is the syscall hash
+                    let target_id = imm as u32;
+                    syscall_dispatch.dispatch(target_id, &mut vm)?;
+                } else {
+                    // V0/V1: CALLX — the immediate field (masked to 4 bits)
+                    // selects which register holds the target address.
+                    // (V2+ uses src field per SIMD-0173, but V0/V1 uses imm.)
+                    let callx_reg = (imm as usize) & 0xF;
+                    let reg_val = vm.registers[callx_reg];
+
+                    // CALLX V0: register holds a virtual address pointing into
+                    // the program's .text section. Try address-based PC
+                    // computation first (the common case for function-pointer
+                    // calls through vtables / .rodata).
+                    let offset = (reg_val & karstflow_constants::vm::REGION_OFFSET_MASK) as usize;
+                    if offset >= program.text_file_offset {
+                        let text_relative = offset - program.text_file_offset;
+                        if text_relative.is_multiple_of(INSTRUCTION_SIZE)
+                            && text_relative / INSTRUCTION_SIZE < program.instructions.len()
+                        {
+                            let target_pc = text_relative / INSTRUCTION_SIZE;
+                            let mut saved = [0u64; CALLEE_SAVED_COUNT];
+                            for j in 0..CALLEE_SAVED_COUNT {
+                                saved[j] = vm.registers[REG_CALLEE_SAVED_START as usize + j];
+                            }
+                            let frame = CallFrame {
+                                return_pc: vm.pc + 1,
+                                saved_registers: saved,
+                                frame_pointer: vm.registers[10],
+                            };
+                            if vm.call_stack.len() >= MAX_CALL_DEPTH {
+                                return Err(VmError::CallDepthExceeded { pc: vm.pc });
+                            }
+                            vm.call_stack.push(frame);
+                            vm.memory
+                                .push_frame()
+                                .map_err(|_| VmError::CallDepthExceeded { pc: vm.pc })?;
+                            if !vm.memory.has_dynamic_frames() {
+                                vm.registers[10] = vm.memory.frame_pointer();
+                            }
+                            vm.pc = target_pc;
+                            continue;
+                        }
+                    }
+
+                    // Fallback: register may hold a syscall hash loaded from
+                    // memory. Try dispatching as a syscall.
+                    let target_id = reg_val as u32;
+                    if syscall_dispatch.has_handler(target_id) {
+                        syscall_dispatch.dispatch(target_id, &mut vm)?;
+                    } else {
+                        return Err(VmError::SyscallError(format!(
+                            "CALLX at PC {}: r{}=0x{:016X} is not a valid call target",
+                            vm.pc, callx_reg, reg_val,
+                        )));
+                    }
+                }
             }
 
             // =================================================================
@@ -1080,9 +1186,7 @@ pub fn execute(
                 }
                 vm.registers[10] = frame.frame_pointer;
 
-                vm.memory
-                    .pop_frame(sbpf_version.has_dynamic_stack_frames())
-                    .map_err(|_| VmError::StackUnderflow)?;
+                vm.memory.pop_frame().map_err(|_| VmError::StackUnderflow)?;
 
                 vm.pc = frame.return_pc;
                 continue;
@@ -1124,6 +1228,7 @@ mod tests {
             10_000,
             &NoSyscalls,
             SysvarSnapshot::default(),
+            karstflow_types::Pubkey::default(),
         )
     }
 
@@ -1303,6 +1408,7 @@ mod tests {
             10_000,
             &NoSyscalls,
             SysvarSnapshot::default(),
+            karstflow_types::Pubkey::default(),
         )
         .unwrap();
         assert_eq!(result.return_value, 0xBEEF);
@@ -1356,6 +1462,7 @@ mod tests {
             budget,
             &NoSyscalls,
             SysvarSnapshot::default(),
+            karstflow_types::Pubkey::default(),
         )
     }
 
@@ -1409,6 +1516,7 @@ mod tests {
             10_000,
             &NoSyscalls,
             SysvarSnapshot::default(),
+            karstflow_types::Pubkey::default(),
         )
         .unwrap();
         assert_eq!(result.return_value, 15); // 10 + 5
@@ -1461,6 +1569,7 @@ mod tests {
             10_000,
             &NoSyscalls,
             SysvarSnapshot::default(),
+            karstflow_types::Pubkey::default(),
         )
     }
 
@@ -1555,6 +1664,7 @@ mod tests {
             10_000,
             &NoSyscalls,
             SysvarSnapshot::default(),
+            karstflow_types::Pubkey::default(),
         )
         .unwrap();
         assert_eq!(result.return_value, 0);
@@ -1699,10 +1809,39 @@ mod tests {
             10_000,
             &NoSyscalls,
             SysvarSnapshot::default(),
+            karstflow_types::Pubkey::default(),
         )
         .unwrap();
         assert_eq!(result.return_value, 10);
         // 5 instructions total: mov, call, mov(func), exit(func), exit(main)
         assert_eq!(result.compute_units_consumed, 5 * CU_PER_INSTRUCTION);
+    }
+
+    #[test]
+    fn r1_initialized_to_input_region() {
+        // r1 must point to REGION_INPUT_BASE per Solana BPF ABI.
+        // Program: mov r0, r1; exit — returns the initial r1 value.
+        let insns = [
+            Instruction::new(Opcode::Mov64Reg as u8, 0, 1, 0, 0),
+            Instruction::new(Opcode::Exit as u8, 0, 0, 0, 0),
+        ];
+        let bytes = make_program_bytes(&insns);
+        let program = load_raw(&bytes).unwrap();
+        let input = vec![0u8; 16]; // some input data
+        let memory = MemoryMap::new(&[], TOTAL_STACK_SIZE, DEFAULT_HEAP_SIZE, input);
+        let result = execute(
+            &program,
+            memory,
+            10_000,
+            &NoSyscalls,
+            SysvarSnapshot::default(),
+            karstflow_types::Pubkey::default(),
+        )
+        .unwrap();
+        assert_eq!(
+            result.return_value,
+            karstflow_constants::vm::REGION_INPUT_BASE,
+            "r1 must be initialized to REGION_INPUT_BASE"
+        );
     }
 }

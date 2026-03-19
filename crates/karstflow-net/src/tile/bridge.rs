@@ -8,7 +8,7 @@
 /// 3. QuicTile processes QUIC protocol and reassembles transactions
 /// 4. Completed transactions are sent to the outbound channel
 ///
-/// This matches Firedancer's architecture where net and quic tiles
+/// This matches the reference implementation's architecture where net and quic tiles
 /// share a tight processing loop without inter-tile packet channels.
 use crate::tile::net_tile::{NetworkTile, NetworkTileConfig};
 use crate::tile::quic_tile::{QuicTile, QuicTileConfig, QuicTransaction};

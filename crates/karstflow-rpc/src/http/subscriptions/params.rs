@@ -357,6 +357,9 @@ pub(super) fn parse_subscription_commitment(
 }
 
 pub(super) fn parse_no_params(params: &serde_json::Value) -> Result<(), ErrorObjectOwned> {
+    if params.is_null() {
+        return Ok(());
+    }
     let array = params.as_array().ok_or_else(invalid_params_error)?;
     if array.is_empty() {
         Ok(())
@@ -368,6 +371,10 @@ pub(super) fn parse_no_params(params: &serde_json::Value) -> Result<(), ErrorObj
 pub(super) fn parse_optional_commitment_config(
     params: &serde_json::Value,
 ) -> Result<RpcCommitment, ErrorObjectOwned> {
+    // solana-py may send null or omit params entirely
+    if params.is_null() {
+        return parse_subscription_commitment(None);
+    }
     let array = params.as_array().ok_or_else(invalid_params_error)?;
     if array.len() > 1 {
         return Err(invalid_params_error());

@@ -5,4 +5,4 @@ mod renderer;
 mod server;
 mod subscriptions;
 
-pub use server::spawn_rpc_http_server;
+pub use server::{spawn_rpc_http_server, spawn_rpc_ws_server};

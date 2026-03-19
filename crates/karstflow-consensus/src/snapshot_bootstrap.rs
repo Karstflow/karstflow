@@ -24,7 +24,7 @@ use crate::{EpochSchedule, LeaderSchedule, StakeTracker};
 use karstflow_constants::block_limits::MESSAGE_HASH_PREFIX_BYTES;
 use karstflow_ids::{FEATURE_PROGRAM_ID, STAKE_PROGRAM_ID, VOTE_PROGRAM_ID};
 use karstflow_storage::{
-    AccountDatabase, GenesisConfig, RestoreResult, SnapshotBankState, StatusCacheEntry,
+    AccountDatabase, ClusterType, GenesisConfig, RestoreResult, SnapshotBankState, StatusCacheEntry,
 };
 use karstflow_types::Pubkey;
 use std::sync::{Arc, RwLock};
@@ -375,8 +375,21 @@ pub fn bootstrap_from_genesis(
     let sysvar_cache = SysvarCache::new(clock, sysvar_epoch_schedule, rent);
     bank.set_sysvar_cache(Arc::new(sysvar_cache));
 
-    // Step 7: Initialize feature set from feature-program-owned accounts.
-    let (feature_set, feature_init) = initialize_features(&accounts);
+    // Step 7: Initialize feature set.
+    // In development mode, activate all known features at slot 0 (matching Solana
+    // test-validator behavior). On other cluster types, scan on-chain feature accounts.
+    let (feature_set, feature_init) = if genesis.cluster_type == ClusterType::Development {
+        let fs = FeatureSet::all_active();
+        let stats = FeatureInitStats {
+            feature_accounts_scanned: 0,
+            features_activated: fs.active_count(),
+            not_yet_activated: 0,
+            unknown_features: 0,
+        };
+        (fs, stats)
+    } else {
+        initialize_features(&accounts)
+    };
     bank.set_feature_set(Arc::new(RwLock::new(feature_set)));
 
     // Step 8: Wrap in BankForks (genesis bank is Processing, use standard constructor).
@@ -1777,7 +1790,8 @@ mod tests {
 
         let leader_schedule = make_leader_schedule();
         let result = bootstrap_from_genesis(&genesis, leader_schedule);
-        assert_eq!(result.feature_init.features_activated, 1);
+        // Development genesis activates all known features at slot 0
+        assert!(result.feature_init.features_activated >= 1);
 
         let bank = result.bank_forks.working_bank();
         let fs_lock = bank.feature_set().unwrap();

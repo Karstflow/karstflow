@@ -43,7 +43,7 @@ pub struct SbpfExecutionEngine {
 impl SbpfExecutionEngine {
     pub fn new() -> Self {
         Self {
-            processor: Arc::new(TransactionProcessor::new()),
+            processor: TransactionProcessor::new_with_cpi(),
             account_state: HashMap::new(),
         }
     }
@@ -285,6 +285,7 @@ impl LeaderPipeline {
     /// Start a new leader slot. Resets pack limits and configures PoH.
     pub fn begin_slot(&mut self, slot: u64) {
         self.pack.new_block(slot);
+        self.poh.begin_leader(slot);
         self.entries.clear();
         self.shred_entries.clear();
         self.microblocks_executed = 0;
@@ -385,6 +386,11 @@ impl LeaderPipeline {
     }
 
     /// Advance PoH by the given number of hashes, collecting tick entries.
+    /// Number of completed PoH ticks in the current slot.
+    pub fn poh_ticks_completed(&self) -> u64 {
+        self.poh.ticks_in_slot()
+    }
+
     pub fn advance_poh(&mut self, target_hashes: u64) {
         let new_entries = self.poh.advance(target_hashes);
         // Build PohEntries for ticks (no transactions).

@@ -595,7 +595,7 @@ impl Blockstore {
     /// parameters. Otherwise fall back to reasonable defaults.
     fn infer_coding_params(&self, _shred: &Shred) -> (u16, u16) {
         // For data shreds, we don't always have coding parameters.
-        // Use conservative defaults matching Firedancer's typical FEC sets.
+        // Use conservative defaults matching the reference implementation's typical FEC sets.
         // Real coding params come from the coding shred headers.
         (32, 32)
     }

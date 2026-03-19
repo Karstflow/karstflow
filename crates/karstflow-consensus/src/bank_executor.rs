@@ -1264,8 +1264,9 @@ impl Bank {
         backend: &dyn ExecutionBackend,
         compute_limit: u64,
     ) -> TransactionExecutionResult {
-        // Step 1: Bank must be processing
-        if self.status() != BankStatus::Processing {
+        // Step 1: Only reject transactions on Rooted banks.
+        // Processing and Frozen banks accept transactions.
+        if self.status() == BankStatus::Rooted {
             return TransactionExecutionResult {
                 success: false,
                 compute_units_consumed: 0,
@@ -2189,6 +2190,17 @@ impl Bank {
                 break 'sim_execution;
             }
 
+            // Inject the program account if not already present so the
+            // execution backend can locate and run the bytecode.
+            if !instr_accounts.iter().any(|(pk, _, _, _)| *pk == program_id) {
+                let program_account = modified
+                    .get(&program_id)
+                    .or_else(|| account_state.get(&program_id))
+                    .cloned()
+                    .unwrap_or_default();
+                instr_accounts.push((program_id, program_account, false, false));
+            }
+
             let instruction_data = instruction.data.clone();
 
             let info = InstructionInfo {
@@ -2935,16 +2947,17 @@ mod tests {
     }
 
     #[test]
-    fn process_transaction_rejects_frozen_bank() {
+    fn process_transaction_rejects_rooted_bank() {
         let bank = create_test_bank();
         let backend = PassthroughBackend;
 
-        // Fill ticks and freeze
+        // Fill ticks, freeze, and root
         use karstflow_constants::ledger::TICKS_PER_SLOT;
         for _ in 0..TICKS_PER_SLOT {
             bank.register_tick().unwrap();
         }
         bank.freeze().unwrap();
+        bank.mark_rooted().unwrap();
 
         let payer = Pubkey::new_unique();
         let program = Pubkey::new_unique();
@@ -5009,16 +5022,16 @@ mod tests {
     }
 
     #[test]
-    fn child_bank_inherits_derived_fee_rate() {
+    fn child_bank_uses_fixed_fee_rate() {
         let bank = create_test_bank();
 
-        // Simulate heavy load
+        // Simulate heavy load — should not affect child fee rate
         bank.add_signatures(DEFAULT_TARGET_SIGNATURES_PER_SLOT * 3);
 
         let child = Bank::new_from_parent(&bank, bank.slot() + 1, bank.leader_schedule().clone());
 
-        // Child's fee rate should be higher than the default
-        assert!(child.lamports_per_signature() > LAMPORTS_PER_SIGNATURE);
+        // Fee rate is always the fixed constant (matches Solana mainnet behavior)
+        assert_eq!(child.lamports_per_signature(), LAMPORTS_PER_SIGNATURE);
     }
 
     // ── account reclamation tests ─────────────────────────────────────

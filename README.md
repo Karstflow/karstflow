@@ -4,13 +4,13 @@
 
 Karstflow is a ground-up Solana validator built for maximum throughput and minimal latency. It features a custom network stack, pre-allocated data structures, zero-copy I/O patterns, and a modular tile-based architecture designed for predictable performance at scale.
 
-**270K+ lines of Rust | 6,000+ tests | 20 crates**
+**270K+ lines of Rust | 6,100+ unit tests | 597/668 E2E tests | 22 crates**
 
 ## Design Principles
 
 - **Performance first**: Pre-allocated pools, batch processing, zero-copy where possible, segment-based compute metering
 - **Native implementation**: No runtime dependency on existing Solana validator codebases
-- **Clean architecture**: 20-crate workspace with strict dependency hierarchy and single-responsibility modules
+- **Clean architecture**: 22-crate workspace with strict dependency hierarchy and single-responsibility modules
 - **Idiomatic Rust**: Leverages Rust's type system, ownership model, traits, and ecosystem for safety and correctness
 - **Tile-based execution**: Pinned-core service model for deterministic scheduling and cache locality
 
@@ -63,6 +63,8 @@ karstflow-types          (core types: Pubkey, Account, Hash, Shred)
 | `karstflow-node` | 1,161 | -- | Validator orchestration and entry point |
 | `karstflow-core` | 770 | 40 | Shared vocabulary types (RuntimeSpec, TopologySpec, ExecutionMode) |
 | `karstflow-ids` | 515 | 4 | Well-known program and sysvar addresses |
+| `karstflow-conformance` | 1,200+ | 35 | Conformance testing: instruction/transaction/block harnesses, state diff engine, fixture system ([README](crates/karstflow-conformance/README.md)) |
+| `karstflow-integration-tests` | 800+ | 15 | Multi-node cluster integration tests: airdrop, transfers, BPF deploy, PDA derivation |
 | `karstflow-observability` | 192 | -- | Metrics HTTP endpoint, tracing initialization |
 
 ## Key Features
@@ -304,6 +306,68 @@ curl -X POST http://localhost:8899 -H "Content-Type: application/json" \
 
 Returns a transaction signature (base58). The airdrop is applied immediately via direct bank credit — no faucet TCP service or separate airdrop binary needed.
 
+## Live Network Mode (Devnet / Testnet / Mainnet)
+
+Karstflow can connect to live Solana networks as an RPC node. In live mode, the node automatically:
+
+1. **Downloads `genesis.bin`** from entrypoint RPC endpoints (`/genesis.tar.bz2`)
+2. **Discovers snapshot peers** via gossip (SnapshotHashes CRDS messages)
+3. **Downloads the latest snapshot** from the best peer (scored by latency + slot freshness)
+4. **Restores accounts** from snapshot and begins replay
+
+### Quick Start (Live Mode)
+
+```bash
+# Connect to Solana Devnet
+just run-profile devnet
+
+# Or with a custom config:
+KARSTFLOW_NODE_CONFIG_PATH=/path/to/devnet.toml cargo run --release -p karstflow-node
+```
+
+Minimal devnet config:
+
+```toml
+[cluster]
+mode = "live"
+gossip_bind_addr = "0.0.0.0:8001"
+entrypoints = ["entrypoint.devnet.solana.com:8001"]
+expected_genesis_hash = "EtWTRABZaYq6iMfeYKouRu166VU2xqa1wcaWoxPkrZBG"
+expected_shred_version = 29062
+data_dir = "/var/karstflow/data"
+identity_keypair_path = "/var/karstflow/identity.json"
+
+[runtime]
+mode = "tokio"
+
+[rpc]
+enabled = true
+bind = "0.0.0.0:8899"
+
+[metrics]
+output_target = "file"
+file_path = "/var/karstflow/metrics.log"
+```
+
+The node will automatically download genesis and snapshot from the network — no manual file management required.
+
+### Multi-Node Local Cluster
+
+For testing multi-validator consensus locally:
+
+```bash
+# Generate a 2-node cluster with shared genesis
+cargo run --release -p karstflow-node -- genesis cluster 2 --output-dir /tmp/cluster
+
+# Start both nodes
+bash /tmp/cluster/start.sh
+```
+
+Features verified on local cluster:
+- **Cross-node transaction propagation** through PoH entries → shreds → turbine → replay
+- **Leader rotation** with hardware-calibrated PoH (~400ms/slot target)
+- **Consensus-driven root advancement** via Tower BFT vote chain
+
 ### Safety Guards
 
 Test-validator mode is **blocked for production clusters**. The validator will refuse to start if dev mode is combined with:
@@ -384,7 +448,7 @@ Live mode includes preflight safety checks (identity keypair, entrypoint routabi
 
 ```
 karstflow/
-+-- crates/                        # 20 Rust crates
++-- crates/                        # 22 Rust crates
 |   +-- karstflow-consensus/      # Consensus (Tower BFT, Bank, Economics)
 |   +-- karstflow-crypto/         # Cryptography (Ed25519, FEC, Hashing)
 |   +-- karstflow-sbpf/           # sBPF VM + Builtin programs
@@ -405,6 +469,8 @@ karstflow/
 |   +-- karstflow-topology/       # Service topology
 |   +-- karstflow-runtime/        # Runtime utilities
 |   +-- karstflow-core/           # Core utilities
+|   +-- karstflow-conformance/   # Conformance test harnesses
+|   +-- karstflow-integration-tests/ # Multi-node integration tests
 +-- config/                        # TOML configuration files
 +-- Cargo.toml                     # Workspace definition
 +-- rust-toolchain.toml            # Rust toolchain
@@ -504,7 +570,7 @@ AF_XDP kernel-bypass requires Linux with root or `CAP_NET_RAW`.
 ### Unit Tests
 
 ```bash
-just test              # 6,000+ tests across 20 crates
+just test              # 6,100+ tests across 22 crates
 just ci                # fmt-check + clippy + test
 ```
 
@@ -523,10 +589,49 @@ Tests cover:
 - Insufficient funds rejection
 - Airdrop → transfer end-to-end flow
 
+### Conformance Tests
+
+Three-layer execution verification: instruction, transaction, and block. Tests compare execution outcomes against expected post-states and verify bank hash determinism. See [karstflow-conformance README](crates/karstflow-conformance/README.md) for details.
+
+```bash
+just conformance       # run conformance tests (20 ignored tests)
+```
+
 ### Smoke Test
 
 ```bash
 just smoke             # 2-second node startup/shutdown cycle
+```
+
+### E2E Tests (karstflow-tests)
+
+Black-box testing via JSON-RPC and WebSocket using the official Solana Python client. See [karstflow-tests README](../karstflow-tests/README.md) for setup and usage.
+
+```bash
+cd ../karstflow-tests
+just smoke             # health + genesis checks
+just functional        # single-node RPC method coverage
+just websocket         # WebSocket subscription tests
+just integration       # multi-node cluster tests
+just load              # Locust load tests + benchmarks
+```
+
+### Docker
+
+Build and run the validator in Docker:
+
+```bash
+# Build image
+docker build -t karstflow:latest .
+
+# Run single dev node
+cd ../karstflow-tests
+just node-up           # start single node
+just node-down         # stop
+
+# Run 3-node cluster
+just cluster-up        # start cluster
+just cluster-down      # stop
 ```
 
 ### Local Cluster Test

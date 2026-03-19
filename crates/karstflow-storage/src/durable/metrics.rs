@@ -2,7 +2,7 @@
 //
 // All counters are bump-only (monotonically increasing) and use relaxed
 // ordering — suitable for observability, not synchronization. Metrics
-// are accumulated per-store instance, matching Firedancer's pattern of
+// are accumulated per-store instance, matching the reference implementation's pattern of
 // tile-local counters drained to shared memory on housekeeping ticks.
 
 use std::sync::atomic::{AtomicU64, Ordering};

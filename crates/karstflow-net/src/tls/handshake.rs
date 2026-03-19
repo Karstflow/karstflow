@@ -157,7 +157,7 @@ impl HandshakeBase {
 
 /// Server-side handshake state.
 ///
-/// Designed for compact memory (similar to Firedancer's ~128 byte estate).
+/// Designed for compact memory (similar to the reference implementation's ~128 byte estate).
 /// Only stores the minimum state needed between handshake message exchanges.
 pub struct ServerHandshake {
     pub base: HandshakeBase,

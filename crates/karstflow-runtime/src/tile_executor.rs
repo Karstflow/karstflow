@@ -2,7 +2,7 @@
 //!
 //! Combines [`TileAdapter`] wrapping of services with the mesh tile
 //! runner infrastructure (CnC, heartbeat, metrics) for full
-//! Firedancer-style execution.
+//! the reference implementation-style execution.
 
 use crate::affinity::{build_pinned_affinity_plan_from_available_cores, PinnedAssignmentSource};
 use crate::service::{Service, ShutdownSwitch};

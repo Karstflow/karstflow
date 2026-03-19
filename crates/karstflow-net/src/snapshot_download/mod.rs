@@ -12,5 +12,5 @@ pub use archive::{
     archive_filename, incremental_archive_filename, incremental_download_path,
     parse_archive_filename, snapshot_download_path, ArchiveInfo,
 };
-pub use downloader::{DownloadConfig, DownloadError, SnapshotDownloader};
+pub use downloader::{download_genesis, DownloadConfig, DownloadError, SnapshotDownloader};
 pub use peer_selector::{SnapshotPeerInfo, SnapshotPeerSelector};

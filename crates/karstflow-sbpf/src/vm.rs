@@ -11,7 +11,7 @@ use crate::program_cache::ProgramCache;
 use crate::syscall_dispatch::{InstructionExecutor, RuntimeSyscallDispatch};
 use crate::sysvar_snapshot::SysvarSnapshot;
 use crate::validation;
-use karstflow_constants::vm::DEFAULT_HEAP_SIZE;
+use karstflow_constants::vm::TOTAL_STACK_SIZE;
 use karstflow_ids::{
     BPF_LOADER_DEPRECATED_PROGRAM_ID, BPF_LOADER_PROGRAM_ID, BPF_LOADER_V2_PROGRAM_ID,
     LOADER_V4_PROGRAM_ID, SYSTEM_PROGRAM_ID, VOTE_PROGRAM_ID,
@@ -202,13 +202,35 @@ impl BytecodeVm {
     }
 
     /// Load and validate a program from raw ELF bytes.
-    fn load_program(&self, elf_bytes: &[u8]) -> Result<LoadedProgram, SbpfExecutionError> {
-        let program = crate::elf_loader::load_elf(elf_bytes)
-            .map_err(|e| SbpfExecutionError::InvalidProgram)?;
+    ///
+    /// Uses the provided active feature set to determine which syscalls are
+    /// valid call targets during validation.
+    fn load_program(
+        &self,
+        elf_bytes: &[u8],
+        active_features: &std::collections::HashSet<[u8; 32]>,
+    ) -> Result<LoadedProgram, SbpfExecutionError> {
+        let program = crate::elf_loader::load_elf(elf_bytes).map_err(|e| {
+            SbpfExecutionError::ExecutionFailed {
+                message: format!("ELF load: {e}"),
+            }
+        })?;
 
-        let syscall_ids = self.syscall_dispatch.registered_ids();
-        validation::validate(&program, &syscall_ids)
-            .map_err(|errors| SbpfExecutionError::InvalidProgram)?;
+        // Merge the VM's base syscall IDs (including CPI handlers) with
+        // feature-gated syscall IDs to get the full set of valid call targets.
+        let feature_dispatch = RuntimeSyscallDispatch::with_active_feature_ids(active_features);
+        let mut syscall_ids = self.syscall_dispatch.registered_ids();
+        syscall_ids.extend(feature_dispatch.registered_ids());
+        validation::validate(&program, &syscall_ids).map_err(|errors| {
+            let sample: Vec<String> = errors.iter().take(3).map(|e| e.to_string()).collect();
+            SbpfExecutionError::ExecutionFailed {
+                message: format!(
+                    "validation: {} errors — {}",
+                    errors.len(),
+                    sample.join("; ")
+                ),
+            }
+        })?;
 
         Ok(program)
     }
@@ -318,7 +340,13 @@ impl BytecodeVm {
             &program.rodata
         };
 
-        let memory = MemoryMap::new(rodata, DEFAULT_HEAP_SIZE, DEFAULT_HEAP_SIZE, input_buffer);
+        let mut memory = MemoryMap::new(
+            rodata,
+            TOTAL_STACK_SIZE,
+            context.heap_size as usize,
+            input_buffer,
+        );
+        memory.set_dynamic_frames(program.sbpf_version.has_dynamic_stack_frames());
 
         // Use the context's snapshot if provided, falling back to the VM default.
         let snapshot = context
@@ -346,6 +374,7 @@ impl BytecodeVm {
             context.compute_budget,
             &self.syscall_dispatch,
             snapshot,
+            context.program_id,
         ) {
             Ok(result) => {
                 let modified_accounts = Self::collect_modified_accounts(
@@ -439,8 +468,15 @@ impl SbpfVm for BytecodeVm {
             }
         }
 
+        // Resolve active features for syscall registration during validation.
+        let active_features = context
+            .sysvar_snapshot
+            .as_ref()
+            .map(|s| &s.active_features)
+            .unwrap_or(&self.sysvar_snapshot.active_features);
+
         // Load, validate, cache, and execute.
-        let program = self.load_program(elf_bytes)?;
+        let program = self.load_program(elf_bytes, active_features)?;
 
         // Compute effective_slot: if this program was recently deployed,
         // apply DELAY_VISIBILITY_SLOT_OFFSET; otherwise it's always visible.
@@ -1090,13 +1126,12 @@ mod tests {
         ]);
 
         let budget = 100_000u64;
-        let context = ExecutionContext {
+        let context = ExecutionContext::new(
             program_id,
-            accounts: vec![(program_id, program_account(elf), false)],
-            instruction_data: vec![],
-            compute_budget: budget,
-            sysvar_snapshot: None,
-        };
+            vec![(program_id, program_account(elf), false)],
+            vec![],
+        )
+        .with_compute_budget(budget);
 
         let result = vm.execute(context);
         match result {
@@ -1128,18 +1163,86 @@ mod tests {
             Instruction::new(Opcode::Exit as u8, 0, 0, 0, 0),
         ]);
 
-        let context = ExecutionContext {
+        let context = ExecutionContext::new(
             program_id,
-            accounts: vec![(program_id, program_account(elf), false)],
-            instruction_data: vec![],
-            compute_budget: 100_000,
-            sysvar_snapshot: None,
-        };
+            vec![(program_id, program_account(elf), false)],
+            vec![],
+        )
+        .with_compute_budget(100_000);
 
         let result = vm.execute(context);
         assert!(
             result.is_err(),
             "Without deplete feature, VM error should return Err"
         );
+    }
+
+    #[test]
+    fn bytecode_vm_loads_and_runs_hello_log_so() {
+        use crate::bpf_serialization;
+        use crate::interpreter;
+        use crate::memory::MemoryMap;
+        use karstflow_constants::vm::{DEFAULT_HEAP_SIZE, TOTAL_STACK_SIZE};
+
+        // Load the real hello_log.so fixture (compiled Solana program)
+        let fixture_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .join("karstflow-tests/fixtures/programs/hello_log.so");
+
+        if !fixture_path.exists() {
+            return;
+        }
+
+        let elf_bytes = std::fs::read(&fixture_path).unwrap();
+
+        // Load and validate the ELF
+        let program = crate::elf_loader::load_elf(&elf_bytes).unwrap();
+        let inner_dispatch =
+            crate::syscall_dispatch::RuntimeSyscallDispatch::with_standard_syscalls();
+        let syscall_ids = inner_dispatch.registered_ids();
+        crate::validation::validate(&program, &syscall_ids).unwrap();
+
+        // Serialize minimal input (no accounts, empty instruction data)
+        let program_id = Pubkey::new_unique();
+        let serialized = bpf_serialization::serialize_aligned(
+            &[], // no accounts
+            &[], // empty instruction data
+            &program_id,
+        )
+        .unwrap();
+
+        // program.rodata is the full ELF image with relocations applied.
+        // It must be mapped at REGION_PROGRAM_BASE so relocated addresses resolve correctly.
+        let memory = MemoryMap::new(
+            &program.rodata,
+            TOTAL_STACK_SIZE,
+            DEFAULT_HEAP_SIZE,
+            serialized.buffer,
+        );
+
+        let result = interpreter::execute(
+            &program,
+            memory,
+            1_000_000,
+            &inner_dispatch,
+            crate::sysvar_snapshot::SysvarSnapshot::default(),
+            karstflow_types::Pubkey::default(),
+        );
+
+        match result {
+            Ok(r) => {
+                assert_eq!(r.return_value, 0, "hello_log should return 0");
+                assert!(r.logs.iter().any(|l| l.contains("hello-log: program_id=")));
+                assert!(r.logs.iter().any(|l| l.contains("hello-log: success")));
+            }
+            Err(ref e) => {
+                panic!("hello_log execution failed: {e}");
+            }
+        }
     }
 }

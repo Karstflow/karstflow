@@ -86,7 +86,7 @@ fn build_slot_leader_response(
 
 fn build_slot_leaders_response(
     request: &serde_json::Value,
-    snapshot: RpcRuntimeSnapshot,
+    _snapshot: RpcRuntimeSnapshot,
     commitment: RpcCommitment,
     bank_access: Option<&Arc<dyn BankAccessProvider>>,
 ) -> Result<serde_json::Value, RpcMethodError> {
@@ -100,18 +100,9 @@ fn build_slot_leaders_response(
         return Err(RpcMethodError::InvalidParams);
     }
 
-    let max_readable_slot = bank_access
-        .map(|bank| bank.get_slot(commitment))
-        .unwrap_or_else(|| snapshot.slot_for_commitment(commitment));
-    if start_slot > max_readable_slot {
-        let empty: Vec<String> = Vec::new();
-        return Ok(types::to_value(&empty));
-    }
-
-    let max_count = max_readable_slot
-        .saturating_sub(start_slot)
-        .saturating_add(1);
-    let effective_limit = limit.min(max_count);
+    // Solana allows querying future slot leaders because the leader schedule
+    // is pre-computed for the entire epoch. Don't clip to current slot.
+    let effective_limit = limit;
 
     if let Some(bank) = bank_access {
         let leaders_range = bank.get_slot_leaders(start_slot, effective_limit, commitment);
@@ -268,12 +259,15 @@ fn build_cluster_nodes_response(
         }
     }
 
-    // Synthetic fallback
+    // Synthetic fallback — use real identity if available
+    let identity = bank_access
+        .and_then(|bank| bank.get_identity())
+        .unwrap_or_else(|| "Karstflow111111111111111111111111111111111".to_string());
     let slot = snapshot.slot_for_commitment(commitment);
     let tvu_port = TVU_BASE_PORT.saturating_add((slot % TVU_PORT_SLOT_MODULUS) as u16);
     json!([
         {
-            "pubkey": "ParaDancer11111111111111111111111111111111",
+            "pubkey": identity,
             "gossip": "203.0.113.10:8001",
             "tpu": "203.0.113.10:8003",
             "rpc": "203.0.113.10:8899",
@@ -343,7 +337,7 @@ fn build_vote_accounts_response(
     let current_vote_pubkey = "Vote111111111111111111111111111111111111111";
     let current_entry = VoteAccountInfo {
         vote_pubkey: current_vote_pubkey.to_string(),
-        node_pubkey: "ParaDancer11111111111111111111111111111111".to_string(),
+        node_pubkey: "Karstflow111111111111111111111111111111111".to_string(),
         activated_stake,
         epoch_vote_account: true,
         commission: DEFAULT_VOTE_COMMISSION_PERCENT,
@@ -359,7 +353,7 @@ fn build_vote_accounts_response(
     let delinquent = if config.keep_unstaked_delinquents {
         vec![VoteAccountInfo {
             vote_pubkey: "VoteDelinq11111111111111111111111111111111111".to_string(),
-            node_pubkey: "ParaDancer33333333333333333333333333333333".to_string(),
+            node_pubkey: "Karstflow333333333333333333333333333333333".to_string(),
             activated_stake: 0,
             epoch_vote_account: false,
             commission: DEFAULT_VOTE_COMMISSION_PERCENT,
@@ -406,20 +400,23 @@ fn parse_vote_accounts_config(
 
     let keep_unstaked_delinquents = config_object
         .and_then(|cfg| cfg.get("keepUnstakedDelinquents"))
-        .map(|value| value.as_bool().ok_or(RpcMethodError::InvalidParams))
+        .map(params::optional_bool)
         .transpose()?
+        .flatten()
         .unwrap_or(false);
 
     let delinquent_slot_distance = config_object
         .and_then(|cfg| cfg.get("delinquentSlotDistance"))
-        .map(|value| value.as_u64().ok_or(RpcMethodError::InvalidParams))
+        .map(params::optional_u64)
         .transpose()?
+        .flatten()
         .unwrap_or(128);
 
     let min_context_slot = config_object
         .and_then(|cfg| cfg.get("minContextSlot"))
-        .map(|value| value.as_u64().ok_or(RpcMethodError::InvalidParams))
-        .transpose()?;
+        .map(params::optional_u64)
+        .transpose()?
+        .flatten();
 
     Ok(VoteAccountsConfig {
         vote_pubkey,
@@ -466,8 +463,8 @@ fn build_leader_schedule_response(
     ];
 
     let mut by_identity = serde_json::Map::new();
-    let default_identity = "ParaDancer11111111111111111111111111111111";
-    let fallback_identity = "ParaDancer22222222222222222222222222222222";
+    let default_identity = "Karstflow111111111111111111111111111111111";
+    let fallback_identity = "Karstflow222222222222222222222222222222222";
     match identity_filter {
         Some(identity) => {
             by_identity.insert(identity, types::to_value(&schedule));
@@ -555,7 +552,7 @@ fn build_block_production_response(
     let produced_count = effective_last_slot
         .saturating_sub(first_slot)
         .saturating_add(1);
-    let identity = "ParaDancer11111111111111111111111111111111";
+    let identity = "Karstflow111111111111111111111111111111111";
     let mut by_identity_map = serde_json::Map::new();
     by_identity_map.insert(
         identity.to_string(),
@@ -621,6 +618,7 @@ fn parse_signatures_for_address_params(
     let config_object = params::first_config_object(params);
     let before = config_object
         .and_then(|cfg| cfg.get("before"))
+        .filter(|v| !v.is_null())
         .map(|value| {
             value
                 .as_str()
@@ -632,6 +630,7 @@ fn parse_signatures_for_address_params(
         .transpose()?;
     let until = config_object
         .and_then(|cfg| cfg.get("until"))
+        .filter(|v| !v.is_null())
         .map(|value| {
             value
                 .as_str()
@@ -643,14 +642,16 @@ fn parse_signatures_for_address_params(
         .transpose()?;
     let limit = config_object
         .and_then(|cfg| cfg.get("limit"))
-        .map(|value| value.as_u64().ok_or(RpcMethodError::InvalidParams))
+        .map(params::optional_u64)
         .transpose()?
+        .flatten()
         .unwrap_or(SIGNATURES_FOR_ADDRESS_DEFAULT_LIMIT)
         .clamp(1, SIGNATURES_FOR_ADDRESS_MAX_LIMIT);
     let min_context_slot = config_object
         .and_then(|cfg| cfg.get("minContextSlot"))
-        .map(|value| value.as_u64().ok_or(RpcMethodError::InvalidParams))
-        .transpose()?;
+        .map(params::optional_u64)
+        .transpose()?
+        .flatten();
     Ok((address, before, until, limit, min_context_slot))
 }
 
@@ -684,12 +685,14 @@ fn parse_slot_range_from_params(
 
     let first_slot = range
         .and_then(|range| range.get("firstSlot"))
-        .map(|value| value.as_u64().ok_or(RpcMethodError::InvalidParams))
-        .transpose()?;
+        .map(params::optional_u64)
+        .transpose()?
+        .flatten();
     let last_slot = range
         .and_then(|range| range.get("lastSlot"))
-        .map(|value| value.as_u64().ok_or(RpcMethodError::InvalidParams))
-        .transpose()?;
+        .map(params::optional_u64)
+        .transpose()?
+        .flatten();
     Ok((first_slot, last_slot))
 }
 
@@ -782,7 +785,7 @@ fn parse_vote_state_summary(data: &[u8], current_slot: u64) -> (String, u64, u64
     // Minimum size: 32 (node) + 32 (voter) + 32 (withdrawer) + 1 (commission) + 4 (vote_count) = 101
     if data.len() < 101 {
         return (
-            "11111111111111111111111111111111".to_string(),
+            "Karstflow111111111111111111111111111111111".to_string(),
             current_slot,
             current_slot.saturating_sub(VOTE_ROOT_SLOT_BACKTRACK),
             DEFAULT_VOTE_COMMISSION_PERCENT,

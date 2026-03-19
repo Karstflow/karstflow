@@ -410,7 +410,7 @@ pub const QUIC_VARINT_MAX: u64 = 0x3fff_ffff_ffff_ffff;
 // QUIC connection ID sizing
 // ---------------------------------------------------------------------------
 
-/// Default connection ID size in bytes (matching Firedancer's default).
+/// Default connection ID size in bytes (matching the reference implementation's default).
 pub const QUIC_DEFAULT_CONN_ID_SIZE: usize = 8;
 
 // ---------------------------------------------------------------------------

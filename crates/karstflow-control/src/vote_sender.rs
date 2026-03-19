@@ -2,7 +2,7 @@
 //!
 //! Complements the gossip-based VoteBroadcastAdapter with low-latency
 //! direct delivery of vote transactions to the current and upcoming
-//! leaders' TPU_VOTE sockets. This mirrors Firedancer's txsend tile
+//! leaders' TPU_VOTE sockets. This mirrors the reference implementation's txsend tile
 //! behavior where votes are sent directly for fast consensus participation.
 
 use karstflow_config::ValidatorIdentity;
@@ -228,7 +228,8 @@ mod tests {
     fn test_cluster_info(pubkey: [u8; 32]) -> Arc<ClusterInfo> {
         let node_id = karstflow_net::NodeId::new(pubkey);
         let addr: SocketAddr = "127.0.0.1:8000".parse().unwrap();
-        let contact_info = karstflow_net::ContactInfo::new(node_id, addr, addr, addr, addr, 0);
+        let contact_info =
+            karstflow_net::ContactInfo::new(node_id, addr, addr, addr, addr, addr, addr, 0);
         Arc::new(ClusterInfo::new(
             node_id,
             contact_info,

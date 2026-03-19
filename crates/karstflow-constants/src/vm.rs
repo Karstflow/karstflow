@@ -236,6 +236,9 @@ pub const ELF_MACHINE_SBF: u16 = 0x00F7;
 /// ELF machine type for classic BPF (older programs).
 pub const ELF_MACHINE_BPF: u16 = 0x00F3;
 
+/// ELF machine type for SBPFv2+ (used by cargo-build-sbf 4.x / solana-program 2.x).
+pub const ELF_MACHINE_SBPF_V2: u16 = 0x0107;
+
 /// ELF header size for 64-bit ELF files.
 pub const ELF64_HEADER_SIZE: usize = 64;
 
@@ -304,8 +307,12 @@ pub const MAX_PERMITTED_DATA_INCREASE: usize = 10 * 1024;
 /// Maximum total account data length (10 MiB).
 pub const MAX_PERMITTED_DATA_LENGTH: usize = 10 * 1024 * 1024;
 
-/// Alignment for u128 values in the serialized input region.
-pub const ALIGN_OF_U128: usize = 16;
+/// Alignment for u128 values in the serialized BPF input region.
+///
+/// Solana's BPF entrypoint uses `BPF_ALIGN_OF_U128 = 8` for account data
+/// alignment padding. This must match exactly for correct deserialization
+/// inside BPF programs.
+pub const ALIGN_OF_U128: usize = 8;
 
 /// Marker byte indicating this account is not a duplicate in the input region.
 pub const NON_DUP_MARKER: u8 = 0xFF;

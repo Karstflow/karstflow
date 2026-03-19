@@ -28,8 +28,16 @@ pub use bootstrap::{
     run_preflight_phase_with_probe_report, run_runtime_phase, run_runtime_phase_with_consensus,
     run_startup_checks, run_startup_checks_with_probe_report, save_tower_to_disk,
     spawn_snapshot_thread, spawn_snapshot_thread_with_gossip, start_gossip_service,
-    BlockstoreShredProvider, ConsensusBundle, ConsensusLeaderLookup, DiagnosticsSummary,
-    GossipHandle, LocalTransactionSubmitter, MainnetReadinessReport, MaterializedServicePair,
+    BlockstoreShredProvider, ConsensusBundle, ConsensusLeaderLookup, ConsensusTransactionSubmitter,
+    DiagnosticsSummary, GossipHandle, LocalTransactionSubmitter, MainnetReadinessReport,
+    MaterializedServicePair, TpuLoopbackSubmitter,
+};
+
+// Re-export TransactionSubmitter trait so downstream crates can cast submitters.
+pub use karstflow_rpc::TransactionSubmitter;
+
+// Continue bootstrap re-exports (split to avoid merge conflict).
+pub use bootstrap::{
     PipelineBundle, RepairBundle, ReplayBundle, ReplayBundleWithExternalInput, ServiceBundle,
     ShredPipelineBundle, StorageMaintenanceBundle, TurbineBundle, VoteBroadcastBundle,
 };

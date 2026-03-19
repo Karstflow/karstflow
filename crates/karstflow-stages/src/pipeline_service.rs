@@ -59,6 +59,8 @@ pub struct PipelineServiceConfig {
     pub exec: ExecConfig,
     /// Maximum transactions to drain from input per tick.
     pub max_drain_per_tick: usize,
+    /// Hashes per PoH tick. Set to 1 for dev/low-power mode.
+    pub hashes_per_tick: u64,
 }
 
 impl Default for PipelineServiceConfig {
@@ -68,6 +70,58 @@ impl Default for PipelineServiceConfig {
             pack: PackConfig::default(),
             exec: ExecConfig::default(),
             max_drain_per_tick: 256,
+            hashes_per_tick: karstflow_constants::ledger::DEFAULT_HASHES_PER_TICK,
+        }
+    }
+}
+
+impl PipelineServiceConfig {
+    /// Create a dev-mode configuration with low-power PoH (instant ticks).
+    pub fn dev() -> Self {
+        Self {
+            hashes_per_tick: 1,
+            ..Default::default()
+        }
+    }
+
+    /// Create a production configuration calibrated to the current hardware.
+    ///
+    /// Measures SHA-256 hash speed and adjusts `hashes_per_tick` so each
+    /// slot takes approximately 400ms (matching Solana mainnet timing).
+    /// This adapts to different CPU speeds and SHA-256 implementations.
+    pub fn calibrated() -> Self {
+        use karstflow_crypto::poh::{poh_append, PohState};
+
+        // Benchmark: hash 100,000 iterations to measure avg time.
+        // Use a large sample to account for cache pressure during sustained hashing.
+        let mut state = PohState { hash: [0u8; 32] };
+        let warmup = 10_000_u64;
+        poh_append(&mut state, warmup); // Warmup
+
+        let benchmark_n = 100_000_u64;
+        let start = std::time::Instant::now();
+        poh_append(&mut state, benchmark_n);
+        let elapsed = start.elapsed();
+        let ns_per_hash = elapsed.as_nanos() as f64 / benchmark_n as f64;
+
+        // Target: 64 ticks per slot, ~400ms per slot → ~6.25ms per tick
+        let target_tick_ns = 6_250_000.0_f64; // 6.25ms
+        let hashes_per_tick = (target_tick_ns / ns_per_hash) as u64;
+        // Clamp to reasonable range: at least 100, at most 62500 (mainnet)
+        let hashes_per_tick = hashes_per_tick
+            .max(100)
+            .min(karstflow_constants::ledger::DEFAULT_HASHES_PER_TICK);
+
+        tracing::info!(
+            ns_per_hash = ns_per_hash as u64,
+            hashes_per_tick,
+            estimated_slot_ms = (hashes_per_tick as f64 * 64.0 * ns_per_hash / 1_000_000.0) as u64,
+            "PoH calibrated to hardware speed",
+        );
+
+        Self {
+            hashes_per_tick,
+            ..Default::default()
         }
     }
 }
@@ -123,6 +177,10 @@ pub struct PipelineHandle {
     is_leading: AtomicBool,
     /// Current leader slot (0 if not leading).
     current_slot: AtomicU64,
+    /// Number of PoH ticks completed in the current slot.
+    /// Updated by the pipeline service during advance_poh.
+    /// The slot driver polls this to detect PoH slot completion.
+    poh_ticks_done: AtomicU64,
     /// Pipeline statistics.
     pub stats: Arc<PipelineServiceStats>,
     /// Inner stage stats for metrics aggregation.
@@ -135,15 +193,22 @@ impl PipelineHandle {
             commands: Mutex::new(Vec::new()),
             is_leading: AtomicBool::new(false),
             current_slot: AtomicU64::new(0),
+            poh_ticks_done: AtomicU64::new(0),
             stats,
             stage_stats,
         }
+    }
+
+    /// Check if the PoH service has completed all ticks for the current slot.
+    pub fn is_poh_slot_complete(&self) -> bool {
+        self.poh_ticks_done.load(Ordering::Relaxed) >= karstflow_constants::ledger::TICKS_PER_SLOT
     }
 
     /// Signal the start of a new leader slot.
     pub fn begin_slot(&self, slot: u64) {
         self.is_leading.store(true, Ordering::Relaxed);
         self.current_slot.store(slot, Ordering::Relaxed);
+        self.poh_ticks_done.store(0, Ordering::Relaxed);
         self.commands
             .lock()
             .expect("pipeline commands lock poisoned")
@@ -233,6 +298,8 @@ pub struct PipelineService {
     completed_shred_entries: Vec<Vec<PohEntry>>,
     /// Maximum transactions to drain per tick.
     max_drain_per_tick: usize,
+    /// Hashes to advance PoH per service tick when leading.
+    hashes_per_poh_advance: u64,
 }
 
 // ---------------------------------------------------------------------------
@@ -286,7 +353,10 @@ impl PipelineServiceBuilder {
             .engine
             .expect("ExecutionEngine must be provided via with_execution_engine()");
         let exec = ExecStage::with_config(engine, self.config.exec);
-        let poh = PohService::new(karstflow_types::Hash::default());
+        let poh = PohService::with_hashes_per_tick(
+            karstflow_types::Hash::default(),
+            self.config.hashes_per_tick,
+        );
 
         // Capture pack/exec stats before stages are consumed by LeaderPipeline.
         let pack_stats = pack.stats();
@@ -313,6 +383,7 @@ impl PipelineServiceBuilder {
             completed_entries: Vec::new(),
             completed_shred_entries: Vec::new(),
             max_drain_per_tick: self.config.max_drain_per_tick,
+            hashes_per_poh_advance: self.config.hashes_per_tick,
         };
 
         (service, handle)
@@ -386,7 +457,8 @@ impl Service for PipelineService {
                         stats.transactions_received.fetch_add(1, Ordering::Relaxed);
                         drained += 1;
 
-                        if self.pipeline.ingest(&raw_tx.payload, raw_tx.source) {
+                        let accepted = self.pipeline.ingest(&raw_tx.payload, raw_tx.source);
+                        if accepted {
                             stats.transactions_accepted.fetch_add(1, Ordering::Relaxed);
                         } else {
                             stats.transactions_dropped.fetch_add(1, Ordering::Relaxed);
@@ -408,6 +480,32 @@ impl Service for PipelineService {
             .fetch_add(result.transactions_resolved as u64, Ordering::Relaxed);
         if result.leader_step.is_some() {
             stats.microblocks_executed.fetch_add(1, Ordering::Relaxed);
+        }
+
+        // Advance PoH and interleave transaction execution.
+        // For each tick, first try to execute a microblock (step), then
+        // advance the PoH by one tick. This ensures transactions get
+        // mixin'd into the PoH chain before the tick boundary.
+        if self.handle.is_leading() {
+            let ticks_before = self.pipeline.poh_ticks_completed();
+            for _ in 0..8 {
+                if self.pipeline.poh_ticks_completed()
+                    >= karstflow_constants::ledger::TICKS_PER_SLOT
+                {
+                    break;
+                }
+                // Execute pending transactions before advancing the tick.
+                // This gives pack → exec → mixin a chance to include
+                // transactions in the PoH chain before the tick boundary.
+                let _ = self.pipeline.service();
+                self.pipeline.advance_poh(self.hashes_per_poh_advance);
+            }
+            let ticks_after = self.pipeline.poh_ticks_completed();
+            if ticks_after > ticks_before {
+                self.handle
+                    .poh_ticks_done
+                    .store(ticks_after, Ordering::Relaxed);
+            }
         }
 
         Ok(())

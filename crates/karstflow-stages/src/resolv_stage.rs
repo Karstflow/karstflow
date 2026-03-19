@@ -6,7 +6,7 @@
 /// later resolution when new blockhashes arrive. Valid transactions are
 /// forwarded to the transaction scheduler.
 ///
-/// This corresponds to Firedancer's resolv tile, which sits between
+/// This corresponds to the reference implementation's resolv tile, which sits between
 /// dedup and pack in the transaction pipeline.
 use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -98,7 +98,7 @@ pub struct ResolvConfig {
 impl Default for ResolvConfig {
     fn default() -> Self {
         Self {
-            blockhash_ring_capacity: 1 << 22, // ~4M entries, matching Firedancer
+            blockhash_ring_capacity: 1 << 22, // ~4M entries, matching the reference implementation
             stash_capacity: 65_536,
             transaction_lifetime_slots: 160,
         }
@@ -254,9 +254,12 @@ impl ResolvStage {
             };
         }
 
-        // Blockhash not known — stash for later if there's room.
+        // Blockhash not in ring — stash for later resolution.
+        // The blockhash will arrive when the producing slot completes and
+        // the resolv-blockhash thread registers it via register_blockhash().
+
+        // Stash for later if there's room.
         if self.stash_count >= self.stash_capacity {
-            // Evict oldest stashed transaction.
             self.evict_oldest_stashed();
         }
 

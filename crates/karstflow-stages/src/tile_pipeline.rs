@@ -646,8 +646,8 @@ impl TransactionPipeline {
         // Resolv tile: consumes from dedup's output 0.
         // SAFETY: dedup's stem outlives resolv (both owned by this struct).
         let resolv_input = unsafe { dedup.output_stem().create_input(0, 0) };
-        let resolv =
-            unsafe { ResolvTile::new(ResolvStage::new(), resolv_input, link_config.clone()) };
+        let mut resolv_stage = ResolvStage::new();
+        let resolv = unsafe { ResolvTile::new(resolv_stage, resolv_input, link_config.clone()) };
 
         // Output consumer: reads resolved transactions from resolv's output.
         // SAFETY: resolv's stem outlives resolv_output (both owned by this struct).
@@ -937,6 +937,11 @@ impl ValidatorPipeline {
     }
 
     /// Advance PoH ticks.
+    /// Number of completed PoH ticks in the current slot.
+    pub fn poh_ticks_completed(&self) -> u64 {
+        self.leader.poh_ticks_completed()
+    }
+
     pub fn advance_poh(&mut self, target_hashes: u64) {
         self.leader.advance_poh(target_hashes);
     }

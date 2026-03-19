@@ -167,11 +167,20 @@ fn render_single_request(
     } else {
         Some(match result {
             Ok(result) => json!({"jsonrpc": "2.0", "result": result, "id": id}),
-            Err(error) => json!({
-                "jsonrpc": "2.0",
-                "error": {"code": error.code(), "message": error.message(method)},
-                "id": id
-            }),
+            Err(ref error) => {
+                let mut err_obj = json!({
+                    "code": error.code(),
+                    "message": error.message(method)
+                });
+                if let Some(data) = error.data() {
+                    err_obj["data"] = data;
+                }
+                json!({
+                    "jsonrpc": "2.0",
+                    "error": err_obj,
+                    "id": id
+                })
+            }
         })
     }
 }
@@ -277,8 +286,8 @@ mod tests {
             None,
             None,
         );
-        assert!(payload.contains(r#""karstflow-core":"0.1.0""#));
-        assert!(payload.contains(r#""feature-set":"full_api""#));
+        assert!(payload.contains(r#""solana-core":"2.2.0""#));
+        assert!(payload.contains(r#""feature-set":4215500110"#));
     }
 
     #[test]
@@ -879,7 +888,7 @@ mod tests {
             None,
             None,
         );
-        assert!(payload.contains(r#""identity":"ParaDancer11111111111111111111111111111111""#));
+        assert!(payload.contains(r#""identity":"Karstflow111111111111111111111111111111111""#));
     }
 
     #[test]
@@ -1015,7 +1024,8 @@ mod tests {
     }
 
     #[test]
-    fn rpc_response_returns_empty_slot_leaders_for_future_start_slot() {
+    fn rpc_response_returns_slot_leaders_for_future_start_slot() {
+        // Solana allows querying future slot leaders (leader schedule is pre-computed).
         let payload = render_json_rpc_response(
             r#"{"jsonrpc":"2.0","id":264,"method":"getSlotLeaders","params":[200,3,{"commitment":"processed"}]}"#,
             false,
@@ -1028,7 +1038,9 @@ mod tests {
             }),
             None,
         );
-        assert!(payload.contains(r#""result":[]"#));
+        // Synthetic fallback returns leaders for any requested range.
+        assert!(payload.contains(r#""result":"#));
+        assert!(!payload.contains(r#""error""#));
     }
 
     #[test]
@@ -1446,7 +1458,7 @@ mod tests {
             }),
             None,
         );
-        assert!(payload.contains(r#""pubkey":"ParaDancer11111111111111111111111111111111""#));
+        assert!(payload.contains(r#""pubkey":"Karstflow111111111111111111111111111111111""#));
         assert!(payload.contains(r#""version":"0.1.0""#));
     }
 
@@ -2171,8 +2183,8 @@ mod tests {
             }),
             None,
         );
-        assert!(payload.contains(r#"ParaDancer11111111111111111111111111111111"#));
-        assert!(payload.contains(r#"ParaDancer22222222222222222222222222222222"#));
+        assert!(payload.contains(r#"Karstflow111111111111111111111111111111111"#));
+        assert!(payload.contains(r#"Karstflow222222222222222222222222222222222"#));
     }
 
     #[test]
@@ -2190,7 +2202,7 @@ mod tests {
             None,
         );
         assert!(payload.contains(r#"Vote111111111111111111111111111111111111111"#));
-        assert!(!payload.contains(r#"ParaDancer22222222222222222222222222222222"#));
+        assert!(!payload.contains(r#"Karstflow222222222222222222222222222222222"#));
     }
 
     #[test]
@@ -2247,7 +2259,7 @@ mod tests {
             None,
         );
         assert!(payload.contains(r#""range":{"firstSlot":12,"lastSlot":15}"#));
-        assert!(payload.contains(r#"ParaDancer11111111111111111111111111111111"#));
+        assert!(payload.contains(r#"Karstflow111111111111111111111111111111111"#));
     }
 
     #[test]
@@ -3857,18 +3869,19 @@ mod tests {
 
     #[test]
     fn bank_access_get_token_supply_parses_mint() {
-        // Build an SPL Mint account (82 bytes):
-        // bytes 0..4: mint_authority option tag (0 = None)
-        // bytes 4..36: mint_authority pubkey (zeroed for None)
-        // bytes 36..44: supply (u64 LE)
-        // byte 44: decimals
-        // byte 45: is_initialized
-        // bytes 46..82: freeze_authority option
+        // Build an SPL Mint account (82 bytes, 1-byte COption tags):
+        // byte 0: mint_authority option tag (0 = None)
+        // bytes 1..33: mint_authority pubkey (zeroed for None)
+        // bytes 33..41: supply (u64 LE)
+        // byte 41: decimals
+        // byte 42: is_initialized
+        // byte 43: freeze_authority option tag
+        // bytes 44..76: freeze_authority pubkey
         let mut mint_data = vec![0u8; 82];
         let supply: u64 = 1_000_000_000;
-        mint_data[36..44].copy_from_slice(&supply.to_le_bytes());
-        mint_data[44] = 6; // decimals
-        mint_data[45] = 1; // is_initialized
+        mint_data[33..41].copy_from_slice(&supply.to_le_bytes());
+        mint_data[41] = 6; // decimals
+        mint_data[42] = 1; // is_initialized
 
         let mint_pubkey = test_pubkey();
         let mint_account = karstflow_types::Account::new(

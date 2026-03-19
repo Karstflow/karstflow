@@ -449,13 +449,13 @@ impl RuntimeSyscallDispatch {
         let mut dispatch = Self::with_standard_syscalls();
         dispatch.register_by_name(
             "sol_invoke_signed_c",
-            Box::new(SolInvokeHandler {
+            Box::new(SolInvokeCHandler {
                 executor: executor.clone(),
             }),
         );
         dispatch.register_by_name(
             "sol_invoke_signed_rust",
-            Box::new(SolInvokeHandler { executor }),
+            Box::new(SolInvokeRustHandler { executor }),
         );
         dispatch
     }
@@ -468,6 +468,10 @@ impl Default for RuntimeSyscallDispatch {
 }
 
 impl SyscallDispatch for RuntimeSyscallDispatch {
+    fn has_handler(&self, syscall_id: u32) -> bool {
+        self.handlers.contains_key(&syscall_id)
+    }
+
     fn dispatch(&self, syscall_id: u32, vm: &mut VmState) -> Result<(), VmError> {
         let handler = self
             .handlers
@@ -480,6 +484,11 @@ impl SyscallDispatch for RuntimeSyscallDispatch {
         let r4 = vm.registers[4];
         let r5 = vm.registers[5];
 
+        #[cfg(test)]
+        eprintln!(
+            "[SYSCALL] PC={} id=0x{:08X} r1=0x{:X} r2=0x{:X} r3=0x{:X} r4=0x{:X} r5=0x{:X}",
+            vm.pc, syscall_id, r1, r2, r3, r4, r5
+        );
         let result = handler.call(vm, r1, r2, r3, r4, r5)?;
         vm.registers[0] = result;
         Ok(())
@@ -733,13 +742,22 @@ impl SyscallHandler for SolMemcpyHandler {
         let cost = syscalls::MEMCPY_BASE_COST + (len as u64) * syscalls::MEMCPY_PER_BYTE_COST;
         deduct_compute(vm, cost)?;
 
-        let data = vm
-            .memory
-            .read_slice(r2, len)
-            .map_err(|e| VmError::MemoryError(e.to_string()))?;
-        vm.memory
-            .write_slice(r1, &data)
-            .map_err(|e| VmError::MemoryError(e.to_string()))?;
+        let data = vm.memory.read_slice(r2, len).map_err(|e| {
+            #[cfg(test)]
+            eprintln!(
+                "[MEMCPY] read fail: src=0x{:X} len={} err={e} PC={}",
+                r2, len, vm.pc
+            );
+            VmError::MemoryError(e.to_string())
+        })?;
+        vm.memory.write_slice(r1, &data).map_err(|e| {
+            #[cfg(test)]
+            eprintln!(
+                "[MEMCPY] write fail: dst=0x{:X} len={} err={e} PC={}",
+                r1, len, vm.pc
+            );
+            VmError::MemoryError(e.to_string())
+        })?;
 
         Ok(0)
     }
@@ -879,8 +897,8 @@ impl SyscallHandler for SolSha256Handler {
         vm: &mut VmState,
         r1: u64, // input pairs pointer
         r2: u64, // pair count
-        _r3: u64,
-        r4: u64, // result pointer (32 bytes)
+        r3: u64, // result pointer (32 bytes)
+        _r4: u64,
         _r5: u64,
     ) -> Result<u64, VmError> {
         let pair_count = r2 as usize;
@@ -894,7 +912,7 @@ impl SyscallHandler for SolSha256Handler {
         let hash: [u8; 32] = hasher.finalize().into();
 
         vm.memory
-            .write_slice(r4, &hash)
+            .write_slice(r3, &hash)
             .map_err(|e| VmError::MemoryError(e.to_string()))?;
 
         Ok(0)
@@ -910,8 +928,8 @@ impl SyscallHandler for SolKeccak256Handler {
         vm: &mut VmState,
         r1: u64, // input pairs pointer
         r2: u64, // pair count
-        _r3: u64,
-        r4: u64, // result pointer (32 bytes)
+        r3: u64, // result pointer (32 bytes)
+        _r4: u64,
         _r5: u64,
     ) -> Result<u64, VmError> {
         let pair_count = r2 as usize;
@@ -927,7 +945,7 @@ impl SyscallHandler for SolKeccak256Handler {
         hasher.finalize(&mut hash);
 
         vm.memory
-            .write_slice(r4, &hash)
+            .write_slice(r3, &hash)
             .map_err(|e| VmError::MemoryError(e.to_string()))?;
 
         Ok(0)
@@ -943,8 +961,8 @@ impl SyscallHandler for SolBlake3Handler {
         vm: &mut VmState,
         r1: u64, // input pairs pointer
         r2: u64, // pair count
-        _r3: u64,
-        r4: u64, // result pointer (32 bytes)
+        r3: u64, // result pointer (32 bytes)
+        _r4: u64,
         _r5: u64,
     ) -> Result<u64, VmError> {
         let pair_count = r2 as usize;
@@ -957,7 +975,7 @@ impl SyscallHandler for SolBlake3Handler {
         let hash_bytes: [u8; 32] = *hash.as_bytes();
 
         vm.memory
-            .write_slice(r4, &hash_bytes)
+            .write_slice(r3, &hash_bytes)
             .map_err(|e| VmError::MemoryError(e.to_string()))?;
 
         Ok(0)
@@ -2204,9 +2222,16 @@ impl SyscallHandler for SolAllocHandler {
 ///
 /// Reads a CPI instruction from VM memory, validates privileges and depth,
 /// then executes the target program through the InstructionExecutor.
+/// CPI handler for the C ABI (`sol_invoke_signed_c`).
 /// Account data is read from the caller's serialized input region and
 /// written back after execution for writable accounts.
-struct SolInvokeHandler {
+struct SolInvokeCHandler {
+    executor: Arc<dyn InstructionExecutor>,
+}
+
+/// CPI handler for the Rust ABI (`sol_invoke_signed_rust`).
+/// Rust programs compiled with solana-program SDK use this variant.
+struct SolInvokeRustHandler {
     executor: Arc<dyn InstructionExecutor>,
 }
 
@@ -2230,19 +2255,36 @@ fn scan_input_region(input: &[u8]) -> Vec<InputRegionEntry> {
     }
 
     let account_count = u64::from_le_bytes(input[..8].try_into().unwrap()) as usize;
-    let mut entries = Vec::with_capacity(account_count);
+    let mut entries: Vec<InputRegionEntry> = Vec::with_capacity(account_count);
     let mut offset = 8;
 
     for _ in 0..account_count {
-        if offset + karstflow_constants::vm::ACCOUNT_SERIALIZED_META_SIZE > input.len() {
+        if offset >= input.len() {
             break;
         }
 
-        // Record offset for this account (points to is_signer byte)
-        let entry_offset = offset;
+        let marker = input[offset];
+        if marker != karstflow_constants::vm::NON_DUP_MARKER {
+            // Duplicate account — 8 bytes total, first byte is index to original
+            let first_idx = marker as usize;
+            if first_idx < entries.len() {
+                entries.push(InputRegionEntry {
+                    pubkey: entries[first_idx].pubkey,
+                    offset: entries[first_idx].offset,
+                });
+            }
+            offset += 8;
+            continue;
+        }
 
-        // Skip is_signer(1) + is_writable(1) = 2
-        offset += 2;
+        // Non-duplicate: aligned format
+        // NON_DUP_MARKER(1) + is_signer(1) + is_writable(1) + is_executable(1) + padding(4)
+        let entry_offset = offset;
+        let header_size = 8; // 1+1+1+1+4
+        if offset + header_size + 32 > input.len() {
+            break;
+        }
+        offset += header_size;
 
         // Read pubkey (32 bytes)
         let mut pk = [0u8; 32];
@@ -2259,13 +2301,15 @@ fn scan_input_region(input: &[u8]) -> Vec<InputRegionEntry> {
         let data_len = u64::from_le_bytes(input[offset..offset + 8].try_into().unwrap()) as usize;
         offset += 8;
 
-        // Skip data + padding
+        // Skip data + realloc buffer + alignment padding + rent_epoch
         if offset + data_len > input.len() {
             break;
         }
         offset += data_len;
-        let padding = (8 - (offset % 8)) % 8;
-        offset += padding;
+        offset += karstflow_constants::vm::MAX_PERMITTED_DATA_INCREASE;
+        let align_offset = data_len.wrapping_neg() & (karstflow_constants::vm::ALIGN_OF_U128 - 1);
+        offset += align_offset;
+        offset += 8; // rent_epoch
 
         entries.push(InputRegionEntry {
             pubkey: Pubkey::new(pk),
@@ -2277,14 +2321,20 @@ fn scan_input_region(input: &[u8]) -> Vec<InputRegionEntry> {
 }
 
 /// Read an Account from the input region at the given byte offset.
+/// Offset must point to the NON_DUP_MARKER byte of a non-duplicate account.
 fn read_account_from_input(input: &[u8], offset: usize) -> Option<(bool, Account)> {
-    if offset + karstflow_constants::vm::ACCOUNT_SERIALIZED_META_SIZE > input.len() {
+    // Aligned format: NON_DUP_MARKER(1) + is_signer(1) + is_writable(1) + is_executable(1) + padding(4)
+    //                 + pubkey(32) + owner(32) + lamports(8) + data_len(8) + data
+    let header_size = 8; // 1+1+1+1+4
+    if offset + header_size + 32 + 32 + 8 + 8 > input.len() {
         return None;
     }
 
-    let _is_signer = input[offset];
-    let is_writable = input[offset + 1] != 0;
-    let pos = offset + 2;
+    let _marker = input[offset]; // NON_DUP_MARKER
+    let _is_signer = input[offset + 1];
+    let is_writable = input[offset + 2] != 0;
+    let is_executable = input[offset + 3] != 0;
+    let pos = offset + header_size;
 
     // Skip pubkey (32 bytes) — caller already knows it
     let pos = pos + 32;
@@ -2314,7 +2364,7 @@ fn read_account_from_input(input: &[u8], offset: usize) -> Option<(bool, Account
             meta: TypesAccountMeta {
                 lamports,
                 owner: Pubkey::new(owner),
-                executable: false,
+                executable: is_executable,
                 rent_epoch: 0,
             },
             data: AccountData::new(data.to_vec()),
@@ -2323,14 +2373,15 @@ fn read_account_from_input(input: &[u8], offset: usize) -> Option<(bool, Account
 }
 
 /// Write modified account data back to the input region after CPI.
-/// Only updates lamports, owner, and data bytes (pubkey and data_len unchanged).
-/// Returns error if the callee's data exceeds the original allocation.
+/// Updates lamports, owner, data_len, and data bytes.
+/// Account data may grow within the realloc buffer (MAX_PERMITTED_DATA_INCREASE).
 fn writeback_account_to_input(
     input: &mut [u8],
     offset: usize,
     account: &Account,
 ) -> Result<(), VmError> {
-    let pos = offset + 2 + 32; // skip is_signer(1) + is_writable(1) + pubkey(32)
+    // Aligned format: skip NON_DUP_MARKER(1) + is_signer(1) + is_writable(1) + is_executable(1) + padding(4) + pubkey(32)
+    let pos = offset + 8 + 32;
 
     // Write owner (32 bytes)
     input[pos..pos + 32].copy_from_slice(account.meta.owner.as_ref());
@@ -2340,18 +2391,23 @@ fn writeback_account_to_input(
     input[pos..pos + 8].copy_from_slice(&account.meta.lamports.to_le_bytes());
     let pos = pos + 8;
 
-    // Read original data_len to check bounds
+    // Read original data_len to check growth bounds
     let original_data_len = u64::from_le_bytes(input[pos..pos + 8].try_into().unwrap()) as usize;
-    let pos = pos + 8;
 
     let new_data = account.data.as_slice();
-    if new_data.len() > original_data_len {
+    let max_allowed =
+        original_data_len.saturating_add(karstflow_constants::vm::MAX_PERMITTED_DATA_INCREASE);
+    if new_data.len() > max_allowed {
         return Err(VmError::MemoryError(
-            "CPI callee cannot grow account data".to_string(),
+            "CPI callee cannot grow account data beyond realloc limit".to_string(),
         ));
     }
 
-    // Write data (may be shorter; zero-fill remainder)
+    // Update data_len to new size
+    input[pos..pos + 8].copy_from_slice(&(new_data.len() as u64).to_le_bytes());
+    let pos = pos + 8;
+
+    // Write data (may be shorter or longer than original; zero-fill remainder within original allocation)
     input[pos..pos + new_data.len()].copy_from_slice(new_data);
     if new_data.len() < original_data_len {
         input[pos + new_data.len()..pos + original_data_len].fill(0);
@@ -2360,31 +2416,322 @@ fn writeback_account_to_input(
     Ok(())
 }
 
-impl SyscallHandler for SolInvokeHandler {
+/// Result of PDA signer derivation from CPI signer seeds.
+enum PdaSignerResult {
+    /// Successfully derived PDA signers.
+    Ok(std::collections::HashSet<Pubkey>),
+    /// Validation failure — return this value to the caller program.
+    Failed(u64),
+    /// VM-level error (memory access violation).
+    VmError(VmError),
+}
+
+/// Derive PDA signers from signer seeds in VM memory.
+/// Layout: r4 points to array of (addr: u64, len: u64) = 16 bytes each.
+/// Each entry points to an array of seed slices (addr: u64, len: u64).
+fn derive_pda_signers(vm: &mut VmState, r4: u64, r5: u64) -> PdaSignerResult {
+    let signer_seeds_count = r5 as usize;
+    let mut pda_signers = std::collections::HashSet::new();
+    if signer_seeds_count == 0 || signer_seeds_count > syscalls::MAX_CPI_SIGNERS {
+        return PdaSignerResult::Ok(pda_signers);
+    }
+    let caller_program_id = vm.program_id;
+    for s in 0..signer_seeds_count {
+        let entry_offset = r4 + (s as u64) * 16;
+        let entry_bytes = match vm.memory.read_slice(entry_offset, 16) {
+            Ok(b) => b,
+            Err(e) => return PdaSignerResult::VmError(VmError::MemoryError(e.to_string())),
+        };
+        let seeds_ptr = u64::from_le_bytes(entry_bytes[0..8].try_into().unwrap());
+        let seeds_len = u64::from_le_bytes(entry_bytes[8..16].try_into().unwrap()) as usize;
+
+        if seeds_len > syscalls::MAX_SIGNER_SEEDS {
+            try_append_log(vm, "Too many seeds for PDA signer".to_string());
+            return PdaSignerResult::Failed(1);
+        }
+
+        let mut seed_data = Vec::with_capacity(seeds_len);
+        for i in 0..seeds_len {
+            let pair_offset = seeds_ptr + (i as u64) * 16;
+            let ptr_bytes = match vm.memory.read_slice(pair_offset, 8) {
+                Ok(b) => b,
+                Err(e) => return PdaSignerResult::VmError(VmError::MemoryError(e.to_string())),
+            };
+            let len_bytes = match vm.memory.read_slice(pair_offset + 8, 8) {
+                Ok(b) => b,
+                Err(e) => return PdaSignerResult::VmError(VmError::MemoryError(e.to_string())),
+            };
+            let ptr = u64::from_le_bytes(ptr_bytes.try_into().unwrap());
+            let len = u64::from_le_bytes(len_bytes.try_into().unwrap()) as usize;
+            if len > syscalls::MAX_SEED_BYTES {
+                try_append_log(vm, "Seed too long for PDA signer".to_string());
+                return PdaSignerResult::Failed(1);
+            }
+            let seed = match vm.memory.read_slice(ptr, len) {
+                Ok(b) => b,
+                Err(e) => return PdaSignerResult::VmError(VmError::MemoryError(e.to_string())),
+            };
+            seed_data.push(seed);
+        }
+
+        let mut hasher = Sha256::new();
+        for seed in &seed_data {
+            hasher.update(seed);
+        }
+        hasher.update(caller_program_id.as_ref());
+        hasher.update(b"ProgramDerivedAddress");
+        let hash: [u8; 32] = hasher.finalize().into();
+
+        if is_on_ed25519_curve(&hash) {
+            try_append_log(vm, "Derived address is on ed25519 curve".to_string());
+            return PdaSignerResult::Failed(1);
+        }
+
+        pda_signers.insert(Pubkey::new(hash));
+    }
+    PdaSignerResult::Ok(pda_signers)
+}
+
+/// Which ABI the CPI caller uses — determines how to update AccountInfo after CPI.
+enum CpiCallerAbi {
+    /// C ABI: SolAccountInfo has `data_len` at offset 16 and each struct is 56 bytes.
+    C,
+    /// Rust ABI: AccountInfo has Rc<RefCell<&mut [u8]>> at offset 16; data len is
+    /// inside the RcBox at +32 from the Rc pointer.
+    Rust,
+}
+
+/// Common CPI execution: resolve accounts, dispatch, writeback.
+#[allow(clippy::too_many_arguments)]
+fn execute_cpi(
+    executor: &Arc<dyn InstructionExecutor>,
+    vm: &mut VmState,
+    target_program_id: Pubkey,
+    instruction_data: Vec<u8>,
+    cpi_account_metas: &[(Pubkey, bool, bool)], // (pubkey, is_signer, is_writable)
+    pda_signers: std::collections::HashSet<Pubkey>,
+    caller_abi: CpiCallerAbi,
+    account_infos_addr: u64,
+    account_infos_count: usize,
+) -> Result<u64, VmError> {
+    // Scan the input region to build an offset table for account lookup
+    let input_data = vm.memory.input_data().to_vec();
+    let input_entries = scan_input_region(&input_data);
+
+    // Build the signers set: accounts marked as signer + PDA-derived signers
+    let mut signers = pda_signers;
+    for (pubkey, is_signer, _is_writable) in cpi_account_metas {
+        if *is_signer {
+            signers.insert(*pubkey);
+        }
+    }
+
+    // Capture original data lengths before CPI for writeback comparison
+    let mut original_data_lens: Vec<(Pubkey, usize)> = Vec::new();
+    let mut accounts = Vec::new();
+    for (pubkey, _is_signer, is_writable) in cpi_account_metas {
+        let account = if let Some(entry) = input_entries.iter().find(|e| e.pubkey == *pubkey) {
+            if let Some((_is_wr, acct)) = read_account_from_input(&input_data, entry.offset) {
+                original_data_lens.push((*pubkey, acct.data.as_slice().len()));
+                acct
+            } else {
+                original_data_lens.push((*pubkey, 0));
+                Account::default()
+            }
+        } else {
+            original_data_lens.push((*pubkey, 0));
+            Account::default()
+        };
+        accounts.push((*pubkey, account, *is_writable));
+    }
+
+    let context =
+        ExecutionContext::new(target_program_id, accounts, instruction_data).with_signers(signers);
+
+    vm.cpi_depth += 1;
+    let result = executor.execute_instruction(context);
+    vm.cpi_depth -= 1;
+
+    match result {
+        Ok(outcome) => {
+            if outcome.success {
+                let input_mut = unsafe {
+                    let ptr = vm.memory.input_data().as_ptr() as *mut u8;
+                    let len = vm.memory.input_data().len();
+                    std::slice::from_raw_parts_mut(ptr, len)
+                };
+
+                // Collect data len changes for caller account update
+                let mut data_len_changes: Vec<(Pubkey, usize)> = Vec::new();
+
+                for (pubkey, modified_account) in &outcome.modified_accounts {
+                    if let Some(entry) = input_entries.iter().find(|e| e.pubkey == *pubkey) {
+                        let is_writable = cpi_account_metas
+                            .iter()
+                            .any(|(pk, _, w)| pk == pubkey && *w);
+                        if is_writable {
+                            let new_data_len = modified_account.data.as_slice().len();
+                            let old_data_len = original_data_lens
+                                .iter()
+                                .find(|(pk, _)| pk == pubkey)
+                                .map(|(_, len)| *len)
+                                .unwrap_or(0);
+                            if new_data_len != old_data_len {
+                                data_len_changes.push((*pubkey, new_data_len));
+                            }
+                            writeback_account_to_input(input_mut, entry.offset, modified_account)?;
+                        }
+                    }
+                }
+
+                // Update caller's AccountInfo data lengths in BPF memory
+                if !data_len_changes.is_empty() {
+                    update_caller_account_data_lens(
+                        vm,
+                        &caller_abi,
+                        account_infos_addr,
+                        account_infos_count,
+                        &data_len_changes,
+                    );
+                }
+            }
+
+            for log in &outcome.logs {
+                if !try_append_log(vm, log.clone()) {
+                    break;
+                }
+            }
+
+            if let Some(data) = outcome.return_data {
+                vm.return_data = Some(data);
+            }
+
+            if vm.compute_meter >= outcome.compute_units_consumed {
+                vm.compute_meter -= outcome.compute_units_consumed;
+            } else {
+                vm.compute_meter = 0;
+                return Err(VmError::ComputeBudgetExceeded);
+            }
+
+            if outcome.success {
+                Ok(0)
+            } else {
+                Ok(1)
+            }
+        }
+        Err(_) => Ok(1),
+    }
+}
+
+/// Update the caller BPF program's AccountInfo data lengths after CPI changed them.
+///
+/// For C ABI: `SolAccountInfo.data_len` is a plain u64 field at offset 16 in a 56-byte struct.
+/// For Rust ABI: `AccountInfo.data` is `Rc<RefCell<&mut [u8]>>` at offset 16; the fat pointer
+/// length lives at RcBox + 32 (after strong:8 + weak:8 + borrow_flag:8 + data_ptr:8).
+fn update_caller_account_data_lens(
+    vm: &mut VmState,
+    caller_abi: &CpiCallerAbi,
+    account_infos_addr: u64,
+    account_infos_count: usize,
+    data_len_changes: &[(Pubkey, usize)],
+) {
+    for i in 0..account_infos_count {
+        let (pubkey, key_ok) = match caller_abi {
+            CpiCallerAbi::C => read_c_account_info_pubkey(vm, account_infos_addr, i),
+            CpiCallerAbi::Rust => read_rust_account_info_pubkey(vm, account_infos_addr, i),
+        };
+        if !key_ok {
+            continue;
+        }
+
+        if let Some((_, new_len)) = data_len_changes.iter().find(|(pk, _)| *pk == pubkey) {
+            match caller_abi {
+                CpiCallerAbi::C => {
+                    // SolAccountInfo is 56 bytes; data_len at offset 16
+                    let data_len_addr = account_infos_addr + (i as u64) * 56 + 16;
+                    let _ = vm
+                        .memory
+                        .write_slice(data_len_addr, &(*new_len as u64).to_le_bytes());
+                }
+                CpiCallerAbi::Rust => {
+                    // AccountInfo is 48 bytes; Rc pointer at offset 16
+                    let rc_ptr_addr = account_infos_addr + (i as u64) * 48 + 16;
+                    if let Ok(rc_ptr_bytes) = vm.memory.read_slice(rc_ptr_addr, 8) {
+                        let rc_ptr = u64::from_le_bytes(rc_ptr_bytes.try_into().unwrap());
+                        // RcBox layout: strong(8) + weak(8) + borrow_flag(8) + data_ptr(8) + len(8)
+                        // len is at rc_ptr + 32
+                        let len_addr = rc_ptr + 32;
+                        let _ = vm
+                            .memory
+                            .write_slice(len_addr, &(*new_len as u64).to_le_bytes());
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Read pubkey from C ABI SolAccountInfo at index `i`.
+fn read_c_account_info_pubkey(vm: &VmState, account_infos_addr: u64, i: usize) -> (Pubkey, bool) {
+    // SolAccountInfo is 56 bytes; key pointer at offset 0
+    let info_addr = account_infos_addr + (i as u64) * 56;
+    let key_ptr_bytes = match vm.memory.read_slice(info_addr, 8) {
+        Ok(b) => b,
+        Err(_) => return (Pubkey::default(), false),
+    };
+    let key_ptr = u64::from_le_bytes(key_ptr_bytes.try_into().unwrap());
+    let pk_bytes = match vm.memory.read_slice(key_ptr, 32) {
+        Ok(b) => b,
+        Err(_) => return (Pubkey::default(), false),
+    };
+    let mut pk = [0u8; 32];
+    pk.copy_from_slice(&pk_bytes);
+    (Pubkey::new(pk), true)
+}
+
+/// Read pubkey from Rust ABI AccountInfo at index `i`.
+fn read_rust_account_info_pubkey(
+    vm: &VmState,
+    account_infos_addr: u64,
+    i: usize,
+) -> (Pubkey, bool) {
+    // AccountInfo is 48 bytes; key pointer at offset 0
+    let info_addr = account_infos_addr + (i as u64) * 48;
+    let key_ptr_bytes = match vm.memory.read_slice(info_addr, 8) {
+        Ok(b) => b,
+        Err(_) => return (Pubkey::default(), false),
+    };
+    let key_ptr = u64::from_le_bytes(key_ptr_bytes.try_into().unwrap());
+    let pk_bytes = match vm.memory.read_slice(key_ptr, 32) {
+        Ok(b) => b,
+        Err(_) => return (Pubkey::default(), false),
+    };
+    let mut pk = [0u8; 32];
+    pk.copy_from_slice(&pk_bytes);
+    (Pubkey::new(pk), true)
+}
+
+impl SyscallHandler for SolInvokeCHandler {
     fn call(
         &self,
         vm: &mut VmState,
-        r1: u64, // instruction pointer
+        r1: u64, // instruction pointer (C ABI)
         r2: u64, // account infos pointer
         r3: u64, // account infos count
-        r4: u64, // signer seeds pointer (unused for now)
-        r5: u64, // signer seeds count (unused for now)
+        r4: u64, // signer seeds pointer
+        r5: u64, // signer seeds count
     ) -> Result<u64, VmError> {
         let account_count = r3 as usize;
-
-        // Compute cost proportional to accounts and data
         let base_cost =
             syscalls::CPI_BASE_COST + syscalls::CPI_PER_ACCOUNT_COST * account_count as u64;
         deduct_compute(vm, base_cost)?;
 
-        // Enforce CPI depth limit using dedicated counter
         if vm.cpi_depth >= syscalls::MAX_CPI_DEPTH {
             try_append_log(vm, "CPI depth limit exceeded".to_string());
             return Ok(1);
         }
 
-        // Read instruction from VM memory:
-        // C ABI layout: program_id_ptr(8) + accounts_ptr(8) + accounts_len(8) + data_ptr(8) + data_len(8)
+        // C ABI layout: program_id_ptr(8) + accounts_ptr(8) + accounts_len(8) + data_ptr(8) + data_len(8) = 40
         let instr_bytes = vm
             .memory
             .read_slice(r1, 40)
@@ -2396,7 +2743,6 @@ impl SyscallHandler for SolInvokeHandler {
         let data_ptr = u64::from_le_bytes(instr_bytes[24..32].try_into().unwrap());
         let data_len = u64::from_le_bytes(instr_bytes[32..40].try_into().unwrap()) as usize;
 
-        // Enforce limits
         if acct_metas_len > syscalls::MAX_CPI_INSTRUCTION_ACCOUNTS {
             try_append_log(vm, "Too many CPI instruction accounts".to_string());
             return Ok(1);
@@ -2406,7 +2752,6 @@ impl SyscallHandler for SolInvokeHandler {
             return Ok(1);
         }
 
-        // Read program ID (32 bytes)
         let program_id_bytes = vm
             .memory
             .read_slice(program_id_ptr, 32)
@@ -2415,7 +2760,6 @@ impl SyscallHandler for SolInvokeHandler {
         pid.copy_from_slice(&program_id_bytes);
         let target_program_id = Pubkey::new(pid);
 
-        // Read instruction data
         let instruction_data = if data_len > 0 {
             vm.memory
                 .read_slice(data_ptr, data_len)
@@ -2423,23 +2767,20 @@ impl SyscallHandler for SolInvokeHandler {
         } else {
             vec![]
         };
+        deduct_compute(vm, syscalls::CPI_PER_DATA_BYTE_COST * data_len as u64)?;
 
-        // Deduct per-data-byte cost
-        let data_cost = syscalls::CPI_PER_DATA_BYTE_COST * data_len as u64;
-        deduct_compute(vm, data_cost)?;
-
-        // Read account metas: each is (pubkey_ptr:8, is_signer:8, is_writable:8) = 24 bytes
+        // C ABI AccountMeta: (pubkey_addr:u64, is_writable:u8, is_signer:u8, pad[6]) = 16 bytes
         let mut cpi_account_metas = Vec::with_capacity(acct_metas_len);
         for i in 0..acct_metas_len {
-            let meta_offset = acct_metas_ptr + (i as u64) * 24;
+            let meta_offset = acct_metas_ptr + (i as u64) * 16;
             let meta_bytes = vm
                 .memory
-                .read_slice(meta_offset, 24)
+                .read_slice(meta_offset, 16)
                 .map_err(|e| VmError::MemoryError(e.to_string()))?;
 
             let pk_ptr = u64::from_le_bytes(meta_bytes[0..8].try_into().unwrap());
-            let is_signer = u64::from_le_bytes(meta_bytes[8..16].try_into().unwrap()) != 0;
-            let is_writable = u64::from_le_bytes(meta_bytes[16..24].try_into().unwrap()) != 0;
+            let is_writable = meta_bytes[8] != 0;
+            let is_signer = meta_bytes[9] != 0;
 
             let pk_bytes = vm
                 .memory
@@ -2451,90 +2792,119 @@ impl SyscallHandler for SolInvokeHandler {
             cpi_account_metas.push((Pubkey::new(pk), is_signer, is_writable));
         }
 
-        // Scan the input region to build an offset table for account lookup
-        let input_data = vm.memory.input_data().to_vec();
-        let input_entries = scan_input_region(&input_data);
+        // Derive PDA signers
+        let pda_signers = match derive_pda_signers(vm, r4, r5) {
+            PdaSignerResult::Ok(signers) => signers,
+            PdaSignerResult::Failed(code) => return Ok(code),
+            PdaSignerResult::VmError(e) => return Err(e),
+        };
 
-        // Build execution accounts from the input region
-        let mut accounts = Vec::new();
-        for (pubkey, _is_signer, is_writable) in &cpi_account_metas {
-            // Find this account in the input region
-            let account = if let Some(entry) = input_entries.iter().find(|e| e.pubkey == *pubkey) {
-                if let Some((_is_wr, acct)) = read_account_from_input(&input_data, entry.offset) {
-                    acct
-                } else {
-                    Account::default()
-                }
-            } else {
-                Account::default()
-            };
-            accounts.push((*pubkey, account, *is_writable));
+        execute_cpi(
+            &self.executor,
+            vm,
+            target_program_id,
+            instruction_data,
+            &cpi_account_metas,
+            pda_signers,
+            CpiCallerAbi::C,
+            r2,
+            account_count,
+        )
+    }
+}
+
+impl SyscallHandler for SolInvokeRustHandler {
+    fn call(
+        &self,
+        vm: &mut VmState,
+        r1: u64, // instruction pointer (Rust ABI)
+        r2: u64, // account infos pointer (unused — accounts come from input region)
+        r3: u64, // account infos count
+        r4: u64, // signer seeds pointer
+        r5: u64, // signer seeds count
+    ) -> Result<u64, VmError> {
+        let account_count = r3 as usize;
+        let base_cost =
+            syscalls::CPI_BASE_COST + syscalls::CPI_PER_ACCOUNT_COST * account_count as u64;
+        deduct_compute(vm, base_cost)?;
+
+        if vm.cpi_depth >= syscalls::MAX_CPI_DEPTH {
+            try_append_log(vm, "CPI depth limit exceeded".to_string());
+            return Ok(1);
         }
 
-        // Execute the target program
-        let context = ExecutionContext::new(target_program_id, accounts, instruction_data);
+        // Rust ABI Instruction layout (80 bytes):
+        //   [0..24]  accounts Vec: (addr:8, cap:8, len:8)
+        //   [24..48] data Vec:     (addr:8, cap:8, len:8)
+        //   [48..80] program_id:   [u8; 32] inline
+        let instr_bytes = vm
+            .memory
+            .read_slice(r1, 80)
+            .map_err(|e| VmError::MemoryError(e.to_string()))?;
 
-        vm.cpi_depth += 1;
-        let result = self.executor.execute_instruction(context);
-        vm.cpi_depth -= 1;
+        let acct_metas_ptr = u64::from_le_bytes(instr_bytes[0..8].try_into().unwrap());
+        let _acct_metas_cap = u64::from_le_bytes(instr_bytes[8..16].try_into().unwrap());
+        let acct_metas_len = u64::from_le_bytes(instr_bytes[16..24].try_into().unwrap()) as usize;
+        let data_ptr = u64::from_le_bytes(instr_bytes[24..32].try_into().unwrap());
+        let _data_cap = u64::from_le_bytes(instr_bytes[32..40].try_into().unwrap());
+        let data_len = u64::from_le_bytes(instr_bytes[40..48].try_into().unwrap()) as usize;
+        let mut pid = [0u8; 32];
+        pid.copy_from_slice(&instr_bytes[48..80]);
+        let target_program_id = Pubkey::new(pid);
 
-        match result {
-            Ok(outcome) => {
-                // Write back modified accounts to the caller's input region
-                if outcome.success {
-                    let input_mut = unsafe {
-                        // The input region is owned by this VM and we have &mut vm.
-                        // We need mutable access to write back account data.
-                        let ptr = vm.memory.input_data().as_ptr() as *mut u8;
-                        let len = vm.memory.input_data().len();
-                        std::slice::from_raw_parts_mut(ptr, len)
-                    };
-
-                    for (pubkey, modified_account) in &outcome.modified_accounts {
-                        if let Some(entry) = input_entries.iter().find(|e| e.pubkey == *pubkey) {
-                            // Only write back if the CPI meta marked it writable
-                            let is_writable = cpi_account_metas
-                                .iter()
-                                .any(|(pk, _, w)| pk == pubkey && *w);
-                            if is_writable {
-                                writeback_account_to_input(
-                                    input_mut,
-                                    entry.offset,
-                                    modified_account,
-                                )?;
-                            }
-                        }
-                    }
-                }
-
-                // Copy logs from callee
-                for log in &outcome.logs {
-                    if !try_append_log(vm, log.clone()) {
-                        break;
-                    }
-                }
-
-                // Store return data if any
-                if let Some(data) = outcome.return_data {
-                    vm.return_data = Some(data);
-                }
-
-                // Deduct compute units consumed by callee
-                if vm.compute_meter >= outcome.compute_units_consumed {
-                    vm.compute_meter -= outcome.compute_units_consumed;
-                } else {
-                    vm.compute_meter = 0;
-                    return Err(VmError::ComputeBudgetExceeded);
-                }
-
-                if outcome.success {
-                    Ok(0)
-                } else {
-                    Ok(1) // Callee returned error
-                }
-            }
-            Err(_) => Ok(1), // Execution error
+        if acct_metas_len > syscalls::MAX_CPI_INSTRUCTION_ACCOUNTS {
+            try_append_log(vm, "Too many CPI instruction accounts".to_string());
+            return Ok(1);
         }
+        if data_len > syscalls::MAX_CPI_INSTRUCTION_SIZE {
+            try_append_log(vm, "CPI instruction data too large".to_string());
+            return Ok(1);
+        }
+
+        let instruction_data = if data_len > 0 {
+            vm.memory
+                .read_slice(data_ptr, data_len)
+                .map_err(|e| VmError::MemoryError(e.to_string()))?
+        } else {
+            vec![]
+        };
+        deduct_compute(vm, syscalls::CPI_PER_DATA_BYTE_COST * data_len as u64)?;
+
+        // Rust ABI AccountMeta: (pubkey:[u8;32], is_signer:u8, is_writable:u8) = 34 bytes packed
+        let mut cpi_account_metas = Vec::with_capacity(acct_metas_len);
+        for i in 0..acct_metas_len {
+            let meta_offset = acct_metas_ptr + (i as u64) * 34;
+            let meta_bytes = vm
+                .memory
+                .read_slice(meta_offset, 34)
+                .map_err(|e| VmError::MemoryError(e.to_string()))?;
+
+            let mut pk = [0u8; 32];
+            pk.copy_from_slice(&meta_bytes[0..32]);
+            let is_signer = meta_bytes[32] != 0;
+            let is_writable = meta_bytes[33] != 0;
+
+            cpi_account_metas.push((Pubkey::new(pk), is_signer, is_writable));
+        }
+
+        // Derive PDA signers
+        let pda_signers = match derive_pda_signers(vm, r4, r5) {
+            PdaSignerResult::Ok(signers) => signers,
+            PdaSignerResult::Failed(code) => return Ok(code),
+            PdaSignerResult::VmError(e) => return Err(e),
+        };
+
+        execute_cpi(
+            &self.executor,
+            vm,
+            target_program_id,
+            instruction_data,
+            &cpi_account_metas,
+            pda_signers,
+            CpiCallerAbi::Rust,
+            r2,
+            account_count,
+        )
     }
 }
 
@@ -2859,6 +3229,7 @@ mod tests {
             10_000,
             &dispatch,
             crate::sysvar_snapshot::SysvarSnapshot::default(),
+            karstflow_types::Pubkey::default(),
         )
         .unwrap();
         assert_eq!(result.return_value, 42);
@@ -2889,6 +3260,7 @@ mod tests {
             100_000,
             &dispatch,
             crate::sysvar_snapshot::SysvarSnapshot::default(),
+            karstflow_types::Pubkey::default(),
         )
         .unwrap();
         assert!(result.logs.iter().any(|l| l.contains("Hi")));
@@ -2938,6 +3310,7 @@ mod tests {
             100_000,
             &dispatch,
             crate::sysvar_snapshot::SysvarSnapshot::default(),
+            karstflow_types::Pubkey::default(),
         )
         .unwrap();
         // Should return the heap base address
@@ -2959,6 +3332,7 @@ mod tests {
             10_000,
             &dispatch,
             crate::sysvar_snapshot::SysvarSnapshot::default(),
+            karstflow_types::Pubkey::default(),
         );
         assert!(matches!(result, Err(VmError::UnknownSyscall { id: 0xBAD })));
     }
@@ -3026,11 +3400,11 @@ mod tests {
             Instruction::new(Opcode::StxDword as u8, 3, 1, 0, 0), // store heap_base at pair[0]
             Instruction::new(Opcode::Mov64Imm as u8, 4, 0, 0, 5),
             Instruction::new(Opcode::StxDword as u8, 3, 4, 8, 0), // store len=5 at pair[1]
-            // Call sha256: r1=pair_ptr(heap+64), r2=1(count), r4=result(heap+128)
+            // Call sha256: r1=pair_ptr(heap+64), r2=1(count), r3=result(heap+128)
             Instruction::new(Opcode::Lddw as u8, 1, 0, 0, (REGION_HEAP_BASE + 64) as i32),
             Instruction::new(0, 0, 0, 0, ((REGION_HEAP_BASE + 64) >> 32) as i32),
             Instruction::new(Opcode::Mov64Imm as u8, 2, 0, 0, 1), // 1 pair
-            Instruction::new(Opcode::Lddw as u8, 4, 0, 0, (REGION_HEAP_BASE + 128) as i32),
+            Instruction::new(Opcode::Lddw as u8, 3, 0, 0, (REGION_HEAP_BASE + 128) as i32),
             Instruction::new(0, 0, 0, 0, ((REGION_HEAP_BASE + 128) >> 32) as i32),
             Instruction::new(Opcode::Call as u8, 0, 0, 0, sha_id as i32),
             // Read first 8 bytes of hash into r0 for validation
@@ -3047,6 +3421,7 @@ mod tests {
             1_000_000,
             &dispatch,
             crate::sysvar_snapshot::SysvarSnapshot::default(),
+            karstflow_types::Pubkey::default(),
         )
         .unwrap();
 
@@ -3133,6 +3508,7 @@ mod tests {
             sysvar_snapshot: snapshot,
             cpi_depth: 0,
             sbpf_version: crate::elf_loader::SbpfVersion::V0,
+            program_id: karstflow_types::Pubkey::default(),
         }
     }
 
@@ -3499,7 +3875,7 @@ mod tests {
     // CPI input region tests
     // -----------------------------------------------------------------------
 
-    /// Build a minimal serialized input region with one account.
+    /// Build a minimal serialized input region with one account (aligned format).
     fn make_input_region(
         pubkey: &Pubkey,
         owner: &Pubkey,
@@ -3510,10 +3886,16 @@ mod tests {
         let mut buf = Vec::new();
         // account_count = 1
         buf.extend_from_slice(&1u64.to_le_bytes());
+        // NON_DUP_MARKER
+        buf.push(karstflow_constants::vm::NON_DUP_MARKER);
         // is_signer
         buf.push(0);
         // is_writable
         buf.push(if is_writable { 1 } else { 0 });
+        // is_executable
+        buf.push(0);
+        // padding (4 bytes)
+        buf.extend_from_slice(&0u32.to_le_bytes());
         // pubkey
         buf.extend_from_slice(pubkey.as_ref());
         // owner
@@ -3521,12 +3903,20 @@ mod tests {
         // lamports
         buf.extend_from_slice(&lamports.to_le_bytes());
         // data_len
-        buf.extend_from_slice(&(data.len() as u64).to_le_bytes());
+        let data_len = data.len();
+        buf.extend_from_slice(&(data_len as u64).to_le_bytes());
         // data
         buf.extend_from_slice(data);
-        // padding
-        let padding = (8 - (buf.len() % 8)) % 8;
-        buf.extend(std::iter::repeat_n(0u8, padding));
+        // realloc buffer (MAX_PERMITTED_DATA_INCREASE bytes, zeroed)
+        buf.resize(
+            buf.len() + karstflow_constants::vm::MAX_PERMITTED_DATA_INCREASE,
+            0,
+        );
+        // alignment padding
+        let align_offset = data_len.wrapping_neg() & (karstflow_constants::vm::ALIGN_OF_U128 - 1);
+        buf.resize(buf.len() + align_offset, 0);
+        // rent_epoch (8 bytes)
+        buf.extend_from_slice(&u64::MAX.to_le_bytes());
         buf
     }
 
@@ -3585,14 +3975,14 @@ mod tests {
     }
 
     #[test]
-    fn writeback_rejects_data_growth() {
+    fn writeback_allows_data_growth_within_realloc_limit() {
         let pk = Pubkey::new([1u8; 32]);
         let owner = Pubkey::new([2u8; 32]);
         let mut input = make_input_region(&pk, &owner, 1000, &[0; 8], true);
 
         let entries = scan_input_region(&input);
 
-        // Try to write back with larger data
+        // Growing from 8 to 16 bytes is within realloc buffer (MAX_PERMITTED_DATA_INCREASE)
         let modified = Account {
             meta: TypesAccountMeta {
                 lamports: 1000,
@@ -3600,7 +3990,33 @@ mod tests {
                 executable: false,
                 rent_epoch: 0,
             },
-            data: AccountData::new(vec![0; 16]), // 16 > original 8
+            data: AccountData::new(vec![0xCC; 16]),
+        };
+
+        writeback_account_to_input(&mut input, entries[0].offset, &modified).unwrap();
+
+        let (_, readback) = read_account_from_input(&input, entries[0].offset).unwrap();
+        assert_eq!(readback.data.as_slice(), &[0xCC; 16]);
+    }
+
+    #[test]
+    fn writeback_rejects_data_growth_beyond_realloc_limit() {
+        let pk = Pubkey::new([1u8; 32]);
+        let owner = Pubkey::new([2u8; 32]);
+        let mut input = make_input_region(&pk, &owner, 1000, &[0; 8], true);
+
+        let entries = scan_input_region(&input);
+
+        // Exceeding original + MAX_PERMITTED_DATA_INCREASE should fail
+        let too_large = vec![0; 8 + karstflow_constants::vm::MAX_PERMITTED_DATA_INCREASE + 1];
+        let modified = Account {
+            meta: TypesAccountMeta {
+                lamports: 1000,
+                owner,
+                executable: false,
+                rent_epoch: 0,
+            },
+            data: AccountData::new(too_large),
         };
 
         let result = writeback_account_to_input(&mut input, entries[0].offset, &modified);
@@ -3629,9 +4045,8 @@ mod tests {
         writeback_account_to_input(&mut input, entries[0].offset, &modified).unwrap();
 
         let (_, readback) = read_account_from_input(&input, entries[0].offset).unwrap();
-        // First 4 bytes are 0xBB, remaining 12 are zeroed
-        assert_eq!(&readback.data.as_slice()[..4], &[0xBB; 4]);
-        assert_eq!(&readback.data.as_slice()[4..], &[0; 12]);
+        // data_len is updated to 4; only the written bytes are returned
+        assert_eq!(readback.data.as_slice(), &[0xBB; 4]);
     }
 
     #[test]
@@ -3654,28 +4069,45 @@ mod tests {
         let mut buf = Vec::new();
         buf.extend_from_slice(&2u64.to_le_bytes()); // 2 accounts
 
-        // Account 1
-        buf.push(0);
-        buf.push(1); // is_signer=0, is_writable=1
+        // Account 1 (aligned format)
+        buf.push(karstflow_constants::vm::NON_DUP_MARKER);
+        buf.push(0); // is_signer
+        buf.push(1); // is_writable
+        buf.push(0); // is_executable
+        buf.extend_from_slice(&0u32.to_le_bytes()); // padding
         buf.extend_from_slice(pk1.as_ref());
         buf.extend_from_slice(owner.as_ref());
         buf.extend_from_slice(&100u64.to_le_bytes());
-        buf.extend_from_slice(&8u64.to_le_bytes());
+        let data1_len: usize = 8;
+        buf.extend_from_slice(&(data1_len as u64).to_le_bytes());
         buf.extend_from_slice(&[0xAA; 8]);
-        // No padding needed (8 + 2 + 32 + 32 + 8 + 8 + 8 = 98; 98%8=2 → pad 6)
-        let padding = (8 - (buf.len() % 8)) % 8;
-        buf.extend(std::iter::repeat_n(0u8, padding));
+        buf.resize(
+            buf.len() + karstflow_constants::vm::MAX_PERMITTED_DATA_INCREASE,
+            0,
+        );
+        let align1 = data1_len.wrapping_neg() & (karstflow_constants::vm::ALIGN_OF_U128 - 1);
+        buf.resize(buf.len() + align1, 0);
+        buf.extend_from_slice(&u64::MAX.to_le_bytes()); // rent_epoch
 
-        // Account 2
-        buf.push(0);
-        buf.push(0); // is_signer=0, is_writable=0
+        // Account 2 (aligned format)
+        buf.push(karstflow_constants::vm::NON_DUP_MARKER);
+        buf.push(0); // is_signer
+        buf.push(0); // is_writable
+        buf.push(0); // is_executable
+        buf.extend_from_slice(&0u32.to_le_bytes()); // padding
         buf.extend_from_slice(pk2.as_ref());
         buf.extend_from_slice(owner.as_ref());
         buf.extend_from_slice(&200u64.to_le_bytes());
-        buf.extend_from_slice(&4u64.to_le_bytes());
+        let data2_len: usize = 4;
+        buf.extend_from_slice(&(data2_len as u64).to_le_bytes());
         buf.extend_from_slice(&[0xBB; 4]);
-        let padding = (8 - (buf.len() % 8)) % 8;
-        buf.extend(std::iter::repeat_n(0u8, padding));
+        buf.resize(
+            buf.len() + karstflow_constants::vm::MAX_PERMITTED_DATA_INCREASE,
+            0,
+        );
+        let align2 = data2_len.wrapping_neg() & (karstflow_constants::vm::ALIGN_OF_U128 - 1);
+        buf.resize(buf.len() + align2, 0);
+        buf.extend_from_slice(&u64::MAX.to_le_bytes()); // rent_epoch
 
         let entries = scan_input_region(&buf);
         assert_eq!(entries.len(), 2);
@@ -3695,7 +4127,7 @@ mod tests {
     fn cpi_depth_limit_uses_dedicated_field() {
         // Verify that CPI depth uses vm.cpi_depth, not call_stack.len()
         let executor = Arc::new(CountingExecutor::new());
-        let handler = SolInvokeHandler {
+        let handler = SolInvokeCHandler {
             executor: executor.clone(),
         };
 
@@ -3838,6 +4270,7 @@ mod tests {
             sysvar_snapshot: crate::sysvar_snapshot::SysvarSnapshot::default(),
             cpi_depth: 0,
             sbpf_version: crate::elf_loader::SbpfVersion::V0,
+            program_id: karstflow_types::Pubkey::default(),
         }
     }
 
@@ -4122,5 +4555,136 @@ mod tests {
         let result = handler.call(&mut vm, 0, 0, 0, 0, 0).unwrap();
         assert_eq!(result, 0);
         assert_eq!(vm.logs[0], "Program data: ");
+    }
+
+    // -----------------------------------------------------------------------
+    // C ABI CPI handler unit test
+    // -----------------------------------------------------------------------
+
+    /// Executor that captures the context it receives for assertion.
+    struct CapturingExecutor {
+        captured: std::sync::Mutex<Option<crate::ExecutionContext>>,
+    }
+
+    impl CapturingExecutor {
+        fn new() -> Self {
+            Self {
+                captured: std::sync::Mutex::new(None),
+            }
+        }
+
+        fn take(&self) -> Option<crate::ExecutionContext> {
+            self.captured.lock().unwrap().take()
+        }
+    }
+
+    impl InstructionExecutor for CapturingExecutor {
+        fn execute_instruction(
+            &self,
+            context: crate::ExecutionContext,
+        ) -> Result<crate::ExecutionOutcome, crate::SbpfExecutionError> {
+            *self.captured.lock().unwrap() = Some(context);
+            Ok(crate::ExecutionOutcome::success(50))
+        }
+    }
+
+    #[test]
+    fn cpi_c_abi_parses_instruction_correctly() {
+        use karstflow_constants::vm::REGION_INPUT_BASE;
+
+        let executor = Arc::new(CapturingExecutor::new());
+        let handler = SolInvokeCHandler {
+            executor: executor.clone(),
+        };
+
+        // --- Lay out C ABI structures in heap memory ---
+        // Heap layout:
+        //   0x000: target program_id (32 bytes)
+        //   0x020: account pubkey (32 bytes)
+        //   0x040: C ABI AccountMeta[1] (16 bytes)
+        //   0x050: instruction data (4 bytes)
+        //   0x060: C ABI Instruction (40 bytes)
+        let base = REGION_HEAP_BASE;
+        let program_id_addr = base; // 0x000
+        let acct_pubkey_addr = base + 0x20; // 0x020
+        let acct_metas_addr = base + 0x40; // 0x040
+        let idata_addr = base + 0x50; // 0x050
+        let instr_addr = base + 0x60; // 0x060
+
+        let target_pid = Pubkey::new([0xAA; 32]);
+        let acct_pk = Pubkey::new([0xBB; 32]);
+        let idata = [1u8, 2, 3, 4];
+
+        // Build input region with one account matching acct_pk
+        let owner = Pubkey::new([0xCC; 32]);
+        let input_data = make_input_region(&acct_pk, &owner, 5000, &[0; 8], true);
+
+        // Create VM with input region
+        let mut vm = VmState {
+            registers: [0u64; 11],
+            pc: 0,
+            instruction_count: 0,
+            memory: MemoryMap::new(&[], TOTAL_STACK_SIZE, DEFAULT_HEAP_SIZE, input_data),
+            call_stack: Vec::new(),
+            compute_meter: 10_000_000,
+            logs: Vec::new(),
+            log_bytes_written: 0,
+            log_truncated: false,
+            return_data: None,
+            heap_position: REGION_HEAP_BASE,
+            sysvar_snapshot: crate::sysvar_snapshot::SysvarSnapshot::default(),
+            cpi_depth: 0,
+            sbpf_version: crate::elf_loader::SbpfVersion::V0,
+            program_id: karstflow_types::Pubkey::default(),
+        };
+
+        // Write target program ID
+        vm.memory
+            .write_slice(program_id_addr, target_pid.as_ref())
+            .unwrap();
+
+        // Write account pubkey
+        vm.memory
+            .write_slice(acct_pubkey_addr, acct_pk.as_ref())
+            .unwrap();
+
+        // Write C ABI AccountMeta: pubkey_addr(8) + is_writable(1) + is_signer(1) + pad(6) = 16
+        let mut meta_buf = [0u8; 16];
+        meta_buf[0..8].copy_from_slice(&acct_pubkey_addr.to_le_bytes());
+        meta_buf[8] = 1; // is_writable
+        meta_buf[9] = 1; // is_signer
+        vm.memory.write_slice(acct_metas_addr, &meta_buf).unwrap();
+
+        // Write instruction data
+        vm.memory.write_slice(idata_addr, &idata).unwrap();
+
+        // Write C ABI Instruction: program_id_ptr(8) + accounts_ptr(8) + accounts_len(8) + data_ptr(8) + data_len(8) = 40
+        let mut instr_buf = [0u8; 40];
+        instr_buf[0..8].copy_from_slice(&program_id_addr.to_le_bytes());
+        instr_buf[8..16].copy_from_slice(&acct_metas_addr.to_le_bytes());
+        instr_buf[16..24].copy_from_slice(&1u64.to_le_bytes()); // 1 account meta
+        instr_buf[24..32].copy_from_slice(&idata_addr.to_le_bytes());
+        instr_buf[32..40].copy_from_slice(&(idata.len() as u64).to_le_bytes());
+        vm.memory.write_slice(instr_addr, &instr_buf).unwrap();
+
+        // --- Call the handler (no signer seeds: r4=0, r5=0) ---
+        let ret = handler
+            .call(&mut vm, instr_addr, REGION_INPUT_BASE, 1, 0, 0)
+            .unwrap();
+        assert_eq!(ret, 0, "CPI should succeed");
+
+        // --- Verify the executor received correctly parsed data ---
+        let ctx = executor.take().expect("executor should have been called");
+        assert_eq!(ctx.program_id, target_pid);
+        assert_eq!(ctx.instruction_data, idata.to_vec());
+        assert_eq!(ctx.accounts.len(), 1);
+        let (pk, acct, writable) = &ctx.accounts[0];
+        assert_eq!(*pk, acct_pk);
+        assert!(writable);
+        assert_eq!(acct.meta.lamports, 5000);
+        assert_eq!(acct.meta.owner, owner);
+
+        // Verify signer was tracked
+        assert!(ctx.signers.contains(&acct_pk));
     }
 }

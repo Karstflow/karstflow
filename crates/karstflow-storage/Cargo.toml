@@ -6,11 +6,11 @@ license.workspace = true
 authors.workspace = true
 
 [dependencies]
-karstflow-constants = { path = "../karstflow-constants" }
-karstflow-types = { path = "../karstflow-types" }
-karstflow-sbpf = { path = "../karstflow-sbpf" }
-karstflow-ids = { path = "../karstflow-ids" }
-karstflow-crypto = { path = "../karstflow-crypto" }
+karstflow-constants = { workspace = true }
+karstflow-types = { workspace = true }
+karstflow-sbpf = { workspace = true }
+karstflow-ids = { workspace = true }
+karstflow-crypto = { workspace = true }
 crossbeam-channel = { workspace = true }
 tracing.workspace = true
 thiserror.workspace = true

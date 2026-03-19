@@ -1,136 +1,31 @@
+mod diagnostics;
+mod leader_orchestrator;
 mod plugin_notifier;
+mod shredding;
+mod slot_driver;
+mod turbine_receiver;
 
 use karstflow_observability::{init_tracing, TracingConfig};
 use karstflow_plugin::PluginService;
 use tracing::{info, warn};
 
 use karstflow_control::{
-    bootstrap_from_development_genesis, bootstrap_from_genesis_file,
-    build_diagnostics_summary_from_probe, build_pipeline_service, build_repair_service,
-    build_replay_service_with_consensus, build_storage_maintenance_service, build_turbine_service,
-    build_vote_broadcast_service, build_vote_sender_service, dispatch_command,
-    ensure_mainnet_readiness, evaluate_mainnet_readiness, materialize_service_pair_from_config,
-    materialize_services_from_config, maybe_spawn_quic_bridge, parse_command,
-    render_diagnostics_cluster_mode_line, render_diagnostics_lane_capacity_line,
-    render_diagnostics_ok_line, render_diagnostics_probe_line,
-    render_diagnostics_readiness_issue_line, render_diagnostics_readiness_line,
-    render_diagnostics_services_line, render_diagnostics_stage_mix_line,
-    render_diagnostics_topology_line, render_preflight_readiness_issue_line,
-    render_preflight_readiness_line, render_readiness_policy_line, resolve_validator_identity,
-    restore_from_snapshot_archive, run_diagnostics_phase, run_preflight_phase,
-    run_preflight_phase_with_probe_report, run_runtime_phase_with_consensus, save_tower_to_disk,
-    start_gossip_service, BlockstoreShredProvider, ServiceBundle,
+    bootstrap_from_development_genesis, bootstrap_from_genesis_file, build_pipeline_service,
+    build_repair_service, build_replay_service_with_consensus, build_storage_maintenance_service,
+    build_turbine_service, build_vote_broadcast_service, build_vote_sender_service,
+    dispatch_command, materialize_service_pair_from_config, maybe_spawn_quic_bridge, parse_command,
+    resolve_validator_identity, restore_from_snapshot_archive, run_runtime_phase_with_consensus,
+    save_tower_to_disk, start_gossip_service, BlockstoreShredProvider,
+    ConsensusTransactionSubmitter, ServiceBundle,
 };
-
-/// Shred produced entries, store in blockstore, and feed to self-replay.
-///
-/// Called by the leader orchestrator after a slot completes. Converts
-/// PohEntries into data + coding shreds, persists them in the blockstore
-/// for repair serving, and sends data shreds to the ShredCollector for
-/// self-replay of the produced block.
-fn shred_produced_entries(
-    slot: u64,
-    entry_batches: &[Vec<karstflow_stages::PohEntry>],
-    leader_pubkey: karstflow_storage::Pubkey,
-    signing_key: &ed25519_dalek::SigningKey,
-    shred_version: u16,
-    blockstore: Option<&std::sync::Arc<karstflow_storage::Blockstore>>,
-    direct_shred_sender: &mut Option<karstflow_mesh::DualSender<karstflow_types::shred::Shred>>,
-) {
-    let config = karstflow_stages::ShredderConfig {
-        shred_version,
-        ..Default::default()
-    };
-    let mut shredder = match karstflow_stages::EntryShredder::new(
-        leader_pubkey,
-        Some(signing_key.clone()),
-        slot,
-        config,
-    ) {
-        Ok(s) => s,
-        Err(e) => {
-            warn!(slot, error = %e, "failed to create shredder for produced block");
-            return;
-        }
-    };
-
-    let mut total_data = 0u64;
-    let mut total_coding = 0u64;
-
-    for batch in entry_batches {
-        if batch.is_empty() {
-            continue;
-        }
-
-        let data_shreds = match shredder.create_data_shreds(batch) {
-            Ok(shreds) => shreds,
-            Err(e) => {
-                warn!(slot, error = %e, "failed to create data shreds");
-                continue;
-            }
-        };
-        let coding_shreds = match shredder.create_coding_shreds(&data_shreds) {
-            Ok(shreds) => shreds,
-            Err(e) => {
-                warn!(slot, error = %e, "failed to create coding shreds");
-                // Still process data shreds even if coding fails.
-                for shred in &data_shreds {
-                    if let Some(bs) = blockstore {
-                        if let Err(e) = bs.insert_shred(shred) {
-                            warn!(slot, error = %e, "blockstore insert failed for produced shred");
-                        }
-                    }
-                    if let Some(ref mut sender) = direct_shred_sender {
-                        if let Err(e) = sender.try_send(shred.clone()) {
-                            warn!(slot, error = ?e, "self-replay channel full, shred dropped");
-                        }
-                    }
-                }
-                total_data += data_shreds.len() as u64;
-                continue;
-            }
-        };
-
-        total_data += data_shreds.len() as u64;
-        total_coding += coding_shreds.len() as u64;
-
-        // Store all shreds in blockstore for repair serving.
-        if let Some(bs) = blockstore {
-            for shred in data_shreds.iter().chain(coding_shreds.iter()) {
-                if let Err(e) = bs.insert_shred(shred) {
-                    warn!(slot, error = %e, "blockstore insert failed for produced shred");
-                }
-            }
-        }
-
-        // Feed data shreds to ShredCollector for self-replay.
-        // This closes the loop: leader produces → shreds → block assembled → replay.
-        if let Some(ref mut sender) = direct_shred_sender {
-            for shred in &data_shreds {
-                if let Err(e) = sender.try_send(shred.clone()) {
-                    warn!(slot, error = ?e, "self-replay channel full, shred dropped");
-                }
-            }
-        }
-    }
-
-    if total_data > 0 || total_coding > 0 {
-        info!(
-            slot,
-            data_shreds = total_data,
-            coding_shreds = total_coding,
-            "produced and broadcast block shreds",
-        );
-    }
-}
 
 fn main() -> karstflow_control::Result<()> {
     let parsed_command = parse_command(std::env::args())?;
     dispatch_command(
         parsed_command,
         run_with_node_config,
-        preflight_with_node_config,
-        diagnostics_with_node_config,
+        diagnostics::preflight_with_node_config,
+        diagnostics::diagnostics_with_node_config,
     )
 }
 
@@ -199,23 +94,121 @@ fn run_with_node_config(
     let runtime_topology = topology_pair.runtime;
 
     // Connect the shred collection pipeline to the replay service.
-    // Assembled blocks from the TVU receive path (EdgeIntake → ShredFilter →
-    // ShredNetworkService → ShredCollector) feed directly into replay for
+    // Assembled blocks from the TVU receive path (EdgeIntake -> ShredFilter ->
+    // ShredNetworkService -> ShredCollector) feed directly into replay for
     // consensus processing.
     let shred_block_input = runtime_topology
         .shred_block_receiver
         .expect("topology must provide shred block receiver");
     // Direct shred sender feeds produced shreds into ShredCollector for
     // self-replay. Used by the leader orchestrator during block production.
+    // Clone for TVU receive path (cross-node shred injection).
     let direct_shred_sender = runtime_topology.direct_shred_sender;
+    let tvu_shred_sender = direct_shred_sender.as_ref().and_then(|s| {
+        if let karstflow_mesh::DualSender::Channel(ref port) = s {
+            Some(karstflow_mesh::DualSender::Channel(port.clone()))
+        } else {
+            None
+        }
+    });
     // Shred arrival receiver feeds the repair coordinator with turbine
     // progress information so it avoids requesting shreds already received.
     let shred_arrival_rx = runtime_topology
         .shred_arrival_receiver
         .unwrap_or_else(|| crossbeam_channel::bounded(1).1);
 
-    // Choose bootstrap path: snapshot archive → genesis file → empty genesis.
-    let replay_bundle = if let Some(ref archive_path) = node_config.snapshot_archive_path {
+    // Live mode without snapshot: auto-download genesis + snapshot from network.
+    // Gossip is already running, so we can discover peers.
+    let mut snapshot_archive_path_override: Option<std::path::PathBuf> = None;
+    let mut genesis_path_override: Option<std::path::PathBuf> = None;
+    if node_config.cluster_mode == karstflow_config::ClusterMode::Live
+        && node_config.snapshot_archive_path.is_none()
+        && node_config.genesis_path.is_none()
+    {
+        let output_dir = node_config
+            .data_dir
+            .clone()
+            .unwrap_or_else(|| std::path::PathBuf::from("/tmp/karstflow-snapshots"));
+        std::fs::create_dir_all(&output_dir).ok();
+
+        // Step 1: Download genesis.bin from entrypoint RPC endpoints.
+        // Genesis is immutable per network and served at /genesis.tar.bz2.
+        info!("live mode: downloading genesis from entrypoints...");
+        let entrypoint_rpc_addrs: Vec<std::net::SocketAddr> = node_config
+            .live_entrypoints
+            .iter()
+            .map(|ep| std::net::SocketAddr::new(ep.ip(), 8899))
+            .collect();
+        match karstflow_net::snapshot_download::download_genesis(
+            &entrypoint_rpc_addrs,
+            &output_dir,
+            30,
+        ) {
+            Ok(path) => {
+                info!(path = %path.display(), "genesis.bin downloaded");
+                genesis_path_override = Some(path);
+            }
+            Err(e) => {
+                warn!(error = %e, "genesis download failed — trying without genesis");
+            }
+        }
+
+        // Step 2: Download snapshot from gossip peers (+ fallback HTTP servers).
+        info!("live mode: downloading snapshot from network peers...");
+        let mut download_config =
+            karstflow_control::snapshot_download::SnapshotDownloadConfig::default();
+        // Fallback servers from KARSTFLOW_SNAPSHOT_SERVERS env (comma-separated).
+        // Example: KARSTFLOW_SNAPSHOT_SERVERS=api.devnet.solana.com:80,backup.example.com:8899
+        if let Ok(servers_str) = std::env::var("KARSTFLOW_SNAPSHOT_SERVERS") {
+            for s in servers_str.split(',') {
+                if let Ok(addr) = s.trim().parse::<std::net::SocketAddr>() {
+                    download_config.fallback_servers.push(addr);
+                } else {
+                    warn!(
+                        server = s.trim(),
+                        "invalid fallback server address, skipping"
+                    );
+                }
+            }
+            if !download_config.fallback_servers.is_empty() {
+                info!(
+                    servers = download_config.fallback_servers.len(),
+                    "configured fallback snapshot servers"
+                );
+            }
+        }
+        let crds_table = gossip_handle.cluster_info.crds_table().clone();
+        match karstflow_control::snapshot_download::download_snapshot_from_network(
+            &crds_table,
+            &output_dir,
+            &download_config,
+        ) {
+            Ok(result) => {
+                info!(
+                    path = %result.full_snapshot_path.display(),
+                    peer = %result.peer.rpc_addr,
+                    "snapshot downloaded successfully"
+                );
+                snapshot_archive_path_override = Some(result.full_snapshot_path);
+            }
+            Err(e) => {
+                warn!(error = %e, "snapshot download failed — cannot join live network without snapshot");
+                return Err(karstflow_control::ControlPlaneError::Bootstrap {
+                    message: format!("snapshot download failed: {e}"),
+                });
+            }
+        }
+    }
+
+    // Choose bootstrap path: snapshot archive -> genesis file -> empty genesis.
+    let effective_snapshot_path = snapshot_archive_path_override
+        .as_deref()
+        .or(node_config.snapshot_archive_path.as_deref());
+    let effective_genesis_path = genesis_path_override
+        .as_deref()
+        .or(node_config.genesis_path.as_deref());
+    let is_dev_mode = effective_snapshot_path.is_none() && effective_genesis_path.is_none();
+    let replay_bundle = if let Some(archive_path) = effective_snapshot_path {
         // Path 1: Restore from a Solana snapshot archive to join an existing network.
         let identity_pubkey = karstflow_storage::Pubkey::from(*identity.pubkey());
         let consensus = restore_from_snapshot_archive(
@@ -230,7 +223,7 @@ fn run_with_node_config(
             consensus,
             Some(*identity.pubkey()),
         )
-    } else if let Some(ref genesis_path) = node_config.genesis_path {
+    } else if let Some(genesis_path) = effective_genesis_path {
         // Path 2: Bootstrap from a genesis.bin file (fresh cluster or dev mode).
         let identity_pubkey = karstflow_storage::Pubkey::from(*identity.pubkey());
         let consensus = bootstrap_from_genesis_file(
@@ -238,8 +231,14 @@ fn run_with_node_config(
             node_config.data_dir.as_deref(),
             Some(&identity_pubkey),
         )?;
+        // Disable PoH verification for cluster mode — each node generates
+        // independent PoH chains. Production clusters will share PoH chain
+        // from genesis after proper PoH synchronization is implemented.
+        let mut replay_config = karstflow_stages::ReplayServiceConfig::default();
+        replay_config.replay_config.verify_poh = false;
+        replay_config.replay_config.replay_mode = true;
         build_replay_service_with_consensus(
-            karstflow_stages::ReplayServiceConfig::default(),
+            replay_config,
             shred_block_input,
             consensus,
             Some(*identity.pubkey()),
@@ -425,9 +424,35 @@ fn run_with_node_config(
             .expect("failed to spawn gossip-status thread");
     }
 
+    // Wire SlotCompleted signals to consensus slot channel.
+    // This ensures leader-produced slots (frozen by slot driver, not
+    // by replay_block) still trigger consensus decisions (voting +
+    // root advancement). Without this, the tower never advances and
+    // root stays at 0.
+    {
+        let consensus_signal_rx = replay_bundle
+            .signal_bus
+            .lock()
+            .expect("signal_bus lock poisoned")
+            .subscribe()
+            .expect("signal bus subscriber limit not reached");
+        let consensus_tx = replay_bundle.consensus_slot_tx.clone();
+
+        std::thread::Builder::new()
+            .name("consensus-slot".into())
+            .spawn(move || {
+                while let Ok(signal) = consensus_signal_rx.recv() {
+                    if let karstflow_stages::ReplaySignal::SlotCompleted(info) = signal {
+                        let _ = consensus_tx.try_send(info.slot);
+                    }
+                }
+            })
+            .expect("failed to spawn consensus-slot thread");
+    }
+
     // Wire replay signals to the plugin service.
     // Subscribe to the SignalBus, then start the plugin observer that
-    // translates ReplaySignal → PluginEvent for all loaded plugins.
+    // translates ReplaySignal -> PluginEvent for all loaded plugins.
     {
         let (plugin_tx, plugin_rx) = crossbeam_channel::bounded(256);
         let signal_rx = replay_bundle
@@ -437,7 +462,7 @@ fn run_with_node_config(
             .subscribe()
             .expect("signal bus subscriber limit not reached");
 
-        // Bridge thread: ReplaySignal → PluginEvent conversion.
+        // Bridge thread: ReplaySignal -> PluginEvent conversion.
         std::thread::Builder::new()
             .name("plugin-bridge".into())
             .spawn(move || {
@@ -536,84 +561,105 @@ fn run_with_node_config(
             backend,
         ))
     };
-    let pipeline_bundle = build_pipeline_service(
-        karstflow_stages::PipelineServiceConfig::default(),
-        pipeline_inputs,
-        Some(leader_exec_engine),
-    );
-    // Wire leader slot orchestration: subscribe to replay signals and
-    // drive the pipeline handle when this validator becomes leader.
-    // After each leader slot completes, entries are shredded and broadcast
-    // to the turbine tree, stored in the blockstore, and fed back to the
-    // shred collector for self-replay.
+    // Dev mode uses hashes_per_tick=1 for instant ticks (fast E2E tests).
+    // Cluster/live mode calibrates hashes_per_tick to the current hardware's
+    // SHA-256 speed, targeting ~400ms per slot (64 ticks × ~6.25ms each).
+    // On fast hardware (mainnet AMD EPYC): hashes_per_tick ≈ 62,500.
+    // On slower hardware (MacBook): auto-adjusted lower for ~400ms slots.
+    let pipeline_config = if is_dev_mode {
+        karstflow_stages::PipelineServiceConfig::dev()
+    } else {
+        karstflow_stages::PipelineServiceConfig::calibrated()
+    };
+    let pipeline_bundle =
+        build_pipeline_service(pipeline_config, pipeline_inputs, Some(leader_exec_engine));
+    // Wire replay slot completions to the resolv stage's blockhash ring.
+    // This follows the reference implementation pattern: when replay freezes
+    // a bank (for both leader and non-leader slots), the resulting blockhash
+    // is registered with resolv so future transactions referencing it can
+    // be validated.
     {
-        let leader_signal_rx = replay_bundle
+        let resolv_signal_rx = replay_bundle
             .signal_bus
             .lock()
             .expect("signal_bus lock poisoned")
             .subscribe()
             .expect("signal bus subscriber limit not reached");
-        let handle = pipeline_bundle.handle.clone();
+        let resolv_pipeline = pipeline_bundle.handle.clone();
 
-        // Identity for shred signing.
+        std::thread::Builder::new()
+            .name("resolv-blockhash".into())
+            .spawn(move || {
+                while let Ok(signal) = resolv_signal_rx.recv() {
+                    if let karstflow_stages::ReplaySignal::SlotCompleted(info) = signal {
+                        resolv_pipeline.register_blockhash(info.bank_hash, info.slot);
+                        resolv_pipeline.advance_slot(info.slot);
+                    }
+                }
+            })
+            .expect("failed to spawn resolv-blockhash thread");
+    }
+
+    // Deferred turbine retransmit handle — populated after turbine service
+    // is built, read by the leader orchestrator during block production.
+    let deferred_retransmit: std::sync::Arc<
+        std::sync::RwLock<Option<std::sync::Arc<karstflow_net::RetransmitService>>>,
+    > = std::sync::Arc::new(std::sync::RwLock::new(None));
+
+    // Wire leader slot orchestration.
+    {
         let leader_pubkey = karstflow_storage::Pubkey::from(*identity.pubkey());
         let leader_signing_key = ed25519_dalek::SigningKey::from_bytes(identity.secret_key());
         let shred_version = node_config.expected_shred_version.unwrap_or(1);
 
-        // Clone shared resources for the orchestrator thread.
-        let orchestrator_blockstore = shared_blockstore.clone();
-        let mut orchestrator_shred_sender = direct_shred_sender;
+        // In cluster mode (genesis file), skip self-replay via ShredCollector.
+        // The slot driver manages bank lifecycle directly for leader slots.
+        // Self-replay would cause BankFrozen → mark_dead → BlockCostLimitExceeded.
+        let orchestrator_shred_sender =
+            if node_config.genesis_path.is_some() || genesis_path_override.is_some() {
+                None
+            } else {
+                direct_shred_sender
+            };
 
-        std::thread::Builder::new()
-            .name("leader-orchestrator".into())
-            .spawn(move || {
-                while let Ok(signal) = leader_signal_rx.recv() {
-                    match signal {
-                        karstflow_stages::ReplaySignal::BecameLeader(info) => {
-                            info!(
-                                start_slot = info.start_slot,
-                                end_slot = info.end_slot,
-                                epoch = info.epoch,
-                                "activating block production for leader range",
-                            );
-                            handle.begin_slot(info.start_slot);
-                        }
-                        karstflow_stages::ReplaySignal::SlotCompleted(info) => {
-                            if handle.is_leading() && info.slot == handle.current_slot() {
-                                let slot = info.slot;
-                                handle.end_slot();
-                                // Register the new blockhash so the resolv
-                                // stage can validate transactions referencing it.
-                                handle.register_blockhash(info.bank_hash, slot);
+        leader_orchestrator::spawn_leader_orchestrator(
+            &replay_bundle.signal_bus,
+            pipeline_bundle.handle.clone(),
+            leader_pubkey,
+            leader_signing_key,
+            shred_version,
+            deferred_retransmit.clone(),
+            shared_blockstore.clone(),
+            orchestrator_shred_sender,
+        );
+    }
 
-                                // Extract produced entries and shred them.
-                                // The take_entries() call blocks briefly until
-                                // the pipeline service processes the request.
-                                let entry_batches = handle.take_entries();
-                                if !entry_batches.is_empty() {
-                                    shred_produced_entries(
-                                        slot,
-                                        &entry_batches,
-                                        leader_pubkey,
-                                        &leader_signing_key,
-                                        shred_version,
-                                        orchestrator_blockstore.as_ref(),
-                                        &mut orchestrator_shred_sender,
-                                    );
-                                }
-                            }
-                        }
-                        karstflow_stages::ReplaySignal::RootAdvanced(info) => {
-                            // Advance the resolv slot so stale transactions
-                            // referencing blockhashes older than the root are
-                            // expired.
-                            handle.advance_slot(info.new_root);
-                        }
-                        _ => {}
-                    }
-                }
-            })
-            .expect("failed to spawn leader orchestrator thread");
+    // Cluster slot driver for genesis-file mode.
+    let has_genesis_file = node_config.genesis_path.is_some() || genesis_path_override.is_some();
+    if has_genesis_file && !is_dev_mode {
+        let identity_pubkey = karstflow_storage::Pubkey::from(*identity.pubkey());
+        slot_driver::spawn_cluster_slot_driver(
+            identity_pubkey,
+            consensus.bank_forks.clone(),
+            replay_bundle.signal_bus.clone(),
+            pipeline_bundle.handle.clone(),
+            if is_dev_mode {
+                1
+            } else {
+                karstflow_constants::ledger::DEFAULT_HASHES_PER_TICK
+            },
+        );
+    }
+
+    // Dev mode genesis completion.
+    if is_dev_mode {
+        let identity_pubkey = karstflow_storage::Pubkey::from(*identity.pubkey());
+        slot_driver::spawn_dev_slot_driver(
+            identity_pubkey,
+            consensus.bank_forks.clone(),
+            replay_bundle.signal_bus.clone(),
+            pipeline_bundle.handle.clone(),
+        );
     }
 
     // Build the turbine retransmit service for shred propagation.
@@ -626,6 +672,18 @@ fn run_with_node_config(
         &node_config.network_config,
     )?;
     let retransmit_service = turbine_bundle.retransmit;
+
+    // Wire turbine retransmit into the leader orchestrator (deferred).
+    if let Ok(mut guard) = deferred_retransmit.write() {
+        *guard = Some(retransmit_service.clone());
+    }
+
+    // Spawn turbine receiver: listens on TVU port and feeds received
+    // shreds directly into ShredCollector for cross-node block propagation.
+    if let Some(tvu_sender) = tvu_shred_sender {
+        let tvu_addr = node_config.tvu_bind_addr();
+        turbine_receiver::spawn_turbine_receiver(tvu_addr, tvu_sender);
+    }
 
     // Build the repair service for slot recovery from peers.
     // The coordinator runs poll-driven in the node runtime; background I/O
@@ -662,6 +720,7 @@ fn run_with_node_config(
     // entries.
     let vote_sender_tower = consensus.tower.clone();
     let vote_sender_forks = consensus.bank_forks.clone();
+    let reporter_bank_forks = consensus.bank_forks.clone();
     let vote_sender_cluster = cluster_info.clone();
     let vote_broadcast_bundle = build_vote_broadcast_service(
         &identity,
@@ -760,7 +819,7 @@ fn run_with_node_config(
                         continue;
                     }
 
-                    // Lock vote processor to resolve identity → vote account
+                    // Lock vote processor to resolve identity -> vote account
                     // and process each gossip vote.
                     let mut vp = gv_vote_processor
                         .lock()
@@ -824,7 +883,8 @@ fn run_with_node_config(
         if let Some(ref bs) = shared_blockstore {
             aggregator = aggregator.with_blockstore(std::sync::Arc::clone(bs.stats()));
         }
-        rpt.with_aggregator(aggregator)
+        rpt.with_bank_forks(reporter_bank_forks.clone())
+            .with_aggregator(aggregator)
     });
 
     let metrics_http_content = runtime_topology.metrics_http_content.clone();
@@ -896,6 +956,21 @@ fn run_with_node_config(
     let _gossip = gossip_handle;
     let _retransmit = retransmit_service;
 
+    // For cluster mode (genesis file), use ConsensusTransactionSubmitter
+    // which resolves the current leader's TPU from gossip and forwards.
+    // For single-node dev mode, bootstrap creates its own submitter.
+    let tx_submitter: Option<std::sync::Arc<dyn karstflow_control::TransactionSubmitter>> =
+        if has_genesis_file {
+            Some(std::sync::Arc::new(ConsensusTransactionSubmitter::new(
+                rpc_bank_forks.clone(),
+                rpc_cluster_info.clone(),
+                *identity.pubkey(),
+                node_config.tpu_bind_addr(),
+            )))
+        } else {
+            None
+        };
+
     let result = run_runtime_phase_with_consensus(
         &node_config,
         topology_pair.startup.services.as_mut_slice(),
@@ -912,6 +987,7 @@ fn run_with_node_config(
         Some(rpc_cluster_info),
         *identity.pubkey(),
         shared_blockstore,
+        tx_submitter,
     );
 
     // Save tower state to disk before shutdown so lockouts survive restarts.
@@ -934,139 +1010,4 @@ fn run_with_node_config(
     // Cleanly shut down plugin service after runtime exits.
     plugin_service.shutdown();
     result
-}
-
-fn preflight_with_node_config(
-    node_config: karstflow_config::NodeConfig,
-    probe_ticks: u32,
-    mainnet_readiness: bool,
-) -> karstflow_control::Result<()> {
-    let _tracing_guard = init_tracing_from_config(&node_config)?;
-    let mut materialized_topology = materialize_services_from_config(&node_config)?;
-    // Push reporter into services (no aggregator needed for preflight).
-    if let Some(rpt) = materialized_topology.reporter.take() {
-        materialized_topology.services.push(Box::new(rpt));
-    }
-    if !mainnet_readiness {
-        return run_preflight_phase(
-            &node_config,
-            materialized_topology.services.as_mut_slice(),
-            probe_ticks,
-        );
-    }
-
-    let startup_probe_report = run_preflight_phase_with_probe_report(
-        &node_config,
-        materialized_topology.services.as_mut_slice(),
-        probe_ticks,
-    )?;
-    let diagnostics_summary = build_diagnostics_summary_from_probe(
-        &node_config,
-        materialized_topology.topology_spec.topology_name.clone(),
-        materialized_topology.topology_spec.stages.len(),
-        materialized_topology.topology_spec.links.len(),
-        materialized_topology.services.as_slice(),
-        startup_probe_report,
-    );
-    let readiness_report = evaluate_mainnet_readiness(&node_config, &diagnostics_summary);
-    println!(
-        "{}",
-        render_readiness_policy_line("preflight", &node_config.mainnet_readiness_policy)
-    );
-    println!(
-        "{}",
-        render_preflight_readiness_line(
-            readiness_report.checks_passed,
-            readiness_report.checks_failed,
-        )
-    );
-    for issue in &readiness_report.failed_checks {
-        println!("{}", render_preflight_readiness_issue_line(issue));
-    }
-    ensure_mainnet_readiness(&readiness_report)
-}
-
-fn diagnostics_with_node_config(
-    node_config: karstflow_config::NodeConfig,
-    probe_ticks: u32,
-    mainnet_readiness: bool,
-) -> karstflow_control::Result<()> {
-    let _tracing_guard = init_tracing_from_config(&node_config)?;
-    let mut materialized_topology = materialize_services_from_config(&node_config)?;
-    // Push reporter into services (no aggregator needed for diagnostics).
-    if let Some(rpt) = materialized_topology.reporter.take() {
-        materialized_topology.services.push(Box::new(rpt));
-    }
-    let diagnostics_summary = run_diagnostics_phase(
-        &node_config,
-        materialized_topology.topology_spec.topology_name.clone(),
-        materialized_topology.topology_spec.stages.len(),
-        materialized_topology.topology_spec.links.len(),
-        materialized_topology.services.as_mut_slice(),
-        probe_ticks,
-    )?;
-    println!(
-        "{}",
-        render_diagnostics_cluster_mode_line(node_config.cluster_mode)
-    );
-    println!(
-        "{}",
-        render_diagnostics_topology_line(
-            &diagnostics_summary.topology_name,
-            diagnostics_summary.stage_count,
-            diagnostics_summary.link_count,
-        )
-    );
-    println!(
-        "{}",
-        render_diagnostics_probe_line(
-            probe_ticks,
-            diagnostics_summary.startup_probe_report.started_ok,
-            diagnostics_summary.startup_probe_report.ticked_ok,
-            diagnostics_summary.startup_probe_report.stopped_ok,
-            diagnostics_summary.startup_probe_report.failures.len()
-        )
-    );
-    println!(
-        "{}",
-        render_diagnostics_stage_mix_line(
-            diagnostics_summary.ingress_gateway_stages,
-            diagnostics_summary.transaction_sanitizer_stages,
-            diagnostics_summary.shred_sanitizer_stages,
-            diagnostics_summary.block_builder_stages,
-            diagnostics_summary.telemetry_stages,
-        )
-    );
-    println!(
-        "{}",
-        render_diagnostics_lane_capacity_line(
-            diagnostics_summary.packet_stream_capacity,
-            diagnostics_summary.shred_stream_capacity,
-            diagnostics_summary.transaction_stream_capacity,
-        )
-    );
-    println!(
-        "{}",
-        render_diagnostics_services_line(&diagnostics_summary.runtime_service_names)
-    );
-    if mainnet_readiness {
-        let readiness_report = evaluate_mainnet_readiness(&node_config, &diagnostics_summary);
-        println!(
-            "{}",
-            render_readiness_policy_line("diagnostics", &node_config.mainnet_readiness_policy)
-        );
-        println!(
-            "{}",
-            render_diagnostics_readiness_line(
-                readiness_report.checks_passed,
-                readiness_report.checks_failed,
-            )
-        );
-        for issue in &readiness_report.failed_checks {
-            println!("{}", render_diagnostics_readiness_issue_line(issue));
-        }
-        ensure_mainnet_readiness(&readiness_report)?;
-    }
-    println!("{}", render_diagnostics_ok_line());
-    Ok(())
 }

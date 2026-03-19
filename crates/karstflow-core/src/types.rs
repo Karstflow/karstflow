@@ -38,7 +38,7 @@ pub enum ExecutionMode {
     Tokio,
     Pinned,
     /// Tile execution: poll-driven spin-loop with CnC lifecycle,
-    /// heartbeat monitoring, and metrics — Firedancer-style.
+    /// heartbeat monitoring, and metrics — the reference implementation-style.
     Tile,
 }
 

@@ -465,6 +465,7 @@ fn run_genesis_cluster(params: GenesisClusterParams) -> Result<()> {
         let gossip_port = BASE_GOSSIP_PORT + i as u16 * PORT_STEP;
         let rpc_port = BASE_RPC_PORT + i as u16 * PORT_STEP;
         let tpu_port = BASE_TPU_PORT + i as u16 * PORT_STEP;
+        let _tvu_port = gossip_port + 8;
 
         // Write per-node TOML config with absolute paths.
         let abs_dir = output_dir.display();
@@ -473,7 +474,7 @@ fn run_genesis_cluster(params: GenesisClusterParams) -> Result<()> {
              \n\
              [cluster]\n\
              mode = \"dev\"\n\
-             gossip_bind_addr = \"0.0.0.0:{gossip_port}\"\n\
+             gossip_bind_addr = \"127.0.0.1:{gossip_port}\"\n\
              gossip_allow_private_addresses = true\n\
              entrypoints = [\"{bootstrap_gossip}\"]\n\
              genesis_path = \"{abs_dir}/genesis.bin\"\n\
@@ -489,7 +490,7 @@ fn run_genesis_cluster(params: GenesisClusterParams) -> Result<()> {
              \n\
              [ingress_policy]\n\
              ingress_mode = \"udp\"\n\
-             udp_bind_address = \"0.0.0.0:{tpu_port}\"\n\
+             udp_bind_address = \"127.0.0.1:{tpu_port}\"\n\
              \n\
              [logging]\n\
              stderr_level = \"info\"\n"

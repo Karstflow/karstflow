@@ -9,11 +9,13 @@ pub struct IngressFilterStats {
     accepted_gossip_source: AtomicU64,
     accepted_bundle_source: AtomicU64,
     accepted_rpc_source: AtomicU64,
+    accepted_tvu_source: AtomicU64,
     duplicate_transactions: AtomicU64,
     duplicate_quic_source: AtomicU64,
     duplicate_gossip_source: AtomicU64,
     duplicate_bundle_source: AtomicU64,
     duplicate_rpc_source: AtomicU64,
+    duplicate_tvu_source: AtomicU64,
     dropped_empty_payload: AtomicU64,
     dropped_oversized_payload: AtomicU64,
     dropped_disallowed_source: AtomicU64,
@@ -30,6 +32,7 @@ impl IngressFilterStats {
             IngressSource::Gossip => self.accepted_gossip_source.fetch_add(1, Ordering::Relaxed),
             IngressSource::Bundle => self.accepted_bundle_source.fetch_add(1, Ordering::Relaxed),
             IngressSource::Rpc => self.accepted_rpc_source.fetch_add(1, Ordering::Relaxed),
+            IngressSource::Tvu => self.accepted_tvu_source.fetch_add(1, Ordering::Relaxed),
         };
     }
 
@@ -40,6 +43,7 @@ impl IngressFilterStats {
             IngressSource::Gossip => self.duplicate_gossip_source.fetch_add(1, Ordering::Relaxed),
             IngressSource::Bundle => self.duplicate_bundle_source.fetch_add(1, Ordering::Relaxed),
             IngressSource::Rpc => self.duplicate_rpc_source.fetch_add(1, Ordering::Relaxed),
+            IngressSource::Tvu => self.duplicate_tvu_source.fetch_add(1, Ordering::Relaxed),
         };
     }
 
@@ -78,11 +82,13 @@ impl IngressFilterStats {
             accepted_gossip_source: self.accepted_gossip_source.load(Ordering::Relaxed),
             accepted_bundle_source: self.accepted_bundle_source.load(Ordering::Relaxed),
             accepted_rpc_source: self.accepted_rpc_source.load(Ordering::Relaxed),
+            accepted_tvu_source: self.accepted_tvu_source.load(Ordering::Relaxed),
             duplicate_transactions: self.duplicate_transactions.load(Ordering::Relaxed),
             duplicate_quic_source: self.duplicate_quic_source.load(Ordering::Relaxed),
             duplicate_gossip_source: self.duplicate_gossip_source.load(Ordering::Relaxed),
             duplicate_bundle_source: self.duplicate_bundle_source.load(Ordering::Relaxed),
             duplicate_rpc_source: self.duplicate_rpc_source.load(Ordering::Relaxed),
+            duplicate_tvu_source: self.duplicate_tvu_source.load(Ordering::Relaxed),
             dropped_empty_payload: self.dropped_empty_payload.load(Ordering::Relaxed),
             dropped_oversized_payload: self.dropped_oversized_payload.load(Ordering::Relaxed),
             dropped_disallowed_source: self.dropped_disallowed_source.load(Ordering::Relaxed),

@@ -4,10 +4,12 @@
 /// (program instructions), .rodata (read-only data), processes
 /// relocations, and builds a call target map for internal functions.
 use crate::instruction::{decode_instructions, Instruction, Opcode};
+use crate::syscall_dispatch::murmur3_hash;
 use karstflow_constants::vm::{
     ELF64_HEADER_SIZE, ELF64_PHDR_SIZE, ELF64_SHDR_SIZE, ELF_CLASS_64, ELF_DATA_LSB,
-    ELF_MACHINE_BPF, ELF_MACHINE_SBF, ELF_MAGIC, INSTRUCTION_SIZE, SBPF_VERSION_V1,
-    SBPF_VERSION_V2, SBPF_VERSION_V3, SHT_PROGBITS, SHT_STRTAB,
+    ELF_MACHINE_BPF, ELF_MACHINE_SBF, ELF_MACHINE_SBPF_V2, ELF_MAGIC, INSTRUCTION_SIZE,
+    REGION_PROGRAM_BASE, R_BPF_64_32, R_BPF_64_64, R_BPF_64_RELATIVE, SBPF_VERSION_V1,
+    SBPF_VERSION_V2, SBPF_VERSION_V3, SHT_DYNSYM, SHT_PROGBITS, SHT_REL, SHT_STRTAB,
 };
 use std::collections::HashMap;
 
@@ -88,6 +90,9 @@ pub struct LoadedProgram {
     pub sbpf_version: SbpfVersion,
     /// Raw .text section bytes (for memory mapping).
     pub text_bytes: Vec<u8>,
+    /// File offset of .text section within the ELF image.
+    /// Used by CALLX (V0) to convert VM addresses to instruction indices.
+    pub text_file_offset: usize,
 }
 
 // ---------------------------------------------------------------------------
@@ -220,6 +225,28 @@ impl RelEntry {
     }
 }
 
+/// Parsed ELF64 dynamic symbol entry.
+struct DynSym {
+    name_offset: u32,
+    info: u8,
+    _other: u8,
+    shndx: u16,
+    value: u64,
+    _size: u64,
+}
+
+impl DynSym {
+    /// ELF STT_FUNC type
+    fn is_function(&self) -> bool {
+        (self.info & 0xF) == 2
+    }
+
+    /// Symbol is defined (has a section) and has a nonzero value
+    fn is_local_function(&self) -> bool {
+        self.is_function() && self.value != 0 && self.shndx != 0
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Public API
 // ---------------------------------------------------------------------------
@@ -248,6 +275,7 @@ pub fn load_elf(bytes: &[u8]) -> Result<LoadedProgram, ElfError> {
 
     let text_start = text_section.offset as usize;
     let text_size = text_section.size as usize;
+    let text_vaddr = text_section.addr;
 
     if !text_size.is_multiple_of(INSTRUCTION_SIZE) {
         return Err(ElfError::UnalignedTextSection { size: text_size });
@@ -257,27 +285,40 @@ pub fn load_elf(bytes: &[u8]) -> Result<LoadedProgram, ElfError> {
         return Err(ElfError::InvalidSectionHeader { index: 0 });
     }
 
-    let text_bytes = bytes[text_start..text_start + text_size].to_vec();
+    // Use the entire ELF as the program data region (matches Solana runtime).
+    // Relocations are applied in-place on this copy.
+    let mut program_image = bytes.to_vec();
 
-    // Find .rodata section (optional)
-    let rodata = find_section_by_name(&sections, &section_names, ".rodata")
-        .and_then(|s| {
-            let start = s.offset as usize;
-            let size = s.size as usize;
-            if start + size <= bytes.len() {
-                Some(bytes[start..start + size].to_vec())
-            } else {
-                None
-            }
-        })
-        .unwrap_or_default();
+    // Parse dynamic symbols and relocations
+    let dynsyms = parse_dynsym_section(&sections, &section_names, bytes);
+    let dynstr = load_dynstr_section(&sections, &section_names, bytes);
+    let relocations = parse_rel_section(&sections, &section_names, bytes);
 
-    // Decode instructions
+    // Process relocations and build call target map
+    let mut call_targets = HashMap::new();
+    process_relocations(
+        &mut program_image,
+        &relocations,
+        &dynsyms,
+        &dynstr,
+        text_start,
+        text_size,
+        text_vaddr,
+        &mut call_targets,
+    )?;
+
+    // Decode instructions from the relocated .text section
+    let text_bytes = program_image[text_start..text_start + text_size].to_vec();
     let instructions = decode_instructions(&text_bytes)
         .map_err(|e| ElfError::InstructionDecodeError(e.to_string()))?;
 
+    // Note: we do NOT merge build_call_targets here. Relocated calls already
+    // have correct hash→PC entries in call_targets. Non-relocated calls use
+    // PC-relative addressing computed at runtime by the interpreter (PC + 1 + imm).
+    // Merging build_call_targets would produce wrong entries when two CALL
+    // instructions share the same imm value but have different relative targets.
+
     // Calculate entry point as instruction index
-    let text_vaddr = text_section.addr;
     let entry_vaddr = header.entry;
     let entry_point = if entry_vaddr >= text_vaddr {
         let byte_offset = (entry_vaddr - text_vaddr) as usize;
@@ -293,19 +334,17 @@ pub fn load_elf(bytes: &[u8]) -> Result<LoadedProgram, ElfError> {
         0 // Default to first instruction
     };
 
-    // Build call target map from CALL instructions
-    let call_targets = build_call_targets(&instructions);
-
     // Detect version from ELF flags
     let sbpf_version = SbpfVersion::from_flags(header.flags);
 
     Ok(LoadedProgram {
         instructions,
-        rodata,
+        rodata: program_image,
         entry_point,
         call_targets,
         sbpf_version,
         text_bytes,
+        text_file_offset: text_start,
     })
 }
 
@@ -331,6 +370,7 @@ pub fn load_raw(instruction_bytes: &[u8]) -> Result<LoadedProgram, ElfError> {
         call_targets,
         sbpf_version: SbpfVersion::V0,
         text_bytes: instruction_bytes.to_vec(),
+        text_file_offset: 0,
     })
 }
 
@@ -362,7 +402,7 @@ fn parse_header(bytes: &[u8]) -> Result<ElfHeader, ElfError> {
 
     // Machine type
     let machine = u16::from_le_bytes([bytes[18], bytes[19]]);
-    if machine != ELF_MACHINE_SBF && machine != ELF_MACHINE_BPF {
+    if machine != ELF_MACHINE_SBF && machine != ELF_MACHINE_BPF && machine != ELF_MACHINE_SBPF_V2 {
         return Err(ElfError::InvalidMachine { machine });
     }
 
@@ -371,8 +411,9 @@ fn parse_header(bytes: &[u8]) -> Result<ElfHeader, ElfError> {
     let shoff = u64::from_le_bytes(bytes[40..48].try_into().unwrap());
     let flags = u32::from_le_bytes(bytes[48..52].try_into().unwrap());
     let phnum = u16::from_le_bytes(bytes[56..58].try_into().unwrap());
-    let shnum = u16::from_le_bytes(bytes[58..60].try_into().unwrap());
-    let shstrndx = u16::from_le_bytes(bytes[60..62].try_into().unwrap());
+    // bytes 58..60 = e_shentsize (skipped — we use ELF64_SHDR_SIZE constant)
+    let shnum = u16::from_le_bytes(bytes[60..62].try_into().unwrap());
+    let shstrndx = u16::from_le_bytes(bytes[62..64].try_into().unwrap());
 
     Ok(ElfHeader {
         machine,
@@ -450,6 +491,233 @@ fn find_section_by_name<'a>(
     sections
         .iter()
         .find(|s| section_name(strtab, s.name_offset) == name)
+}
+
+// ---------------------------------------------------------------------------
+// Dynamic symbol and relocation parsing
+// ---------------------------------------------------------------------------
+
+fn parse_dynsym_section(sections: &[SectionHeader], strtab: &[u8], bytes: &[u8]) -> Vec<DynSym> {
+    let dynsym_section = match find_section_by_name(sections, strtab, ".dynsym") {
+        Some(s) => s,
+        None => return Vec::new(),
+    };
+    let start = dynsym_section.offset as usize;
+    let size = dynsym_section.size as usize;
+    if start + size > bytes.len() {
+        return Vec::new();
+    }
+
+    // ELF64 symbol entry is 24 bytes
+    const SYM_SIZE: usize = 24;
+    let count = size / SYM_SIZE;
+    let mut syms = Vec::with_capacity(count);
+
+    for i in 0..count {
+        let off = start + i * SYM_SIZE;
+        syms.push(DynSym {
+            name_offset: u32::from_le_bytes(bytes[off..off + 4].try_into().unwrap()),
+            info: bytes[off + 4],
+            _other: bytes[off + 5],
+            shndx: u16::from_le_bytes(bytes[off + 6..off + 8].try_into().unwrap()),
+            value: u64::from_le_bytes(bytes[off + 8..off + 16].try_into().unwrap()),
+            _size: u64::from_le_bytes(bytes[off + 16..off + 24].try_into().unwrap()),
+        });
+    }
+
+    syms
+}
+
+fn load_dynstr_section(sections: &[SectionHeader], strtab: &[u8], bytes: &[u8]) -> Vec<u8> {
+    let dynstr_section = match find_section_by_name(sections, strtab, ".dynstr") {
+        Some(s) => s,
+        None => return Vec::new(),
+    };
+    let start = dynstr_section.offset as usize;
+    let size = dynstr_section.size as usize;
+    if start + size > bytes.len() {
+        return Vec::new();
+    }
+    bytes[start..start + size].to_vec()
+}
+
+fn parse_rel_section(sections: &[SectionHeader], strtab: &[u8], bytes: &[u8]) -> Vec<RelEntry> {
+    let rel_section = match find_section_by_name(sections, strtab, ".rel.dyn") {
+        Some(s) => s,
+        None => return Vec::new(),
+    };
+    let start = rel_section.offset as usize;
+    let size = rel_section.size as usize;
+    if start + size > bytes.len() {
+        return Vec::new();
+    }
+
+    // ELF64 relocation entry (without addend) is 16 bytes
+    const REL_SIZE: usize = 16;
+    let count = size / REL_SIZE;
+    let mut rels = Vec::with_capacity(count);
+
+    for i in 0..count {
+        let off = start + i * REL_SIZE;
+        rels.push(RelEntry {
+            offset: u64::from_le_bytes(bytes[off..off + 8].try_into().unwrap()),
+            info: u64::from_le_bytes(bytes[off + 8..off + 16].try_into().unwrap()),
+        });
+    }
+
+    rels
+}
+
+fn dynstr_name(dynstr: &[u8], offset: u32) -> &str {
+    let start = offset as usize;
+    if start >= dynstr.len() {
+        return "";
+    }
+    let end = dynstr[start..]
+        .iter()
+        .position(|&b| b == 0)
+        .map(|p| start + p)
+        .unwrap_or(dynstr.len());
+    std::str::from_utf8(&dynstr[start..end]).unwrap_or("")
+}
+
+/// Apply relocations to the program image and populate call_targets.
+#[allow(clippy::too_many_arguments)]
+fn process_relocations(
+    image: &mut [u8],
+    relocations: &[RelEntry],
+    dynsyms: &[DynSym],
+    dynstr: &[u8],
+    text_file_offset: usize,
+    text_size: usize,
+    text_vaddr: u64,
+    call_targets: &mut HashMap<u32, usize>,
+) -> Result<(), ElfError> {
+    let text_file_end = text_file_offset + text_size;
+
+    for rel in relocations {
+        let r_offset = rel.offset as usize;
+        let r_type = rel.rel_type();
+        let r_sym = rel.sym_index() as usize;
+
+        match r_type {
+            // R_BPF_64_RELATIVE: add REGION_PROGRAM_BASE to embedded address
+            R_BPF_64_RELATIVE => {
+                if r_offset >= text_file_offset && r_offset < text_file_end {
+                    // In .text: this is an LDDW instruction — patch dual imm fields
+                    let imm_offset = r_offset + 4;
+                    let imm_high_offset = imm_offset + 8;
+                    if imm_high_offset + 4 > image.len() {
+                        continue;
+                    }
+                    let va_low =
+                        u32::from_le_bytes(image[imm_offset..imm_offset + 4].try_into().unwrap());
+                    let va_high = u32::from_le_bytes(
+                        image[imm_high_offset..imm_high_offset + 4]
+                            .try_into()
+                            .unwrap(),
+                    );
+                    let refd_addr = ((va_high as u64) << 32) | (va_low as u64);
+                    // Add REGION_PROGRAM_BASE if the address is not already in VM space
+                    let normalized = if refd_addr < REGION_PROGRAM_BASE {
+                        refd_addr + REGION_PROGRAM_BASE
+                    } else {
+                        refd_addr
+                    };
+                    image[imm_offset..imm_offset + 4]
+                        .copy_from_slice(&(normalized as u32).to_le_bytes());
+                    image[imm_high_offset..imm_high_offset + 4]
+                        .copy_from_slice(&((normalized >> 32) as u32).to_le_bytes());
+                } else {
+                    // In data: addresses use the same split layout as LDDW.
+                    // The file offset is stored in bytes [r_offset+4..r_offset+8]
+                    // (the "high imm" position), with bytes [r_offset..r_offset+4]
+                    // typically zero. Read the offset, add REGION_PROGRAM_BASE,
+                    // then write back as split low/high u32 halves.
+                    if r_offset + 8 > image.len() {
+                        continue;
+                    }
+                    let file_offset =
+                        u32::from_le_bytes(image[r_offset + 4..r_offset + 8].try_into().unwrap())
+                            as u64;
+                    let relocated = file_offset + REGION_PROGRAM_BASE;
+                    image[r_offset..r_offset + 4]
+                        .copy_from_slice(&(relocated as u32).to_le_bytes());
+                    image[r_offset + 4..r_offset + 8]
+                        .copy_from_slice(&((relocated >> 32) as u32).to_le_bytes());
+                }
+            }
+
+            // R_BPF_64_32: patch CALL imm with murmur3 hash
+            R_BPF_64_32 => {
+                let imm_offset = r_offset + 4;
+                if imm_offset + 4 > image.len() {
+                    continue;
+                }
+
+                if r_sym < dynsyms.len() {
+                    let sym = &dynsyms[r_sym];
+                    let name = dynstr_name(dynstr, sym.name_offset);
+
+                    if sym.is_local_function() {
+                        // Local function: compute target PC and register
+                        if sym.value >= text_vaddr {
+                            let byte_offset = (sym.value - text_vaddr) as usize;
+                            let target_pc = byte_offset / INSTRUCTION_SIZE;
+                            let key = murmur3_hash(name);
+                            image[imm_offset..imm_offset + 4].copy_from_slice(&key.to_le_bytes());
+                            call_targets.insert(key, target_pc);
+                            // Also register by the function's file offset
+                            // (for CALLX via R_BPF_64_RELATIVE vtable pointers).
+                            let file_offset_key = (text_file_offset + byte_offset) as u32;
+                            call_targets.entry(file_offset_key).or_insert(target_pc);
+                        }
+                    } else if !name.is_empty() {
+                        // External symbol (syscall): write murmur3(name)
+                        let key = murmur3_hash(name);
+                        image[imm_offset..imm_offset + 4].copy_from_slice(&key.to_le_bytes());
+                    }
+                }
+            }
+
+            // R_BPF_64_64: absolute 64-bit relocation for LDDW
+            R_BPF_64_64 => {
+                let imm_offset = r_offset + 4;
+                let imm_high_offset = imm_offset + 8;
+                if imm_high_offset + 4 > image.len() {
+                    continue;
+                }
+
+                let addend =
+                    u32::from_le_bytes(image[imm_offset..imm_offset + 4].try_into().unwrap())
+                        as u64;
+
+                let sym_value = if r_sym < dynsyms.len() {
+                    dynsyms[r_sym].value
+                } else {
+                    0
+                };
+
+                let addr = sym_value + addend;
+                let normalized = if addr < REGION_PROGRAM_BASE {
+                    addr + REGION_PROGRAM_BASE
+                } else {
+                    addr
+                };
+
+                image[imm_offset..imm_offset + 4]
+                    .copy_from_slice(&(normalized as u32).to_le_bytes());
+                image[imm_high_offset..imm_high_offset + 4]
+                    .copy_from_slice(&((normalized >> 32) as u32).to_le_bytes());
+            }
+
+            _ => {
+                // Unknown relocation type — skip
+            }
+        }
+    }
+
+    Ok(())
 }
 
 fn build_call_targets(instructions: &[Instruction]) -> HashMap<u32, usize> {
@@ -589,9 +857,9 @@ impl TestElfBuilder {
         // e_shentsize
         elf[58..60].copy_from_slice(&(ELF64_SHDR_SIZE as u16).to_le_bytes());
         // e_shnum
-        elf[58..60].copy_from_slice(&shnum.to_le_bytes());
+        elf[60..62].copy_from_slice(&shnum.to_le_bytes());
         // e_shstrndx
-        elf[60..62].copy_from_slice(&shstrndx.to_le_bytes());
+        elf[62..64].copy_from_slice(&shstrndx.to_le_bytes());
 
         // Section headers
         // Section 0: null
@@ -675,7 +943,10 @@ mod tests {
             .rodata(rodata.clone())
             .build();
         let program = load_elf(&elf).unwrap();
-        assert_eq!(program.rodata, rodata);
+        // rodata is now the full ELF image; check that .rodata bytes are present
+        // at the expected offset within the program image
+        let rodata_offset = elf.len() - rodata.len();
+        assert_eq!(&program.rodata[rodata_offset..], &rodata);
     }
 
     #[test]

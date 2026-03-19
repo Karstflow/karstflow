@@ -396,10 +396,10 @@ impl Bank {
             signature_status_cache: parent.signature_status_cache.clone(),
             cost_tracker: Arc::new(crate::cost_tracker::CostTracker::new()),
             accounts_data_size: AtomicI64::new(parent.accounts_data_size.load(Ordering::Acquire)),
-            lamports_per_signature: AtomicU64::new(derive_fee_rate(
-                parent.lamports_per_signature.load(Ordering::Relaxed),
-                parent.signature_count.load(Ordering::Relaxed),
-            )),
+            // Use fixed fee rate matching Solana mainnet behavior.
+            // The dynamic fee rate governor (derive_fee_rate) is not active
+            // on Solana mainnet — lamports_per_signature is always the constant.
+            lamports_per_signature: AtomicU64::new(LAMPORTS_PER_SIGNATURE),
             next_leader_schedule: RwLock::new(None),
             stake_tracker: parent.stake_tracker.clone(),
             stake_history: parent.stake_history.clone(),
@@ -777,6 +777,20 @@ impl Bank {
         *self.last_blockhash.read().expect("blockhash lock poisoned")
     }
 
+    /// Get the most recent blockhash that is registered in the queue and
+    /// therefore accepted by `is_blockhash_valid` / `process_transaction`.
+    /// Falls back to `last_blockhash()` if the queue is empty.
+    pub fn latest_valid_blockhash(&self) -> [u8; 32] {
+        let queue = self
+            .blockhash_queue
+            .read()
+            .expect("blockhash_queue lock poisoned");
+        queue
+            .last_blockhash()
+            .map(|h| h.to_bytes())
+            .unwrap_or_else(|| self.last_blockhash())
+    }
+
     /// Set the last PoH blockhash for this slot.
     pub fn set_last_blockhash(&self, hash: [u8; 32]) {
         *self
@@ -792,6 +806,21 @@ impl Bank {
             .read()
             .expect("blockhash_queue lock poisoned")
             .is_hash_valid(&hash)
+    }
+
+    /// Register a blockhash as valid for transaction processing.
+    ///
+    /// Used in dev mode to accept transactions signed with a blockhash
+    /// from a different bank (due to rapid slot changes).
+    pub fn register_recent_blockhash(&self, blockhash: [u8; 32]) {
+        use crate::blockhash_queue::BlockhashInfo;
+        let hash = crate::Hash::new(blockhash);
+        let info = BlockhashInfo::new(hash, self.lamports_per_signature(), self.slot());
+        let mut queue = self
+            .blockhash_queue
+            .write()
+            .expect("blockhash_queue lock poisoned");
+        queue.register_hash(info);
     }
 
     /// Get a reference to the blockhash queue lock.
@@ -1772,6 +1801,10 @@ pub enum BankFeeError {
 /// Uses an adjustment step of target/20 (5%) per slot, clamped between
 /// target/2 and target*10. This matches the protocol's gradual fee
 /// adjustment to prevent sudden fee spikes.
+///
+/// Note: currently unused — Solana mainnet uses a fixed fee rate.
+/// Retained for potential future dynamic fee activation.
+#[allow(dead_code)]
 pub(crate) fn derive_fee_rate(current_rate: u64, parent_signature_count: u64) -> u64 {
     let target = LAMPORTS_PER_SIGNATURE;
     let target_sigs = DEFAULT_TARGET_SIGNATURES_PER_SLOT;
