@@ -4,7 +4,7 @@
 
 Karstflow is a ground-up Solana validator built for maximum throughput and minimal latency. It features a custom network stack, pre-allocated data structures, zero-copy I/O patterns, and a modular tile-based architecture designed for predictable performance at scale.
 
-**270K+ lines of Rust | 6,100+ tests | 22 crates**
+**270K+ lines of Rust | 6,100+ unit tests | 597/668 E2E tests | 22 crates**
 
 ## Design Principles
 
@@ -305,6 +305,68 @@ curl -X POST http://localhost:8899 -H "Content-Type: application/json" \
 ```
 
 Returns a transaction signature (base58). The airdrop is applied immediately via direct bank credit — no faucet TCP service or separate airdrop binary needed.
+
+## Live Network Mode (Devnet / Testnet / Mainnet)
+
+Karstflow can connect to live Solana networks as an RPC node. In live mode, the node automatically:
+
+1. **Downloads `genesis.bin`** from entrypoint RPC endpoints (`/genesis.tar.bz2`)
+2. **Discovers snapshot peers** via gossip (SnapshotHashes CRDS messages)
+3. **Downloads the latest snapshot** from the best peer (scored by latency + slot freshness)
+4. **Restores accounts** from snapshot and begins replay
+
+### Quick Start (Live Mode)
+
+```bash
+# Connect to Solana Devnet
+just run-profile devnet
+
+# Or with a custom config:
+KARSTFLOW_NODE_CONFIG_PATH=/path/to/devnet.toml cargo run --release -p karstflow-node
+```
+
+Minimal devnet config:
+
+```toml
+[cluster]
+mode = "live"
+gossip_bind_addr = "0.0.0.0:8001"
+entrypoints = ["entrypoint.devnet.solana.com:8001"]
+expected_genesis_hash = "EtWTRABZaYq6iMfeYKouRu166VU2xqa1wcaWoxPkrZBG"
+expected_shred_version = 29062
+data_dir = "/var/karstflow/data"
+identity_keypair_path = "/var/karstflow/identity.json"
+
+[runtime]
+mode = "tokio"
+
+[rpc]
+enabled = true
+bind = "0.0.0.0:8899"
+
+[metrics]
+output_target = "file"
+file_path = "/var/karstflow/metrics.log"
+```
+
+The node will automatically download genesis and snapshot from the network — no manual file management required.
+
+### Multi-Node Local Cluster
+
+For testing multi-validator consensus locally:
+
+```bash
+# Generate a 2-node cluster with shared genesis
+cargo run --release -p karstflow-node -- genesis cluster 2 --output-dir /tmp/cluster
+
+# Start both nodes
+bash /tmp/cluster/start.sh
+```
+
+Features verified on local cluster:
+- **Cross-node transaction propagation** through PoH entries → shreds → turbine → replay
+- **Leader rotation** with hardware-calibrated PoH (~400ms/slot target)
+- **Consensus-driven root advancement** via Tower BFT vote chain
 
 ### Safety Guards
 
