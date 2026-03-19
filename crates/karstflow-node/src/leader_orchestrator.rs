@@ -12,6 +12,7 @@ use crate::shredding::shred_produced_entries;
 pub(crate) fn spawn_leader_orchestrator(
     signal_bus: &std::sync::Arc<std::sync::Mutex<karstflow_stages::SignalBus>>,
     handle: std::sync::Arc<karstflow_stages::PipelineHandle>,
+    bank_forks: std::sync::Arc<std::sync::RwLock<karstflow_consensus::BankForks>>,
     leader_pubkey: karstflow_storage::Pubkey,
     leader_signing_key: ed25519_dalek::SigningKey,
     shred_version: u16,
@@ -32,11 +33,14 @@ pub(crate) fn spawn_leader_orchestrator(
     std::thread::Builder::new()
         .name("leader-orchestrator".into())
         .spawn(move || {
+            let mut leader_end_slot: u64 = 0;
+
             while let Ok(signal) = leader_signal_rx.recv() {
                 match signal {
                     karstflow_stages::ReplaySignal::BecameLeader(info) => {
                         // Only begin if not already leading (prevents double begin)
                         if !handle.is_leading() {
+                            leader_end_slot = info.end_slot;
                             info!(
                                 start_slot = info.start_slot,
                                 end_slot = info.end_slot,
@@ -86,9 +90,32 @@ pub(crate) fn spawn_leader_orchestrator(
                                 );
                             }
 
-                            // Begin next slot in the leader range.
+                            // Begin next slot if still in leader range.
                             let next_slot = slot + 1;
-                            handle.begin_slot(next_slot);
+                            if next_slot < leader_end_slot {
+                                let mut forks =
+                                    bank_forks.write().expect("bank_forks lock poisoned");
+                                if forks.get(next_slot).is_none() {
+                                    if let Some(parent) = forks.get(slot) {
+                                        let ls = parent.leader_schedule().clone();
+                                        let child = karstflow_consensus::Bank::new_from_parent(
+                                            &parent, next_slot, ls,
+                                        );
+                                        let _ = forks.insert(child);
+                                        let _ = forks.set_working_bank(next_slot);
+                                    }
+                                }
+                                drop(forks);
+                                handle.begin_slot(next_slot);
+                            } else {
+                                info!(
+                                    completed = slot,
+                                    "leader range complete, waiting for next BecameLeader"
+                                );
+                                // PoH transitions to follower. Replay will
+                                // emit BecameLeader when our next leader
+                                // range starts (after processing peer blocks).
+                            }
                         }
                     }
                     karstflow_stages::ReplaySignal::RootAdvanced(info) => {

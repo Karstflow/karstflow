@@ -245,8 +245,15 @@ pub fn download_snapshot_from_network(
 
         tried.push(peer.identity);
 
-        // Download full snapshot.
-        match downloader.download_full(&peer, output_dir) {
+        // Download full snapshot. For fallback servers (identity[8]==0xFF),
+        // use the generic /snapshot.tar.bz2 URL with HTTP redirect.
+        let is_fallback = peer.identity[8] == 0xFF;
+        let download_result = if is_fallback {
+            downloader.download_full_from_server(peer.rpc_addr, output_dir)
+        } else {
+            downloader.download_full(&peer, output_dir)
+        };
+        match download_result {
             Ok(full_path) => {
                 // Try incremental if available.
                 let incr_path = match downloader.download_incremental(&peer, output_dir) {

@@ -83,6 +83,30 @@ impl SnapshotDownloader {
         Self { agent, config }
     }
 
+    /// Download a full snapshot from a fallback HTTP server.
+    ///
+    /// Uses the generic `/snapshot.tar.bz2` URL which typically redirects
+    /// to the actual snapshot file with slot/hash in the filename.
+    /// Returns the path to the downloaded archive.
+    pub fn download_full_from_server(
+        &self,
+        addr: std::net::SocketAddr,
+        output_dir: &Path,
+    ) -> Result<PathBuf, DownloadError> {
+        let url = format!("http://{}/snapshot.tar.bz2", addr);
+        info!(%url, "downloading snapshot from fallback server");
+
+        let output_path = output_dir.join("snapshot-fallback.tar.zst");
+        let temp_path = output_dir.join("snapshot-fallback.tar.zst.partial");
+
+        self.download_to_file(&url, addr, &temp_path)?;
+
+        std::fs::rename(&temp_path, &output_path)?;
+        info!(path = %output_path.display(), "fallback snapshot download complete");
+
+        Ok(output_path)
+    }
+
     /// Download a full snapshot from a peer to the output directory.
     ///
     /// Returns the path to the downloaded archive file.

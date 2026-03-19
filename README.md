@@ -4,7 +4,7 @@
 
 Karstflow is a ground-up Solana validator built for maximum throughput and minimal latency. It features a custom network stack, pre-allocated data structures, zero-copy I/O patterns, and a modular tile-based architecture designed for predictable performance at scale.
 
-**270K+ lines of Rust | 6,100+ unit tests | 597/668 E2E tests | 22 crates**
+**270K+ lines of Rust | 6,100+ unit tests | 597/668 E2E tests | 22 crates | 8 embedded BPF programs**
 
 ## Design Principles
 
@@ -350,6 +350,32 @@ file_path = "/var/karstflow/metrics.log"
 ```
 
 The node will automatically download genesis and snapshot from the network — no manual file management required.
+
+### Embedded BPF Programs
+
+Genesis includes real BPF program binaries from the Solana ecosystem (sourced from agave `program-binaries`):
+
+| Program | ID | Size |
+|---------|-----|------|
+| SPL Token | `TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA` | 133 KB |
+| SPL Token 2022 | `TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb` | 507 KB |
+| SPL Memo v1 | `Memo1UhkJRfHyvLMcVucJwxXeuD728EqVDDwQDxFMNo` | 17 KB |
+| SPL Memo v3 | `MemoSq4gqABAXKb96qnH8TysNcWxMyWCqXgDLGmfcHr` | 75 KB |
+| Associated Token | `ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL` | 105 KB |
+| Address Lookup Table | `AddressLookupTab1e1111111111111111111111111` | 170 KB |
+| Config | `Config1111111111111111111111111111111111111` | 157 KB |
+| Feature Gate | `Feature111111111111111111111111111111111111` | 73 KB |
+
+These are embedded at compile time — no external downloads needed for program execution.
+
+### PoH Architecture
+
+Slot management follows the reference implementation (firedancer) pattern:
+
+- **PoH-driven slots**: The PoH service continuously hashes SHA-256 and drives slot boundaries (no timer-based slot driver)
+- **Hardware-calibrated**: `hashes_per_tick` is auto-calibrated to the CPU's SHA-256 speed, targeting ~400ms/slot
+- **Transaction mixin**: Executed transactions are mixed into the PoH chain and included in block entries for shredding
+- **Leader rotation**: Replay stage detects leader transitions and emits BecameLeader signals
 
 ### Multi-Node Local Cluster
 

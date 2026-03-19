@@ -393,6 +393,75 @@ fn run_genesis_cluster(params: GenesisClusterParams) -> Result<()> {
         ));
     }
 
+    // Add vote account + stake account for each validator.
+    // This enables consensus voting and root advancement.
+    for (i, (_, pubkey_bytes)) in keypairs.iter().enumerate() {
+        let identity = Pubkey::new(*pubkey_bytes);
+
+        // Derive deterministic vote account address from identity.
+        let mut vote_bytes = [0u8; 32];
+        vote_bytes[..8].copy_from_slice(&(i as u64).to_le_bytes());
+        vote_bytes[8] = 0x01; // Vote account marker
+        vote_bytes[24..32].copy_from_slice(&pubkey_bytes[24..32]);
+        let vote_pubkey = Pubkey::new(vote_bytes);
+
+        // Create vote state with identity as authorized voter/withdrawer.
+        let vote_state = karstflow_consensus::VoteState::new(
+            identity, identity, // authorized_voter
+            identity, // authorized_withdrawer
+            100,      // max commission (like reference implementation genesis)
+        );
+        let vote_data = vote_state.serialize();
+
+        // Vote account (rent-exempt minimum for data size).
+        let vote_lamports = 3_480_960;
+        genesis.accounts.push((
+            vote_pubkey,
+            karstflow_storage::GenesisAccount {
+                lamports: vote_lamports,
+                data: vote_data,
+                owner: karstflow_ids::VOTE_PROGRAM_ID,
+                executable: false,
+                rent_epoch: u64::MAX,
+            },
+        ));
+
+        // Derive stake account address.
+        let mut stake_bytes = [0u8; 32];
+        stake_bytes[..8].copy_from_slice(&(i as u64).to_le_bytes());
+        stake_bytes[8] = 0x02; // Stake account marker
+        stake_bytes[24..32].copy_from_slice(&pubkey_bytes[24..32]);
+        let stake_pubkey = Pubkey::new(stake_bytes);
+
+        // Create stake state delegated to vote account.
+        let authorized = karstflow_consensus::Authorized::new(identity, identity);
+        let lockup = karstflow_consensus::Lockup::new(0, 0, Pubkey::default());
+        let meta = karstflow_consensus::Meta::new(2_282_880, authorized, lockup);
+        let delegation = karstflow_consensus::Delegation::new(
+            vote_pubkey,
+            1_000_000_000, // 1B lamports stake
+            0,             // activation_epoch = 0
+        );
+        let stake_account = karstflow_consensus::StakeAccount::new(delegation, 0);
+        let stake_state = karstflow_consensus::StakeState::Delegated(
+            meta,
+            stake_account,
+            karstflow_consensus::StakeFlags::default(),
+        );
+        let stake_data = karstflow_consensus::serialize_stake_state(&stake_state);
+
+        genesis.accounts.push((
+            stake_pubkey,
+            karstflow_storage::GenesisAccount {
+                lamports: 1_000_000_000 + 2_282_880,
+                data: stake_data,
+                owner: karstflow_ids::STAKE_PROGRAM_ID,
+                executable: false,
+                rent_epoch: u64::MAX,
+            },
+        ));
+    }
+
     // Add faucet account.
     let faucet = crate::bootstrap::development_faucet_pubkey();
     genesis.accounts.push((

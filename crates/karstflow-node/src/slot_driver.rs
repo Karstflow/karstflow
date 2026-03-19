@@ -7,6 +7,7 @@ use tracing::{info, warn};
 /// - Enters timer loop that advances slots every 400ms
 /// - Only produces blocks when this validator is the scheduled leader
 /// - Non-leader slots are still ticked to keep bank state advancing
+#[allow(dead_code)]
 pub(crate) fn spawn_cluster_slot_driver(
     identity_pubkey: karstflow_storage::Pubkey,
     bank_forks: std::sync::Arc<std::sync::RwLock<karstflow_consensus::BankForks>>,
@@ -64,6 +65,8 @@ pub(crate) fn spawn_cluster_slot_driver(
             }
 
             // Helper: check if identity is leader for a slot.
+            // Uses the highest available bank for schedule lookup. The
+            // leader schedule covers the entire epoch (432K slots).
             let is_leader_for = |slot: u64| -> bool {
                 let forks = bank_forks.read().expect("bank_forks lock poisoned");
                 let bank = forks.working_bank();
@@ -159,6 +162,19 @@ pub(crate) fn spawn_cluster_slot_driver(
                         continue; // Poll again
                     }
 
+                    // Skip if bank is already frozen (e.g., from previous
+                    // iteration's retry after parent-not-ready continue).
+                    let already_frozen = {
+                        let forks = bank_forks.read().expect("bank_forks lock poisoned");
+                        forks
+                            .working_bank()
+                            .is_frozen()
+                    };
+                    if already_frozen {
+                        // Bank was frozen in a previous iteration. Just
+                        // advance to the next slot.
+                    } else {
+
                     let forks = bank_forks.read().expect("bank_forks lock poisoned");
                     let bank = forks.working_bank();
                     let ticks_needed =
@@ -191,6 +207,7 @@ pub(crate) fn spawn_cluster_slot_driver(
                             timestamp: 0,
                         },
                     ));
+                    } // else (not already frozen)
                 }
                 // Non-leader: do NOT create a bank or freeze. Replay will
                 // create the bank when the block arrives from the leader
@@ -227,9 +244,10 @@ pub(crate) fn spawn_cluster_slot_driver(
                     }
 
                     if !parent_ready {
-                        // Don't advance — retry this slot on next tick.
-                        // Parent will arrive via turbine when gossip
-                        // discovers the peer.
+                        // Don't advance current_slot — retry next tick.
+                        // Skip the currently_leading update too so we
+                        // don't try to freeze an already-frozen bank.
+                        std::thread::sleep(slot_duration);
                         continue;
                     }
 
@@ -281,7 +299,10 @@ pub(crate) fn spawn_cluster_slot_driver(
                         ));
                     }
                 } else {
-                    // Non-leader slot: advance counter, replay handles banks.
+                    // Non-leader slot: advance counter unconditionally.
+                    // The slot driver tracks wall-clock slot progression.
+                    // Replay handles bank creation when blocks arrive via
+                    // turbine from the leader.
                     current_slot = next_slot;
                     if currently_leading {
                         info!(
