@@ -380,6 +380,28 @@ fn run_with_node_config(
         None
     };
 
+    // Snapshot file server: serves /snapshot.tar.bz2 and /genesis.tar.bz2
+    // so other validators can download snapshots during bootstrap.
+    if let Some(data_dir) = &node_config.data_dir {
+        let snapshot_bind = std::net::SocketAddr::new(
+            node_config
+                .rpc_bind
+                .map(|a| a.ip())
+                .unwrap_or(std::net::IpAddr::from([127, 0, 0, 1])),
+            node_config
+                .rpc_bind
+                .map(|a| a.port() + 1) // RPC port + 1 for snapshot serving
+                .unwrap_or(8900),
+        );
+        let _snapshot_server = karstflow_control::spawn_snapshot_file_server(
+            snapshot_bind,
+            karstflow_control::SnapshotServerConfig {
+                snapshot_dir: data_dir.join("snapshots"),
+                genesis_path: effective_genesis_path.map(std::path::PathBuf::from),
+            },
+        );
+    }
+
     // Gossip status publisher: advertise lowest slot and epoch slots so
     // peers know what data this node can serve for repair and catch-up.
     {
