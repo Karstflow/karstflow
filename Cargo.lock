@@ -1573,6 +1573,7 @@ dependencies = [
  "bincode",
  "bs58",
  "dashmap",
+ "http",
  "jsonrpsee",
  "karstflow-constants",
  "karstflow-types",
@@ -1581,6 +1582,7 @@ dependencies = [
  "serde_json",
  "thiserror 2.0.18",
  "tokio",
+ "tower",
  "tracing",
  "zstd",
 ]

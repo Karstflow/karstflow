@@ -380,6 +380,17 @@ fn run_with_node_config(
         None
     };
 
+    // Snapshot middleware config: serves /snapshot.tar.bz2 and /genesis.tar.bz2
+    // on the same RPC port via tower middleware (no separate server needed).
+    let snapshot_middleware_config =
+        node_config
+            .data_dir
+            .as_ref()
+            .map(|data_dir| karstflow_control::SnapshotMiddlewareConfig {
+                snapshot_dir: data_dir.join("snapshots"),
+                genesis_path: effective_genesis_path.map(std::path::PathBuf::from),
+            });
+
     // Gossip status publisher: advertise lowest slot and epoch slots so
     // peers know what data this node can serve for repair and catch-up.
     {
@@ -634,6 +645,7 @@ fn run_with_node_config(
             &replay_bundle.signal_bus,
             pipeline_bundle.handle.clone(),
             consensus.bank_forks.clone(),
+            consensus.fork_choice.clone(),
             leader_pubkey,
             leader_signing_key,
             shred_version,
@@ -677,6 +689,11 @@ fn run_with_node_config(
                                     continue;
                                 }
                             }
+                            // Mark rooted so BankForks::set_root() can succeed
+                            // when Tower produces a new root via voting.
+                            if let Err(e) = bank.mark_rooted() {
+                                tracing::debug!(error = ?e, slot, "slot-freeze: mark_rooted skipped");
+                            }
                             let hash = bank.last_blockhash();
                             drop(forks);
 
@@ -710,6 +727,7 @@ fn run_with_node_config(
         cluster_bootstrap::bootstrap_genesis_and_start_leading(
             identity_pubkey,
             &consensus.bank_forks,
+            &consensus.fork_choice,
             &replay_bundle.signal_bus,
             &pipeline_bundle.handle,
         );
@@ -1056,6 +1074,7 @@ fn run_with_node_config(
         *identity.pubkey(),
         shared_blockstore,
         tx_submitter,
+        snapshot_middleware_config,
     );
 
     // Save tower state to disk before shutdown so lockouts survive restarts.

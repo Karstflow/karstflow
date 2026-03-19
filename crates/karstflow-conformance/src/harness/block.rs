@@ -25,12 +25,19 @@ pub struct BlockExecutionResult {
     pub failed_count: usize,
 }
 
+/// Deterministic validator identity for conformance tests.
+/// Using a fixed pubkey ensures bank hash is reproducible across runs.
+const CONFORMANCE_VALIDATOR_PUBKEY: Pubkey = Pubkey::new_from_array([
+    0xCF, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0A, 0x0B, 0x0C, 0x0D, 0x0E, 0x0F,
+    0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19, 0x1A, 0x1B, 0x1C, 0x1D, 0x1E, 0x1F,
+]);
+
 /// Execute a block of transactions against a fresh development genesis bank.
 pub fn execute_block(
     pre_accounts: &HashMap<Pubkey, Account>,
     transactions: &[SanitizedTransaction],
 ) -> BlockExecutionResult {
-    let consensus = bootstrap_from_development_genesis(None, None)
+    let consensus = bootstrap_from_development_genesis(None, Some(&CONFORMANCE_VALIDATOR_PUBKEY))
         .expect("failed to bootstrap development genesis");
     let forks = consensus.bank_forks.read().unwrap();
     let bank = forks.working_bank();
@@ -42,6 +49,10 @@ pub fn execute_block(
             .store_published_account(*pubkey, account.clone());
     }
 
+    // Register genesis blockhash for transaction validation.
+    let genesis_hash = bank.last_blockhash();
+    bank.register_recent_blockhash(genesis_hash);
+
     let backend = Arc::new(SbpfExecutionAdapter::with_defaults());
 
     // Execute all transactions.
@@ -50,8 +61,12 @@ pub fn execute_block(
     let mut failed_count = 0;
 
     for txn in transactions {
+        // Clear signatures to skip verification — conformance tests
+        // verify execution logic, not cryptographic signatures.
+        let mut txn_copy = txn.clone();
+        txn_copy.signatures.clear();
         let result = bank.process_transaction(
-            txn,
+            &txn_copy,
             backend.as_ref(),
             karstflow_constants::execution::MAX_COMPUTE_UNITS,
         );

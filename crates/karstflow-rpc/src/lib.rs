@@ -15,7 +15,10 @@ mod methods;
 
 pub use cache::{AccountCache, BlockCache, BlockInfo, SignatureCache};
 pub use errors::{Result, RpcError};
-pub use http::{spawn_rpc_http_server, spawn_rpc_ws_server};
+pub use http::{
+    spawn_rpc_http_server, spawn_rpc_ws_server, spawn_snapshot_file_server, SnapshotLayer,
+    SnapshotMiddlewareConfig, SnapshotServerConfig,
+};
 pub use state::{
     metrics_file_provider, BankAccessProvider, RpcAddressSignatureEntry, RpcBlockCommitment,
     RpcBlockData, RpcBlockTransaction, RpcClusterNode, RpcCommitment, RpcPerformanceSample,

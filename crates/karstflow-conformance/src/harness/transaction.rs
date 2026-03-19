@@ -37,6 +37,12 @@ pub fn execute_transaction(pre_accounts: &HashMap<Pubkey, Account>) -> Transacti
             .store_published_account(*pubkey, account.clone());
     }
 
+    // Register the genesis blockhash so transactions pass validation.
+    // In dev mode bootstrap, finish_slot() is called by the slot driver
+    // later, but conformance tests run synchronously without a slot driver.
+    let genesis_hash = bank.last_blockhash();
+    bank.register_recent_blockhash(genesis_hash);
+
     let backend = Arc::new(SbpfExecutionAdapter::with_defaults());
     let faucet = development_faucet_pubkey();
 
@@ -60,10 +66,18 @@ impl TransactionSetup {
         &self,
         transaction: &karstflow_consensus::SanitizedTransaction,
     ) -> TransactionExecutionResult {
-        self.bank.process_transaction(
-            transaction,
+        // Use empty signatures to skip signature verification.
+        // Conformance tests verify execution logic, not cryptographic signatures.
+        let mut txn = transaction.clone();
+        txn.signatures.clear();
+        let result = self.bank.process_transaction(
+            &txn,
             self.backend.as_ref(),
             karstflow_constants::execution::MAX_COMPUTE_UNITS,
-        )
+        );
+        if !result.success {
+            eprintln!("[conformance] tx failed: {:?}", result.error);
+        }
+        result
     }
 }

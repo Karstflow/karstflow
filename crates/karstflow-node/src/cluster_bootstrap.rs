@@ -19,6 +19,7 @@ use tracing::{info, warn};
 pub(crate) fn bootstrap_genesis_and_start_leading(
     identity_pubkey: karstflow_storage::Pubkey,
     bank_forks: &std::sync::Arc<std::sync::RwLock<karstflow_consensus::BankForks>>,
+    fork_choice: &std::sync::Arc<std::sync::Mutex<karstflow_consensus::ForkChoice>>,
     signal_bus: &std::sync::Arc<std::sync::Mutex<karstflow_stages::SignalBus>>,
     _pipeline_handle: &std::sync::Arc<karstflow_stages::PipelineHandle>,
 ) {
@@ -39,6 +40,8 @@ pub(crate) fn bootstrap_genesis_and_start_leading(
             warn!(error = ?e, "cluster-bootstrap: failed to finalize genesis");
             return;
         }
+        // Mark genesis rooted so set_root works when Tower advances.
+        let _ = genesis_bank.mark_rooted();
         let genesis_slot = genesis_bank.slot();
         let genesis_hash = genesis_bank.last_blockhash();
         info!(
@@ -46,6 +49,12 @@ pub(crate) fn bootstrap_genesis_and_start_leading(
             "cluster-bootstrap: genesis bank finalized"
         );
         drop(forks);
+
+        // Register genesis in fork choice.
+        fork_choice
+            .lock()
+            .expect("fork_choice lock poisoned")
+            .add_fork(genesis_slot, None);
 
         // Emit SlotCompleted for genesis so resolv-blockhash thread
         // registers the genesis hash.
@@ -103,6 +112,12 @@ pub(crate) fn bootstrap_genesis_and_start_leading(
             }
             let _ = forks.set_working_bank(slot);
             drop(forks);
+
+            // Register in fork choice so consensus can vote for this slot.
+            fork_choice
+                .lock()
+                .expect("fork_choice lock poisoned")
+                .add_fork(slot, Some(0));
 
             // Find the end of our leader range.
             let end_slot = {

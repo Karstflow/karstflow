@@ -2654,6 +2654,7 @@ pub(crate) fn maybe_start_rpc_http_server(node_config: &NodeConfig) -> Result<()
         None,
         None,
         None,
+        None,
     )
 }
 
@@ -2669,6 +2670,10 @@ pub(crate) fn maybe_start_rpc_http_server(node_config: &NodeConfig) -> Result<()
 /// When `cluster_info` is provided alongside `bank_forks`, the RPC
 /// server can forward `sendTransaction` requests to the current
 /// leader's TPU socket via UDP.
+///
+/// When `snapshot_middleware_config` is provided, the RPC server serves
+/// snapshot and genesis files on the same port via tower middleware,
+/// eliminating the need for a separate snapshot HTTP server.
 #[allow(clippy::too_many_arguments)]
 pub fn maybe_start_rpc_http_server_with_consensus(
     node_config: &NodeConfig,
@@ -2679,6 +2684,7 @@ pub fn maybe_start_rpc_http_server_with_consensus(
     blockstore: Option<Arc<Blockstore>>,
     health_status: Option<SharedHealthStatus>,
     tx_submitter_override: Option<Arc<dyn TransactionSubmitter>>,
+    snapshot_middleware_config: Option<karstflow_rpc::SnapshotMiddlewareConfig>,
 ) -> Result<()> {
     if !node_config.rpc_enabled {
         return Ok(());
@@ -2742,6 +2748,7 @@ pub fn maybe_start_rpc_http_server_with_consensus(
         runtime_snapshot_provider.clone(),
         bank_access_provider.clone(),
         tx_submitter,
+        snapshot_middleware_config,
     )?;
 
     // Spawn dedicated WebSocket server on a separate port (Solana-compatible).
@@ -3917,6 +3924,7 @@ pub fn run_runtime_phase(
         [0u8; 32],
         None,
         None,
+        None,
     )
 }
 
@@ -3938,6 +3946,7 @@ pub fn run_runtime_phase_with_consensus(
     identity_pubkey: [u8; 32],
     blockstore: Option<Arc<Blockstore>>,
     tx_submitter_override: Option<Arc<dyn TransactionSubmitter>>,
+    snapshot_middleware_config: Option<karstflow_rpc::SnapshotMiddlewareConfig>,
 ) -> Result<()> {
     run_startup_checks(node_config, startup_services, "startup", 0)?;
     maybe_start_metrics_http_bridge(
@@ -3954,6 +3963,7 @@ pub fn run_runtime_phase_with_consensus(
         blockstore,
         runtime_bundle.health_status.clone(),
         tx_submitter_override,
+        snapshot_middleware_config,
     )?;
     println!(
         "{}",

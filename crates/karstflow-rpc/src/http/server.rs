@@ -10,8 +10,10 @@ use tracing::{error, info};
 
 use super::registry::REGISTERED_RPC_METHODS;
 use super::renderer::render_json_rpc_response_with_dev_mode;
+use super::snapshot_middleware::{SnapshotLayer, SnapshotMiddlewareConfig};
 use super::subscriptions::register_subscription_methods;
 
+#[allow(clippy::too_many_arguments)]
 pub fn spawn_rpc_http_server(
     bind_addr: SocketAddr,
     full_api: bool,
@@ -20,6 +22,7 @@ pub fn spawn_rpc_http_server(
     runtime_snapshot_provider: Option<Arc<dyn RuntimeSnapshotProvider>>,
     bank_access_provider: Option<Arc<dyn BankAccessProvider>>,
     tx_submitter: Option<Arc<dyn TransactionSubmitter>>,
+    snapshot_config: Option<SnapshotMiddlewareConfig>,
 ) -> Result<()> {
     let bind_probe = TcpListener::bind(bind_addr)
         .map_err(|source| RpcError::RpcHttpBind { bind_addr, source })?;
@@ -48,14 +51,6 @@ pub fn spawn_rpc_http_server(
             };
 
             runtime.block_on(async move {
-                let server = match ServerBuilder::default().build(bind_addr).await {
-                    Ok(server) => server,
-                    Err(error) => {
-                        error!(%error, "failed to start jsonrpsee server");
-                        return;
-                    }
-                };
-
                 let mut module = RpcModule::new(());
                 for method in REGISTERED_RPC_METHODS {
                     // Dev-mode methods are only registered when dev_mode is active.
@@ -94,8 +89,35 @@ pub fn spawn_rpc_http_server(
                     return;
                 }
 
-                let _handle = server.start(module);
-                std::future::pending::<()>().await;
+                // Build server with optional snapshot middleware on the same port.
+                if let Some(snap_cfg) = snapshot_config {
+                    let middleware = tower::ServiceBuilder::new()
+                        .layer(SnapshotLayer::new(snap_cfg));
+                    let server = match ServerBuilder::default()
+                        .set_http_middleware(middleware)
+                        .build(bind_addr)
+                        .await
+                    {
+                        Ok(server) => server,
+                        Err(error) => {
+                            error!(%error, "failed to start jsonrpsee server (with snapshot middleware)");
+                            return;
+                        }
+                    };
+                    info!("snapshot/genesis files served on same RPC port");
+                    let _handle = server.start(module);
+                    std::future::pending::<()>().await;
+                } else {
+                    let server = match ServerBuilder::default().build(bind_addr).await {
+                        Ok(server) => server,
+                        Err(error) => {
+                            error!(%error, "failed to start jsonrpsee server");
+                            return;
+                        }
+                    };
+                    let _handle = server.start(module);
+                    std::future::pending::<()>().await;
+                }
             });
         })
         .map_err(RpcError::RpcHttpThreadSpawn)?;
