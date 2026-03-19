@@ -351,6 +351,8 @@ file_path = "/var/karstflow/metrics.log"
 
 The node will automatically download genesis and snapshot from the network — no manual file management required.
 
+Snapshot and genesis files are served on the **same RPC port** (e.g. `8899`) via tower middleware — other validators can download `/genesis.tar.bz2` and `/snapshot.tar.bz2` directly from the RPC endpoint.
+
 ### Embedded BPF Programs
 
 Genesis includes real BPF program binaries from the Solana ecosystem (sourced from agave `program-binaries`):

@@ -11,6 +11,9 @@ serde_json.workspace = true
 serde.workspace = true
 tokio.workspace = true
 jsonrpsee = { version = "0.24", features = ["server"] }
+# tower 0.4 to match jsonrpsee 0.24's set_http_middleware requirement
+tower = "0.4"
+http = { workspace = true }
 karstflow-constants.workspace = true
 karstflow-types.workspace = true
 parking_lot.workspace = true

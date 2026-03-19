@@ -36,8 +36,10 @@ pub use bootstrap::{
 
 // Re-export TransactionSubmitter trait so downstream crates can cast submitters.
 pub use karstflow_rpc::TransactionSubmitter;
-// Re-export snapshot file server for wiring in main.rs.
-pub use karstflow_rpc::{spawn_snapshot_file_server, SnapshotServerConfig};
+// Re-export snapshot file server and middleware for wiring in main.rs.
+pub use karstflow_rpc::{
+    spawn_snapshot_file_server, SnapshotMiddlewareConfig, SnapshotServerConfig,
+};
 
 // Continue bootstrap re-exports (split to avoid merge conflict).
 pub use bootstrap::{
