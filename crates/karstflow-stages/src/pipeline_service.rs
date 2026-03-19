@@ -185,6 +185,16 @@ pub struct PipelineHandle {
     pub stats: Arc<PipelineServiceStats>,
     /// Inner stage stats for metrics aggregation.
     pub stage_stats: PipelineStageStats,
+    /// Channel to signal when PoH completes all ticks for a slot.
+    /// The receiver (in main.rs) freezes the bank and emits SlotCompleted.
+    slot_complete_tx: std::sync::Mutex<Option<crossbeam_channel::Sender<u64>>>,
+}
+
+impl PipelineHandle {
+    /// Set the channel for PoH slot completion notifications.
+    pub fn set_slot_complete_tx(&self, tx: crossbeam_channel::Sender<u64>) {
+        *self.slot_complete_tx.lock().expect("lock") = Some(tx);
+    }
 }
 
 impl PipelineHandle {
@@ -196,6 +206,7 @@ impl PipelineHandle {
             poh_ticks_done: AtomicU64::new(0),
             stats,
             stage_stats,
+            slot_complete_tx: std::sync::Mutex::new(None),
         }
     }
 
@@ -505,6 +516,19 @@ impl Service for PipelineService {
                 self.handle
                     .poh_ticks_done
                     .store(ticks_after, Ordering::Relaxed);
+
+                // PoH completed all ticks for this slot — signal slot
+                // boundary. The slot completion handler (wired in main.rs)
+                // freezes the bank and emits SlotCompleted, replacing
+                // the old slot driver's freeze logic.
+                if ticks_after >= karstflow_constants::ledger::TICKS_PER_SLOT {
+                    let slot = self.handle.current_slot();
+                    if let Ok(guard) = self.handle.slot_complete_tx.lock() {
+                        if let Some(ref tx) = *guard {
+                            let _ = tx.try_send(slot);
+                        }
+                    }
+                }
             }
         }
 

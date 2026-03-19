@@ -12,6 +12,7 @@ use crate::shredding::shred_produced_entries;
 pub(crate) fn spawn_leader_orchestrator(
     signal_bus: &std::sync::Arc<std::sync::Mutex<karstflow_stages::SignalBus>>,
     handle: std::sync::Arc<karstflow_stages::PipelineHandle>,
+    bank_forks: std::sync::Arc<std::sync::RwLock<karstflow_consensus::BankForks>>,
     leader_pubkey: karstflow_storage::Pubkey,
     leader_signing_key: ed25519_dalek::SigningKey,
     shred_version: u16,
@@ -86,8 +87,22 @@ pub(crate) fn spawn_leader_orchestrator(
                                 );
                             }
 
-                            // Begin next slot in the leader range.
+                            // Create bank for next leader slot and begin it.
                             let next_slot = slot + 1;
+                            {
+                                let mut forks =
+                                    bank_forks.write().expect("bank_forks lock poisoned");
+                                if forks.get(next_slot).is_none() {
+                                    if let Some(parent) = forks.get(slot) {
+                                        let ls = parent.leader_schedule().clone();
+                                        let child = karstflow_consensus::Bank::new_from_parent(
+                                            &parent, next_slot, ls,
+                                        );
+                                        let _ = forks.insert(child);
+                                        let _ = forks.set_working_bank(next_slot);
+                                    }
+                                }
+                            }
                             handle.begin_slot(next_slot);
                         }
                     }

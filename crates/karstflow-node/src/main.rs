@@ -1,3 +1,4 @@
+mod cluster_bootstrap;
 mod diagnostics;
 mod leader_orchestrator;
 mod plugin_notifier;
@@ -625,6 +626,7 @@ fn run_with_node_config(
         leader_orchestrator::spawn_leader_orchestrator(
             &replay_bundle.signal_bus,
             pipeline_bundle.handle.clone(),
+            consensus.bank_forks.clone(),
             leader_pubkey,
             leader_signing_key,
             shred_version,
@@ -634,20 +636,75 @@ fn run_with_node_config(
         );
     }
 
-    // Cluster slot driver for genesis-file mode.
+    // Cluster bootstrap for genesis-file mode.
+    // One-time: tick genesis, create first leader bank, emit BecameLeader.
+    // After this, PoH + Replay + Orchestrator handle all slot management.
     let has_genesis_file = node_config.genesis_path.is_some() || genesis_path_override.is_some();
     if has_genesis_file && !is_dev_mode {
         let identity_pubkey = karstflow_storage::Pubkey::from(*identity.pubkey());
-        slot_driver::spawn_cluster_slot_driver(
+
+        // Wire PoH slot completion → bank freeze + SlotCompleted emission.
+        // This replaces the old slot driver's timer-based freeze logic.
+        let (slot_complete_tx, slot_complete_rx) = crossbeam_channel::bounded::<u64>(16);
+        pipeline_bundle
+            .handle
+            .set_slot_complete_tx(slot_complete_tx);
+        {
+            let freeze_forks = consensus.bank_forks.clone();
+            let freeze_bus = replay_bundle.signal_bus.clone();
+            std::thread::Builder::new()
+                .name("slot-freeze".into())
+                .spawn(move || {
+                    while let Ok(slot) = slot_complete_rx.recv() {
+                        let forks = freeze_forks.read().expect("bank_forks lock poisoned");
+                        if let Some(bank) = forks.get(slot) {
+                            if !bank.is_frozen() {
+                                let ticks_needed = bank
+                                    .max_tick_height()
+                                    .saturating_sub(bank.tick_height());
+                                for _ in 0..ticks_needed {
+                                    let _ = bank.register_tick();
+                                }
+                                if let Err(e) = bank.finish_slot() {
+                                    tracing::warn!(error = ?e, slot, "slot-freeze: finish_slot failed");
+                                    continue;
+                                }
+                            }
+                            let hash = bank.last_blockhash();
+                            drop(forks);
+
+                            let mut bus =
+                                freeze_bus.lock().expect("signal_bus lock poisoned");
+                            bus.emit(karstflow_stages::ReplaySignal::SlotCompleted(
+                                karstflow_stages::SlotCompletedInfo {
+                                    slot,
+                                    parent_slot: slot.saturating_sub(1),
+                                    bank_hash: hash,
+                                    block_hash: hash,
+                                    parent_blockhash: [0u8; 32],
+                                    epoch: 0,
+                                    is_epoch_boundary: false,
+                                    transaction_count: 0,
+                                    executed_count: 0,
+                                    fee_lamports_collected: 0,
+                                    capitalization: 0,
+                                    timestamp: 0,
+                                },
+                            ));
+                        }
+                    }
+                })
+                .expect("failed to spawn slot-freeze thread");
+        }
+
+        // Bootstrap genesis + first leader slot.
+        // Small delay to let orchestrator subscribe to signal bus.
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        cluster_bootstrap::bootstrap_genesis_and_start_leading(
             identity_pubkey,
-            consensus.bank_forks.clone(),
-            replay_bundle.signal_bus.clone(),
-            pipeline_bundle.handle.clone(),
-            if is_dev_mode {
-                1
-            } else {
-                karstflow_constants::ledger::DEFAULT_HASHES_PER_TICK
-            },
+            &consensus.bank_forks,
+            &replay_bundle.signal_bus,
+            &pipeline_bundle.handle,
         );
     }
 
