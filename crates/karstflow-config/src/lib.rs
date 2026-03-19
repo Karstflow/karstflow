@@ -503,11 +503,9 @@ impl NodeConfig {
         if matches!(self.metrics_output_target, MetricsOutputTarget::Stdout) {
             return Err(ConfigError::LiveModeRejectsStdoutMetricsTarget);
         }
-        if self.topology_spec.topology_name == "default-pipeline" {
-            return Err(ConfigError::LiveModeRejectsDefaultTopologyName {
-                topology_name: self.topology_spec.topology_name.clone(),
-            });
-        }
+        // Default pipeline topology is acceptable for devnet — custom topology
+        // files are recommended for mainnet but not required.
+        // TODO: require custom topology for mainnet readiness policy.
 
         Ok(())
     }

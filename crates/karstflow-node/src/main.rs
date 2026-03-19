@@ -117,10 +117,51 @@ fn run_with_node_config(
         .shred_arrival_receiver
         .unwrap_or_else(|| crossbeam_channel::bounded(1).1);
 
+    // Live mode without snapshot: download snapshot from network peers.
+    // Gossip is already running, so we can discover peers with snapshots.
+    let mut snapshot_archive_path_override: Option<std::path::PathBuf> = None;
+    if node_config.cluster_mode == karstflow_config::ClusterMode::Live
+        && node_config.snapshot_archive_path.is_none()
+        && node_config.genesis_path.is_none()
+    {
+        info!("live mode: downloading snapshot from network peers...");
+        let download_config =
+            karstflow_control::snapshot_download::SnapshotDownloadConfig::default();
+        let output_dir = node_config
+            .data_dir
+            .clone()
+            .unwrap_or_else(|| std::path::PathBuf::from("/tmp/karstflow-snapshots"));
+        std::fs::create_dir_all(&output_dir).ok();
+
+        let crds_table = gossip_handle.cluster_info.crds_table().clone();
+        match karstflow_control::snapshot_download::download_snapshot_from_network(
+            &crds_table,
+            &output_dir,
+            &download_config,
+        ) {
+            Ok(result) => {
+                info!(
+                    path = %result.full_snapshot_path.display(),
+                    peer = %result.peer.rpc_addr,
+                    "snapshot downloaded successfully"
+                );
+                snapshot_archive_path_override = Some(result.full_snapshot_path);
+            }
+            Err(e) => {
+                warn!(error = %e, "snapshot download failed — cannot join live network without snapshot");
+                return Err(karstflow_control::ControlPlaneError::Bootstrap {
+                    message: format!("snapshot download failed: {e}"),
+                });
+            }
+        }
+    }
+
     // Choose bootstrap path: snapshot archive -> genesis file -> empty genesis.
-    let is_dev_mode =
-        node_config.snapshot_archive_path.is_none() && node_config.genesis_path.is_none();
-    let replay_bundle = if let Some(ref archive_path) = node_config.snapshot_archive_path {
+    let effective_snapshot_path = snapshot_archive_path_override
+        .as_deref()
+        .or(node_config.snapshot_archive_path.as_deref());
+    let is_dev_mode = effective_snapshot_path.is_none() && node_config.genesis_path.is_none();
+    let replay_bundle = if let Some(archive_path) = effective_snapshot_path {
         // Path 1: Restore from a Solana snapshot archive to join an existing network.
         let identity_pubkey = karstflow_storage::Pubkey::from(*identity.pubkey());
         let consensus = restore_from_snapshot_archive(
