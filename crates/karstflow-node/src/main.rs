@@ -178,6 +178,13 @@ fn run_with_node_config(
                 );
             }
         }
+        // Min download speed override (bytes/sec). Default: 10 MB/s.
+        // Set to 0 to disable speed checking entirely.
+        if let Ok(speed_str) = std::env::var("KARSTFLOW_SNAPSHOT_MIN_SPEED") {
+            if let Ok(speed) = speed_str.parse::<u64>() {
+                download_config.download.min_speed_bytes_per_sec = speed;
+            }
+        }
         let crds_table = gossip_handle.cluster_info.crds_table().clone();
         match karstflow_control::snapshot_download::download_snapshot_from_network(
             &crds_table,
@@ -739,7 +746,11 @@ fn run_with_node_config(
     // shreds directly into ShredCollector for cross-node block propagation.
     if let Some(tvu_sender) = tvu_shred_sender {
         let tvu_addr = node_config.tvu_bind_addr();
-        turbine_receiver::spawn_turbine_receiver(tvu_addr, tvu_sender);
+        turbine_receiver::spawn_turbine_receiver(
+            tvu_addr,
+            tvu_sender,
+            node_config.expected_shred_version.unwrap_or(0),
+        );
     }
 
     // Build the repair service for slot recovery from peers.

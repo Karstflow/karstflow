@@ -33,11 +33,14 @@ pub(crate) fn spawn_leader_orchestrator(
     std::thread::Builder::new()
         .name("leader-orchestrator".into())
         .spawn(move || {
+            let mut leader_end_slot: u64 = 0;
+
             while let Ok(signal) = leader_signal_rx.recv() {
                 match signal {
                     karstflow_stages::ReplaySignal::BecameLeader(info) => {
                         // Only begin if not already leading (prevents double begin)
                         if !handle.is_leading() {
+                            leader_end_slot = info.end_slot;
                             info!(
                                 start_slot = info.start_slot,
                                 end_slot = info.end_slot,
@@ -87,9 +90,9 @@ pub(crate) fn spawn_leader_orchestrator(
                                 );
                             }
 
-                            // Create bank for next leader slot and begin it.
+                            // Begin next slot if still in leader range.
                             let next_slot = slot + 1;
-                            {
+                            if next_slot < leader_end_slot {
                                 let mut forks =
                                     bank_forks.write().expect("bank_forks lock poisoned");
                                 if forks.get(next_slot).is_none() {
@@ -102,8 +105,17 @@ pub(crate) fn spawn_leader_orchestrator(
                                         let _ = forks.set_working_bank(next_slot);
                                     }
                                 }
+                                drop(forks);
+                                handle.begin_slot(next_slot);
+                            } else {
+                                info!(
+                                    completed = slot,
+                                    "leader range complete, waiting for next BecameLeader"
+                                );
+                                // PoH transitions to follower. Replay will
+                                // emit BecameLeader when our next leader
+                                // range starts (after processing peer blocks).
                             }
-                            handle.begin_slot(next_slot);
                         }
                     }
                     karstflow_stages::ReplaySignal::RootAdvanced(info) => {

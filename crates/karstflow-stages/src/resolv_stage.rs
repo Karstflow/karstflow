@@ -91,7 +91,7 @@ pub struct ResolvConfig {
     /// Maximum number of stashed transactions awaiting blockhash resolution.
     pub stash_capacity: usize,
     /// Number of slots after which a transaction is considered expired.
-    /// Solana uses ~150 slots, but we use 160 to account for skipped slots.
+    /// Matches Solana's MAX_PROCESSING_AGE (150 slots).
     pub transaction_lifetime_slots: u64,
 }
 
@@ -100,7 +100,7 @@ impl Default for ResolvConfig {
         Self {
             blockhash_ring_capacity: 1 << 22, // ~4M entries, matching the reference implementation
             stash_capacity: 65_536,
-            transaction_lifetime_slots: 160,
+            transaction_lifetime_slots: 150,
         }
     }
 }
