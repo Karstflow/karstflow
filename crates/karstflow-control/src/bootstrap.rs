@@ -519,6 +519,16 @@ pub fn bootstrap_from_development_genesis(
     // Add native programs, SPL programs, precompiles, and sysvars.
     append_builtin_genesis_accounts(&mut genesis.accounts);
 
+    // Replace SPL program stubs with real BPF binaries.
+    // The stub accounts from append_builtin_genesis_accounts have empty/minimal
+    // data. The real BPF binaries enable actual program execution.
+    let bpf_accounts = crate::program_binaries::genesis_program_accounts();
+    for (pubkey, account) in bpf_accounts {
+        // Remove stub if it exists, then add real binary.
+        genesis.accounts.retain(|(pk, _)| *pk != pubkey);
+        genesis.accounts.push((pubkey, account));
+    }
+
     let validators = vec![(identity, 500_000_000)];
     let leader_schedule = Arc::new(
         LeaderSchedule::new(0, &validators).expect("leader schedule from single validator"),

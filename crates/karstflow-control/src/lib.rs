@@ -3,6 +3,7 @@ mod command;
 mod errors;
 mod output;
 mod preflight;
+pub mod program_binaries;
 mod runner;
 pub mod snapshot_download;
 mod surface;
