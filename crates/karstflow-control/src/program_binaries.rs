@@ -107,8 +107,9 @@ fn core_bpf_programs() -> Vec<ProgramBinary> {
 
 /// Generate genesis accounts for all embedded BPF programs.
 ///
-/// Each program gets an executable account with the ELF binary as data.
-/// The account is owned by the BPF loader and marked executable.
+/// For BPF Loader v2 programs: single executable account with ELF as data.
+/// For Upgradeable Loader programs: Program account + ProgramData account
+/// (following the standard Solana deployment model).
 pub fn genesis_program_accounts() -> Vec<(Pubkey, GenesisAccount)> {
     let mut accounts = Vec::new();
 
@@ -119,7 +120,6 @@ pub fn genesis_program_accounts() -> Vec<(Pubkey, GenesisAccount)> {
 
     for prog in all_programs {
         let data_len = prog.elf.len();
-        // Rent-exempt minimum: data_len * 1 byte per year + base rent
         let lamports = (data_len as u64 + 128) * 6960;
 
         tracing::info!(
