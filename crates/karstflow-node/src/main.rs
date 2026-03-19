@@ -153,10 +153,30 @@ fn run_with_node_config(
             }
         }
 
-        // Step 2: Download snapshot from gossip peers.
+        // Step 2: Download snapshot from gossip peers (+ fallback HTTP servers).
         info!("live mode: downloading snapshot from network peers...");
-        let download_config =
+        let mut download_config =
             karstflow_control::snapshot_download::SnapshotDownloadConfig::default();
+        // Fallback servers from KARSTFLOW_SNAPSHOT_SERVERS env (comma-separated).
+        // Example: KARSTFLOW_SNAPSHOT_SERVERS=api.devnet.solana.com:80,backup.example.com:8899
+        if let Ok(servers_str) = std::env::var("KARSTFLOW_SNAPSHOT_SERVERS") {
+            for s in servers_str.split(',') {
+                if let Ok(addr) = s.trim().parse::<std::net::SocketAddr>() {
+                    download_config.fallback_servers.push(addr);
+                } else {
+                    warn!(
+                        server = s.trim(),
+                        "invalid fallback server address, skipping"
+                    );
+                }
+            }
+            if !download_config.fallback_servers.is_empty() {
+                info!(
+                    servers = download_config.fallback_servers.len(),
+                    "configured fallback snapshot servers"
+                );
+            }
+        }
         let crds_table = gossip_handle.cluster_info.crds_table().clone();
         match karstflow_control::snapshot_download::download_snapshot_from_network(
             &crds_table,

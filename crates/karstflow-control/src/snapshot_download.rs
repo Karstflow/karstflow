@@ -45,6 +45,12 @@ pub struct SnapshotDownloadConfig {
 
     /// HTTP download configuration.
     pub download: DownloadConfig,
+
+    /// Fallback HTTP/RPC servers for snapshot download.
+    /// Used when gossip doesn't find peers (e.g., behind NAT).
+    /// These are tried after gossip timeout, in order.
+    /// Example: `["http://api.devnet.solana.com:80"]`
+    pub fallback_servers: Vec<std::net::SocketAddr>,
 }
 
 impl Default for SnapshotDownloadConfig {
@@ -56,6 +62,7 @@ impl Default for SnapshotDownloadConfig {
             max_retries: 5,
             min_slot: None,
             download: DownloadConfig::default(),
+            fallback_servers: Vec::new(),
         }
     }
 }
@@ -113,21 +120,89 @@ pub fn download_snapshot_from_network(
 
         if start.elapsed() >= config.gossip_timeout {
             if peers.is_empty() {
-                return Err(ControlPlaneError::Bootstrap {
-                    message: format!(
-                        "no snapshot peers found after {}s gossip timeout",
-                        config.gossip_timeout.as_secs()
-                    ),
-                });
+                if !config.fallback_servers.is_empty() {
+                    info!(
+                        servers = config.fallback_servers.len(),
+                        "no gossip peers found, using fallback HTTP servers"
+                    );
+                    // Create synthetic peers from fallback servers.
+                    for (i, addr) in config.fallback_servers.iter().enumerate() {
+                        let mut identity = [0u8; 32];
+                        identity[..8].copy_from_slice(&(i as u64).to_le_bytes());
+                        identity[8] = 0xFF; // Mark as fallback
+                        peers.push(SnapshotPeerInfo {
+                            identity,
+                            rpc_addr: *addr,
+                            full_snapshot: (0, [0u8; 32]), // Slot/hash unknown for fallback
+                            incremental_snapshot: None,
+                        });
+                    }
+                } else {
+                    return Err(ControlPlaneError::Bootstrap {
+                        message: format!(
+                            "no snapshot peers found after {}s gossip timeout",
+                            config.gossip_timeout.as_secs()
+                        ),
+                    });
+                }
+            } else {
+                info!(
+                    peer_count = peers.len(),
+                    "gossip timeout reached, proceeding with available peers"
+                );
             }
-            info!(
-                peer_count = peers.len(),
-                "gossip timeout reached, proceeding with available peers"
-            );
             break;
         }
 
         std::thread::sleep(config.gossip_poll_interval);
+    }
+
+    // Phase 1b: Rank peers by TCP connect latency.
+    // Uses TCP connect (not ICMP) since it doesn't require root privileges
+    // and measures the same network path as the HTTP download.
+    if peers.len() > 1 {
+        info!(
+            peer_count = peers.len(),
+            "measuring peer latency for ranking"
+        );
+        let mut latencies: Vec<(usize, Duration)> = peers
+            .iter()
+            .enumerate()
+            .filter_map(|(i, peer)| {
+                let start = Instant::now();
+                match std::net::TcpStream::connect_timeout(&peer.rpc_addr, Duration::from_secs(5)) {
+                    Ok(_stream) => {
+                        let latency = start.elapsed();
+                        info!(
+                            peer = %peer.rpc_addr,
+                            latency_ms = latency.as_millis(),
+                            slot = peer.full_snapshot.0,
+                            "peer latency measured"
+                        );
+                        Some((i, latency))
+                    }
+                    Err(_) => {
+                        warn!(peer = %peer.rpc_addr, "peer unreachable, skipping");
+                        None
+                    }
+                }
+            })
+            .collect();
+
+        // Sort by latency (fastest first), then by slot (newest first for ties).
+        latencies.sort_by(|a, b| a.1.cmp(&b.1));
+
+        let ranked: Vec<SnapshotPeerInfo> =
+            latencies.iter().map(|(i, _)| peers[*i].clone()).collect();
+
+        if !ranked.is_empty() {
+            info!(
+                best_peer = %ranked[0].rpc_addr,
+                best_latency_ms = latencies[0].1.as_millis(),
+                "peers ranked by latency"
+            );
+            peers = ranked;
+        }
     }
 
     // Phase 2: Download from best peer with retry.
