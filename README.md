@@ -1,10 +1,20 @@
-# Karstflow
+<p align="center">
+  <img src="assets/logo/karstflow-logo-256.png" alt="Karstflow" width="200" />
+</p>
 
-> High-performance Solana validator implementation in Rust
+<h1 align="center">Karstflow</h1>
+
+<p align="center">
+  <strong>High-performance Solana validator implementation in Rust</strong>
+</p>
+
+<p align="center">
+  270K+ lines of Rust &nbsp;|&nbsp; 6,132+ unit tests &nbsp;|&nbsp; 35/35 conformance &nbsp;|&nbsp; 597/668 E2E &nbsp;|&nbsp; 22 crates &nbsp;|&nbsp; 8 embedded BPF programs
+</p>
+
+---
 
 Karstflow is a ground-up Solana validator built for maximum throughput and minimal latency. It features a custom network stack, pre-allocated data structures, zero-copy I/O patterns, and a modular tile-based architecture designed for predictable performance at scale.
-
-**270K+ lines of Rust | 6,100+ unit tests | 597/668 E2E tests | 22 crates | 8 embedded BPF programs**
 
 ## Design Principles
 
@@ -49,7 +59,7 @@ karstflow-types          (core types: Pubkey, Account, Hash, Shred)
 | `karstflow-stages` | 43,836 | 907 | Replay with fork tracking, block production, PoH state machine, pack scheduler with CU pacing, shred pipeline, metrics aggregation |
 | `karstflow-net` | 40,947 | 904 | Custom QUIC engine, TLS 1.3, gossip with 14-type CRDS, turbine broadcast, repair, AF_XDP |
 | `karstflow-storage` | 29,317 | 744 | Disk-primary account database, blockstore, full+incremental snapshots, persistent backend, LZ4 compression |
-| `karstflow-rpc` | 16,671 | 441 | 60+ JSON-RPC methods, 9 WebSocket subscription types, transaction simulation |
+| `karstflow-rpc` | 16,671 | 441 | 65 JSON-RPC methods, 9 WebSocket subscription types, transaction simulation |
 | `karstflow-control` | 9,009 | 129 | Control plane: bootstrap, preflight validation, diagnostics, service materialization |
 | `karstflow-config` | 7,769 | 207 | TOML configuration with env override, live-mode preflight checks, schema migration |
 | `karstflow-mesh` | 6,615 | 147 | Dual-mode IPC (channels + shared memory), typed SPSC tile links, bounded channels, stats tracking |
@@ -123,7 +133,7 @@ All pipeline stages communicate through dual-mode IPC (`DualSender`/`DualReceive
 
 ### RPC
 
-- **61 JSON-RPC methods** with strict envelope and parameter validation
+- **65 JSON-RPC methods** with strict envelope and parameter validation (100% Solana RPC coverage)
 - **9 WebSocket subscription types**: slot, account, root, signature, vote, block, logs, program, slotsUpdates
 - **Transaction simulation** engine
 - **Account caching** with LRU eviction
@@ -372,7 +382,7 @@ These are embedded at compile time — no external downloads needed for program 
 
 ### PoH Architecture
 
-Slot management follows the reference implementation (firedancer) pattern:
+Slot management follows the reference implementation pattern:
 
 - **PoH-driven slots**: The PoH service continuously hashes SHA-256 and drives slot boundaries (no timer-based slot driver)
 - **Hardware-calibrated**: `hashes_per_tick` is auto-calibrated to the CPU's SHA-256 speed, targeting ~400ms/slot
@@ -394,7 +404,8 @@ bash /tmp/cluster/start.sh
 Features verified on local cluster:
 - **Cross-node transaction propagation** through PoH entries → shreds → turbine → replay
 - **Leader rotation** with hardware-calibrated PoH (~400ms/slot target)
-- **Consensus-driven root advancement** via Tower BFT vote chain
+- **Consensus-driven root advancement** via Tower BFT vote chain with ForkChoice integration
+- **Sustained operation** — no stalls, banks properly rooted and pruned
 
 ### Safety Guards
 
@@ -517,7 +528,7 @@ Current maturity of each subsystem (as of March 2026):
 | Network | 97% | Custom QUIC with pool lifecycle hardening, TLS 1.3, gossip (14 CRDS types + vote integration), turbine with real stake weights + XDP + retransmit cache eviction, repair with signed requests, AF_XDP kernel-bypass (4K LOC), TPU forwarding. Remaining: gRPC plugin transport (auxiliary) |
 | Storage | 98% | Disk-primary MVCC accounts, file-backed store, full/incremental snapshots with gossip hash publishing + merkle tree + parallel decompress, blockstore indexes, LZ4 compression, lattice hash, auto-scheduled snapshot creation |
 | IPC / Mesh | 98% | Dual-mode SPSC (channels + shared memory), 9 FragmentCodec implementations, tile links, bounded channels with backpressure stats |
-| RPC | 100% | 61 JSON-RPC methods (vs 52 in reference) with real bank data via BankAccessProvider, 9 WebSocket subscription types, transaction simulation, getHealth wired to real health check |
+| RPC | 100% | 65 JSON-RPC methods (100% Solana coverage) with real bank data via BankAccessProvider, 9 WebSocket subscription types, transaction simulation, getHealth wired to real health check, snapshot/genesis serving on same port |
 | Execution | 98% | SVM adapter with real BankExecutionEngine enforced in production, batch orchestration, retry policies, compute budget enforcement, epoch rewards sysvar wiring |
 | Crypto | 99% | Ed25519 batch verify, Blake3/SHA-256/Keccak, secp256k1/r1, BN254 pairing, BLS12-381 (G1/G2 via BLST), Reed-Solomon FEC, LtHash, ChaCha20 RNG, PoH module, ZK ElGamal (13 instruction types) |
 | Config | 98% | TOML with env override, live-mode preflight, schema migration, cluster profiles, UDP/XDP transport config, feature gate registry with override modes |
@@ -534,7 +545,7 @@ The validator can boot from genesis or snapshot, sync via gossip and turbine, pa
 
 **Operational**: Gossip discovery, turbine shred reception, FEC reconstruction, block replay, vote submission, snapshot auto-scheduling with gossip hash publishing, leader pipeline with real execution, shred store persistence, repair protocol, blockstore GC with retention policies.
 
-**Remaining for full devnet operation**: Expanded conformance testing, TPU forwarding fallback chain.
+**Remaining for full devnet operation**: Linux server deployment with public IP for live network sync.
 
 ### Mainnet Readiness: 7/10
 
@@ -598,7 +609,7 @@ AF_XDP kernel-bypass requires Linux with root or `CAP_NET_RAW`.
 ### Unit Tests
 
 ```bash
-just test              # 6,100+ tests across 22 crates
+just test              # 6,132+ tests across 22 crates
 just ci                # fmt-check + clippy + test
 ```
 
@@ -622,7 +633,7 @@ Tests cover:
 Three-layer execution verification: instruction, transaction, and block. Tests compare execution outcomes against expected post-states and verify bank hash determinism. See [karstflow-conformance README](crates/karstflow-conformance/README.md) for details.
 
 ```bash
-just conformance       # run conformance tests (20 ignored tests)
+just conformance       # run conformance tests (35/35 pass)
 ```
 
 ### Smoke Test
@@ -679,8 +690,22 @@ just cluster-init 3    # multi-node local cluster
 - **Zero warnings**: Clean `cargo check --workspace` with no dead code or unused imports
 - **TODO tracking**: Zero outstanding TODOs in production code
 
+## Security
+
+Found a vulnerability? Please report it privately — **do not open a public issue**.
+See [`SECURITY.md`](SECURITY.md) for details and contact information.
+
+## Contributing
+
+External contributions are not accepted at this time.
+See [`CONTRIBUTING.md`](CONTRIBUTING.md) for details.
+
 ## License
 
-Copyright (c) 2025–2026 boogvar. All rights reserved.
+Copyright (c) 2025–2026 Vladimir Bugaev (boogvar). All rights reserved.
 
-This software is proprietary and confidential. See `LICENSE` for full terms.
+This software is proprietary. No license is granted to use, copy, modify, or distribute it without prior express written permission.
+
+For licensing inquiries, collaboration, or investment opportunities, contact: **boogvar@gmail.com**
+
+See [`LICENSE`](LICENSE) for full terms.

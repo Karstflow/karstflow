@@ -1,19 +1,90 @@
-Copyright (c) 2025 boogvar. All rights reserved.
+Karstflow — Proprietary License
 
-PROPRIETARY AND CONFIDENTIAL
+Copyright (c) 2025-2026 Vladimir Bugaev (boogvar). All rights reserved.
+https://github.com/BoogVAr
 
-This software and associated documentation files (the "Software") are the proprietary
-and confidential information of the copyright holder.
+This software and associated documentation files, including all source code,
+skills, references, scripts, hooks, plugins, configurations, test suites,
+build artifacts, and any other materials contained in this repository
+(collectively, the "Software"), are the exclusive intellectual property
+of Vladimir Bugaev (boogvar).
 
-The Software is licensed, not sold. This license does not grant you any rights to use,
-copy, modify, merge, publish, distribute, sublicense, and/or sell copies of the Software.
+The Software is protected by copyright law and international treaties.
 
-Unauthorized copying, distribution, modification, or use of this Software, via any medium,
-is strictly prohibited without the express written permission of the copyright holder.
+ALL RIGHTS RESERVED. NO LICENSE GRANTED.
 
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED,
-INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR
-PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE
-FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR
-OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+Without the prior express written permission of Vladimir Bugaev (boogvar),
+you may NOT:
+
+1.  Use, execute, or run the Software or any part of it for any purpose,
+    whether commercial, non-commercial, educational, or personal.
+
+2.  Copy, reproduce, duplicate, or create backup copies of the Software
+    or any part of it.
+
+3.  Modify, adapt, translate, alter, transform, or create derivative works
+    based on the Software or any part of it.
+
+4.  Distribute, publish, sublicense, sell, lease, rent, lend, transfer,
+    or otherwise make available the Software or any part of it to any
+    third party by any means.
+
+5.  Reverse engineer, decompile, disassemble, or attempt to derive the
+    source code, algorithms, data structures, architecture, or design
+    patterns from the Software or any skill content delivered through it.
+
+6.  Use the Software or any part of it to train, fine-tune, or otherwise
+    develop machine learning models, AI systems, or automated tools.
+
+7.  Remove, alter, or obscure any copyright notices, proprietary markings,
+    or license terms included in the Software.
+
+8.  Incorporate any part of the Software into other software, frameworks,
+    products, or services without explicit written permission.
+
+9.  Submit pull requests, patches, issues, or any other contributions to
+    this repository. External contributions are not accepted without a
+    prior written agreement.
+
+10. Benchmark, compare, or publish performance data derived from the
+    Software without explicit written permission.
+
+Any access to this repository does NOT constitute a grant of any license
+or right to use the Software. Viewing the source code on GitHub or any
+other platform does not imply permission to use, copy, or distribute it.
+
+TRADEMARKS:
+
+"Karstflow" and associated logos are trademarks of Vladimir Bugaev
+(boogvar). Nothing in this license grants permission to use these marks.
+
+ENFORCEMENT:
+
+Any unauthorized use, reproduction, modification, or distribution of the
+Software is strictly prohibited and constitutes a violation of copyright law.
+Violations may result in immediate legal action, including but not limited to
+injunctive relief, claims for damages, and recovery of legal costs.
+
+SEVERABILITY:
+
+If any provision of this license is held to be invalid or unenforceable,
+the remaining provisions shall continue in full force and effect.
+
+DISCLAIMER:
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE, AND NONINFRINGEMENT. IN NO EVENT SHALL
+VLADIMIR BUGAEV (BOOGVAR) BE LIABLE FOR ANY CLAIM, DAMAGES, OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT, OR OTHERWISE, ARISING
+FROM, OUT OF, OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 DEALINGS IN THE SOFTWARE.
+
+CONTACT:
+
+For licensing inquiries, collaboration, investment opportunities,
+or integration requests:
+
+  Vladimir Bugaev (boogvar)
+  Email:  boogvar@gmail.com
+  GitHub: https://github.com/BoogVAr
