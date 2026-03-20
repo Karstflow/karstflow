@@ -492,8 +492,8 @@ impl ReplayStage {
                     // Only emit if we haven't already signaled this range.
                     if self.last_leader_signal_end != Some(end_slot) {
                         // Create the leader bank from the just-frozen parent.
-                        // This follows the firedancer pattern: replay creates
-                        // leader banks after processing the parent slot.
+                        // This follows the reference implementation pattern:
+                        // replay creates leader banks after processing the parent slot.
                         {
                             let mut forks = self
                                 .bank_transition

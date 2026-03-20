@@ -1,14 +1,13 @@
 # Contributing
 
-## Local setup
-1. Install Rust via rustup.
-2. Enter repository root.
-3. Run:
-   - `cargo fmt --all`
-   - `cargo clippy --workspace --all-targets -- -D warnings`
-   - `cargo test --workspace --all-targets`
+Karstflow is a proprietary project. **External contributions are not accepted**
+at this time — pull requests will be closed without review.
 
-## Style
-- Prefer clear, descriptive names.
-- Preserve behavior/invariants over naming parity with source project.
-- Keep module mapping updated in `docs/90_module_mapping_working.md`.
+If you are interested in collaboration, licensing, or partnership
+opportunities, please reach out:
+
+- **Email**: boogvar@gmail.com
+- **GitHub**: [BoogVAr](https://github.com/BoogVAr)
+
+Bug reports and feature requests are welcome via
+[GitHub Issues](https://github.com/BoogVAr/karstflow/issues).

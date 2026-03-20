@@ -29,7 +29,12 @@ resolver = "2"
 version = "0.1.0"
 edition = "2021"
 license = "SEE LICENSE IN LICENSE"
-authors = ["boogvar"]
+authors = ["Vladimir Bugaev <boogvar@gmail.com>"]
+description = "High-performance Solana validator implementation in Rust"
+repository = "https://github.com/BoogVAr/karstflow"
+homepage = "https://github.com/BoogVAr/karstflow"
+keywords = ["solana", "validator", "blockchain", "rust", "high-performance"]
+categories = ["cryptography::cryptocurrencies"]
 
 [workspace.dependencies]
 tower = "0.5"
