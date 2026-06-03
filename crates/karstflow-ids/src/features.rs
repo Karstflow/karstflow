@@ -76,6 +76,18 @@ pub const LOADER_V3_MINIMUM_EXTEND_PROGRAM_SIZE: Pubkey = Pubkey::new([
 ]);
 
 // ---------------------------------------------------------------------------
+// System program feature gates
+// ---------------------------------------------------------------------------
+
+/// Enables the System program CreateAccountAllowPrefund instruction, which
+/// permits creating an account that already holds lamports (prefunded).
+/// Base58: 6sPDzwyARRExKH52LECxcGoqziH8G7SZofwuxi8Ja331
+pub const CREATE_ACCOUNT_ALLOW_PREFUND: Pubkey = Pubkey::new([
+    0x57, 0x32, 0x9a, 0x9e, 0x7c, 0x9b, 0x2b, 0x63, 0xa6, 0xee, 0x98, 0xb8, 0x4a, 0x21, 0x4e, 0xb2,
+    0x16, 0xce, 0x9d, 0x43, 0x32, 0xb5, 0x8c, 0x1c, 0x9c, 0xa4, 0x56, 0x8b, 0xde, 0x3b, 0xa9, 0x14,
+]);
+
+// ---------------------------------------------------------------------------
 // VM execution feature gates
 // ---------------------------------------------------------------------------
 
@@ -308,6 +320,7 @@ mod tests {
             ENABLE_BPF_LOADER_SET_AUTHORITY_CHECKED,
             ENABLE_EXTEND_PROGRAM_CHECKED,
             LOADER_V3_MINIMUM_EXTEND_PROGRAM_SIZE,
+            CREATE_ACCOUNT_ALLOW_PREFUND,
             ACCOUNT_DATA_DIRECT_MAPPING,
             STRICTER_ABI_AND_RUNTIME_CONSTRAINTS,
             DEPLETE_CU_METER_ON_VM_FAILURE,
