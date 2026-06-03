@@ -579,6 +579,11 @@ impl VoteProgramExecutor {
         let mut vote_state = VoteState::deserialize(vote_account.data.as_ref())
             .map_err(|e| format!("Failed to deserialize vote state: {:?}", e))?;
 
+        // The authorized withdrawer must sign a commission change.
+        if !context.signers.is_empty() && !context.is_signer(&vote_state.authorized_withdrawer) {
+            return Err("UpdateCommission: authorized withdrawer must sign".to_string());
+        }
+
         vote_state.commission = new_commission;
 
         vote_account.data = AccountData::new(vote_state.serialize());
@@ -623,6 +628,13 @@ impl VoteProgramExecutor {
 
         if !vote_writable || !to_writable {
             return Err("Both accounts must be writable".to_string());
+        }
+
+        // The authorized withdrawer must sign a withdrawal.
+        let vote_state = VoteState::deserialize(vote_account.data.as_ref())
+            .map_err(|e| format!("Failed to deserialize vote state: {:?}", e))?;
+        if !context.signers.is_empty() && !context.is_signer(&vote_state.authorized_withdrawer) {
+            return Err("Withdraw: authorized withdrawer must sign".to_string());
         }
 
         if vote_account.meta.lamports < lamports {
@@ -1128,6 +1140,109 @@ mod tests {
         let modified = outcome.modified_accounts.get(&vote_pubkey).unwrap();
         let updated = VoteState::deserialize(modified.data.as_ref()).unwrap();
         assert_eq!(updated.commission, 25);
+    }
+
+    #[test]
+    fn update_commission_accepts_when_withdrawer_signs() {
+        let executor = VoteProgramExecutor::new(150);
+        let node = Pubkey::new_unique();
+        let voter = Pubkey::new_unique();
+        let withdrawer = Pubkey::new_unique();
+
+        let vote_state = VoteState::new(node, voter, withdrawer, 5);
+        let vote_pubkey = Pubkey::new_unique();
+        let account = make_vote_account(&vote_state);
+
+        let mut instruction_data = Vec::new();
+        instruction_data.extend_from_slice(&constants::INSTRUCTION_UPDATE_COMMISSION.to_le_bytes());
+        instruction_data.push(25);
+
+        let mut signers = std::collections::HashSet::new();
+        signers.insert(withdrawer);
+        let context = ExecutionContext::new(
+            VOTE_PROGRAM_ID,
+            vec![(vote_pubkey, account, true)],
+            instruction_data,
+        )
+        .with_signers(signers);
+
+        let outcome = executor.execute(&context).unwrap();
+        assert!(outcome.success);
+        let modified = outcome.modified_accounts.get(&vote_pubkey).unwrap();
+        assert_eq!(
+            VoteState::deserialize(modified.data.as_ref())
+                .unwrap()
+                .commission,
+            25
+        );
+    }
+
+    #[test]
+    fn update_commission_rejects_when_withdrawer_does_not_sign() {
+        let executor = VoteProgramExecutor::new(150);
+        let node = Pubkey::new_unique();
+        let voter = Pubkey::new_unique();
+        let withdrawer = Pubkey::new_unique();
+
+        let vote_state = VoteState::new(node, voter, withdrawer, 5);
+        let vote_pubkey = Pubkey::new_unique();
+        let account = make_vote_account(&vote_state);
+
+        let mut instruction_data = Vec::new();
+        instruction_data.extend_from_slice(&constants::INSTRUCTION_UPDATE_COMMISSION.to_le_bytes());
+        instruction_data.push(25);
+
+        // Some other account signs, but not the authorized withdrawer.
+        let mut signers = std::collections::HashSet::new();
+        signers.insert(Pubkey::new_unique());
+        let context = ExecutionContext::new(
+            VOTE_PROGRAM_ID,
+            vec![(vote_pubkey, account, true)],
+            instruction_data,
+        )
+        .with_signers(signers);
+
+        let result = executor.execute(&context);
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .contains("authorized withdrawer must sign"));
+    }
+
+    #[test]
+    fn withdraw_rejects_when_withdrawer_does_not_sign() {
+        let executor = VoteProgramExecutor::new(150);
+        let node = Pubkey::new_unique();
+        let voter = Pubkey::new_unique();
+        let withdrawer = Pubkey::new_unique();
+
+        let vote_state = VoteState::new(node, voter, withdrawer, 5);
+        let vote_pubkey = Pubkey::new_unique();
+        let mut account = make_vote_account(&vote_state);
+        account.meta.lamports = 1_000_000;
+        let to_account = Account::zeroed();
+
+        let mut instruction_data = Vec::new();
+        instruction_data.extend_from_slice(&constants::INSTRUCTION_WITHDRAW.to_le_bytes());
+        instruction_data.extend_from_slice(&500u64.to_le_bytes());
+
+        let mut signers = std::collections::HashSet::new();
+        signers.insert(Pubkey::new_unique()); // not the withdrawer
+        let context = ExecutionContext::new(
+            VOTE_PROGRAM_ID,
+            vec![
+                (vote_pubkey, account, true),
+                (Pubkey::new_unique(), to_account, true),
+            ],
+            instruction_data,
+        )
+        .with_signers(signers);
+
+        let result = executor.execute(&context);
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .contains("authorized withdrawer must sign"));
     }
 
     #[test]
