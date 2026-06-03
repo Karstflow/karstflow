@@ -100,9 +100,19 @@ fn to_execution_context(
         .iter()
         .map(|(k, a, w, _signer)| (*k, a.clone(), *w))
         .collect();
+    // Propagate the per-account signer flags so builtins can verify required
+    // signers. Without this, context.signers is empty and signer-gated checks
+    // (e.g. System CreateAccount, vote authority) are silently bypassed.
+    let signers = instruction
+        .accounts
+        .iter()
+        .filter(|(_, _, _, signer)| *signer)
+        .map(|(k, _, _, _)| *k)
+        .collect();
     ExecutionContext::new(instruction.program_id, accounts, instruction.data.clone())
         .with_compute_budget(remaining_compute_units)
         .with_sysvar_snapshot(snapshot)
+        .with_signers(signers)
 }
 
 /// Convert consensus `ProcessedSibling` list into sBPF `SiblingInstruction` list.
