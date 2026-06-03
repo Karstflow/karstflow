@@ -7,10 +7,12 @@ use super::{CostLimits, CostTrackerError};
 ///
 /// Returns `Ok(())` if the transaction would not violate any limit, or a
 /// specific error describing which limit would be exceeded.
+#[allow(clippy::too_many_arguments)]
 pub fn check_limits(
     current_block_cost: u64,
     current_vote_cost: u64,
     current_data_delta: i64,
+    current_allocated_data_size: u64,
     account_cost_fn: &dyn Fn(&Pubkey) -> u64,
     tx_cost: &TransactionCost,
     limits: &CostLimits,
@@ -62,6 +64,17 @@ pub fn check_limits(
         });
     }
 
+    // Per-block allocated account data limit (pre-execution estimate).
+    let new_allocated =
+        current_allocated_data_size.saturating_add(tx_cost.allocated_accounts_data_size);
+    if new_allocated > limits.block_accounts_data_size_limit {
+        return Err(CostTrackerError::BlockAccountsDataSizeLimitExceeded {
+            current: current_allocated_data_size,
+            requested: tx_cost.allocated_accounts_data_size,
+            limit: limits.block_accounts_data_size_limit,
+        });
+    }
+
     Ok(())
 }
 
@@ -92,6 +105,7 @@ mod tests {
             0,
             0,
             0,
+            0,
             &no_account_cost,
             &tx,
             &default_limits(),
@@ -105,6 +119,7 @@ mod tests {
         let tx = simple_tx(1_000);
         let result = check_limits(
             MAX_BLOCK_COMPUTE_UNITS,
+            0,
             0,
             0,
             &no_account_cost,
@@ -126,6 +141,7 @@ mod tests {
             0,
             MAX_VOTE_COMPUTE_UNITS,
             0,
+            0,
             &no_account_cost,
             &tx,
             &default_limits(),
@@ -143,6 +159,7 @@ mod tests {
         let result = check_limits(
             0,
             MAX_VOTE_COMPUTE_UNITS,
+            0,
             0,
             &no_account_cost,
             &tx,
@@ -165,7 +182,7 @@ mod tests {
                 0
             }
         };
-        let result = check_limits(0, 0, 0, &cost_fn, &tx, &default_limits(), tx.is_vote);
+        let result = check_limits(0, 0, 0, 0, &cost_fn, &tx, &default_limits(), tx.is_vote);
         assert!(matches!(
             result,
             Err(CostTrackerError::AccountCostLimitExceeded { .. })
@@ -180,6 +197,7 @@ mod tests {
             0,
             0,
             MAX_ACCOUNT_DATA_SIZE_DELTA,
+            0,
             &no_account_cost,
             &tx,
             &default_limits(),
@@ -208,11 +226,12 @@ mod tests {
 
         // A tx fitting under 100M but not 50M should pass
         let tx = simple_tx(60_000_000);
-        let result = check_limits(0, 0, 0, &no_account_cost, &tx, &limits, tx.is_vote);
+        let result = check_limits(0, 0, 0, 0, &no_account_cost, &tx, &limits, tx.is_vote);
         assert!(result.is_ok());
 
         // Same tx would fail under default 50M
         let result = check_limits(
+            0,
             0,
             0,
             0,
@@ -245,5 +264,43 @@ mod tests {
         let limits = CostLimits::from_features(false, true, true);
         // 60M * 40% = 24M
         assert_eq!(limits.account_cost_limit, 24_000_000);
+    }
+
+    #[test]
+    fn exceeds_block_allocated_data_size() {
+        let mut tx = simple_tx(1_000);
+        tx.allocated_accounts_data_size = 1;
+        let limits = default_limits();
+        let result = check_limits(
+            0,
+            0,
+            0,
+            limits.block_accounts_data_size_limit,
+            &no_account_cost,
+            &tx,
+            &limits,
+            tx.is_vote,
+        );
+        assert!(matches!(
+            result,
+            Err(CostTrackerError::BlockAccountsDataSizeLimitExceeded { .. })
+        ));
+    }
+
+    #[test]
+    fn allocated_data_within_limit_ok() {
+        let mut tx = simple_tx(1_000);
+        tx.allocated_accounts_data_size = 1_000;
+        let result = check_limits(
+            0,
+            0,
+            0,
+            0,
+            &no_account_cost,
+            &tx,
+            &default_limits(),
+            tx.is_vote,
+        );
+        assert!(result.is_ok());
     }
 }

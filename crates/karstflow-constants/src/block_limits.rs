@@ -41,6 +41,13 @@ pub const WRITE_LOCK_COST: u64 = 300;
 /// Maximum account data size delta per block (bytes).
 pub const MAX_ACCOUNT_DATA_SIZE_DELTA: i64 = 100_000_000; // 100MB
 
+/// Maximum total account data a single block may allocate (bytes).
+///
+/// Enforced from the pre-execution estimate of system-program allocations
+/// (`calculate_allocated_accounts_data_size`), matching the reference cost
+/// tracker's `FD_MAX_BLOCK_ACCOUNTS_DATA_SIZE_DELTA`.
+pub const MAX_BLOCK_ACCOUNTS_DATA_SIZE: u64 = 100_000_000; // 100MB
+
 /// Number of shards for the transaction cache.
 pub const TRANSACTION_CACHE_SHARDS: usize = 64;
 

@@ -1428,7 +1428,27 @@ impl Bank {
                     .unwrap_or(false)
             })
             .unwrap_or(false);
-        let estimated_cost = TransactionCost::new(compute_limit, is_vote);
+        // Estimate the account data this transaction requests to allocate, from
+        // its system-program instructions, so the block-level allocation limit
+        // is enforced before execution (consensus-critical).
+        let prefund_active = self
+            .feature_set()
+            .map(|fs| {
+                let fs = fs.read().expect("feature_set lock poisoned");
+                fs.is_active(&karstflow_ids::features::CREATE_ACCOUNT_ALLOW_PREFUND)
+            })
+            .unwrap_or(false);
+        let allocated_data_size = crate::cost_tracker::calculate_allocated_accounts_data_size(
+            transaction.instructions.iter().filter_map(|ix| {
+                transaction
+                    .account_keys
+                    .get(ix.program_id_index as usize)
+                    .map(|pid| (pid, ix.data.as_slice()))
+            }),
+            prefund_active,
+        );
+        let mut estimated_cost = TransactionCost::new(compute_limit, is_vote);
+        estimated_cost.allocated_accounts_data_size = allocated_data_size;
         if let Err(e) = self.cost_tracker().try_add(&estimated_cost) {
             return TransactionExecutionResult {
                 success: false,

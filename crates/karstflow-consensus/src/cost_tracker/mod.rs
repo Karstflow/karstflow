@@ -4,6 +4,7 @@
 //! to prevent blocks from exceeding protocol limits.
 
 mod account_cost;
+mod allocated_data;
 mod block_limits_checker;
 mod transaction_cost;
 
@@ -11,13 +12,14 @@ mod transaction_cost;
 mod tests;
 
 pub use account_cost::AccountCostTracker;
+pub use allocated_data::calculate_allocated_accounts_data_size;
 pub use block_limits_checker::check_limits;
 pub use transaction_cost::TransactionCost;
 
 use karstflow_constants::block_limits::{
-    ACCOUNT_CU_LIMIT_RATIO_PERCENT, MAX_ACCOUNT_DATA_SIZE_DELTA, MAX_BLOCK_COMPUTE_UNITS,
-    MAX_BLOCK_COMPUTE_UNITS_SIMD_0256, MAX_BLOCK_COMPUTE_UNITS_SIMD_0286, MAX_VOTE_COMPUTE_UNITS,
-    MAX_WRITABLE_ACCOUNT_COMPUTE_UNITS,
+    ACCOUNT_CU_LIMIT_RATIO_PERCENT, MAX_ACCOUNT_DATA_SIZE_DELTA, MAX_BLOCK_ACCOUNTS_DATA_SIZE,
+    MAX_BLOCK_COMPUTE_UNITS, MAX_BLOCK_COMPUTE_UNITS_SIMD_0256, MAX_BLOCK_COMPUTE_UNITS_SIMD_0286,
+    MAX_VOTE_COMPUTE_UNITS, MAX_WRITABLE_ACCOUNT_COMPUTE_UNITS,
 };
 use karstflow_storage::Pubkey;
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
@@ -38,6 +40,9 @@ pub struct CostLimits {
     pub account_cost_limit: u64,
     /// Maximum account data size delta per block (bytes).
     pub account_data_size_limit: i64,
+    /// Maximum total account data the block may allocate (bytes), enforced from
+    /// the pre-execution system-program allocation estimate.
+    pub block_accounts_data_size_limit: u64,
 }
 
 impl CostLimits {
@@ -73,6 +78,7 @@ impl CostLimits {
             vote_cost_limit: MAX_VOTE_COMPUTE_UNITS,
             account_cost_limit,
             account_data_size_limit: MAX_ACCOUNT_DATA_SIZE_DELTA,
+            block_accounts_data_size_limit: MAX_BLOCK_ACCOUNTS_DATA_SIZE,
         }
     }
 }
@@ -84,6 +90,7 @@ impl Default for CostLimits {
             vote_cost_limit: MAX_VOTE_COMPUTE_UNITS,
             account_cost_limit: MAX_WRITABLE_ACCOUNT_COMPUTE_UNITS,
             account_data_size_limit: MAX_ACCOUNT_DATA_SIZE_DELTA,
+            block_accounts_data_size_limit: MAX_BLOCK_ACCOUNTS_DATA_SIZE,
         }
     }
 }
@@ -104,6 +111,8 @@ pub struct CostTracker {
     account_costs: AccountCostTracker,
     /// Net account data size change (can be negative from account closures).
     account_data_size_delta: AtomicI64,
+    /// Cumulative pre-execution allocated account data size for this block.
+    allocated_accounts_data_size: AtomicU64,
     /// Whether this block has been marked as dead (exceeded limits).
     is_dead: AtomicBool,
     /// Number of transactions added to this block.
@@ -127,6 +136,7 @@ impl CostTracker {
             vote_cost: AtomicU64::new(0),
             account_costs: AccountCostTracker::new(),
             account_data_size_delta: AtomicI64::new(0),
+            allocated_accounts_data_size: AtomicU64::new(0),
             is_dead: AtomicBool::new(false),
             transaction_count: AtomicU64::new(0),
             remove_simple_vote_from_cost_model: false,
@@ -141,6 +151,7 @@ impl CostTracker {
             vote_cost: AtomicU64::new(0),
             account_costs: AccountCostTracker::new(),
             account_data_size_delta: AtomicI64::new(0),
+            allocated_accounts_data_size: AtomicU64::new(0),
             is_dead: AtomicBool::new(false),
             transaction_count: AtomicU64::new(0),
             remove_simple_vote_from_cost_model: remove_simple_vote,
@@ -166,12 +177,14 @@ impl CostTracker {
         let current_block = self.block_cost.load(Ordering::Acquire);
         let current_vote = self.vote_cost.load(Ordering::Acquire);
         let current_delta = self.account_data_size_delta.load(Ordering::Acquire);
+        let current_allocated = self.allocated_accounts_data_size.load(Ordering::Acquire);
 
         let check_vote_limit = cost.is_vote && !self.remove_simple_vote_from_cost_model;
         check_limits(
             current_block,
             current_vote,
             current_delta,
+            current_allocated,
             &|pubkey| self.account_costs.get(pubkey),
             cost,
             &self.limits,
@@ -193,6 +206,10 @@ impl CostTracker {
         if cost.data_size_delta != 0 {
             self.account_data_size_delta
                 .fetch_add(cost.data_size_delta, Ordering::Release);
+        }
+        if cost.allocated_accounts_data_size != 0 {
+            self.allocated_accounts_data_size
+                .fetch_add(cost.allocated_accounts_data_size, Ordering::Release);
         }
         self.transaction_count.fetch_add(1, Ordering::Release);
 
@@ -217,6 +234,10 @@ impl CostTracker {
                     Some(current.saturating_sub(cost.data_size_delta))
                 })
                 .ok();
+        }
+        if cost.allocated_accounts_data_size != 0 {
+            self.allocated_accounts_data_size
+                .fetch_sub(cost.allocated_accounts_data_size, Ordering::Release);
         }
         self.transaction_count.fetch_sub(1, Ordering::Release);
     }
@@ -311,6 +332,12 @@ pub enum CostTrackerError {
         current: i64,
         requested: i64,
         limit: i64,
+    },
+    /// Per-block allocated account data size limit exceeded.
+    BlockAccountsDataSizeLimitExceeded {
+        current: u64,
+        requested: u64,
+        limit: u64,
     },
     /// Block is dead.
     BlockDead,

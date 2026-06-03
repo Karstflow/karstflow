@@ -17,6 +17,9 @@ pub struct TransactionCost {
     pub data_size_delta: i64,
     /// Number of signatures on the transaction.
     pub signature_count: u64,
+    /// Pre-execution estimate of account data this transaction requests to
+    /// allocate (bytes), enforced against the per-block allocation limit.
+    pub allocated_accounts_data_size: u64,
 }
 
 impl TransactionCost {
@@ -28,6 +31,7 @@ impl TransactionCost {
             writable_accounts: Vec::new(),
             data_size_delta: 0,
             signature_count: 1,
+            allocated_accounts_data_size: 0,
         }
     }
 
@@ -69,6 +73,7 @@ mod tests {
         assert!(cost.writable_accounts.is_empty());
         assert_eq!(cost.data_size_delta, 0);
         assert_eq!(cost.signature_count, 1);
+        assert_eq!(cost.allocated_accounts_data_size, 0);
     }
 
     #[test]
