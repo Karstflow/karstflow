@@ -493,7 +493,10 @@ impl VoteState {
         Self {
             node_pubkey,
             authorized_withdrawer,
-            commission: (inflation_rewards_commission_bps / 100) as u8,
+            // Convert v4 basis-points commission to the legacy u8 percentage,
+            // saturating at u8::MAX so an out-of-range bps value cannot wrap on
+            // truncation (matches reference fd_vsv_get_commission clamp, W018 A8).
+            commission: (inflation_rewards_commission_bps / 100).min(u8::MAX as u16) as u8,
             votes: VecDeque::with_capacity(MAX_LOCKOUT_HISTORY),
             root_slot: None,
             authorized_voters: AuthorizedVoters::new(epoch, authorized_voter),
@@ -1231,6 +1234,36 @@ mod tests {
             VoteState::deserialize(&data),
             Err(VoteError::InvalidAccountData)
         ));
+    }
+
+    /// W018 A8: v4 commission in basis points must saturate at u8::MAX when
+    /// converted to the legacy u8 percentage, never wrap on truncation.
+    #[test]
+    fn new_v4_commission_saturates_not_wraps() {
+        // 30000 bps / 100 = 300, which would wrap to 44 as a bare `as u8`.
+        let vs = VoteState::new_v4(
+            Pubkey::default(),
+            Pubkey::default(),
+            Pubkey::default(),
+            30_000,
+            Pubkey::default(),
+            Pubkey::default(),
+            0,
+            0,
+        );
+        assert_eq!(vs.commission, u8::MAX);
+        // In-range value is unaffected: 10000 bps (100%) -> 100.
+        let vs2 = VoteState::new_v4(
+            Pubkey::default(),
+            Pubkey::default(),
+            Pubkey::default(),
+            10_000,
+            Pubkey::default(),
+            Pubkey::default(),
+            0,
+            0,
+        );
+        assert_eq!(vs2.commission, 100);
     }
 
     /// Boundary: exactly MAX_EPOCH_CREDITS_HISTORY entries is accepted.
