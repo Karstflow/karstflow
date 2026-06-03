@@ -6,7 +6,7 @@ use crate::interpreter::{SyscallDispatch, VmError, VmState};
 use crate::{ExecutionContext, ExecutionOutcome, SbpfExecutionError};
 use karstflow_constants::syscalls;
 use karstflow_types::{Account, AccountData, AccountMeta as TypesAccountMeta, Pubkey};
-use sha2::{Digest, Sha256};
+use sha2::{Digest, Sha256, Sha512};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tiny_keccak::{Hasher, Keccak};
@@ -105,6 +105,7 @@ impl RuntimeSyscallDispatch {
         dispatch.register_by_name("sol_sha256", Box::new(SolSha256Handler));
         dispatch.register_by_name("sol_keccak256", Box::new(SolKeccak256Handler));
         dispatch.register_by_name("sol_blake3", Box::new(SolBlake3Handler));
+        dispatch.register_by_name("sol_sha512", Box::new(SolSha512Handler));
 
         // Heap allocation
         dispatch.register_by_name("sol_alloc_free_", Box::new(SolAllocHandler));
@@ -226,6 +227,7 @@ impl RuntimeSyscallDispatch {
         dispatch.register_by_name("sol_sha256", Box::new(SolSha256Handler));
         dispatch.register_by_name("sol_keccak256", Box::new(SolKeccak256Handler));
         dispatch.register_by_name("sol_blake3", Box::new(SolBlake3Handler));
+        dispatch.register_by_name("sol_sha512", Box::new(SolSha512Handler));
         dispatch.register_by_name("sol_alloc_free_", Box::new(SolAllocHandler));
         dispatch.register_by_name(
             "sol_create_program_address",
@@ -379,6 +381,11 @@ impl RuntimeSyscallDispatch {
         // Feature-gated: blake3
         if features::is_feature_active(active_features, &features::BLAKE3_SYSCALL_ENABLED) {
             dispatch.register_by_name("sol_blake3", Box::new(SolBlake3Handler));
+        }
+
+        // Feature-gated: sha512 (SIMD-0512)
+        if features::is_feature_active(active_features, &features::ENABLE_SHA512_SYSCALL) {
+            dispatch.register_by_name("sol_sha512", Box::new(SolSha512Handler));
         }
 
         // Feature-gated: curve25519 operations
@@ -910,6 +917,38 @@ impl SyscallHandler for SolSha256Handler {
         let mut hasher = Sha256::new();
         hasher.update(&data);
         let hash: [u8; 32] = hasher.finalize().into();
+
+        vm.memory
+            .write_slice(r3, &hash)
+            .map_err(|e| VmError::MemoryError(e.to_string()))?;
+
+        Ok(0)
+    }
+}
+
+/// sol_sha512: Compute SHA-512 hash (SIMD-0512). Gated behind the
+/// `enable_sha512_syscall` feature; output is 64 bytes.
+struct SolSha512Handler;
+
+impl SyscallHandler for SolSha512Handler {
+    fn call(
+        &self,
+        vm: &mut VmState,
+        r1: u64, // input pairs pointer
+        r2: u64, // pair count
+        r3: u64, // result pointer (64 bytes)
+        _r4: u64,
+        _r5: u64,
+    ) -> Result<u64, VmError> {
+        let pair_count = r2 as usize;
+        let data = read_hash_inputs(vm, r1, pair_count)?;
+
+        let cost = syscalls::SHA512_BASE_COST + syscalls::SHA512_PER_BYTE_COST * data.len() as u64;
+        deduct_compute(vm, cost)?;
+
+        let mut hasher = Sha512::new();
+        hasher.update(&data);
+        let hash: [u8; 64] = hasher.finalize().into();
 
         vm.memory
             .write_slice(r3, &hash)
@@ -3434,6 +3473,62 @@ mod tests {
         assert_eq!(result.return_value, expected_first_8);
     }
 
+    #[test]
+    fn sha512_handler_correct_hash() {
+        use sha2::{Digest, Sha512};
+
+        let dispatch = RuntimeSyscallDispatch::with_standard_syscalls();
+        let sha_id = murmur3_hash("sol_sha512");
+
+        // Write test data "hello" to heap, set up input pair pointing to it,
+        // call sol_sha512, then read the first 8 bytes of the 64-byte digest.
+        let bytes = make_program_bytes(&[
+            Instruction::new(Opcode::Lddw as u8, 1, 0, 0, REGION_HEAP_BASE as i32),
+            Instruction::new(0, 0, 0, 0, (REGION_HEAP_BASE >> 32) as i32),
+            // "hell" + "o"
+            Instruction::new(Opcode::Mov64Imm as u8, 2, 0, 0, 0x6C6C6568u32 as i32),
+            Instruction::new(Opcode::StxWord as u8, 1, 2, 0, 0),
+            Instruction::new(Opcode::Mov64Imm as u8, 2, 0, 0, 0x6F),
+            Instruction::new(Opcode::StxByte as u8, 1, 2, 4, 0),
+            // Input pair at heap+64: ptr=heap_base, len=5
+            Instruction::new(Opcode::Lddw as u8, 3, 0, 0, (REGION_HEAP_BASE + 64) as i32),
+            Instruction::new(0, 0, 0, 0, ((REGION_HEAP_BASE + 64) >> 32) as i32),
+            Instruction::new(Opcode::StxDword as u8, 3, 1, 0, 0),
+            Instruction::new(Opcode::Mov64Imm as u8, 4, 0, 0, 5),
+            Instruction::new(Opcode::StxDword as u8, 3, 4, 8, 0),
+            // Call sha512: r1=pair_ptr(heap+64), r2=1, r3=result(heap+128)
+            Instruction::new(Opcode::Lddw as u8, 1, 0, 0, (REGION_HEAP_BASE + 64) as i32),
+            Instruction::new(0, 0, 0, 0, ((REGION_HEAP_BASE + 64) >> 32) as i32),
+            Instruction::new(Opcode::Mov64Imm as u8, 2, 0, 0, 1),
+            Instruction::new(Opcode::Lddw as u8, 3, 0, 0, (REGION_HEAP_BASE + 128) as i32),
+            Instruction::new(0, 0, 0, 0, ((REGION_HEAP_BASE + 128) >> 32) as i32),
+            Instruction::new(Opcode::Call as u8, 0, 0, 0, sha_id as i32),
+            // Read first 8 bytes of the digest into r0
+            Instruction::new(Opcode::Lddw as u8, 1, 0, 0, (REGION_HEAP_BASE + 128) as i32),
+            Instruction::new(0, 0, 0, 0, ((REGION_HEAP_BASE + 128) >> 32) as i32),
+            Instruction::new(Opcode::LdxDword as u8, 0, 1, 0, 0),
+            Instruction::new(Opcode::Exit as u8, 0, 0, 0, 0),
+        ]);
+        let program = load_raw(&bytes).unwrap();
+        let memory = MemoryMap::new(&[], TOTAL_STACK_SIZE, DEFAULT_HEAP_SIZE, vec![]);
+        let result = crate::interpreter::execute(
+            &program,
+            memory,
+            1_000_000,
+            &dispatch,
+            crate::sysvar_snapshot::SysvarSnapshot::default(),
+            karstflow_types::Pubkey::default(),
+        )
+        .unwrap();
+
+        let mut hasher = Sha512::new();
+        hasher.update(b"hello");
+        let expected: [u8; 64] = hasher.finalize().into();
+        let expected_first_8 = u64::from_le_bytes(expected[..8].try_into().unwrap());
+
+        assert_eq!(result.return_value, expected_first_8);
+    }
+
     /// A test executor that counts invocations and returns success.
     struct CountingExecutor {
         call_count: std::sync::atomic::AtomicU64,
@@ -4395,6 +4490,7 @@ mod tests {
         assert!(!ids.contains(&murmur3_hash("sol_alt_bn128_compression")));
         assert!(!ids.contains(&murmur3_hash("sol_poseidon")));
         assert!(!ids.contains(&murmur3_hash("sol_get_epoch_stake")));
+        assert!(!ids.contains(&murmur3_hash("sol_sha512")));
     }
 
     #[test]
@@ -4409,6 +4505,7 @@ mod tests {
         all_features.insert(*features::ENABLE_ALT_BN128_COMPRESSION_SYSCALL.as_bytes());
         all_features.insert(*features::ENABLE_POSEIDON_SYSCALL.as_bytes());
         all_features.insert(*features::ENABLE_GET_EPOCH_STAKE_SYSCALL.as_bytes());
+        all_features.insert(*features::ENABLE_SHA512_SYSCALL.as_bytes());
 
         let dispatch = RuntimeSyscallDispatch::with_active_feature_ids(&all_features);
         let ids = dispatch.registered_ids();
@@ -4422,6 +4519,7 @@ mod tests {
         assert!(ids.contains(&murmur3_hash("sol_alt_bn128_compression")));
         assert!(ids.contains(&murmur3_hash("sol_poseidon")));
         assert!(ids.contains(&murmur3_hash("sol_get_epoch_stake")));
+        assert!(ids.contains(&murmur3_hash("sol_sha512")));
 
         // Always-available too
         assert!(ids.contains(&murmur3_hash("sol_log_")));

@@ -24,6 +24,10 @@ pub const KECCAK256_BASE_COST: u64 = 100;
 pub const KECCAK256_PER_BYTE_COST: u64 = 2;
 pub const BLAKE3_BASE_COST: u64 = 100;
 pub const BLAKE3_PER_BYTE_COST: u64 = 2;
+// sha512 (SIMD-0512): same base as sha256; per-byte cost is half (the reference
+// charges sha256-byte-cost over len/2), so 1 CU/byte vs sha256's 2.
+pub const SHA512_BASE_COST: u64 = 100;
+pub const SHA512_PER_BYTE_COST: u64 = 1;
 pub const SECP256K1_RECOVER_COST: u64 = 25_000;
 
 // Compute costs for PDA operations

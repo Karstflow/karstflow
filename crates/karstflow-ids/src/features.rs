@@ -135,6 +135,12 @@ pub const BLAKE3_SYSCALL_ENABLED: Pubkey = Pubkey::new([
     0x91, 0x57, 0xA9, 0x2F, 0x60, 0xF2, 0xE7, 0x91, 0xB3, 0x18, 0x7D, 0x2F, 0xEE, 0x34, 0xE4, 0x88,
 ]);
 
+/// Enables the sha512 hash syscall (SIMD-0512).
+pub const ENABLE_SHA512_SYSCALL: Pubkey = Pubkey::new([
+    0x0c, 0xd3, 0x90, 0x59, 0xed, 0x06, 0x42, 0x15, 0x11, 0xe5, 0x76, 0x8c, 0x1e, 0x16, 0x42, 0xf4,
+    0x9c, 0xef, 0x1e, 0xab, 0xf4, 0xbe, 0x4e, 0xde, 0x46, 0x6f, 0x8a, 0x62, 0x12, 0x69, 0xee, 0xd6,
+]);
+
 /// Enables curve25519 point validation and group operations syscalls.
 /// Base58: GHQhVfu1DEhEMb7P8WAtR9txCSGVAhRXoGi5DYJxTk37
 pub const CURVE25519_SYSCALL_ENABLED: Pubkey = Pubkey::new([
@@ -338,6 +344,7 @@ mod tests {
             STRICTER_ABI_AND_RUNTIME_CONSTRAINTS,
             DEPLETE_CU_METER_ON_VM_FAILURE,
             BLAKE3_SYSCALL_ENABLED,
+            ENABLE_SHA512_SYSCALL,
             CURVE25519_SYSCALL_ENABLED,
             ENABLE_ALT_BN128_SYSCALL,
             ENABLE_ALT_BN128_COMPRESSION_SYSCALL,
