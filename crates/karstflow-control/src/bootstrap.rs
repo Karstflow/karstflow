@@ -3219,7 +3219,7 @@ impl BankAccessProvider for ConsensusBankAccessProvider {
             .into_iter()
             .map(|(pubkey, account)| (pubkey, account.meta.lamports))
             .collect();
-        all_accounts.sort_by(|a, b| b.1.cmp(&a.1));
+        all_accounts.sort_by_key(|b| std::cmp::Reverse(b.1));
         all_accounts.truncate(limit);
         all_accounts
     }

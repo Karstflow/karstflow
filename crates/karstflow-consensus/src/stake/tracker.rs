@@ -172,7 +172,7 @@ impl StakeTracker {
     /// Get all vote accounts sorted by stake (descending).
     pub fn vote_accounts_by_stake(&self) -> Vec<(Pubkey, &VoteAccountEntry)> {
         let mut entries: Vec<_> = self.vote_accounts.iter().map(|(k, v)| (*k, v)).collect();
-        entries.sort_by(|a, b| b.1.activated_stake.cmp(&a.1.activated_stake));
+        entries.sort_by_key(|b| std::cmp::Reverse(b.1.activated_stake));
         entries
     }
 

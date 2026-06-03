@@ -177,7 +177,7 @@ impl VoteAccountCache {
     /// descending stake (useful for leader schedule generation).
     pub fn staked_vote_accounts(&self) -> Vec<(&Pubkey, &VoteAccountEntry)> {
         let mut staked: Vec<_> = self.entries.iter().filter(|(_, e)| e.stake > 0).collect();
-        staked.sort_by(|a, b| b.1.stake.cmp(&a.1.stake));
+        staked.sort_by_key(|b| std::cmp::Reverse(b.1.stake));
         staked
     }
 

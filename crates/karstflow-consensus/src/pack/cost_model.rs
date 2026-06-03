@@ -281,11 +281,11 @@ fn parse_compute_budget_instructions(instructions: &[InstructionView<'_>]) -> Co
                     params.heap_size_bytes = Some(size);
                 }
             }
-            INSTRUCTION_SET_LOADED_ACCOUNTS_DATA_SIZE_LIMIT => {
-                if params.loaded_accounts_data_size.is_none() && ix.data.len() >= 5 {
-                    let size = u32::from_le_bytes([ix.data[1], ix.data[2], ix.data[3], ix.data[4]]);
-                    params.loaded_accounts_data_size = Some(size as u64);
-                }
+            INSTRUCTION_SET_LOADED_ACCOUNTS_DATA_SIZE_LIMIT
+                if params.loaded_accounts_data_size.is_none() && ix.data.len() >= 5 =>
+            {
+                let size = u32::from_le_bytes([ix.data[1], ix.data[2], ix.data[3], ix.data[4]]);
+                params.loaded_accounts_data_size = Some(size as u64);
             }
             _ => {}
         }

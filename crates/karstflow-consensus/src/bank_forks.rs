@@ -357,11 +357,7 @@ impl BankForks {
     pub fn try_prune_dead(&mut self) -> usize {
         let mut pruned = 0;
 
-        loop {
-            let Some(&slot) = self.dead_queue.front() else {
-                break;
-            };
-
+        while let Some(&slot) = self.dead_queue.front() {
             // Bank already evicted (by set_root or a previous prune).
             let Some(bank) = self.banks.get(&slot) else {
                 self.dead_queue.pop_front();

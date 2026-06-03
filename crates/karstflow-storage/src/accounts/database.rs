@@ -738,7 +738,7 @@ impl AccountDatabase {
         }
 
         // Sort by pubkey bytes for deterministic ordering.
-        account_hashes.sort_by(|a, b| a.0.cmp(&b.0));
+        account_hashes.sort_by_key(|a| a.0);
 
         let count = account_hashes.len();
 
