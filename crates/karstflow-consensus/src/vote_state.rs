@@ -1061,6 +1061,12 @@ impl VoteState {
         let mut epoch_credits = VecDeque::new();
         if offset + 4 <= data.len() {
             let ec_count = Self::read_u32(data, &mut offset)? as usize;
+            // Protocol bound: a vote account may carry at most MAX_EPOCH_CREDITS_HISTORY
+            // epoch-credit entries. Reject over-long histories instead of parsing them
+            // (matches reference seek_epoch_credits MAX_EPOCH_CREDITS_HISTORY enforcement).
+            if ec_count > MAX_EPOCH_CREDITS_HISTORY {
+                return Err(VoteError::InvalidAccountData);
+            }
             for _ in 0..ec_count {
                 if offset + 24 > data.len() {
                     break;
@@ -1206,6 +1212,47 @@ pub const MAX_EPOCH_CREDITS: usize = karstflow_constants::consensus::MAX_EPOCH_C
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// W018 upstream sync: a vote account whose serialized epoch-credits count
+    /// exceeds MAX_EPOCH_CREDITS_HISTORY must be rejected on deserialize
+    /// (matches reference seek_epoch_credits bound enforcement).
+    #[test]
+    fn deserialize_rejects_oversized_epoch_credits() {
+        let mut data = Vec::new();
+        data.extend_from_slice(&[0u8; 32]); // node_pubkey
+        data.extend_from_slice(&[0u8; 32]); // authorized_voter
+        data.extend_from_slice(&[0u8; 32]); // authorized_withdrawer
+        data.push(0); // commission
+        data.extend_from_slice(&0u32.to_le_bytes()); // vote_count = 0
+        data.push(0); // root_slot flag = none
+        let oversized = (MAX_EPOCH_CREDITS_HISTORY as u32) + 1;
+        data.extend_from_slice(&oversized.to_le_bytes()); // ec_count = 65
+        assert!(matches!(
+            VoteState::deserialize(&data),
+            Err(VoteError::InvalidAccountData)
+        ));
+    }
+
+    /// Boundary: exactly MAX_EPOCH_CREDITS_HISTORY entries is accepted.
+    #[test]
+    fn deserialize_accepts_max_epoch_credits() {
+        let mut data = Vec::new();
+        data.extend_from_slice(&[0u8; 32]);
+        data.extend_from_slice(&[0u8; 32]);
+        data.extend_from_slice(&[0u8; 32]);
+        data.push(0);
+        data.extend_from_slice(&0u32.to_le_bytes());
+        data.push(0);
+        let count = MAX_EPOCH_CREDITS_HISTORY as u32;
+        data.extend_from_slice(&count.to_le_bytes());
+        for i in 0..MAX_EPOCH_CREDITS_HISTORY as u64 {
+            data.extend_from_slice(&i.to_le_bytes()); // epoch
+            data.extend_from_slice(&i.to_le_bytes()); // credits
+            data.extend_from_slice(&0u64.to_le_bytes()); // prev_credits
+        }
+        let vs = VoteState::deserialize(&data).expect("max epoch credits accepted");
+        assert_eq!(vs.epoch_credits.len(), MAX_EPOCH_CREDITS_HISTORY);
+    }
 
     #[test]
     fn vote_lockout_calculates_expiration() {
