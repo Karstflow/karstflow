@@ -56,6 +56,11 @@ pub const SIZE_OF_PROGRAMDATA_METADATA: usize = 45;
 /// Maximum permitted account data length (10 MiB).
 pub const MAX_PERMITTED_DATA_LENGTH: u64 = 10 * 1024 * 1024;
 
+/// Minimum number of additional bytes an ExtendProgram instruction must
+/// request when the `loader_v3_minimum_extend_program_size` feature is active
+/// (10 KiB). The only exception is extending exactly to the maximum size.
+pub const MINIMUM_EXTEND_PROGRAM_BYTES: usize = 10 * 1024;
+
 // ── Compute costs ───────────────────────────────────────────────────────
 
 pub const COMPUTE_COST_INITIALIZE_BUFFER: u64 = 500;

@@ -2,6 +2,7 @@ use super::{ExecutionContext, ExecutionOutcome};
 use karstflow_constants::bpf_loader_program as constants;
 use karstflow_ids::features::{
     is_feature_active, ENABLE_BPF_LOADER_SET_AUTHORITY_CHECKED, ENABLE_EXTEND_PROGRAM_CHECKED,
+    LOADER_V3_MINIMUM_EXTEND_PROGRAM_SIZE,
 };
 use karstflow_ids::BPF_LOADER_PROGRAM_ID;
 use karstflow_types::{Account, AccountData, Pubkey};
@@ -967,6 +968,28 @@ impl BpfLoaderExecutor {
                 "Extended ProgramData length of {} bytes exceeds max account data length",
                 new_len
             ));
+        }
+
+        // When loader_v3_minimum_extend_program_size is active, the request must
+        // add at least MINIMUM_EXTEND_PROGRAM_BYTES, unless it extends exactly to
+        // the maximum permitted size.
+        if let Some(ref snap) = context.sysvar_snapshot {
+            if is_feature_active(
+                &snap.active_features,
+                &LOADER_V3_MINIMUM_EXTEND_PROGRAM_SIZE,
+            ) {
+                let headroom =
+                    (constants::MAX_PERMITTED_DATA_LENGTH as usize).saturating_sub(old_len);
+                if additional_bytes < constants::MINIMUM_EXTEND_PROGRAM_BYTES
+                    && additional_bytes != headroom
+                {
+                    return Err(format!(
+                        "ExtendProgram requires a minimum of {} additional bytes or to extend to maximum size, but only {} were requested",
+                        constants::MINIMUM_EXTEND_PROGRAM_BYTES,
+                        additional_bytes
+                    ));
+                }
+            }
         }
 
         let mut data = programdata_account.data.as_ref().to_vec();
@@ -2111,5 +2134,86 @@ mod tests {
         if let Err(msg) = &result {
             assert!(!msg.contains("feature gate not active"));
         }
+    }
+
+    // ── loader_v3_minimum_extend_program_size gate ──────────────────────
+
+    fn extend_context_with_features(
+        additional_bytes: u32,
+        elf_len: usize,
+        features: std::collections::HashSet<[u8; 32]>,
+    ) -> (ExecutionContext, Pubkey) {
+        use crate::SysvarSnapshot;
+
+        let authority = Pubkey::new_unique();
+        let pd_pubkey = Pubkey::new_unique();
+        let pd_account = make_programdata_account(50, Some(authority), elf_len);
+        let program_account = make_program_account(pd_pubkey);
+
+        let mut instruction_data = constants::INSTRUCTION_EXTEND_PROGRAM.to_le_bytes().to_vec();
+        instruction_data.extend_from_slice(&additional_bytes.to_le_bytes());
+
+        let snapshot = SysvarSnapshot {
+            active_features: features,
+            ..SysvarSnapshot::default()
+        };
+        let ctx = ExecutionContext::new(
+            BPF_LOADER_PROGRAM_ID,
+            vec![
+                (pd_pubkey, pd_account, true),
+                (Pubkey::new_unique(), program_account, false),
+            ],
+            instruction_data,
+        )
+        .with_sysvar_snapshot(snapshot);
+        (ctx, pd_pubkey)
+    }
+
+    #[test]
+    fn extend_program_below_minimum_rejected_when_feature_active() {
+        let executor = BpfLoaderExecutor::new(150);
+        let mut features = std::collections::HashSet::new();
+        features.insert(*LOADER_V3_MINIMUM_EXTEND_PROGRAM_SIZE.as_bytes());
+        // 200 bytes < MINIMUM_EXTEND_PROGRAM_BYTES and far below headroom.
+        let (ctx, _) = extend_context_with_features(200, 100, features);
+
+        let result = executor.execute(&ctx);
+        assert!(result.is_err());
+        let msg = result.unwrap_err();
+        assert!(msg.contains("minimum"));
+        assert!(msg.contains(&constants::MINIMUM_EXTEND_PROGRAM_BYTES.to_string()));
+    }
+
+    #[test]
+    fn extend_program_below_minimum_allowed_when_feature_inactive() {
+        let executor = BpfLoaderExecutor::new(150);
+        // Same sub-minimum request, but feature gate not active → legacy behavior.
+        let (ctx, pd_pubkey) =
+            extend_context_with_features(200, 100, std::collections::HashSet::new());
+
+        let outcome = executor.execute(&ctx).unwrap();
+        assert!(outcome.success);
+        let modified = &outcome.modified_accounts[&pd_pubkey];
+        assert_eq!(
+            modified.data.as_ref().len(),
+            constants::SIZE_OF_PROGRAMDATA_METADATA + 100 + 200
+        );
+    }
+
+    #[test]
+    fn extend_program_to_max_allowed_when_feature_active() {
+        let executor = BpfLoaderExecutor::new(150);
+        let mut features = std::collections::HashSet::new();
+        features.insert(*LOADER_V3_MINIMUM_EXTEND_PROGRAM_SIZE.as_bytes());
+        // old_len = MAX - 100, request exactly the 100-byte headroom: below the
+        // minimum but extends to maximum size, so the gate must allow it.
+        let max = constants::MAX_PERMITTED_DATA_LENGTH as usize;
+        let elf_len = max - 100 - constants::SIZE_OF_PROGRAMDATA_METADATA;
+        let (ctx, pd_pubkey) = extend_context_with_features(100, elf_len, features);
+
+        let outcome = executor.execute(&ctx).unwrap();
+        assert!(outcome.success);
+        let modified = &outcome.modified_accounts[&pd_pubkey];
+        assert_eq!(modified.data.as_ref().len(), max);
     }
 }

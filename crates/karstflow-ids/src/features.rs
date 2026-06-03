@@ -67,6 +67,14 @@ pub const ENABLE_EXTEND_PROGRAM_CHECKED: Pubkey = Pubkey::new([
     0x28, 0x4D, 0x99, 0x50, 0x39, 0x5D, 0xE9, 0x70, 0x11, 0x8C, 0x88, 0x96, 0xC7, 0x32, 0x90, 0x49,
 ]);
 
+/// Requires ExtendProgram to add at least the minimum extend size (or extend
+/// exactly to the maximum data length) in the BPF upgradeable loader.
+/// Base58: YbbRLkvenrocjGPGyoQE4wjnvYzTgfsk38NFmcYK7a5
+pub const LOADER_V3_MINIMUM_EXTEND_PROGRAM_SIZE: Pubkey = Pubkey::new([
+    0x08, 0x18, 0x1e, 0xb9, 0x12, 0xa0, 0x56, 0xbe, 0x46, 0xe6, 0x2f, 0x6c, 0xd5, 0xe7, 0x97, 0xde,
+    0x2a, 0xd0, 0x2b, 0xe0, 0x09, 0xa9, 0x01, 0x36, 0x6a, 0x7f, 0x33, 0x74, 0x31, 0x4f, 0x47, 0xf6,
+]);
+
 // ---------------------------------------------------------------------------
 // VM execution feature gates
 // ---------------------------------------------------------------------------
@@ -299,6 +307,7 @@ mod tests {
             MOVE_PRECOMPILE_VERIFICATION_TO_SVM,
             ENABLE_BPF_LOADER_SET_AUTHORITY_CHECKED,
             ENABLE_EXTEND_PROGRAM_CHECKED,
+            LOADER_V3_MINIMUM_EXTEND_PROGRAM_SIZE,
             ACCOUNT_DATA_DIRECT_MAPPING,
             STRICTER_ABI_AND_RUNTIME_CONSTRAINTS,
             DEPLETE_CU_METER_ON_VM_FAILURE,
