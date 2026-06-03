@@ -88,6 +88,18 @@ pub const CREATE_ACCOUNT_ALLOW_PREFUND: Pubkey = Pubkey::new([
 ]);
 
 // ---------------------------------------------------------------------------
+// Vote program feature gates
+// ---------------------------------------------------------------------------
+
+/// When active, disables the first-half-of-epoch timing restriction on vote
+/// commission increases (UpdateCommission may run at any point in the epoch).
+/// Base58: 76dHtohc2s5dR3ahJyBxs7eJJVipFkaPdih9CLgTTb4B
+pub const DELAY_COMMISSION_UPDATES: Pubkey = Pubkey::new([
+    0x5a, 0x97, 0x0f, 0x6d, 0x79, 0x4d, 0x43, 0xf5, 0x93, 0x88, 0x4b, 0xb9, 0xe2, 0xf1, 0x18, 0x5f,
+    0xa3, 0x02, 0x70, 0xbe, 0x4c, 0xce, 0x7e, 0x21, 0x52, 0xc1, 0xb0, 0xad, 0x2f, 0xf6, 0xcc, 0xd0,
+]);
+
+// ---------------------------------------------------------------------------
 // VM execution feature gates
 // ---------------------------------------------------------------------------
 
@@ -321,6 +333,7 @@ mod tests {
             ENABLE_EXTEND_PROGRAM_CHECKED,
             LOADER_V3_MINIMUM_EXTEND_PROGRAM_SIZE,
             CREATE_ACCOUNT_ALLOW_PREFUND,
+            DELAY_COMMISSION_UPDATES,
             ACCOUNT_DATA_DIRECT_MAPPING,
             STRICTER_ABI_AND_RUNTIME_CONSTRAINTS,
             DEPLETE_CU_METER_ON_VM_FAILURE,
