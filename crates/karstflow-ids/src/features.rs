@@ -141,6 +141,14 @@ pub const ENABLE_SHA512_SYSCALL: Pubkey = Pubkey::new([
     0x9c, 0xef, 0x1e, 0xab, 0xf4, 0xbe, 0x4e, 0xde, 0x46, 0x6f, 0x8a, 0x62, 0x12, 0x69, 0xee, 0xd6,
 ]);
 
+/// Disables deployment (and finalize) of sBPF v0/v1/v2 programs (SIMD-0500).
+/// Base58: B8JJXCy5amZyWG9r7EnUYLwzXSXTxG7GZ1qZ1qggo83g. Older programs remain
+/// executable; only new Deploy/Upgrade/Finalize is restricted to sBPF v3+.
+pub const DISABLE_SBPF_V0_V1_V2_DEPLOYMENT: Pubkey = Pubkey::new([
+    0x96, 0x73, 0x7f, 0x9a, 0xb4, 0x9c, 0x39, 0xb0, 0xb7, 0x87, 0x52, 0xdb, 0x07, 0xef, 0xee, 0xbf,
+    0xa6, 0xd1, 0x0c, 0x4f, 0xc4, 0xea, 0x72, 0xe2, 0x8d, 0x72, 0x22, 0xf0, 0xea, 0xf4, 0xf4, 0x97,
+]);
+
 /// Enables curve25519 point validation and group operations syscalls.
 /// Base58: GHQhVfu1DEhEMb7P8WAtR9txCSGVAhRXoGi5DYJxTk37
 pub const CURVE25519_SYSCALL_ENABLED: Pubkey = Pubkey::new([
@@ -345,6 +353,7 @@ mod tests {
             DEPLETE_CU_METER_ON_VM_FAILURE,
             BLAKE3_SYSCALL_ENABLED,
             ENABLE_SHA512_SYSCALL,
+            DISABLE_SBPF_V0_V1_V2_DEPLOYMENT,
             CURVE25519_SYSCALL_ENABLED,
             ENABLE_ALT_BN128_SYSCALL,
             ENABLE_ALT_BN128_COMPRESSION_SYSCALL,
