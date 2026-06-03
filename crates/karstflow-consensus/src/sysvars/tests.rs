@@ -44,7 +44,7 @@ fn sysvar_cache_creates_with_genesis_values() {
 #[test]
 fn sysvar_cache_updates_clock_slot() {
     let cache = SysvarCache::default();
-    cache.update_clock(42, 0, 1000);
+    cache.update_clock(42, 0, Some(1000));
     let c = cache.clock();
     assert_eq!(c.slot, 42);
     assert_eq!(c.unix_timestamp, 1000);
@@ -52,9 +52,34 @@ fn sysvar_cache_updates_clock_slot() {
 }
 
 #[test]
+fn sysvar_cache_clock_keeps_previous_timestamp_when_no_estimate() {
+    let cache = SysvarCache::default();
+    cache.update_clock(42, 0, Some(1000));
+    // No estimate available for the next slot → keep the previous timestamp
+    // rather than inventing wall-clock time (would diverge consensus).
+    cache.update_clock(43, 0, None);
+    let c = cache.clock();
+    assert_eq!(c.slot, 43);
+    assert_eq!(c.unix_timestamp, 1000);
+}
+
+#[test]
+fn sysvar_cache_clock_epoch_boundary_keeps_timestamp_when_no_estimate() {
+    let cache = SysvarCache::default();
+    cache.update_clock(42, 0, Some(1000));
+    // Crossing an epoch boundary with no estimate must anchor
+    // epoch_start_timestamp to the kept (previous) timestamp.
+    cache.update_clock(100, 1, None);
+    let c = cache.clock();
+    assert_eq!(c.epoch, 1);
+    assert_eq!(c.unix_timestamp, 1000);
+    assert_eq!(c.epoch_start_timestamp, 1000);
+}
+
+#[test]
 fn sysvar_cache_updates_clock_epoch_boundary() {
     let cache = SysvarCache::default();
-    cache.update_clock(100, 1, 2000);
+    cache.update_clock(100, 1, Some(2000));
     let c = cache.clock();
     assert_eq!(c.slot, 100);
     assert_eq!(c.epoch, 1);
@@ -65,9 +90,9 @@ fn sysvar_cache_updates_clock_epoch_boundary() {
 #[test]
 fn sysvar_cache_clock_epoch_does_not_go_backward() {
     let cache = SysvarCache::default();
-    cache.update_clock(100, 1, 2000);
+    cache.update_clock(100, 1, Some(2000));
     // Attempt to set a lower epoch (should not regress).
-    cache.update_clock(101, 0, 2001);
+    cache.update_clock(101, 0, Some(2001));
     let c = cache.clock();
     assert_eq!(c.epoch, 1); // Still epoch 1.
 }
@@ -75,9 +100,9 @@ fn sysvar_cache_clock_epoch_does_not_go_backward() {
 #[test]
 fn sysvar_cache_clock_advances_multiple_epochs() {
     let cache = SysvarCache::default();
-    cache.update_clock(10, 0, 1000);
-    cache.update_clock(500, 1, 2000);
-    cache.update_clock(1000, 2, 3000);
+    cache.update_clock(10, 0, Some(1000));
+    cache.update_clock(500, 1, Some(2000));
+    cache.update_clock(1000, 2, Some(3000));
 
     let c = cache.clock();
     assert_eq!(c.slot, 1000);
@@ -426,7 +451,7 @@ fn sysvar_account_clock_roundtrip_through_account() {
         EpochSchedule::default(),
         Rent::default(),
     );
-    cache.update_clock(50, 0, 1_700_000_050);
+    cache.update_clock(50, 0, Some(1_700_000_050));
 
     let account = cache.get_sysvar_account(&CLOCK_SYSVAR_ID).unwrap();
     let restored = ClockSysvar::from_bytes(account.data.as_slice()).unwrap();
@@ -638,7 +663,7 @@ fn sysvar_cache_concurrent_read_write() {
         let cache = cache.clone();
         thread::spawn(move || {
             for i in 0..100u64 {
-                cache.update_clock(i, 0, i as i64 * 10);
+                cache.update_clock(i, 0, Some(i as i64 * 10));
                 cache.update_slot_hashes(i, [i as u8; 32]);
                 cache.update_slot_history(i);
             }

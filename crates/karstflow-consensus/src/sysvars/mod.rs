@@ -80,13 +80,17 @@ impl SysvarCache {
     ///
     /// Called once per slot by the runtime. Advances the slot counter, updates
     /// epoch boundaries, and sets the estimated network timestamp.
-    pub fn update_clock(&self, slot: u64, epoch: u64, timestamp: i64) {
+    pub fn update_clock(&self, slot: u64, epoch: u64, timestamp: Option<i64>) {
         let mut guard = self.clock.write().expect("clock sysvar lock poisoned");
         guard.clock.slot = slot;
-        guard.clock.unix_timestamp = timestamp;
+        // When no stake-weighted estimate is present, keep the previous
+        // unix_timestamp rather than inventing one (wall-clock would be
+        // non-deterministic and diverge consensus).
+        let unix_timestamp = timestamp.unwrap_or(guard.clock.unix_timestamp);
+        guard.clock.unix_timestamp = unix_timestamp;
         if epoch > guard.clock.epoch {
             guard.clock.epoch = epoch;
-            guard.clock.epoch_start_timestamp = timestamp;
+            guard.clock.epoch_start_timestamp = unix_timestamp;
             guard.clock.leader_schedule_epoch = epoch.saturating_add(1);
         }
     }

@@ -572,24 +572,17 @@ impl Bank {
     ///
     /// Collects the last vote timestamp and current stake from each entry
     /// in the vote account cache, then computes a stake-weighted median.
-    /// Falls back to system time when the cache is empty or not attached.
-    fn estimate_network_timestamp(&self) -> i64 {
-        let fallback = || {
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_secs() as i64)
-                .unwrap_or(0)
-        };
-
-        let cache_lock = match &self.vote_account_cache {
-            Some(c) => c,
-            None => return fallback(),
-        };
+    /// Returns `None` when no estimate is available (cache absent, zero total
+    /// stake, or no votes) — the caller then keeps the previous clock value.
+    /// A wall-clock fallback would be non-deterministic across nodes and
+    /// diverge consensus.
+    fn estimate_network_timestamp(&self) -> Option<i64> {
+        let cache_lock = self.vote_account_cache.as_ref()?;
 
         let cache = cache_lock.read().expect("vote_cache lock poisoned");
         let total_stake = cache.total_epoch_stake();
         if total_stake == 0 {
-            return fallback();
+            return None;
         }
 
         let vote_timestamps: Vec<(i64, u64)> = cache
@@ -599,10 +592,13 @@ impl Bank {
             .collect();
 
         if vote_timestamps.is_empty() {
-            return fallback();
+            return None;
         }
 
-        calculate_stake_weighted_timestamp(vote_timestamps, total_stake)
+        Some(calculate_stake_weighted_timestamp(
+            vote_timestamps,
+            total_stake,
+        ))
     }
 
     /// Build a slot context for instruction execution from current bank state.
@@ -3555,9 +3551,9 @@ mod tests {
         let cache = Arc::new(RwLock::new(cache));
         bank.set_vote_account_cache(cache.clone());
 
-        // With empty cache (no staked entries), falls back to system time
+        // With empty cache (no staked entries), no estimate is available.
         let ts = bank.estimate_network_timestamp();
-        assert!(ts > 0);
+        assert_eq!(ts, None);
 
         // Populate cache with two validators with known timestamps
         let v1 = Pubkey::new_unique();
@@ -3574,20 +3570,19 @@ mod tests {
         let ts = bank.estimate_network_timestamp();
         // v1 has 60% stake, v2 has 40%. Sorted: [v1=1700000000, v2=1700000010]
         // Cumulative at v1: 600 >= 500 (half of 1000), so median is v1's timestamp
-        assert_eq!(ts, 1_700_000_000);
+        assert_eq!(ts, Some(1_700_000_000));
     }
 
     #[test]
-    fn estimate_timestamp_returns_system_time_without_cache() {
+    fn estimate_timestamp_none_without_cache() {
         let accounts = Arc::new(AccountDatabase::new());
         let epoch_schedule = Arc::new(EpochSchedule::default());
         let leader_schedule = create_test_leader_schedule(0);
 
         let bank = Bank::new_genesis(accounts, epoch_schedule, leader_schedule);
-        // No vote cache attached
+        // No vote cache attached → no estimate (never wall-clock).
         let ts = bank.estimate_network_timestamp();
-        // Should be current system time (positive)
-        assert!(ts > 0);
+        assert_eq!(ts, None);
     }
 
     #[test]
