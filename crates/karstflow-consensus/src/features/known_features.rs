@@ -13,7 +13,7 @@ use super::FeatureActivation;
 use karstflow_types::Pubkey;
 
 /// Total number of registered protocol features.
-pub const FEATURE_COUNT: usize = 277;
+pub const FEATURE_COUNT: usize = 278;
 
 /// Complete registry of all protocol features.
 ///
@@ -2227,6 +2227,14 @@ pub const FEATURE_REGISTRY: &[(&str, [u8; 32]); FEATURE_COUNT] = &[
             0x0d, 0xbc, 0x3b, 0x61, 0x39, 0xea, 0x5b, 0x7f, 0xaf, 0xf2, 0x76, 0x43, 0x0d, 0x88,
             0xc7, 0xa7, 0xb1, 0x87, 0x26, 0x38, 0x0f, 0xf1, 0x91, 0xe7, 0xf6, 0x4a, 0xdb, 0xbf,
             0x52, 0xf2, 0x1b, 0x26,
+        ],
+    ),
+    (
+        "validate_chained_block_id_2",
+        [
+            0x0d, 0xbc, 0x3b, 0x68, 0xa2, 0x90, 0x42, 0x94, 0x71, 0x68, 0x24, 0xf6, 0xad, 0x2a,
+            0x32, 0xe9, 0x49, 0x30, 0x42, 0xa3, 0x80, 0x46, 0x91, 0x94, 0x6c, 0x28, 0x18, 0x33,
+            0xcd, 0x6f, 0x71, 0x55,
         ],
     ),
     (
@@ -4665,6 +4673,19 @@ mod registry_tests {
         for (name, _) in FEATURE_REGISTRY.iter() {
             assert!(seen.insert(name), "duplicate feature name: {}", name);
         }
+    }
+
+    /// W029 upstream re-baseline (firedancer 27ee00b29): the new feature
+    /// `validate_chained_block_id_2` must be registered, resolvable, and
+    /// distinct from the v1 `validate_chained_block_id`.
+    #[test]
+    fn w029_validate_chained_block_id_2_registered() {
+        let v1 = feature_id("validate_chained_block_id").expect("v1 not registered");
+        let v2 = feature_id("validate_chained_block_id_2").expect("v2 not registered");
+        assert_ne!(v2, Pubkey::default(), "v2 has default id");
+        assert_ne!(v1, v2, "v1 and v2 must have distinct ids");
+        assert!(is_known_feature(&v2), "v2 not recognized as known");
+        assert_eq!(feature_name(&v2), Some("validate_chained_block_id_2"));
     }
 
     #[test]
