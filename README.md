@@ -566,10 +566,14 @@ The runtime is continuously re-baselined against the upstream reference (agave v
 - Durable-nonce accounts required to be static, not lookup-table-resolved (SIMD-242)
 - Per-block and per-account compute-unit limits derived from the active feature set (`raise_block_limits_to_60m`/`100m`, `raise_account_cu_limit`)
 - Feature registry tracking 278 protocol features
+- Byte-exact vote-account wire codec for all on-chain layout versions (`V1_14_11`, `V3`, and the `V4` Alpenglow format), with discriminant-driven decoding — the `V4` variant carries the split-commission collectors, basis-point commissions, pending delegator rewards, and the optional BLS proof-of-possession public key
+- BLS12-381 proof-of-possession verification for Alpenglow validator key registration (min-pk ciphersuite, `ALPENGLOW`-domain message), matching the reference implementation byte-for-byte and validated against its known-answer vectors
 
 Validated against a live single-node validator: the functional + WebSocket E2E suite passes (592 checks, 0 failures; 21 multi-node tests skipped on a single node), alongside 6,100+ unit tests and the conformance suite.
 
 Versioned (v0) transactions are fully supported, including account resolution through Address Lookup Tables across the dev, leader-pipeline, replay, and simulation paths.
+
+Scope note: Solana's Alpenglow upgrade is currently realized at the vote-account and validator-key layer (the V4 vote-state format and BLS proof-of-possession above); the standalone Alpenglow consensus engine (Votor / Rotor / aggregate certificates) is not yet part of the upstream v4 reference and is therefore not implemented here.
 
 ## Hardware Requirements
 
