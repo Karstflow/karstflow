@@ -573,7 +573,19 @@ Validated against a live single-node validator: the functional + WebSocket E2E s
 
 Versioned (v0) transactions are fully supported, including account resolution through Address Lookup Tables across the dev, leader-pipeline, replay, and simulation paths.
 
-Scope note: Solana's Alpenglow upgrade is currently realized at the vote-account and validator-key layer (the V4 vote-state format and BLS proof-of-possession above); the standalone Alpenglow consensus engine (Votor / Rotor / aggregate certificates) is not yet part of the upstream v4 reference and is therefore not implemented here.
+### Alpenglow Consensus Engine (feature-gated, disabled by default)
+
+The Alpenglow consensus engine is implemented as a self-contained, **disabled-by-default** crate (`karstflow-alpenglow`) so it can be developed and validated ahead of activation without affecting the running validator, which continues to use Tower BFT. The crate is not a dependency of the node binary and is gated behind an `engine` cargo feature (off by default); nothing in it is instantiated until the engine is explicitly enabled.
+
+It provides the full voting-layer protocol:
+
+- **Votor** voting decision engine — notar / skip / notar-fallback / skip-fallback / final voting, per-window timeouts, and the bad-window slashing invariant
+- Five **vote** kinds and five **certificate** kinds with quorum thresholds (20% / 40% / 60% / 80%) and aggregate-signature signer bitmasks
+- Per-slot state machine (vote/stake accounting, certificate creation, safe-to-notar / safe-to-skip, slashable-offence detection)
+- **Finality** tracker (direct, implicit-ancestor, and implicit-skip finalization) and **parent-ready** tracker (valid-parent propagation across skip-connected windows)
+- Central **pool** integrator wiring the above and emitting events to Votor + repair requests
+
+The aggregate-signature layer currently uses a deterministic stub (real signature material is a later hardening step that changes no wire format); all consensus logic is exercised by the crate's unit tests.
 
 ## Hardware Requirements
 
