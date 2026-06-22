@@ -2761,9 +2761,8 @@ impl SyscallHandler for SolInvokeCHandler {
         r5: u64, // signer seeds count
     ) -> Result<u64, VmError> {
         let account_count = r3 as usize;
-        let base_cost =
-            syscalls::CPI_BASE_COST + syscalls::CPI_PER_ACCOUNT_COST * account_count as u64;
-        deduct_compute(vm, base_cost)?;
+        // Flat invoke cost (reference CPI compute model, SIMD-0339).
+        deduct_compute(vm, syscalls::CPI_INVOKE_UNITS)?;
 
         if vm.cpi_depth >= syscalls::MAX_CPI_DEPTH {
             try_append_log(vm, "CPI depth limit exceeded".to_string());
@@ -2806,7 +2805,21 @@ impl SyscallHandler for SolInvokeCHandler {
         } else {
             vec![]
         };
-        deduct_compute(vm, syscalls::CPI_PER_DATA_BYTE_COST * data_len as u64)?;
+        // Instruction translation cost: instruction data + account metas.
+        let instr_translation = (data_len as u64) / syscalls::CPI_BYTES_PER_UNIT
+            + (acct_metas_len as u64).saturating_mul(syscalls::CPI_RUST_ACCOUNT_META_SIZE)
+                / syscalls::CPI_BYTES_PER_UNIT;
+        deduct_compute(vm, instr_translation)?;
+        // Account-info translation: cap then proportional cost.
+        if account_count > syscalls::MAX_CPI_ACCOUNT_INFOS {
+            try_append_log(vm, "Too many CPI account infos".to_string());
+            return Ok(1);
+        }
+        deduct_compute(
+            vm,
+            (account_count as u64).saturating_mul(syscalls::CPI_ACCOUNT_INFO_BYTE_SIZE)
+                / syscalls::CPI_BYTES_PER_UNIT,
+        )?;
 
         // C ABI AccountMeta: (pubkey_addr:u64, is_writable:u8, is_signer:u8, pad[6]) = 16 bytes
         let mut cpi_account_metas = Vec::with_capacity(acct_metas_len);
@@ -2863,9 +2876,8 @@ impl SyscallHandler for SolInvokeRustHandler {
         r5: u64, // signer seeds count
     ) -> Result<u64, VmError> {
         let account_count = r3 as usize;
-        let base_cost =
-            syscalls::CPI_BASE_COST + syscalls::CPI_PER_ACCOUNT_COST * account_count as u64;
-        deduct_compute(vm, base_cost)?;
+        // Flat invoke cost (reference CPI compute model, SIMD-0339).
+        deduct_compute(vm, syscalls::CPI_INVOKE_UNITS)?;
 
         if vm.cpi_depth >= syscalls::MAX_CPI_DEPTH {
             try_append_log(vm, "CPI depth limit exceeded".to_string());
@@ -2907,7 +2919,21 @@ impl SyscallHandler for SolInvokeRustHandler {
         } else {
             vec![]
         };
-        deduct_compute(vm, syscalls::CPI_PER_DATA_BYTE_COST * data_len as u64)?;
+        // Instruction translation cost: instruction data + account metas.
+        let instr_translation = (data_len as u64) / syscalls::CPI_BYTES_PER_UNIT
+            + (acct_metas_len as u64).saturating_mul(syscalls::CPI_RUST_ACCOUNT_META_SIZE)
+                / syscalls::CPI_BYTES_PER_UNIT;
+        deduct_compute(vm, instr_translation)?;
+        // Account-info translation: cap then proportional cost.
+        if account_count > syscalls::MAX_CPI_ACCOUNT_INFOS {
+            try_append_log(vm, "Too many CPI account infos".to_string());
+            return Ok(1);
+        }
+        deduct_compute(
+            vm,
+            (account_count as u64).saturating_mul(syscalls::CPI_ACCOUNT_INFO_BYTE_SIZE)
+                / syscalls::CPI_BYTES_PER_UNIT,
+        )?;
 
         // Rust ABI AccountMeta: (pubkey:[u8;32], is_signer:u8, is_writable:u8) = 34 bytes packed
         let mut cpi_account_metas = Vec::with_capacity(acct_metas_len);
@@ -3213,6 +3239,35 @@ mod tests {
     use crate::instruction::{Instruction, Opcode};
     use crate::memory::MemoryMap;
     use karstflow_constants::vm::{DEFAULT_HEAP_SIZE, REGION_HEAP_BASE, TOTAL_STACK_SIZE};
+
+    /// Reference CPI compute model (agave v4 / SIMD-0339): flat invoke cost plus
+    /// per-component translation costs at CPI_BYTES_PER_UNIT. Guards against
+    /// accidental drift of the CPI cost constants away from the reference.
+    fn cpi_total_cost(data_len: u64, instr_accounts: u64, account_infos: u64) -> u64 {
+        syscalls::CPI_INVOKE_UNITS
+            + data_len / syscalls::CPI_BYTES_PER_UNIT
+            + instr_accounts.saturating_mul(syscalls::CPI_RUST_ACCOUNT_META_SIZE)
+                / syscalls::CPI_BYTES_PER_UNIT
+            + account_infos.saturating_mul(syscalls::CPI_ACCOUNT_INFO_BYTE_SIZE)
+                / syscalls::CPI_BYTES_PER_UNIT
+    }
+
+    #[test]
+    fn cpi_compute_cost_matches_reference_model() {
+        // Constants pinned to the reference (FD_VM_*).
+        assert_eq!(syscalls::CPI_INVOKE_UNITS, 946);
+        assert_eq!(syscalls::CPI_BYTES_PER_UNIT, 250);
+        assert_eq!(syscalls::CPI_RUST_ACCOUNT_META_SIZE, 34);
+        assert_eq!(syscalls::CPI_ACCOUNT_INFO_BYTE_SIZE, 80);
+        assert_eq!(syscalls::MAX_CPI_ACCOUNT_INFOS, 255);
+
+        // Minimal CPI: only the flat invoke cost (all divided terms round to 0).
+        assert_eq!(cpi_total_cost(0, 0, 0), 946);
+        // data 100/250=0, metas 3*34/250=0, infos 5*80/250=400/250=1 → 947.
+        assert_eq!(cpi_total_cost(100, 3, 5), 947);
+        // data 1000/250=4, metas 10*34/250=1, infos 10*80/250=3 → 954.
+        assert_eq!(cpi_total_cost(1000, 10, 10), 954);
+    }
 
     fn make_program_bytes(insns: &[Instruction]) -> Vec<u8> {
         let mut bytes = Vec::new();
