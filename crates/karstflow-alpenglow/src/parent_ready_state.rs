@@ -1,8 +1,7 @@
 //! Per-slot state for the parent-ready tracker.
 //!
-//! Port of the reference `consensus/pool/parent_ready_tracker/
-//! fd_parent_ready_state.{h,c}` (mirrors `parent_ready_state.rs`). The Rust
-//! reference's tokio oneshot waiter is dropped: `wait_for_parent_ready` returns
+//! Part of the Alpenglow consensus engine port. The reference's tokio oneshot
+//! waiter is dropped: `wait_for_parent_ready` returns
 //! synchronously (`Some(min-slot ready parent)` if ready, else `None`). The
 //! fixed-cap arrays of the C port become growable `Vec`s.
 

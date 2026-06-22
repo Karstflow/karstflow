@@ -1,10 +1,10 @@
-//! Pool: the central consensus data structure (the Rust `PoolImpl`).
+//! Pool: the central consensus data structure of the Alpenglow engine.
 //!
-//! Port of the reference `consensus/fd_pool.{h,c}` (mirrors `pool.rs`).
+//! Part of the Alpenglow consensus engine port (the central integrator).
 //! Received votes/certs are placed into the pool, which tracks per-slot status,
 //! drives the finality and parent-ready trackers, and emits events to Votor and
-//! repair requests. The reference's wksp pools/maps become `HashMap`s; the
-//! Rust mpsc channels become a [`PoolOut`] buffer. Events are typed as
+//! repair requests. The reference's workspace pools/maps become `HashMap`s; the
+//! reference's mpsc channels become a [`PoolOut`] buffer. Events are typed as
 //! [`VotorPoolEvent`] so they can be fed straight into [`crate::votor::Votor`].
 
 use std::collections::HashMap;

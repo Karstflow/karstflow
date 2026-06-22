@@ -1,14 +1,13 @@
 //! The five Alpenglow vote kinds and the `Vote` sum type.
 //!
-//! Port of the reference `consensus/fd_vote.{h,c}` (mirrors
-//! `alpenglow/src/consensus/vote.rs`). Each vote signs a `VotePayload` — a
+//! Part of the Alpenglow consensus engine port. Each vote signs a `VotePayload` — a
 //! tagged `(kind, slot[, block_hash])` tuple. The payload discriminant width is
 //! taken to be 4 bytes (wincode), matching upstream; this is only load-bearing
 //! for cross-client signature interop, not for internal (self-consistent)
 //! consensus, and upstream itself flags it as not-yet-byte-verified.
 //!
 //! Concrete-vote payload kind values (the wire `kind` written into the signed
-//! payload) follow the reference `FD_VOTE_TYPE_*` macros: Notar=0, Final=1,
+//! payload) follow the reference protocol's vote-type discriminants: Notar=0, Final=1,
 //! Skip=2, NotarFallback=3, SkipFallback=4.
 
 use crate::aggsig::{PublicKey, SecretKey, Signature};

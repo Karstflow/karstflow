@@ -6,7 +6,7 @@
 //! domain separation tag matching the reference implementation exactly, so a
 //! proof accepted here is accepted on mainnet and vice versa.
 //!
-//! Ciphersuite (must match the reference `fd_bls12_381` byte-for-byte):
+//! Ciphersuite (must match the reference implementation byte-for-byte):
 //! - public key in G1 (48-byte compressed), proof in G2 (96-byte compressed) —
 //!   the `blst` `min_pk` variant;
 //! - hash-to-curve SHA-256 / SSWU / RO (random oracle);

@@ -1,7 +1,7 @@
 //! Byte-exact bincode wire codec for on-chain vote-account `data`.
 //!
 //! This is the canonical Solana vote-account layout (matching the reference
-//! `fd_vote_codec.c` / agave `VoteStateVersions`), as opposed to the simplified
+//! implementation / agave `VoteStateVersions`), as opposed to the simplified
 //! self-consistent format used by [`VoteState::serialize`]. Producing these
 //! exact bytes is required for mainnet compatibility: cross-validator vote
 //! decoding, bank-hash account-data hashing, and client-side (e.g. solders)

@@ -1,7 +1,6 @@
 //! Validator-set snapshot for one epoch.
 //!
-//! Port of the reference `consensus/fd_epoch_info.{h,c}` (mirrors
-//! `alpenglow/src/consensus/epoch_info.rs`). The read-mostly validator list
+//! Part of the Alpenglow consensus engine port. The read-mostly validator list
 //! (indexed by validator id), total stake, round-robin leader schedule, and
 //! quorum predicates. Networking fields of the Rust `ValidatorInfo` are omitted
 //! — they belong to the tile fabric, not the consensus core. The flat

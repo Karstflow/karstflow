@@ -1,17 +1,16 @@
 //! Aggregate signature scheme for Alpenglow (BLS12-381, `min_sig` shape).
 //!
-//! Faithful port of the reference `crypto/fd_aggsig.{h,c}` (which mirrors
-//! `alpenglow/src/crypto/aggsig.rs`). The signer-bitmask logic and the wincode
-//! wire format are real and exact; the cryptographic sign/verify operations are
-//! a **deterministic stub**, exactly as upstream — the real BLS primitives
-//! (keygen / hash-to-curve sign / aggregate verify) are not yet available on
-//! firedancer `main` (they live on `drubin/bls-ag`). The stub is sufficient to
-//! exercise all consensus logic (vote/cert accumulation, thresholds,
+//! Faithful port of the reference Alpenglow aggregate-signature scheme. The
+//! signer-bitmask logic and the wincode wire format are real and exact; the
+//! cryptographic sign/verify operations are a **deterministic stub**, exactly
+//! as the reference — the real BLS primitives (keygen / hash-to-curve sign /
+//! aggregate verify) are not yet wired in the reference. The stub is sufficient
+//! to exercise all consensus logic (vote/cert accumulation, thresholds,
 //! finalization), which is independent of the signature scheme. Swapping in
 //! real BLS (via the `blst` crate) is the final hardening step and does not
 //! change any wire format or consensus logic.
 //!
-//! Deviation from upstream: the reference `fd_aggsig_sk_to_pk` writes
+//! Deviation from the reference: its secret-key→public-key stub writes
 //! `SIG_SZ` (192) bytes into a `PUBKEY_SZ` (96) buffer — a harmless latent
 //! over-write because verification ignores key/sig content in the stub. Here we
 //! fill exactly the destination length, preserving determinism without the

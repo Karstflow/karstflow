@@ -1,8 +1,8 @@
 //! Finality tracker: tracks direct finalization of blocks plus the resulting
 //! implicit finalization of ancestors and implicit skipping of earlier slots.
 //!
-//! Port of the reference `consensus/pool/fd_finality_tracker.{h,c}` (mirrors
-//! `finality_tracker.rs`). The reference's wksp pool/map/treap pair becomes a
+//! Part of the Alpenglow consensus engine port. The reference's workspace
+//! pool/map/treap pair becomes a
 //! `BTreeMap<slot, (status, hash)>` (ordered → prefix prune) and a
 //! `HashMap<BlockId, BlockId>` (child → parent). "Consensus safety violation"
 //! fatal logs become panics (they indicate impossible input).

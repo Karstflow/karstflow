@@ -1,9 +1,9 @@
 //! Votor: the per-slot voting decision process (when to cast notar / skip /
 //! notar-fallback / skip-fallback / final votes).
 //!
-//! Port of the reference `consensus/fd_votor.{h,c}` (mirrors `votor.rs`). The
-//! Rust async task (tokio channels + spawned timers + all2all broadcast) is
-//! collapsed exactly as the C port does: handlers are called directly and
+//! Part of the Alpenglow consensus engine port. The reference's async task
+//! (tokio channels + spawned timers + broadcast) is collapsed: handlers are
+//! called directly and
 //! append outgoing votes/certs and timeouts-to-schedule to a [`VotorOut`]
 //! buffer; the embedding tile owns the wall-clock and feeds fired timeouts back
 //! into [`Votor::handle_timeout_event`]. The slot map is a `BTreeMap`.

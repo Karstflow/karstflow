@@ -1,9 +1,8 @@
 //! Per-slot consensus state: votes, running stake totals, certificates, and
 //! safe-to-notar / safe-to-skip bookkeeping for a single slot.
 //!
-//! Port of the reference `consensus/pool/fd_slot_state.{h,c}` (mirrors
-//! `alpenglow/src/consensus/pool/slot_state.rs`). The reference is a
-//! workspace-backed object built on `fd_pool`/`fd_map_chain`; here the same
+//! Part of the Alpenglow consensus engine port. The reference is a
+//! workspace-backed object built on low-level pool/map generics; here the same
 //! logic is expressed with idiomatic `HashMap`/`HashSet`/`Vec`. The control
 //! flow is faithful, including the per-vote-kind ordering of stake-counting vs.
 //! vote-storage (NOTAR / NOTAR_FALLBACK count before storing; SKIP /

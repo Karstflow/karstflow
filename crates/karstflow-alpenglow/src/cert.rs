@@ -1,8 +1,7 @@
 //! The five Alpenglow certificate kinds and the `Cert` sum type.
 //!
-//! Port of the reference `consensus/fd_cert.{h,c}` (mirrors
-//! `alpenglow/src/consensus/cert.rs`). A certificate aggregates a quorum of
-//! votes into a BLS aggregate signature plus a signer bitmask.
+//! Part of the Alpenglow consensus engine port. A certificate aggregates a
+//! quorum of votes into a BLS aggregate signature plus a signer bitmask.
 //!
 //! - `NotarCert`         ≥60% notar votes for one block   (block notarized)
 //! - `NotarFallbackCert` ≥60% notar + notar-fallback      (weak notarization)

@@ -1,9 +1,8 @@
 //! Alpenglow consensus engine (Votor voting + certificates + aggregate BLS).
 //!
 //! This crate is a feature-gated, **disabled-by-default** Rust port of the
-//! Solana Alpenglow consensus protocol, tracking the reference implementation
-//! (firedancer `origin/alpenglow` / the Solana Alpenglow Rust reference). It is
-//! deliberately NOT wired into the running validator: the live node continues to
+//! Solana Alpenglow consensus protocol, tracking the reference implementation.
+//! It is deliberately NOT wired into the running validator: the live node continues to
 //! use Tower BFT. The crate exists in the workspace so the engine is compiled
 //! and unit-tested, but nothing here is instantiated until the engine is
 //! explicitly enabled (the `engine` cargo feature plus a runtime switch).

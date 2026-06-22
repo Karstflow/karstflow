@@ -1,15 +1,13 @@
 //! Common base for the Alpenglow consensus port — types, constants, and
 //! quorum/window helpers.
 //!
-//! Faithful Rust port of the reference `fd_alpenglow_base.h`, which itself
-//! mirrors the Solana Alpenglow Rust reference (`alpenglow/src/types.rs`,
-//! `alpenglow/src/consensus.rs` constants, `alpenglow/src/types/fraction.rs`,
-//! `alpenglow/src/types/slot.rs`). Values are byte/semantics-exact.
+//! Faithful Rust port of the Alpenglow base types, constants and helpers.
+//! Values are byte/semantics-exact with the reference Alpenglow protocol.
 
 /// 32-byte block hash (double-Merkle root of a block).
 pub type BlockHash = [u8; 32];
 
-/// Genesis block hash is all-zero (`alpenglow/src/crypto/merkle.rs`).
+/// Genesis block hash is all-zero.
 pub const GENESIS_BLOCK_HASH: BlockHash = [0u8; 32];
 
 /// Number of consecutive slots a single leader owns.

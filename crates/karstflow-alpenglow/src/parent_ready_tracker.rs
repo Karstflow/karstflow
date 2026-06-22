@@ -1,11 +1,10 @@
 //! Parent-ready tracker: tracks, across slots, which blocks are valid parents
 //! for block production at window-start slots.
 //!
-//! Port of the reference `consensus/pool/fd_parent_ready_tracker.{h,c}`
-//! (mirrors `parent_ready_tracker.rs`). The parent-ready condition for a
+//! Part of the Alpenglow consensus engine port. The parent-ready condition for a
 //! window-start slot `s` and block `b` (with `s > slot(b)`): `b` is notarized
 //! or notarized-fallback, and every slot in `(slot(b), s)` is skip-certified.
-//! The reference's wksp pool/map become a `BTreeMap<slot, ParentReadyState>`.
+//! The reference's workspace pool/map become a `BTreeMap<slot, ParentReadyState>`.
 
 use std::collections::BTreeMap;
 
