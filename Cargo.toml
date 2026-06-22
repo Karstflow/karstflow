@@ -22,6 +22,7 @@ members = [
   "crates/karstflow-plugin",
   "crates/karstflow-integration-tests",
   "crates/karstflow-conformance",
+  "crates/karstflow-alpenglow",
 ]
 resolver = "2"
 

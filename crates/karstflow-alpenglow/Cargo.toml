@@ -1,0 +1,21 @@
+[package]
+name = "karstflow-alpenglow"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+
+# Alpenglow consensus engine (Votor + certificates + aggregate BLS).
+#
+# DISABLED BY DEFAULT: this crate is intentionally NOT a dependency of
+# karstflow-node / karstflow-control, so the engine never runs in the live
+# validator. It is part of the workspace only so it is compiled and tested.
+# The `engine` feature guards the (future) runtime wiring; it is off by default.
+
+[features]
+default = []
+# Enables the runtime engine wiring (event loop / networking glue). Off by
+# default — the consensus data structures and logic always build and test.
+engine = []
+
+[dependencies]
