@@ -17,6 +17,7 @@ pub mod aggsig;
 pub mod base;
 pub mod cert;
 pub mod epoch_info;
+pub mod slot_state;
 pub mod vote;
 
 pub use base::{
