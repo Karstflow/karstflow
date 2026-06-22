@@ -76,9 +76,10 @@ pub const INSTRUCTION_BASE_COST: u64 = 200;
 
 /// Maximum number of account keys a transaction may lock.
 ///
-/// With the `increase_tx_account_lock_limit` feature active, this is 128.
-/// The legacy limit (64) is not used in current protocol versions.
-pub const MAX_TRANSACTION_ACCOUNT_LOCKS: usize = 128;
+/// The `increase_tx_account_lock_limit` feature (SIMD-0339, which would have
+/// raised this to 128) was reverted upstream, so the protocol limit remains
+/// 64 for v4 / mainnet compatibility.
+pub const MAX_TRANSACTION_ACCOUNT_LOCKS: usize = 64;
 
 /// Maximum number of accounts per instruction (SIMD-0406).
 ///

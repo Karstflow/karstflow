@@ -538,7 +538,7 @@ fn validate_account_locks(
         });
     }
 
-    // O(n^2) duplicate check — acceptable since MAX_TRANSACTION_ACCOUNT_LOCKS is 128.
+    // O(n^2) duplicate check — acceptable since MAX_TRANSACTION_ACCOUNT_LOCKS is 64.
     for i in 0..count {
         for j in (i + 1)..count {
             if transaction.account_keys[i] == transaction.account_keys[j] {
