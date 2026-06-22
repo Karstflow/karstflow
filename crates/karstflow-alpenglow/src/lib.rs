@@ -22,6 +22,7 @@ pub mod parent_ready_state;
 pub mod parent_ready_tracker;
 pub mod slot_state;
 pub mod vote;
+pub mod votor;
 
 pub use base::{
     fraction_is_met, is_genesis_window, is_quorum, is_start_of_window, is_strong_quorum,

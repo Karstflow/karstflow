@@ -190,8 +190,10 @@ impl FinalityTracker {
         self.parents.insert(*block, *parent);
 
         if let Some((status, hash)) = self.status.get(&block.slot).copied() {
-            if matches!(status, FinStatus::Finalized | FinStatus::ImplicitlyFinalized)
-                && hash == block.hash
+            if matches!(
+                status,
+                FinStatus::Finalized | FinStatus::ImplicitlyFinalized
+            ) && hash == block.hash
             {
                 self.handle_implicitly_finalized(block.slot, *parent, &mut ev);
                 self.prune();
