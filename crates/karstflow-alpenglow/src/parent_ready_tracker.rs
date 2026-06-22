@@ -157,7 +157,7 @@ impl ParentReadyTracker {
         implicitly_skipped: &[u64],
     ) -> Option<ParentReady> {
         let mut best: Option<ParentReady> = None;
-        let mut consider = |v: Vec<ParentReady>, best: &mut Option<ParentReady>| {
+        let consider = |v: Vec<ParentReady>, best: &mut Option<ParentReady>| {
             for pr in v {
                 if best.map(|b| pr.slot > b.slot).unwrap_or(true) {
                     *best = Some(pr);

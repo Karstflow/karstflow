@@ -17,6 +17,7 @@ pub mod aggsig;
 pub mod base;
 pub mod cert;
 pub mod epoch_info;
+pub mod finality_tracker;
 pub mod parent_ready_state;
 pub mod parent_ready_tracker;
 pub mod slot_state;
