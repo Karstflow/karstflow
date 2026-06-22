@@ -972,7 +972,10 @@ impl BpfLoaderExecutor {
                 programdata_address,
             } => {
                 if *programdata_address != programdata_pubkey {
-                    return Err("Program account does not match ProgramData account".into());
+                    // Upstream (loader v3) emits this exact (intentionally
+                    // redundant) string for ExtendProgram; required for log
+                    // conformance. The Close path keeps "Program account ...".
+                    return Err("ProgramData account does not match ProgramData account".into());
                 }
             }
             _ => return Err("Invalid Program account".into()),
