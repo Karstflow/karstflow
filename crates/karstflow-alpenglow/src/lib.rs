@@ -13,7 +13,11 @@
 //! - P1 messages (vote/cert), P2 aggsig, P3 slot_state, P4 trackers, P5 votor,
 //!   P6 pool, P7 scaffolding, P8 validation — pending.
 
+pub mod aggsig;
 pub mod base;
+pub mod cert;
+pub mod epoch_info;
+pub mod vote;
 
 pub use base::{
     fraction_is_met, is_genesis_window, is_quorum, is_start_of_window, is_strong_quorum,
