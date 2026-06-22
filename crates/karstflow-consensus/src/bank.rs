@@ -354,6 +354,11 @@ impl Bank {
             leader_schedule
         };
 
+        // Derive block/account compute-unit limits from the parent's active
+        // features so replay enforces the v4 limits (raised block limit +
+        // raise_account_cu_limit = 40% of the block limit) instead of defaults.
+        let cost_limits = Self::cost_limits_from_features(parent.feature_set.as_ref());
+
         Self {
             slot,
             parent_slot: Some(parent.slot),
@@ -394,7 +399,7 @@ impl Bank {
             ),
             transaction_cache: parent.transaction_cache.clone(),
             signature_status_cache: parent.signature_status_cache.clone(),
-            cost_tracker: Arc::new(crate::cost_tracker::CostTracker::new()),
+            cost_tracker: Arc::new(crate::cost_tracker::CostTracker::with_limits(cost_limits)),
             accounts_data_size: AtomicI64::new(parent.accounts_data_size.load(Ordering::Acquire)),
             // Use fixed fee rate matching Solana mainnet behavior.
             // The dynamic fee rate governor (derive_fee_rate) is not active
@@ -849,6 +854,28 @@ impl Bank {
     /// Get the per-block cost tracker.
     pub fn cost_tracker(&self) -> &crate::cost_tracker::CostTracker {
         &self.cost_tracker
+    }
+
+    /// Resolve block/account compute-unit limits from the active feature set.
+    ///
+    /// Mirrors the reference cost model: the block limit follows
+    /// `raise_block_limits_to_100m` (SIMD-0286) / `raise_block_limits_to_60m`
+    /// (SIMD-0256), and `raise_account_cu_limit` (SIMD-0306) sets the per-account
+    /// limit to 40% of the block limit. Falls back to defaults when no feature
+    /// set is attached (e.g. the genesis bank).
+    fn cost_limits_from_features(
+        feature_set: Option<&Arc<RwLock<FeatureSet>>>,
+    ) -> crate::cost_tracker::CostLimits {
+        use crate::features::known_features;
+        let Some(fs_lock) = feature_set else {
+            return crate::cost_tracker::CostLimits::default();
+        };
+        let fs = fs_lock.read().expect("feature_set lock poisoned");
+        crate::cost_tracker::CostLimits::from_features(
+            fs.is_active(&known_features::raise_block_limits_to_100m()),
+            fs.is_active(&known_features::raise_block_limits_to_60m()),
+            fs.is_active(&known_features::raise_account_cu_limit()),
+        )
     }
 
     /// Total bytes of account data across the database.
@@ -1838,6 +1865,25 @@ mod tests {
         let validator = Pubkey::new_unique();
         let validators = vec![(validator, 1000)];
         Arc::new(LeaderSchedule::new(epoch, &validators).unwrap())
+    }
+
+    #[test]
+    fn cost_limits_track_raise_features() {
+        use crate::cost_tracker::CostLimits;
+        use crate::features::known_features;
+
+        // No feature set (genesis): defaults.
+        assert_eq!(Bank::cost_limits_from_features(None), CostLimits::default());
+
+        // raise_block_limits_to_100m + raise_account_cu_limit active.
+        let mut fs = FeatureSet::new();
+        fs.activate(known_features::raise_block_limits_to_100m(), 0);
+        fs.activate(known_features::raise_account_cu_limit(), 0);
+        let arc = Arc::new(RwLock::new(fs));
+        assert_eq!(
+            Bank::cost_limits_from_features(Some(&arc)),
+            CostLimits::from_features(true, false, true),
+        );
     }
 
     #[test]
