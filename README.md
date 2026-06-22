@@ -569,7 +569,7 @@ The runtime is continuously re-baselined against the upstream reference (agave v
 
 Validated against a live single-node validator: the functional + WebSocket E2E suite passes (592 checks, 0 failures; 21 multi-node tests skipped on a single node), alongside 6,100+ unit tests and the conformance suite.
 
-Known limitation (under active work): versioned (v0) transactions that reference accounts through an Address Lookup Table are not yet resolved in the execution path. Legacy and static-key transactions are unaffected.
+Versioned (v0) transactions are fully supported, including account resolution through Address Lookup Tables across the dev, leader-pipeline, replay, and simulation paths.
 
 ## Hardware Requirements
 
