@@ -10,9 +10,23 @@ use karstflow_constants::vote_program::{
     COMPUTE_COST_INITIALIZE, COMPUTE_COST_UPDATE_COMMISSION, COMPUTE_COST_UPDATE_VOTE_STATE,
     COMPUTE_COST_VOTE, COMPUTE_COST_WITHDRAW, VOTE_AUTHORIZE_VOTER, VOTE_AUTHORIZE_WITHDRAWER,
 };
+use karstflow_ids::features::{is_feature_active, DELAY_COMMISSION_UPDATES};
 use karstflow_ids::VOTE_PROGRAM_ID;
 use karstflow_types::{Account, AccountData, Pubkey};
 use std::collections::HashMap;
+
+/// Whether a vote-commission increase is allowed at the given slot.
+///
+/// Mirrors the reference implementation: increases are only permitted in the
+/// first half of an epoch (relative_slot * 2 <= slots_per_epoch). With no
+/// normal epoch schedule (slots_per_epoch == 0) updates are always allowed.
+fn is_commission_update_allowed(slot: u64, first_normal_slot: u64, slots_per_epoch: u64) -> bool {
+    if slots_per_epoch == 0 {
+        return true;
+    }
+    let relative_slot = slot.saturating_sub(first_normal_slot) % slots_per_epoch;
+    relative_slot.saturating_mul(2) <= slots_per_epoch
+}
 
 /// Vote program executor with configurable base compute cost.
 #[derive(Debug, Clone)]
@@ -579,6 +593,29 @@ impl VoteProgramExecutor {
         let mut vote_state = VoteState::deserialize(vote_account.data.as_ref())
             .map_err(|e| format!("Failed to deserialize vote state: {:?}", e))?;
 
+        // The authorized withdrawer must sign a commission change.
+        if !context.signers.is_empty() && !context.is_signer(&vote_state.authorized_withdrawer) {
+            return Err("UpdateCommission: authorized withdrawer must sign".to_string());
+        }
+
+        // Commission increases are only allowed in the first half of an epoch,
+        // unless the `delay_commission_updates` feature disables the rule.
+        // Decreases are always allowed. Skipped when no sysvar snapshot is
+        // available to evaluate the epoch position.
+        if let Some(ref snap) = context.sysvar_snapshot {
+            let rule_disabled = is_feature_active(&snap.active_features, &DELAY_COMMISSION_UPDATES);
+            if !rule_disabled
+                && new_commission > vote_state.commission
+                && !is_commission_update_allowed(
+                    snap.slot,
+                    snap.first_normal_slot,
+                    snap.slots_per_epoch,
+                )
+            {
+                return Err("UpdateCommission: commission update too late in epoch".to_string());
+            }
+        }
+
         vote_state.commission = new_commission;
 
         vote_account.data = AccountData::new(vote_state.serialize());
@@ -623,6 +660,13 @@ impl VoteProgramExecutor {
 
         if !vote_writable || !to_writable {
             return Err("Both accounts must be writable".to_string());
+        }
+
+        // The authorized withdrawer must sign a withdrawal.
+        let vote_state = VoteState::deserialize(vote_account.data.as_ref())
+            .map_err(|e| format!("Failed to deserialize vote state: {:?}", e))?;
+        if !context.signers.is_empty() && !context.is_signer(&vote_state.authorized_withdrawer) {
+            return Err("Withdraw: authorized withdrawer must sign".to_string());
         }
 
         if vote_account.meta.lamports < lamports {
@@ -1128,6 +1172,216 @@ mod tests {
         let modified = outcome.modified_accounts.get(&vote_pubkey).unwrap();
         let updated = VoteState::deserialize(modified.data.as_ref()).unwrap();
         assert_eq!(updated.commission, 25);
+    }
+
+    #[test]
+    fn update_commission_accepts_when_withdrawer_signs() {
+        let executor = VoteProgramExecutor::new(150);
+        let node = Pubkey::new_unique();
+        let voter = Pubkey::new_unique();
+        let withdrawer = Pubkey::new_unique();
+
+        let vote_state = VoteState::new(node, voter, withdrawer, 5);
+        let vote_pubkey = Pubkey::new_unique();
+        let account = make_vote_account(&vote_state);
+
+        let mut instruction_data = Vec::new();
+        instruction_data.extend_from_slice(&constants::INSTRUCTION_UPDATE_COMMISSION.to_le_bytes());
+        instruction_data.push(25);
+
+        let mut signers = std::collections::HashSet::new();
+        signers.insert(withdrawer);
+        let context = ExecutionContext::new(
+            VOTE_PROGRAM_ID,
+            vec![(vote_pubkey, account, true)],
+            instruction_data,
+        )
+        .with_signers(signers);
+
+        let outcome = executor.execute(&context).unwrap();
+        assert!(outcome.success);
+        let modified = outcome.modified_accounts.get(&vote_pubkey).unwrap();
+        assert_eq!(
+            VoteState::deserialize(modified.data.as_ref())
+                .unwrap()
+                .commission,
+            25
+        );
+    }
+
+    #[test]
+    fn update_commission_rejects_when_withdrawer_does_not_sign() {
+        let executor = VoteProgramExecutor::new(150);
+        let node = Pubkey::new_unique();
+        let voter = Pubkey::new_unique();
+        let withdrawer = Pubkey::new_unique();
+
+        let vote_state = VoteState::new(node, voter, withdrawer, 5);
+        let vote_pubkey = Pubkey::new_unique();
+        let account = make_vote_account(&vote_state);
+
+        let mut instruction_data = Vec::new();
+        instruction_data.extend_from_slice(&constants::INSTRUCTION_UPDATE_COMMISSION.to_le_bytes());
+        instruction_data.push(25);
+
+        // Some other account signs, but not the authorized withdrawer.
+        let mut signers = std::collections::HashSet::new();
+        signers.insert(Pubkey::new_unique());
+        let context = ExecutionContext::new(
+            VOTE_PROGRAM_ID,
+            vec![(vote_pubkey, account, true)],
+            instruction_data,
+        )
+        .with_signers(signers);
+
+        let result = executor.execute(&context);
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .contains("authorized withdrawer must sign"));
+    }
+
+    #[test]
+    fn withdraw_rejects_when_withdrawer_does_not_sign() {
+        let executor = VoteProgramExecutor::new(150);
+        let node = Pubkey::new_unique();
+        let voter = Pubkey::new_unique();
+        let withdrawer = Pubkey::new_unique();
+
+        let vote_state = VoteState::new(node, voter, withdrawer, 5);
+        let vote_pubkey = Pubkey::new_unique();
+        let mut account = make_vote_account(&vote_state);
+        account.meta.lamports = 1_000_000;
+        let to_account = Account::zeroed();
+
+        let mut instruction_data = Vec::new();
+        instruction_data.extend_from_slice(&constants::INSTRUCTION_WITHDRAW.to_le_bytes());
+        instruction_data.extend_from_slice(&500u64.to_le_bytes());
+
+        let mut signers = std::collections::HashSet::new();
+        signers.insert(Pubkey::new_unique()); // not the withdrawer
+        let context = ExecutionContext::new(
+            VOTE_PROGRAM_ID,
+            vec![
+                (vote_pubkey, account, true),
+                (Pubkey::new_unique(), to_account, true),
+            ],
+            instruction_data,
+        )
+        .with_signers(signers);
+
+        let result = executor.execute(&context);
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .contains("authorized withdrawer must sign"));
+    }
+
+    fn commission_snapshot(slot: u64, feature_active: bool) -> crate::SysvarSnapshot {
+        let mut snap = crate::SysvarSnapshot {
+            slot,
+            slots_per_epoch: 100,
+            first_normal_slot: 0,
+            ..Default::default()
+        };
+        if feature_active {
+            snap.active_features
+                .insert(*DELAY_COMMISSION_UPDATES.as_bytes());
+        }
+        snap
+    }
+
+    #[test]
+    fn update_commission_increase_rejected_in_second_half_of_epoch() {
+        let executor = VoteProgramExecutor::new(150);
+        let withdrawer = Pubkey::new_unique();
+        let vote_state = VoteState::new(Pubkey::new_unique(), Pubkey::new_unique(), withdrawer, 5);
+        let vote_pubkey = Pubkey::new_unique();
+        let account = make_vote_account(&vote_state);
+
+        let mut instruction_data = Vec::new();
+        instruction_data.extend_from_slice(&constants::INSTRUCTION_UPDATE_COMMISSION.to_le_bytes());
+        instruction_data.push(25); // increase 5 -> 25
+
+        let mut signers = std::collections::HashSet::new();
+        signers.insert(withdrawer);
+        // slot 80 of a 100-slot epoch: 80*2 > 100 → second half → not allowed.
+        let context = ExecutionContext::new(
+            VOTE_PROGRAM_ID,
+            vec![(vote_pubkey, account, true)],
+            instruction_data,
+        )
+        .with_signers(signers)
+        .with_sysvar_snapshot(commission_snapshot(80, false));
+
+        let result = executor.execute(&context);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("too late in epoch"));
+    }
+
+    #[test]
+    fn update_commission_decrease_allowed_in_second_half_of_epoch() {
+        let executor = VoteProgramExecutor::new(150);
+        let withdrawer = Pubkey::new_unique();
+        let vote_state = VoteState::new(Pubkey::new_unique(), Pubkey::new_unique(), withdrawer, 50);
+        let vote_pubkey = Pubkey::new_unique();
+        let account = make_vote_account(&vote_state);
+
+        let mut instruction_data = Vec::new();
+        instruction_data.extend_from_slice(&constants::INSTRUCTION_UPDATE_COMMISSION.to_le_bytes());
+        instruction_data.push(10); // decrease 50 -> 10, always allowed
+
+        let mut signers = std::collections::HashSet::new();
+        signers.insert(withdrawer);
+        let context = ExecutionContext::new(
+            VOTE_PROGRAM_ID,
+            vec![(vote_pubkey, account, true)],
+            instruction_data,
+        )
+        .with_signers(signers)
+        .with_sysvar_snapshot(commission_snapshot(80, false));
+
+        let outcome = executor.execute(&context).unwrap();
+        assert!(outcome.success);
+    }
+
+    #[test]
+    fn update_commission_increase_allowed_when_delay_feature_active() {
+        let executor = VoteProgramExecutor::new(150);
+        let withdrawer = Pubkey::new_unique();
+        let vote_state = VoteState::new(Pubkey::new_unique(), Pubkey::new_unique(), withdrawer, 5);
+        let vote_pubkey = Pubkey::new_unique();
+        let account = make_vote_account(&vote_state);
+
+        let mut instruction_data = Vec::new();
+        instruction_data.extend_from_slice(&constants::INSTRUCTION_UPDATE_COMMISSION.to_le_bytes());
+        instruction_data.push(25);
+
+        let mut signers = std::collections::HashSet::new();
+        signers.insert(withdrawer);
+        // Second half of epoch, but the feature disables the timing rule.
+        let context = ExecutionContext::new(
+            VOTE_PROGRAM_ID,
+            vec![(vote_pubkey, account, true)],
+            instruction_data,
+        )
+        .with_signers(signers)
+        .with_sysvar_snapshot(commission_snapshot(80, true));
+
+        let outcome = executor.execute(&context).unwrap();
+        assert!(outcome.success);
+    }
+
+    #[test]
+    fn commission_update_allowed_first_half_only() {
+        // first half allowed
+        assert!(is_commission_update_allowed(10, 0, 100));
+        assert!(is_commission_update_allowed(50, 0, 100));
+        // second half rejected
+        assert!(!is_commission_update_allowed(51, 0, 100));
+        assert!(!is_commission_update_allowed(99, 0, 100));
+        // no normal schedule → always allowed
+        assert!(is_commission_update_allowed(99, 0, 0));
     }
 
     #[test]

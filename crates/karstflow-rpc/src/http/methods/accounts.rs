@@ -234,7 +234,7 @@ fn build_token_largest_accounts_response(
             .collect();
 
         if !matching.is_empty() {
-            matching.sort_by(|a, b| b.1.cmp(&a.1));
+            matching.sort_by_key(|b| std::cmp::Reverse(b.1));
             matching.truncate(20);
 
             // Read decimals from mint account.

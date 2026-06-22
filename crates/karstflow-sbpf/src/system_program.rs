@@ -6,6 +6,7 @@ use karstflow_constants::{
     },
     system_program as constants,
 };
+use karstflow_ids::features::{is_feature_active, CREATE_ACCOUNT_ALLOW_PREFUND};
 use karstflow_ids::SYSTEM_PROGRAM_ID;
 use karstflow_types::{Account, AccountData, Pubkey};
 use sha2::{Digest, Sha256};
@@ -25,6 +26,7 @@ pub const SYSTEM_PROGRAM_ALLOCATE_WITH_SEED: u32 = 9;
 pub const SYSTEM_PROGRAM_ASSIGN_WITH_SEED: u32 = 10;
 pub const SYSTEM_PROGRAM_TRANSFER_WITH_SEED: u32 = 11;
 pub const SYSTEM_PROGRAM_UPGRADE_NONCE_ACCOUNT: u32 = 12;
+pub const SYSTEM_PROGRAM_CREATE_ACCOUNT_ALLOW_PREFUND: u32 = 13;
 
 /// System program execution errors
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -261,6 +263,14 @@ impl SystemProgramExecutor {
                 compute_used = compute_used.saturating_add(constants::COMPUTE_COST_NONCE_ADVANCE);
                 self.execute_upgrade_nonce_account(context, &mut modified_accounts, &mut logs)
             }
+            SYSTEM_PROGRAM_CREATE_ACCOUNT_ALLOW_PREFUND => {
+                compute_used = compute_used.saturating_add(constants::COMPUTE_COST_CREATE_ACCOUNT);
+                self.execute_create_account_allow_prefund(
+                    context,
+                    &mut modified_accounts,
+                    &mut logs,
+                )
+            }
             _ => {
                 logs.push(format!(
                     "System: Unknown instruction type {}",
@@ -352,6 +362,102 @@ impl SystemProgramExecutor {
         to_account.data = AccountData::new(vec![0u8; space as usize]);
 
         modified_accounts.insert(from_pubkey, from_account);
+        modified_accounts.insert(to_pubkey, to_account);
+
+        Ok(())
+    }
+
+    /// CreateAccountAllowPrefund (discriminant 13).
+    ///
+    /// Gated behind the `create_account_allow_prefund` feature. Unlike
+    /// CreateAccount, the target account is allowed to already hold lamports
+    /// (prefunded); only a non-empty data buffer or non-system owner counts as
+    /// "already in use". Account order is reversed from CreateAccount: the new
+    /// account is index 0 and the funding account (when lamports > 0) is index 1.
+    fn execute_create_account_allow_prefund(
+        &self,
+        context: &ExecutionContext,
+        modified_accounts: &mut HashMap<Pubkey, Account>,
+        logs: &mut Vec<String>,
+    ) -> Result<(), String> {
+        logs.push("System: CreateAccountAllowPrefund".to_string());
+
+        let active = context
+            .sysvar_snapshot
+            .as_ref()
+            .map(|s| is_feature_active(&s.active_features, &CREATE_ACCOUNT_ALLOW_PREFUND))
+            .unwrap_or(false);
+        if !active {
+            return Err(
+                "CreateAccountAllowPrefund instruction not available: feature gate not active"
+                    .to_string(),
+            );
+        }
+
+        if context.instruction_data.len() < 52 {
+            return Err("CreateAccountAllowPrefund instruction data too short".to_string());
+        }
+        let lamports = u64::from_le_bytes(
+            context.instruction_data[4..12]
+                .try_into()
+                .map_err(|_| "Failed to parse lamports")?,
+        );
+        let space = u64::from_le_bytes(
+            context.instruction_data[12..20]
+                .try_into()
+                .map_err(|_| "Failed to parse space")?,
+        );
+        let owner = Pubkey::new_from_array(
+            context.instruction_data[20..52]
+                .try_into()
+                .map_err(|_| "Failed to parse owner")?,
+        );
+
+        if space > constants::MAX_ACCOUNT_DATA_SIZE {
+            return Err(SystemProgramError::InvalidAccountDataLength.to_string());
+        }
+
+        // The new account is index 0; funding account (if any) is index 1.
+        if context.accounts.is_empty() {
+            return Err("CreateAccountAllowPrefund requires at least 1 account".to_string());
+        }
+        let (to_pubkey, mut to_account, to_writable) = context.accounts[0].clone();
+        if !to_writable {
+            return Err("CreateAccountAllowPrefund requires writable new account".to_string());
+        }
+        // The new account must sign (allocate + assign authorization).
+        if !context.signers.is_empty() && !context.is_signer(&to_pubkey) {
+            return Err("CreateAccountAllowPrefund: new account must be a signer".to_string());
+        }
+
+        // Allocate-and-assign: prefunded lamports are allowed, but a non-empty
+        // data buffer or a non-system owner means the account is already in use.
+        if !to_account.data.as_ref().is_empty() || to_account.meta.owner != SYSTEM_PROGRAM_ID {
+            return Err(SystemProgramError::AccountAlreadyInUse.to_string());
+        }
+
+        to_account.meta.owner = owner;
+        to_account.data = AccountData::new(vec![0u8; space as usize]);
+
+        // Transfer the requested lamports from the funding account (index 1).
+        if lamports > 0 {
+            if context.accounts.len() < 2 {
+                return Err("CreateAccountAllowPrefund requires a funding account".to_string());
+            }
+            let (from_pubkey, mut from_account, from_writable) = context.accounts[1].clone();
+            if !from_writable {
+                return Err(
+                    "CreateAccountAllowPrefund requires writable funding account".to_string(),
+                );
+            }
+            if from_account.meta.lamports < lamports {
+                return Err(SystemProgramError::ResultWithNegativeLamports.to_string());
+            }
+            from_account.meta.lamports = from_account.meta.lamports.saturating_sub(lamports);
+            to_account.meta.lamports = to_account.meta.lamports.saturating_add(lamports);
+            modified_accounts.insert(from_pubkey, from_account);
+        }
+
         modified_accounts.insert(to_pubkey, to_account);
 
         Ok(())
@@ -1419,6 +1525,145 @@ mod tests {
             ],
             instruction_data,
         );
+
+        let result = executor.execute(&context);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("already in use"));
+    }
+
+    // -----------------------------------------------------------------------
+    // CreateAccountAllowPrefund (discriminant 13, feature-gated)
+    // -----------------------------------------------------------------------
+
+    fn prefund_snapshot(feature_active: bool) -> crate::SysvarSnapshot {
+        let mut snapshot = crate::SysvarSnapshot::default();
+        if feature_active {
+            snapshot
+                .active_features
+                .insert(*CREATE_ACCOUNT_ALLOW_PREFUND.as_bytes());
+        }
+        snapshot
+    }
+
+    fn prefund_instruction_data(lamports: u64, space: u64, owner: &Pubkey) -> Vec<u8> {
+        let mut data = SYSTEM_PROGRAM_CREATE_ACCOUNT_ALLOW_PREFUND
+            .to_le_bytes()
+            .to_vec();
+        data.extend_from_slice(&lamports.to_le_bytes());
+        data.extend_from_slice(&space.to_le_bytes());
+        data.extend_from_slice(owner.as_bytes());
+        data
+    }
+
+    #[test]
+    fn create_account_allow_prefund_rejected_without_feature() {
+        let executor = SystemProgramExecutor::new(150);
+        let new_owner = Pubkey::new_unique();
+        let mut context = ExecutionContext::new(
+            SYSTEM_PROGRAM_ID,
+            vec![(Pubkey::new_unique(), Account::zeroed(), true)],
+            prefund_instruction_data(0, 100, &new_owner),
+        );
+        context.sysvar_snapshot = Some(prefund_snapshot(false));
+
+        let result = executor.execute(&context);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("feature gate not active"));
+    }
+
+    #[test]
+    fn create_account_allow_prefund_on_prefunded_account() {
+        let executor = SystemProgramExecutor::new(150);
+        let new_owner = Pubkey::new_unique();
+        let to_pubkey = Pubkey::new_unique();
+
+        // Target already holds lamports but has empty data and system owner.
+        let to_account = Account {
+            meta: AccountMeta {
+                lamports: 777,
+                owner: SYSTEM_PROGRAM_ID,
+                executable: false,
+                rent_epoch: 0,
+            },
+            data: AccountData::empty(),
+        };
+
+        // lamports = 0 in the instruction → no funding account required.
+        let mut context = ExecutionContext::new(
+            SYSTEM_PROGRAM_ID,
+            vec![(to_pubkey, to_account, true)],
+            prefund_instruction_data(0, 64, &new_owner),
+        );
+        context.sysvar_snapshot = Some(prefund_snapshot(true));
+
+        let outcome = executor.execute(&context).unwrap();
+        assert!(outcome.success);
+        let modified = &outcome.modified_accounts[&to_pubkey];
+        assert_eq!(modified.meta.owner, new_owner);
+        assert_eq!(modified.data.as_ref().len(), 64);
+        // Prefunded lamports are preserved.
+        assert_eq!(modified.meta.lamports, 777);
+    }
+
+    #[test]
+    fn create_account_allow_prefund_transfers_from_funder() {
+        let executor = SystemProgramExecutor::new(150);
+        let new_owner = Pubkey::new_unique();
+        let to_pubkey = Pubkey::new_unique();
+        let from_pubkey = Pubkey::new_unique();
+
+        // Target prefunded with 100; funder has 10_000; transfer 5_000.
+        let to_account = Account {
+            meta: AccountMeta {
+                lamports: 100,
+                owner: SYSTEM_PROGRAM_ID,
+                executable: false,
+                rent_epoch: 0,
+            },
+            data: AccountData::empty(),
+        };
+        let from_account = Account {
+            meta: AccountMeta {
+                lamports: 10_000,
+                owner: SYSTEM_PROGRAM_ID,
+                executable: false,
+                rent_epoch: 0,
+            },
+            data: AccountData::empty(),
+        };
+
+        let mut context = ExecutionContext::new(
+            SYSTEM_PROGRAM_ID,
+            vec![
+                (to_pubkey, to_account, true),
+                (from_pubkey, from_account, true),
+            ],
+            prefund_instruction_data(5_000, 32, &new_owner),
+        );
+        context.sysvar_snapshot = Some(prefund_snapshot(true));
+
+        let outcome = executor.execute(&context).unwrap();
+        assert!(outcome.success);
+        assert_eq!(outcome.modified_accounts[&to_pubkey].meta.lamports, 5_100);
+        assert_eq!(outcome.modified_accounts[&from_pubkey].meta.lamports, 5_000);
+    }
+
+    #[test]
+    fn create_account_allow_prefund_rejects_account_in_use() {
+        let executor = SystemProgramExecutor::new(150);
+        let new_owner = Pubkey::new_unique();
+
+        // Non-empty data → already in use, even with the feature active.
+        let mut to_account = Account::zeroed();
+        to_account.meta.owner = SYSTEM_PROGRAM_ID;
+        to_account.data.resize(8, 0);
+
+        let mut context = ExecutionContext::new(
+            SYSTEM_PROGRAM_ID,
+            vec![(Pubkey::new_unique(), to_account, true)],
+            prefund_instruction_data(0, 64, &new_owner),
+        );
+        context.sysvar_snapshot = Some(prefund_snapshot(true));
 
         let result = executor.execute(&context);
         assert!(result.is_err());

@@ -59,7 +59,7 @@ impl SnapshotPeerSelector {
 
         // Sort by full snapshot slot descending (highest = best).
         let mut result: Vec<SnapshotPeerInfo> = peers.into_values().collect();
-        result.sort_by(|a, b| b.full_snapshot.0.cmp(&a.full_snapshot.0));
+        result.sort_by_key(|b| std::cmp::Reverse(b.full_snapshot.0));
         result
     }
 

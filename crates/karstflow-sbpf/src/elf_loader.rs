@@ -8,8 +8,9 @@ use crate::syscall_dispatch::murmur3_hash;
 use karstflow_constants::vm::{
     ELF64_HEADER_SIZE, ELF64_PHDR_SIZE, ELF64_SHDR_SIZE, ELF_CLASS_64, ELF_DATA_LSB,
     ELF_MACHINE_BPF, ELF_MACHINE_SBF, ELF_MACHINE_SBPF_V2, ELF_MAGIC, INSTRUCTION_SIZE,
-    REGION_PROGRAM_BASE, R_BPF_64_32, R_BPF_64_64, R_BPF_64_RELATIVE, SBPF_VERSION_V1,
-    SBPF_VERSION_V2, SBPF_VERSION_V3, SHT_DYNSYM, SHT_PROGBITS, SHT_REL, SHT_STRTAB,
+    REGION_PROGRAM_BASE, R_BPF_64_32, R_BPF_64_64, R_BPF_64_RELATIVE, SBPF_VERSION_V0,
+    SBPF_VERSION_V1, SBPF_VERSION_V2, SBPF_VERSION_V3, SHT_DYNSYM, SHT_PROGBITS, SHT_REL,
+    SHT_STRTAB,
 };
 use std::collections::HashMap;
 
@@ -38,6 +39,29 @@ impl SbpfVersion {
             f if f == SBPF_VERSION_V1 => Self::V1,
             _ => Self::V0,
         }
+    }
+
+    /// Numeric sBPF version (0..=3).
+    pub fn version_number(self) -> u32 {
+        match self {
+            Self::V0 => SBPF_VERSION_V0,
+            Self::V1 => SBPF_VERSION_V1,
+            Self::V2 => SBPF_VERSION_V2,
+            Self::V3 => SBPF_VERSION_V3,
+        }
+    }
+
+    /// Determine the sBPF version declared by an ELF program's `e_flags`
+    /// (offset 48..52) without performing full ELF validation. Returns `None`
+    /// when the header is too short to contain `e_flags`.
+    ///
+    /// Used by the deployment-version gate (SIMD-0500), which inspects only the
+    /// declared version; it must agree with the version the executor derives.
+    pub fn from_elf_e_flags(bytes: &[u8]) -> Option<Self> {
+        let flags = bytes.get(48..52)?;
+        Some(Self::from_flags(u32::from_le_bytes(
+            flags.try_into().unwrap(),
+        )))
     }
 
     /// V1+ enables dynamic stack frames (SIMD-0166) — no guard zones.

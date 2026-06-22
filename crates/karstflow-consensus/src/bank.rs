@@ -354,6 +354,11 @@ impl Bank {
             leader_schedule
         };
 
+        // Derive block/account compute-unit limits from the parent's active
+        // features so replay enforces the v4 limits (raised block limit +
+        // raise_account_cu_limit = 40% of the block limit) instead of defaults.
+        let cost_limits = Self::cost_limits_from_features(parent.feature_set.as_ref());
+
         Self {
             slot,
             parent_slot: Some(parent.slot),
@@ -394,7 +399,7 @@ impl Bank {
             ),
             transaction_cache: parent.transaction_cache.clone(),
             signature_status_cache: parent.signature_status_cache.clone(),
-            cost_tracker: Arc::new(crate::cost_tracker::CostTracker::new()),
+            cost_tracker: Arc::new(crate::cost_tracker::CostTracker::with_limits(cost_limits)),
             accounts_data_size: AtomicI64::new(parent.accounts_data_size.load(Ordering::Acquire)),
             // Use fixed fee rate matching Solana mainnet behavior.
             // The dynamic fee rate governor (derive_fee_rate) is not active
@@ -572,24 +577,17 @@ impl Bank {
     ///
     /// Collects the last vote timestamp and current stake from each entry
     /// in the vote account cache, then computes a stake-weighted median.
-    /// Falls back to system time when the cache is empty or not attached.
-    fn estimate_network_timestamp(&self) -> i64 {
-        let fallback = || {
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_secs() as i64)
-                .unwrap_or(0)
-        };
-
-        let cache_lock = match &self.vote_account_cache {
-            Some(c) => c,
-            None => return fallback(),
-        };
+    /// Returns `None` when no estimate is available (cache absent, zero total
+    /// stake, or no votes) — the caller then keeps the previous clock value.
+    /// A wall-clock fallback would be non-deterministic across nodes and
+    /// diverge consensus.
+    fn estimate_network_timestamp(&self) -> Option<i64> {
+        let cache_lock = self.vote_account_cache.as_ref()?;
 
         let cache = cache_lock.read().expect("vote_cache lock poisoned");
         let total_stake = cache.total_epoch_stake();
         if total_stake == 0 {
-            return fallback();
+            return None;
         }
 
         let vote_timestamps: Vec<(i64, u64)> = cache
@@ -599,10 +597,13 @@ impl Bank {
             .collect();
 
         if vote_timestamps.is_empty() {
-            return fallback();
+            return None;
         }
 
-        calculate_stake_weighted_timestamp(vote_timestamps, total_stake)
+        Some(calculate_stake_weighted_timestamp(
+            vote_timestamps,
+            total_stake,
+        ))
     }
 
     /// Build a slot context for instruction execution from current bank state.
@@ -853,6 +854,28 @@ impl Bank {
     /// Get the per-block cost tracker.
     pub fn cost_tracker(&self) -> &crate::cost_tracker::CostTracker {
         &self.cost_tracker
+    }
+
+    /// Resolve block/account compute-unit limits from the active feature set.
+    ///
+    /// Mirrors the reference cost model: the block limit follows
+    /// `raise_block_limits_to_100m` (SIMD-0286) / `raise_block_limits_to_60m`
+    /// (SIMD-0256), and `raise_account_cu_limit` (SIMD-0306) sets the per-account
+    /// limit to 40% of the block limit. Falls back to defaults when no feature
+    /// set is attached (e.g. the genesis bank).
+    fn cost_limits_from_features(
+        feature_set: Option<&Arc<RwLock<FeatureSet>>>,
+    ) -> crate::cost_tracker::CostLimits {
+        use crate::features::known_features;
+        let Some(fs_lock) = feature_set else {
+            return crate::cost_tracker::CostLimits::default();
+        };
+        let fs = fs_lock.read().expect("feature_set lock poisoned");
+        crate::cost_tracker::CostLimits::from_features(
+            fs.is_active(&known_features::raise_block_limits_to_100m()),
+            fs.is_active(&known_features::raise_block_limits_to_60m()),
+            fs.is_active(&known_features::raise_account_cu_limit()),
+        )
     }
 
     /// Total bytes of account data across the database.
@@ -1842,6 +1865,25 @@ mod tests {
         let validator = Pubkey::new_unique();
         let validators = vec![(validator, 1000)];
         Arc::new(LeaderSchedule::new(epoch, &validators).unwrap())
+    }
+
+    #[test]
+    fn cost_limits_track_raise_features() {
+        use crate::cost_tracker::CostLimits;
+        use crate::features::known_features;
+
+        // No feature set (genesis): defaults.
+        assert_eq!(Bank::cost_limits_from_features(None), CostLimits::default());
+
+        // raise_block_limits_to_100m + raise_account_cu_limit active.
+        let mut fs = FeatureSet::new();
+        fs.activate(known_features::raise_block_limits_to_100m(), 0);
+        fs.activate(known_features::raise_account_cu_limit(), 0);
+        let arc = Arc::new(RwLock::new(fs));
+        assert_eq!(
+            Bank::cost_limits_from_features(Some(&arc)),
+            CostLimits::from_features(true, false, true),
+        );
     }
 
     #[test]
@@ -3555,9 +3597,9 @@ mod tests {
         let cache = Arc::new(RwLock::new(cache));
         bank.set_vote_account_cache(cache.clone());
 
-        // With empty cache (no staked entries), falls back to system time
+        // With empty cache (no staked entries), no estimate is available.
         let ts = bank.estimate_network_timestamp();
-        assert!(ts > 0);
+        assert_eq!(ts, None);
 
         // Populate cache with two validators with known timestamps
         let v1 = Pubkey::new_unique();
@@ -3574,20 +3616,19 @@ mod tests {
         let ts = bank.estimate_network_timestamp();
         // v1 has 60% stake, v2 has 40%. Sorted: [v1=1700000000, v2=1700000010]
         // Cumulative at v1: 600 >= 500 (half of 1000), so median is v1's timestamp
-        assert_eq!(ts, 1_700_000_000);
+        assert_eq!(ts, Some(1_700_000_000));
     }
 
     #[test]
-    fn estimate_timestamp_returns_system_time_without_cache() {
+    fn estimate_timestamp_none_without_cache() {
         let accounts = Arc::new(AccountDatabase::new());
         let epoch_schedule = Arc::new(EpochSchedule::default());
         let leader_schedule = create_test_leader_schedule(0);
 
         let bank = Bank::new_genesis(accounts, epoch_schedule, leader_schedule);
-        // No vote cache attached
+        // No vote cache attached → no estimate (never wall-clock).
         let ts = bank.estimate_network_timestamp();
-        // Should be current system time (positive)
-        assert!(ts > 0);
+        assert_eq!(ts, None);
     }
 
     #[test]

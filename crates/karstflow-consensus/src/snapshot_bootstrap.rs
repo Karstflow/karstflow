@@ -165,7 +165,7 @@ pub fn collect_validator_stakes(accounts: &AccountDatabase) -> Vec<(Pubkey, u64)
 
     // Sort descending by stake for deterministic schedule generation.
     let mut result: Vec<(Pubkey, u64)> = node_stakes.into_iter().collect();
-    result.sort_by(|a, b| b.1.cmp(&a.1));
+    result.sort_by_key(|b| std::cmp::Reverse(b.1));
     result
 }
 

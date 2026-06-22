@@ -6,7 +6,7 @@ use crate::interpreter::{SyscallDispatch, VmError, VmState};
 use crate::{ExecutionContext, ExecutionOutcome, SbpfExecutionError};
 use karstflow_constants::syscalls;
 use karstflow_types::{Account, AccountData, AccountMeta as TypesAccountMeta, Pubkey};
-use sha2::{Digest, Sha256};
+use sha2::{Digest, Sha256, Sha512};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tiny_keccak::{Hasher, Keccak};
@@ -105,6 +105,7 @@ impl RuntimeSyscallDispatch {
         dispatch.register_by_name("sol_sha256", Box::new(SolSha256Handler));
         dispatch.register_by_name("sol_keccak256", Box::new(SolKeccak256Handler));
         dispatch.register_by_name("sol_blake3", Box::new(SolBlake3Handler));
+        dispatch.register_by_name("sol_sha512", Box::new(SolSha512Handler));
 
         // Heap allocation
         dispatch.register_by_name("sol_alloc_free_", Box::new(SolAllocHandler));
@@ -226,6 +227,7 @@ impl RuntimeSyscallDispatch {
         dispatch.register_by_name("sol_sha256", Box::new(SolSha256Handler));
         dispatch.register_by_name("sol_keccak256", Box::new(SolKeccak256Handler));
         dispatch.register_by_name("sol_blake3", Box::new(SolBlake3Handler));
+        dispatch.register_by_name("sol_sha512", Box::new(SolSha512Handler));
         dispatch.register_by_name("sol_alloc_free_", Box::new(SolAllocHandler));
         dispatch.register_by_name(
             "sol_create_program_address",
@@ -379,6 +381,11 @@ impl RuntimeSyscallDispatch {
         // Feature-gated: blake3
         if features::is_feature_active(active_features, &features::BLAKE3_SYSCALL_ENABLED) {
             dispatch.register_by_name("sol_blake3", Box::new(SolBlake3Handler));
+        }
+
+        // Feature-gated: sha512 (SIMD-0512)
+        if features::is_feature_active(active_features, &features::ENABLE_SHA512_SYSCALL) {
+            dispatch.register_by_name("sol_sha512", Box::new(SolSha512Handler));
         }
 
         // Feature-gated: curve25519 operations
@@ -910,6 +917,38 @@ impl SyscallHandler for SolSha256Handler {
         let mut hasher = Sha256::new();
         hasher.update(&data);
         let hash: [u8; 32] = hasher.finalize().into();
+
+        vm.memory
+            .write_slice(r3, &hash)
+            .map_err(|e| VmError::MemoryError(e.to_string()))?;
+
+        Ok(0)
+    }
+}
+
+/// sol_sha512: Compute SHA-512 hash (SIMD-0512). Gated behind the
+/// `enable_sha512_syscall` feature; output is 64 bytes.
+struct SolSha512Handler;
+
+impl SyscallHandler for SolSha512Handler {
+    fn call(
+        &self,
+        vm: &mut VmState,
+        r1: u64, // input pairs pointer
+        r2: u64, // pair count
+        r3: u64, // result pointer (64 bytes)
+        _r4: u64,
+        _r5: u64,
+    ) -> Result<u64, VmError> {
+        let pair_count = r2 as usize;
+        let data = read_hash_inputs(vm, r1, pair_count)?;
+
+        let cost = syscalls::SHA512_BASE_COST + syscalls::SHA512_PER_BYTE_COST * data.len() as u64;
+        deduct_compute(vm, cost)?;
+
+        let mut hasher = Sha512::new();
+        hasher.update(&data);
+        let hash: [u8; 64] = hasher.finalize().into();
 
         vm.memory
             .write_slice(r3, &hash)
@@ -2722,9 +2761,8 @@ impl SyscallHandler for SolInvokeCHandler {
         r5: u64, // signer seeds count
     ) -> Result<u64, VmError> {
         let account_count = r3 as usize;
-        let base_cost =
-            syscalls::CPI_BASE_COST + syscalls::CPI_PER_ACCOUNT_COST * account_count as u64;
-        deduct_compute(vm, base_cost)?;
+        // Flat invoke cost (reference CPI compute model, SIMD-0339).
+        deduct_compute(vm, syscalls::CPI_INVOKE_UNITS)?;
 
         if vm.cpi_depth >= syscalls::MAX_CPI_DEPTH {
             try_append_log(vm, "CPI depth limit exceeded".to_string());
@@ -2767,7 +2805,21 @@ impl SyscallHandler for SolInvokeCHandler {
         } else {
             vec![]
         };
-        deduct_compute(vm, syscalls::CPI_PER_DATA_BYTE_COST * data_len as u64)?;
+        // Instruction translation cost: instruction data + account metas.
+        let instr_translation = (data_len as u64) / syscalls::CPI_BYTES_PER_UNIT
+            + (acct_metas_len as u64).saturating_mul(syscalls::CPI_RUST_ACCOUNT_META_SIZE)
+                / syscalls::CPI_BYTES_PER_UNIT;
+        deduct_compute(vm, instr_translation)?;
+        // Account-info translation: cap then proportional cost.
+        if account_count > syscalls::MAX_CPI_ACCOUNT_INFOS {
+            try_append_log(vm, "Too many CPI account infos".to_string());
+            return Ok(1);
+        }
+        deduct_compute(
+            vm,
+            (account_count as u64).saturating_mul(syscalls::CPI_ACCOUNT_INFO_BYTE_SIZE)
+                / syscalls::CPI_BYTES_PER_UNIT,
+        )?;
 
         // C ABI AccountMeta: (pubkey_addr:u64, is_writable:u8, is_signer:u8, pad[6]) = 16 bytes
         let mut cpi_account_metas = Vec::with_capacity(acct_metas_len);
@@ -2824,9 +2876,8 @@ impl SyscallHandler for SolInvokeRustHandler {
         r5: u64, // signer seeds count
     ) -> Result<u64, VmError> {
         let account_count = r3 as usize;
-        let base_cost =
-            syscalls::CPI_BASE_COST + syscalls::CPI_PER_ACCOUNT_COST * account_count as u64;
-        deduct_compute(vm, base_cost)?;
+        // Flat invoke cost (reference CPI compute model, SIMD-0339).
+        deduct_compute(vm, syscalls::CPI_INVOKE_UNITS)?;
 
         if vm.cpi_depth >= syscalls::MAX_CPI_DEPTH {
             try_append_log(vm, "CPI depth limit exceeded".to_string());
@@ -2868,7 +2919,21 @@ impl SyscallHandler for SolInvokeRustHandler {
         } else {
             vec![]
         };
-        deduct_compute(vm, syscalls::CPI_PER_DATA_BYTE_COST * data_len as u64)?;
+        // Instruction translation cost: instruction data + account metas.
+        let instr_translation = (data_len as u64) / syscalls::CPI_BYTES_PER_UNIT
+            + (acct_metas_len as u64).saturating_mul(syscalls::CPI_RUST_ACCOUNT_META_SIZE)
+                / syscalls::CPI_BYTES_PER_UNIT;
+        deduct_compute(vm, instr_translation)?;
+        // Account-info translation: cap then proportional cost.
+        if account_count > syscalls::MAX_CPI_ACCOUNT_INFOS {
+            try_append_log(vm, "Too many CPI account infos".to_string());
+            return Ok(1);
+        }
+        deduct_compute(
+            vm,
+            (account_count as u64).saturating_mul(syscalls::CPI_ACCOUNT_INFO_BYTE_SIZE)
+                / syscalls::CPI_BYTES_PER_UNIT,
+        )?;
 
         // Rust ABI AccountMeta: (pubkey:[u8;32], is_signer:u8, is_writable:u8) = 34 bytes packed
         let mut cpi_account_metas = Vec::with_capacity(acct_metas_len);
@@ -3175,6 +3240,35 @@ mod tests {
     use crate::memory::MemoryMap;
     use karstflow_constants::vm::{DEFAULT_HEAP_SIZE, REGION_HEAP_BASE, TOTAL_STACK_SIZE};
 
+    /// Reference CPI compute model (agave v4 / SIMD-0339): flat invoke cost plus
+    /// per-component translation costs at CPI_BYTES_PER_UNIT. Guards against
+    /// accidental drift of the CPI cost constants away from the reference.
+    fn cpi_total_cost(data_len: u64, instr_accounts: u64, account_infos: u64) -> u64 {
+        syscalls::CPI_INVOKE_UNITS
+            + data_len / syscalls::CPI_BYTES_PER_UNIT
+            + instr_accounts.saturating_mul(syscalls::CPI_RUST_ACCOUNT_META_SIZE)
+                / syscalls::CPI_BYTES_PER_UNIT
+            + account_infos.saturating_mul(syscalls::CPI_ACCOUNT_INFO_BYTE_SIZE)
+                / syscalls::CPI_BYTES_PER_UNIT
+    }
+
+    #[test]
+    fn cpi_compute_cost_matches_reference_model() {
+        // Constants pinned to the reference (FD_VM_*).
+        assert_eq!(syscalls::CPI_INVOKE_UNITS, 946);
+        assert_eq!(syscalls::CPI_BYTES_PER_UNIT, 250);
+        assert_eq!(syscalls::CPI_RUST_ACCOUNT_META_SIZE, 34);
+        assert_eq!(syscalls::CPI_ACCOUNT_INFO_BYTE_SIZE, 80);
+        assert_eq!(syscalls::MAX_CPI_ACCOUNT_INFOS, 255);
+
+        // Minimal CPI: only the flat invoke cost (all divided terms round to 0).
+        assert_eq!(cpi_total_cost(0, 0, 0), 946);
+        // data 100/250=0, metas 3*34/250=0, infos 5*80/250=400/250=1 → 947.
+        assert_eq!(cpi_total_cost(100, 3, 5), 947);
+        // data 1000/250=4, metas 10*34/250=1, infos 10*80/250=3 → 954.
+        assert_eq!(cpi_total_cost(1000, 10, 10), 954);
+    }
+
     fn make_program_bytes(insns: &[Instruction]) -> Vec<u8> {
         let mut bytes = Vec::new();
         for insn in insns {
@@ -3429,6 +3523,62 @@ mod tests {
         let mut hasher = Sha256::new();
         hasher.update(b"hello");
         let expected: [u8; 32] = hasher.finalize().into();
+        let expected_first_8 = u64::from_le_bytes(expected[..8].try_into().unwrap());
+
+        assert_eq!(result.return_value, expected_first_8);
+    }
+
+    #[test]
+    fn sha512_handler_correct_hash() {
+        use sha2::{Digest, Sha512};
+
+        let dispatch = RuntimeSyscallDispatch::with_standard_syscalls();
+        let sha_id = murmur3_hash("sol_sha512");
+
+        // Write test data "hello" to heap, set up input pair pointing to it,
+        // call sol_sha512, then read the first 8 bytes of the 64-byte digest.
+        let bytes = make_program_bytes(&[
+            Instruction::new(Opcode::Lddw as u8, 1, 0, 0, REGION_HEAP_BASE as i32),
+            Instruction::new(0, 0, 0, 0, (REGION_HEAP_BASE >> 32) as i32),
+            // "hell" + "o"
+            Instruction::new(Opcode::Mov64Imm as u8, 2, 0, 0, 0x6C6C6568u32 as i32),
+            Instruction::new(Opcode::StxWord as u8, 1, 2, 0, 0),
+            Instruction::new(Opcode::Mov64Imm as u8, 2, 0, 0, 0x6F),
+            Instruction::new(Opcode::StxByte as u8, 1, 2, 4, 0),
+            // Input pair at heap+64: ptr=heap_base, len=5
+            Instruction::new(Opcode::Lddw as u8, 3, 0, 0, (REGION_HEAP_BASE + 64) as i32),
+            Instruction::new(0, 0, 0, 0, ((REGION_HEAP_BASE + 64) >> 32) as i32),
+            Instruction::new(Opcode::StxDword as u8, 3, 1, 0, 0),
+            Instruction::new(Opcode::Mov64Imm as u8, 4, 0, 0, 5),
+            Instruction::new(Opcode::StxDword as u8, 3, 4, 8, 0),
+            // Call sha512: r1=pair_ptr(heap+64), r2=1, r3=result(heap+128)
+            Instruction::new(Opcode::Lddw as u8, 1, 0, 0, (REGION_HEAP_BASE + 64) as i32),
+            Instruction::new(0, 0, 0, 0, ((REGION_HEAP_BASE + 64) >> 32) as i32),
+            Instruction::new(Opcode::Mov64Imm as u8, 2, 0, 0, 1),
+            Instruction::new(Opcode::Lddw as u8, 3, 0, 0, (REGION_HEAP_BASE + 128) as i32),
+            Instruction::new(0, 0, 0, 0, ((REGION_HEAP_BASE + 128) >> 32) as i32),
+            Instruction::new(Opcode::Call as u8, 0, 0, 0, sha_id as i32),
+            // Read first 8 bytes of the digest into r0
+            Instruction::new(Opcode::Lddw as u8, 1, 0, 0, (REGION_HEAP_BASE + 128) as i32),
+            Instruction::new(0, 0, 0, 0, ((REGION_HEAP_BASE + 128) >> 32) as i32),
+            Instruction::new(Opcode::LdxDword as u8, 0, 1, 0, 0),
+            Instruction::new(Opcode::Exit as u8, 0, 0, 0, 0),
+        ]);
+        let program = load_raw(&bytes).unwrap();
+        let memory = MemoryMap::new(&[], TOTAL_STACK_SIZE, DEFAULT_HEAP_SIZE, vec![]);
+        let result = crate::interpreter::execute(
+            &program,
+            memory,
+            1_000_000,
+            &dispatch,
+            crate::sysvar_snapshot::SysvarSnapshot::default(),
+            karstflow_types::Pubkey::default(),
+        )
+        .unwrap();
+
+        let mut hasher = Sha512::new();
+        hasher.update(b"hello");
+        let expected: [u8; 64] = hasher.finalize().into();
         let expected_first_8 = u64::from_le_bytes(expected[..8].try_into().unwrap());
 
         assert_eq!(result.return_value, expected_first_8);
@@ -4395,6 +4545,7 @@ mod tests {
         assert!(!ids.contains(&murmur3_hash("sol_alt_bn128_compression")));
         assert!(!ids.contains(&murmur3_hash("sol_poseidon")));
         assert!(!ids.contains(&murmur3_hash("sol_get_epoch_stake")));
+        assert!(!ids.contains(&murmur3_hash("sol_sha512")));
     }
 
     #[test]
@@ -4409,6 +4560,7 @@ mod tests {
         all_features.insert(*features::ENABLE_ALT_BN128_COMPRESSION_SYSCALL.as_bytes());
         all_features.insert(*features::ENABLE_POSEIDON_SYSCALL.as_bytes());
         all_features.insert(*features::ENABLE_GET_EPOCH_STAKE_SYSCALL.as_bytes());
+        all_features.insert(*features::ENABLE_SHA512_SYSCALL.as_bytes());
 
         let dispatch = RuntimeSyscallDispatch::with_active_feature_ids(&all_features);
         let ids = dispatch.registered_ids();
@@ -4422,6 +4574,7 @@ mod tests {
         assert!(ids.contains(&murmur3_hash("sol_alt_bn128_compression")));
         assert!(ids.contains(&murmur3_hash("sol_poseidon")));
         assert!(ids.contains(&murmur3_hash("sol_get_epoch_stake")));
+        assert!(ids.contains(&murmur3_hash("sol_sha512")));
 
         // Always-available too
         assert!(ids.contains(&murmur3_hash("sol_log_")));

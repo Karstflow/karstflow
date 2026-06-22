@@ -41,6 +41,13 @@ pub const WRITE_LOCK_COST: u64 = 300;
 /// Maximum account data size delta per block (bytes).
 pub const MAX_ACCOUNT_DATA_SIZE_DELTA: i64 = 100_000_000; // 100MB
 
+/// Maximum total account data a single block may allocate (bytes).
+///
+/// Enforced from the pre-execution estimate of system-program allocations
+/// (`calculate_allocated_accounts_data_size`), matching the reference cost
+/// tracker's `FD_MAX_BLOCK_ACCOUNTS_DATA_SIZE_DELTA`.
+pub const MAX_BLOCK_ACCOUNTS_DATA_SIZE: u64 = 100_000_000; // 100MB
+
 /// Number of shards for the transaction cache.
 pub const TRANSACTION_CACHE_SHARDS: usize = 64;
 
@@ -69,9 +76,10 @@ pub const INSTRUCTION_BASE_COST: u64 = 200;
 
 /// Maximum number of account keys a transaction may lock.
 ///
-/// With the `increase_tx_account_lock_limit` feature active, this is 128.
-/// The legacy limit (64) is not used in current protocol versions.
-pub const MAX_TRANSACTION_ACCOUNT_LOCKS: usize = 128;
+/// The `increase_tx_account_lock_limit` feature (SIMD-0339, which would have
+/// raised this to 128) was reverted upstream, so the protocol limit remains
+/// 64 for v4 / mainnet compatibility.
+pub const MAX_TRANSACTION_ACCOUNT_LOCKS: usize = 64;
 
 /// Maximum number of accounts per instruction (SIMD-0406).
 ///

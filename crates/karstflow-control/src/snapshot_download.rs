@@ -190,7 +190,7 @@ pub fn download_snapshot_from_network(
             .collect();
 
         // Sort by latency (fastest first), then by slot (newest first for ties).
-        latencies.sort_by(|a, b| a.1.cmp(&b.1));
+        latencies.sort_by_key(|a| a.1);
 
         let ranked: Vec<SnapshotPeerInfo> =
             latencies.iter().map(|(i, _)| peers[*i].clone()).collect();

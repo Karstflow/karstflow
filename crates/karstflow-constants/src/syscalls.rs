@@ -10,7 +10,11 @@ pub const MAX_CPI_INSTRUCTION_ACCOUNTS: usize = 255;
 /// Maximum CPI instruction data length (bytes).
 /// Used in BPF input region footprint calculation.
 pub const MAX_CPI_INSTRUCTION_DATA_LEN: usize = 10_240;
-pub const MAX_CPI_ACCOUNT_INFOS: usize = 128;
+/// Maximum number of account infos passable to a CPI.
+///
+/// 255 with `increase_cpi_account_info_limit` (SIMD-0339), which is permanently
+/// active on v4 / mainnet.
+pub const MAX_CPI_ACCOUNT_INFOS: usize = 255;
 pub const MAX_RETURN_DATA_SIZE: usize = 1024;
 pub const MAX_SIGNER_SEEDS: usize = 16;
 pub const MAX_SEED_BYTES: usize = 32;
@@ -24,6 +28,10 @@ pub const KECCAK256_BASE_COST: u64 = 100;
 pub const KECCAK256_PER_BYTE_COST: u64 = 2;
 pub const BLAKE3_BASE_COST: u64 = 100;
 pub const BLAKE3_PER_BYTE_COST: u64 = 2;
+// sha512 (SIMD-0512): same base as sha256; per-byte cost is half (the reference
+// charges sha256-byte-cost over len/2), so 1 CU/byte vs sha256's 2.
+pub const SHA512_BASE_COST: u64 = 100;
+pub const SHA512_PER_BYTE_COST: u64 = 1;
 pub const SECP256K1_RECOVER_COST: u64 = 25_000;
 
 // Compute costs for PDA operations
@@ -31,10 +39,25 @@ pub const CREATE_PROGRAM_ADDRESS_COST: u64 = 1500;
 pub const FIND_PROGRAM_ADDRESS_COST: u64 = 1500;
 pub const FIND_PROGRAM_ADDRESS_PER_ITERATION: u64 = 550;
 
-// Compute costs for CPI
+// Compute costs for CPI (legacy model — retained for the parallel cpi.rs path)
 pub const CPI_BASE_COST: u64 = 1000;
 pub const CPI_PER_ACCOUNT_COST: u64 = 100;
 pub const CPI_PER_DATA_BYTE_COST: u64 = 1;
+
+// CPI compute model matching the reference (agave v4 / SIMD-0339), used by the
+// live sol_invoke_signed_c / sol_invoke_signed_rust handlers. Total billed:
+//   CPI_INVOKE_UNITS                                  (flat invoke cost)
+// + instruction_data_len / CPI_BYTES_PER_UNIT         (instruction data)
+// + instr_accounts_len * CPI_RUST_ACCOUNT_META_SIZE / CPI_BYTES_PER_UNIT
+// + account_info_cnt   * CPI_ACCOUNT_INFO_BYTE_SIZE   / CPI_BYTES_PER_UNIT
+/// Flat compute cost charged per CPI invoke (FD_VM_INVOKE_UNITS).
+pub const CPI_INVOKE_UNITS: u64 = 946;
+/// Account-data bytes billed per compute unit (FD_VM_CPI_BYTES_PER_UNIT).
+pub const CPI_BYTES_PER_UNIT: u64 = 250;
+/// Serialized size of a Rust AccountMeta for translation billing.
+pub const CPI_RUST_ACCOUNT_META_SIZE: u64 = 34;
+/// Serialized size of an AccountInfo for translation billing.
+pub const CPI_ACCOUNT_INFO_BYTE_SIZE: u64 = 80;
 
 // Compute costs for memory operations
 pub const MEMCPY_BASE_COST: u64 = 10;

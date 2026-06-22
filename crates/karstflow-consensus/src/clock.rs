@@ -113,11 +113,11 @@ pub fn calculate_stake_weighted_timestamp(
     total_stake: u64,
 ) -> i64 {
     if vote_timestamps.is_empty() || total_stake == 0 {
-        // No votes, return current time
-        return std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs() as i64;
+        // No estimate available. Return a deterministic 0 rather than
+        // wall-clock time; callers treat "no estimate" by keeping the
+        // previous clock value (wall-clock here would be non-deterministic
+        // across nodes and diverge consensus).
+        return 0;
     }
 
     // Limit to max stake weights
@@ -242,8 +242,8 @@ mod tests {
 
         let timestamp = calculate_stake_weighted_timestamp(votes, 0);
 
-        // Should return current time (approximate check)
-        assert!(timestamp > 0);
+        // No estimate available → deterministic 0 (never wall-clock).
+        assert_eq!(timestamp, 0);
     }
 
     #[test]

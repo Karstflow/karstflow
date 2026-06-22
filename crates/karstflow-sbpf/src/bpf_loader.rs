@@ -1,7 +1,10 @@
 use super::{ExecutionContext, ExecutionOutcome};
+use crate::elf_loader::SbpfVersion;
 use karstflow_constants::bpf_loader_program as constants;
+use karstflow_constants::vm::SBPF_VERSION_V3;
 use karstflow_ids::features::{
-    is_feature_active, ENABLE_BPF_LOADER_SET_AUTHORITY_CHECKED, ENABLE_EXTEND_PROGRAM_CHECKED,
+    is_feature_active, DISABLE_SBPF_V0_V1_V2_DEPLOYMENT, ENABLE_BPF_LOADER_SET_AUTHORITY_CHECKED,
+    ENABLE_EXTEND_PROGRAM_CHECKED, LOADER_V3_MINIMUM_EXTEND_PROGRAM_SIZE,
 };
 use karstflow_ids::BPF_LOADER_PROGRAM_ID;
 use karstflow_types::{Account, AccountData, Pubkey};
@@ -452,6 +455,31 @@ impl BpfLoaderExecutor {
     ///           [5] clock sysvar, [6] system program, [7] authority (signer)
     ///
     /// Instruction data: disc(4) + max_data_len(8)
+    /// SIMD-0500: when `disable_sbpf_v0_v1_v2_deployment` is active, reject
+    /// deployment (Deploy/Upgrade/Finalize) of programs whose declared sBPF
+    /// version is below v3. Older programs remain executable; only new
+    /// deployment is restricted. ExtendProgram is exempt (it does not call
+    /// this). `elf` is the program's ELF image. A header too short to declare a
+    /// version is not rejected here, mirroring the reference's leniency.
+    fn check_deployment_version(context: &ExecutionContext, elf: &[u8]) -> Result<(), String> {
+        let active = context
+            .sysvar_snapshot
+            .as_ref()
+            .map(|s| is_feature_active(&s.active_features, &DISABLE_SBPF_V0_V1_V2_DEPLOYMENT))
+            .unwrap_or(false);
+        if !active {
+            return Ok(());
+        }
+        if let Some(version) = SbpfVersion::from_elf_e_flags(elf) {
+            if version.version_number() < SBPF_VERSION_V3 {
+                return Err(
+                    "SIMD-0500: deployment of sBPF v0/v1/v2 programs is disabled".to_string(),
+                );
+            }
+        }
+        Ok(())
+    }
+
     fn execute_deploy(
         &self,
         context: &ExecutionContext,
@@ -542,6 +570,8 @@ impl BpfLoaderExecutor {
 
         // Copy buffer data into programdata
         let src = &buffer_account.data.as_ref()[buffer_data_offset..];
+        // SIMD-0500: gate deployment on the program's declared sBPF version.
+        Self::check_deployment_version(context, src)?;
         programdata_data[constants::SIZE_OF_PROGRAMDATA_METADATA
             ..constants::SIZE_OF_PROGRAMDATA_METADATA + buffer_data_len]
             .copy_from_slice(src);
@@ -673,6 +703,8 @@ impl BpfLoaderExecutor {
 
         // Copy new ELF data
         let src = &buffer_account.data.as_ref()[buffer_data_offset..];
+        // SIMD-0500: gate the upgrade on the new program's declared sBPF version.
+        Self::check_deployment_version(context, src)?;
         pd_data[constants::SIZE_OF_PROGRAMDATA_METADATA
             ..constants::SIZE_OF_PROGRAMDATA_METADATA + buffer_data_len]
             .copy_from_slice(src);
@@ -747,6 +779,17 @@ impl BpfLoaderExecutor {
                     .ok_or("Program not upgradeable")?;
                 if *auth != present_authority {
                     return Err("Incorrect upgrade authority provided".into());
+                }
+                // SIMD-0500: finalizing (new authority None makes the program
+                // immutable) is forbidden for sub-v3 programs.
+                if new_authority.is_none() {
+                    if let Some(elf) = account
+                        .data
+                        .as_ref()
+                        .get(constants::SIZE_OF_PROGRAMDATA_METADATA..)
+                    {
+                        Self::check_deployment_version(context, elf)?;
+                    }
                 }
                 // New authority can be None (makes program immutable)
                 UpgradeableLoaderState::ProgramData {
@@ -929,7 +972,10 @@ impl BpfLoaderExecutor {
                 programdata_address,
             } => {
                 if *programdata_address != programdata_pubkey {
-                    return Err("Program account does not match ProgramData account".into());
+                    // Upstream (loader v3) emits this exact (intentionally
+                    // redundant) string for ExtendProgram; required for log
+                    // conformance. The Close path keeps "Program account ...".
+                    return Err("ProgramData account does not match ProgramData account".into());
                 }
             }
             _ => return Err("Invalid Program account".into()),
@@ -967,6 +1013,28 @@ impl BpfLoaderExecutor {
                 "Extended ProgramData length of {} bytes exceeds max account data length",
                 new_len
             ));
+        }
+
+        // When loader_v3_minimum_extend_program_size is active, the request must
+        // add at least MINIMUM_EXTEND_PROGRAM_BYTES, unless it extends exactly to
+        // the maximum permitted size.
+        if let Some(ref snap) = context.sysvar_snapshot {
+            if is_feature_active(
+                &snap.active_features,
+                &LOADER_V3_MINIMUM_EXTEND_PROGRAM_SIZE,
+            ) {
+                let headroom =
+                    (constants::MAX_PERMITTED_DATA_LENGTH as usize).saturating_sub(old_len);
+                if additional_bytes < constants::MINIMUM_EXTEND_PROGRAM_BYTES
+                    && additional_bytes != headroom
+                {
+                    return Err(format!(
+                        "ExtendProgram requires a minimum of {} additional bytes or to extend to maximum size, but only {} were requested",
+                        constants::MINIMUM_EXTEND_PROGRAM_BYTES,
+                        additional_bytes
+                    ));
+                }
+            }
         }
 
         let mut data = programdata_account.data.as_ref().to_vec();
@@ -1442,6 +1510,71 @@ mod tests {
             }
             _ => panic!("Expected ProgramData state"),
         }
+    }
+
+    /// Build a deploy ExecutionContext whose buffer ELF declares `version` in
+    /// its e_flags, optionally with the SIMD-0500 feature active.
+    fn deploy_context_with_version(version: u32, feature_active: bool) -> ExecutionContext {
+        let authority = Pubkey::new_unique();
+        let mut buffer_account = make_buffer_account(authority, 100);
+        // Patch e_flags (offset 48 within the ELF area) to the desired version.
+        let mut data = buffer_account.data.as_ref().to_vec();
+        let off = constants::SIZE_OF_BUFFER_METADATA + 48;
+        data[off..off + 4].copy_from_slice(&version.to_le_bytes());
+        buffer_account.data = AccountData::from(data);
+
+        let mut instruction_data = constants::INSTRUCTION_DEPLOY_WITH_MAX_DATA_LEN
+            .to_le_bytes()
+            .to_vec();
+        instruction_data.extend_from_slice(&200u64.to_le_bytes());
+
+        let mut context = ExecutionContext::new(
+            BPF_LOADER_PROGRAM_ID,
+            vec![
+                (Pubkey::new_unique(), Account::default(), true),
+                (Pubkey::new_unique(), make_account(10_000, 0), true),
+                (
+                    Pubkey::new_unique(),
+                    make_account(10_000, constants::SIZE_OF_PROGRAM),
+                    true,
+                ),
+                (Pubkey::new_unique(), buffer_account, false),
+            ],
+            instruction_data,
+        );
+        let mut snapshot = crate::SysvarSnapshot::default();
+        if feature_active {
+            snapshot
+                .active_features
+                .insert(*DISABLE_SBPF_V0_V1_V2_DEPLOYMENT.as_bytes());
+        }
+        context.sysvar_snapshot = Some(snapshot);
+        context
+    }
+
+    #[test]
+    fn simd0500_rejects_sub_v3_deploy_when_active() {
+        let executor = BpfLoaderExecutor::new(150);
+        let context = deploy_context_with_version(0, true);
+        let result = executor.execute(&context);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("SIMD-0500"));
+    }
+
+    #[test]
+    fn simd0500_allows_v3_deploy_when_active() {
+        let executor = BpfLoaderExecutor::new(150);
+        let context = deploy_context_with_version(SBPF_VERSION_V3, true);
+        let outcome = executor.execute(&context).unwrap();
+        assert!(outcome.success);
+    }
+
+    #[test]
+    fn simd0500_allows_sub_v3_deploy_when_inactive() {
+        let executor = BpfLoaderExecutor::new(150);
+        let context = deploy_context_with_version(0, false);
+        let outcome = executor.execute(&context).unwrap();
+        assert!(outcome.success);
     }
 
     #[test]
@@ -2111,5 +2244,86 @@ mod tests {
         if let Err(msg) = &result {
             assert!(!msg.contains("feature gate not active"));
         }
+    }
+
+    // ── loader_v3_minimum_extend_program_size gate ──────────────────────
+
+    fn extend_context_with_features(
+        additional_bytes: u32,
+        elf_len: usize,
+        features: std::collections::HashSet<[u8; 32]>,
+    ) -> (ExecutionContext, Pubkey) {
+        use crate::SysvarSnapshot;
+
+        let authority = Pubkey::new_unique();
+        let pd_pubkey = Pubkey::new_unique();
+        let pd_account = make_programdata_account(50, Some(authority), elf_len);
+        let program_account = make_program_account(pd_pubkey);
+
+        let mut instruction_data = constants::INSTRUCTION_EXTEND_PROGRAM.to_le_bytes().to_vec();
+        instruction_data.extend_from_slice(&additional_bytes.to_le_bytes());
+
+        let snapshot = SysvarSnapshot {
+            active_features: features,
+            ..SysvarSnapshot::default()
+        };
+        let ctx = ExecutionContext::new(
+            BPF_LOADER_PROGRAM_ID,
+            vec![
+                (pd_pubkey, pd_account, true),
+                (Pubkey::new_unique(), program_account, false),
+            ],
+            instruction_data,
+        )
+        .with_sysvar_snapshot(snapshot);
+        (ctx, pd_pubkey)
+    }
+
+    #[test]
+    fn extend_program_below_minimum_rejected_when_feature_active() {
+        let executor = BpfLoaderExecutor::new(150);
+        let mut features = std::collections::HashSet::new();
+        features.insert(*LOADER_V3_MINIMUM_EXTEND_PROGRAM_SIZE.as_bytes());
+        // 200 bytes < MINIMUM_EXTEND_PROGRAM_BYTES and far below headroom.
+        let (ctx, _) = extend_context_with_features(200, 100, features);
+
+        let result = executor.execute(&ctx);
+        assert!(result.is_err());
+        let msg = result.unwrap_err();
+        assert!(msg.contains("minimum"));
+        assert!(msg.contains(&constants::MINIMUM_EXTEND_PROGRAM_BYTES.to_string()));
+    }
+
+    #[test]
+    fn extend_program_below_minimum_allowed_when_feature_inactive() {
+        let executor = BpfLoaderExecutor::new(150);
+        // Same sub-minimum request, but feature gate not active → legacy behavior.
+        let (ctx, pd_pubkey) =
+            extend_context_with_features(200, 100, std::collections::HashSet::new());
+
+        let outcome = executor.execute(&ctx).unwrap();
+        assert!(outcome.success);
+        let modified = &outcome.modified_accounts[&pd_pubkey];
+        assert_eq!(
+            modified.data.as_ref().len(),
+            constants::SIZE_OF_PROGRAMDATA_METADATA + 100 + 200
+        );
+    }
+
+    #[test]
+    fn extend_program_to_max_allowed_when_feature_active() {
+        let executor = BpfLoaderExecutor::new(150);
+        let mut features = std::collections::HashSet::new();
+        features.insert(*LOADER_V3_MINIMUM_EXTEND_PROGRAM_SIZE.as_bytes());
+        // old_len = MAX - 100, request exactly the 100-byte headroom: below the
+        // minimum but extends to maximum size, so the gate must allow it.
+        let max = constants::MAX_PERMITTED_DATA_LENGTH as usize;
+        let elf_len = max - 100 - constants::SIZE_OF_PROGRAMDATA_METADATA;
+        let (ctx, pd_pubkey) = extend_context_with_features(100, elf_len, features);
+
+        let outcome = executor.execute(&ctx).unwrap();
+        assert!(outcome.success);
+        let modified = &outcome.modified_accounts[&pd_pubkey];
+        assert_eq!(modified.data.as_ref().len(), max);
     }
 }

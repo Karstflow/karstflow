@@ -52,7 +52,10 @@ mod tests {
         let clock = sysvars.clock();
         assert_eq!(clock.slot, bank.slot());
         assert_eq!(clock.epoch, bank.epoch());
-        assert!(clock.unix_timestamp > 0);
+        // No staked votes → no stake-weighted estimate → the previous
+        // (genesis) timestamp is kept deterministically rather than a
+        // non-deterministic wall-clock value.
+        assert_eq!(clock.unix_timestamp, 0);
     }
 
     #[test]
