@@ -20,6 +20,7 @@ pub mod epoch_info;
 pub mod finality_tracker;
 pub mod parent_ready_state;
 pub mod parent_ready_tracker;
+pub mod pool;
 pub mod slot_state;
 pub mod vote;
 pub mod votor;
