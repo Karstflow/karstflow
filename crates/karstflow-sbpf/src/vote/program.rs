@@ -17,6 +17,20 @@ use karstflow_ids::VOTE_PROGRAM_ID;
 use karstflow_types::{Account, AccountData, Pubkey};
 use std::collections::HashMap;
 
+/// Byte offsets within canonical `InitializeAccountV2` instruction data (after
+/// the 4-byte type discriminant): node, authorized_voter, BLS pubkey, BLS proof
+/// of possession, authorized_withdrawer, then the inflation-rewards commission.
+const V2_NODE_OFF: usize = 4;
+const V2_VOTER_OFF: usize = 36;
+const V2_BLS_PUBKEY_OFF: usize = 68;
+const V2_BLS_PROOF_OFF: usize = V2_BLS_PUBKEY_OFF + VOTE_BLS_PUBKEY_LEN;
+const V2_WITHDRAWER_OFF: usize = V2_BLS_PROOF_OFF + VOTE_BLS_PROOF_LEN;
+const V2_INFL_BPS_OFF: usize = V2_WITHDRAWER_OFF + 32;
+/// Total instruction-data length: discriminant + node + voter + bls48 + proof96
+/// + withdrawer + inflation_bps(2) + inflation_collector(32) + revenue_bps(2)
+/// + revenue_collector(32).
+const VOTE_INIT_V2_LEN: usize = V2_INFL_BPS_OFF + 2 + 32 + 2 + 32;
+
 /// Whether a vote-commission increase is allowed at the given slot.
 ///
 /// Mirrors the reference implementation: increases are only permitted in the
@@ -215,24 +229,29 @@ impl VoteProgramExecutor {
     // InitializeAccountV2
     // -----------------------------------------------------------------------
 
-    /// Initialize a new vote account, optionally registering an authorized-voter
-    /// BLS public key with a proof of possession (Alpenglow groundwork).
+    /// Initialize a new vote account, registering the authorized-voter BLS
+    /// public key with a proof of possession (Alpenglow V4 vote account).
     ///
-    /// Instruction data layout after the 4-byte type discriminant:
+    /// Canonical instruction-data layout after the 4-byte type discriminant:
     ///   [4..36]    node_pubkey (32 bytes)
     ///   [36..68]   authorized_voter (32 bytes)
-    ///   [68..100]  authorized_withdrawer (32 bytes)
-    ///   [100]      commission (1 byte)
-    ///   [101..149] authorized_voter BLS pubkey (48 bytes, optional)
-    ///   [149..245] BLS proof of possession (96 bytes, optional)
+    ///   [68..116]  authorized_voter BLS pubkey (48 bytes)
+    ///   [116..212] BLS proof of possession (96 bytes)
+    ///   [212..244] authorized_withdrawer (32 bytes)
+    ///   [244..246] inflation_rewards_commission_bps (u16, little-endian)
+    ///   [246..278] inflation_rewards_collector (32 bytes)
+    ///   [278..280] block_revenue_commission_bps (u16, little-endian)
+    ///   [280..312] block_revenue_collector (32 bytes)
     ///
-    /// When the BLS fields are present the node identity must have signed and the
-    /// proof of possession is verified over `"ALPENGLOW" || vote_account_pubkey
-    /// || bls_pubkey`; an invalid proof rejects the instruction. When the BLS
-    /// fields are absent the behavior matches [`Self::execute_initialize`].
+    /// The node identity must have signed and the proof of possession is
+    /// verified over `"ALPENGLOW" || vote_account_pubkey || bls_pubkey`; an
+    /// invalid proof rejects the instruction. The bespoke vote-account storage
+    /// keeps node/voter/withdrawer/commission and the BLS pubkey; the basis-
+    /// point commission is folded into the legacy percentage and the split-
+    /// commission collectors are validated for length but not yet persisted.
     ///
     /// Returns the additional compute units charged for proof-of-possession
-    /// verification (zero when no BLS pubkey is supplied).
+    /// verification.
     fn execute_initialize_v2(
         &self,
         context: &ExecutionContext,
@@ -245,14 +264,29 @@ impl VoteProgramExecutor {
             return Err("InitializeAccountV2 requires at least 1 account".to_string());
         }
 
-        if context.instruction_data.len() < 101 {
+        if context.instruction_data.len() < VOTE_INIT_V2_LEN {
             return Err("InitializeAccountV2 instruction data too short".to_string());
         }
 
-        let node_pubkey = read_pubkey(&context.instruction_data, 4)?;
-        let authorized_voter = read_pubkey(&context.instruction_data, 36)?;
-        let authorized_withdrawer = read_pubkey(&context.instruction_data, 68)?;
-        let commission = context.instruction_data[100];
+        let node_pubkey = read_pubkey(&context.instruction_data, V2_NODE_OFF)?;
+        let authorized_voter = read_pubkey(&context.instruction_data, V2_VOTER_OFF)?;
+        let bls_pubkey: [u8; VOTE_BLS_PUBKEY_LEN] = context.instruction_data
+            [V2_BLS_PUBKEY_OFF..V2_BLS_PUBKEY_OFF + VOTE_BLS_PUBKEY_LEN]
+            .try_into()
+            .map_err(|_| "Failed to read BLS pubkey".to_string())?;
+        let bls_proof: [u8; VOTE_BLS_PROOF_LEN] = context.instruction_data
+            [V2_BLS_PROOF_OFF..V2_BLS_PROOF_OFF + VOTE_BLS_PROOF_LEN]
+            .try_into()
+            .map_err(|_| "Failed to read BLS proof of possession".to_string())?;
+        let authorized_withdrawer = read_pubkey(&context.instruction_data, V2_WITHDRAWER_OFF)?;
+        let inflation_rewards_commission_bps = u16::from_le_bytes(
+            context.instruction_data[V2_INFL_BPS_OFF..V2_INFL_BPS_OFF + 2]
+                .try_into()
+                .map_err(|_| "Failed to read commission".to_string())?,
+        );
+        // The bespoke vote-account stores a legacy u8 percentage; derive it
+        // from the basis-point commission, saturating to avoid truncation wrap.
+        let commission = (inflation_rewards_commission_bps / 100).min(u8::MAX as u16) as u8;
 
         let (vote_pubkey, mut vote_account, writable) = context.accounts[0].clone();
 
@@ -264,46 +298,30 @@ impl VoteProgramExecutor {
             return Err("Vote account not owned by vote program".to_string());
         }
 
+        // The node identity must authorize the new account.
+        if !context.signers.is_empty() && !context.is_signer(&node_pubkey) {
+            return Err("InitializeAccountV2 requires the node identity to sign".to_string());
+        }
+
+        // Verify the proof of possession over the vote account pubkey before
+        // the BLS key is stored.
+        let vote_account_pubkey: [u8; 32] = *vote_pubkey.as_bytes();
+        if !verify_vote_bls_pop(&vote_account_pubkey, &bls_pubkey, &bls_proof) {
+            return Err("BLS proof of possession verification failed".to_string());
+        }
+
         let mut vote_state = VoteState::new(
             node_pubkey,
             authorized_voter,
             authorized_withdrawer,
             commission,
         );
-
-        // The BLS pubkey + proof of possession are appended only by V4-aware
-        // clients; when present the node identity must have signed and the proof
-        // is verified before the key is stored.
-        let bls_len = VOTE_BLS_PUBKEY_LEN + VOTE_BLS_PROOF_LEN;
-        let mut pop_cost = 0u64;
-        if context.instruction_data.len() >= 101 + bls_len {
-            if !context.signers.is_empty() && !context.is_signer(&node_pubkey) {
-                return Err("InitializeAccountV2 requires the node identity to sign".to_string());
-            }
-
-            let bls_pubkey: [u8; VOTE_BLS_PUBKEY_LEN] = context.instruction_data
-                [101..101 + VOTE_BLS_PUBKEY_LEN]
-                .try_into()
-                .map_err(|_| "Failed to read BLS pubkey".to_string())?;
-            let bls_proof: [u8; VOTE_BLS_PROOF_LEN] = context.instruction_data
-                [101 + VOTE_BLS_PUBKEY_LEN..101 + bls_len]
-                .try_into()
-                .map_err(|_| "Failed to read BLS proof of possession".to_string())?;
-
-            pop_cost = COMPUTE_COST_POP;
-
-            let vote_account_pubkey: [u8; 32] = *vote_pubkey.as_bytes();
-            if !verify_vote_bls_pop(&vote_account_pubkey, &bls_pubkey, &bls_proof) {
-                return Err("BLS proof of possession verification failed".to_string());
-            }
-
-            vote_state.bls_pubkey = Some(bls_pubkey);
-        }
+        vote_state.bls_pubkey = Some(bls_pubkey);
 
         vote_account.data = AccountData::new(vote_state.serialize());
         modified_accounts.insert(vote_pubkey, vote_account);
 
-        Ok(pop_cost)
+        Ok(COMPUTE_COST_POP)
     }
 
     // -----------------------------------------------------------------------
@@ -1085,50 +1103,83 @@ mod tests {
         "b8778284f744f6ae2791145183ef8fcb66dcd6602da8ca1add3e6828904db482708fb1d9bd2cbeb72320cdef56d173bc";
     const KAT_PROOF_HEX: &str = "b21b2bc4933e1d2cd32e9b976cc89a98d14f45c89356bb67afab0bc48a6ff9c2d3c4d2394d68706077e5dd7596459da70227c70f2f14adbfbcf6b46ae34f970f88b49dd8185f705333f682eb27674e8abbdf21519dd01424f6993713c9e4632d";
 
+    /// Build canonical `InitializeAccountV2` instruction data. `commission_bps`
+    /// is the inflation-rewards commission in basis points; both split-
+    /// commission collectors are filled with the voter pubkey (their exact
+    /// value is validated for length but not persisted by the bespoke state).
     fn make_initialize_v2_data(
         node: &Pubkey,
         voter: &Pubkey,
         withdrawer: &Pubkey,
-        commission: u8,
-        bls: Option<(&[u8], &[u8])>,
+        commission_bps: u16,
+        bls_pubkey: &[u8],
+        bls_proof: &[u8],
     ) -> Vec<u8> {
         let mut data = constants::INSTRUCTION_INITIALIZE_ACCOUNT_V2
             .to_le_bytes()
             .to_vec();
-        data.extend_from_slice(node.as_bytes());
-        data.extend_from_slice(voter.as_bytes());
-        data.extend_from_slice(withdrawer.as_bytes());
-        data.push(commission);
-        if let Some((pubkey, proof)) = bls {
-            data.extend_from_slice(pubkey);
-            data.extend_from_slice(proof);
-        }
+        data.extend_from_slice(node.as_bytes()); // [4..36]
+        data.extend_from_slice(voter.as_bytes()); // [36..68]
+        data.extend_from_slice(bls_pubkey); // [68..116]
+        data.extend_from_slice(bls_proof); // [116..212]
+        data.extend_from_slice(withdrawer.as_bytes()); // [212..244]
+        data.extend_from_slice(&commission_bps.to_le_bytes()); // [244..246]
+        data.extend_from_slice(voter.as_bytes()); // inflation_collector [246..278]
+        data.extend_from_slice(&0u16.to_le_bytes()); // revenue_bps [278..280]
+        data.extend_from_slice(voter.as_bytes()); // revenue_collector [280..312]
         data
     }
 
     #[test]
-    fn initialize_v2_without_bls_behaves_like_v1() {
+    fn initialize_v2_rejects_short_legacy_data() {
+        // A legacy V1-sized init payload is not a valid InitializeAccountV2.
+        let executor = VoteProgramExecutor::new(150);
+        let mut instruction_data = constants::INSTRUCTION_INITIALIZE_ACCOUNT_V2
+            .to_le_bytes()
+            .to_vec();
+        instruction_data.resize(101, 0);
+
+        let context = ExecutionContext::new(
+            VOTE_PROGRAM_ID,
+            vec![(Pubkey::new_unique(), make_empty_vote_account(), true)],
+            instruction_data,
+        );
+
+        let result = executor.execute(&context);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("too short"));
+    }
+
+    #[test]
+    fn initialize_v2_derives_commission_and_fields() {
         let executor = VoteProgramExecutor::new(150);
         let node = Pubkey::new_unique();
         let voter = Pubkey::new_unique();
         let withdrawer = Pubkey::new_unique();
+        let bls = hx(KAT_BLS_HEX);
+        let proof = hx(KAT_PROOF_HEX);
 
-        let instruction_data = make_initialize_v2_data(&node, &voter, &withdrawer, 7, None);
-        let vote_pubkey = Pubkey::new_unique();
+        // 750 bps -> 7% legacy commission; also checks node/withdrawer offsets.
+        let instruction_data =
+            make_initialize_v2_data(&node, &voter, &withdrawer, 750, &bls, &proof);
+        let vote_pubkey = Pubkey::new_from_array(hx(KAT_VOTE_HEX).try_into().unwrap());
 
+        let mut signers = std::collections::HashSet::new();
+        signers.insert(node);
         let context = ExecutionContext::new(
             VOTE_PROGRAM_ID,
             vec![(vote_pubkey, make_empty_vote_account(), true)],
             instruction_data,
-        );
+        )
+        .with_signers(signers);
 
         let outcome = executor.execute(&context).unwrap();
         assert!(outcome.success);
         let modified = outcome.modified_accounts.get(&vote_pubkey).unwrap();
         let state = VoteState::deserialize(modified.data.as_ref()).unwrap();
         assert_eq!(state.node_pubkey, node);
+        assert_eq!(state.authorized_withdrawer, withdrawer);
         assert_eq!(state.commission, 7);
-        assert_eq!(state.bls_pubkey, None);
     }
 
     #[test]
@@ -1141,7 +1192,7 @@ mod tests {
         let proof = hx(KAT_PROOF_HEX);
 
         let instruction_data =
-            make_initialize_v2_data(&node, &voter, &withdrawer, 3, Some((&bls, &proof)));
+            make_initialize_v2_data(&node, &voter, &withdrawer, 300, &bls, &proof);
         // The PoP is bound to the vote account pubkey, so it must equal the KAT.
         let vote_pubkey = Pubkey::new_from_array(hx(KAT_VOTE_HEX).try_into().unwrap());
 
@@ -1174,7 +1225,7 @@ mod tests {
         proof[0] ^= 0x01;
 
         let instruction_data =
-            make_initialize_v2_data(&node, &voter, &withdrawer, 3, Some((&bls, &proof)));
+            make_initialize_v2_data(&node, &voter, &withdrawer, 300, &bls, &proof);
         let vote_pubkey = Pubkey::new_from_array(hx(KAT_VOTE_HEX).try_into().unwrap());
 
         let mut signers = std::collections::HashSet::new();
@@ -1201,7 +1252,7 @@ mod tests {
         let proof = hx(KAT_PROOF_HEX);
 
         let instruction_data =
-            make_initialize_v2_data(&node, &voter, &withdrawer, 3, Some((&bls, &proof)));
+            make_initialize_v2_data(&node, &voter, &withdrawer, 300, &bls, &proof);
         let vote_pubkey = Pubkey::new_from_array(hx(KAT_VOTE_HEX).try_into().unwrap());
 
         // Signer set is non-empty but does not include the node identity.
