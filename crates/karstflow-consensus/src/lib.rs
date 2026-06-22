@@ -43,6 +43,7 @@ mod vote_processor;
 mod vote_stakes;
 mod vote_state;
 mod vote_tx_tracker;
+mod vote_wire;
 
 pub use bank::{
     Bank, BankFeeError, BankFreezeError, BankRootError, BankStatus, BankTickError,
@@ -126,3 +127,7 @@ pub use snapshot_bootstrap::{
 pub use transaction_cache::{SeedEntry, TransactionCache};
 pub use transaction_wire::{deserialize_transaction, DeserializedTransaction};
 pub use vote_tx_tracker::VoteTxTracker;
+pub use vote_wire::{
+    VoteStateVersion, VOTE_DISCRIMINANT_UNINITIALIZED, VOTE_DISCRIMINANT_V1_14_11,
+    VOTE_DISCRIMINANT_V3, VOTE_DISCRIMINANT_V4,
+};

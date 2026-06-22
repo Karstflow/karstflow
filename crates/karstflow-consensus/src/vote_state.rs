@@ -306,6 +306,15 @@ impl AuthorizedVoters {
     pub fn inner(&self) -> &BTreeMap<u64, Pubkey> {
         &self.authorized_voters
     }
+
+    /// Reconstruct directly from raw (epoch, voter) entries decoded off the
+    /// bincode wire. Used by the byte-exact vote-account codec; bypasses the
+    /// reauthorization validation in `set_authorized_voter`.
+    pub(crate) fn from_entries(entries: impl IntoIterator<Item = (u64, Pubkey)>) -> Self {
+        Self {
+            authorized_voters: entries.into_iter().collect(),
+        }
+    }
 }
 
 /// Circular buffer tracking prior authorized voters.
@@ -358,6 +367,22 @@ impl PriorVoters {
     /// Get all prior voter entries.
     pub fn entries(&self) -> &[(Pubkey, u64, u64)] {
         &self.entries
+    }
+
+    /// Next write index in the circular buffer (the `idx` wire field).
+    pub(crate) fn write_index(&self) -> usize {
+        self.index
+    }
+
+    /// Reconstruct from a wire-decoded buffer. `entries` holds only the
+    /// populated slots (in physical order); `index` is the raw `idx` field and
+    /// `is_full` whether the buffer has wrapped.
+    pub(crate) fn from_wire(entries: Vec<(Pubkey, u64, u64)>, index: usize, is_full: bool) -> Self {
+        Self {
+            entries,
+            index,
+            is_full,
+        }
     }
 }
 
@@ -495,7 +520,7 @@ impl VoteState {
             authorized_withdrawer,
             // Convert v4 basis-points commission to the legacy u8 percentage,
             // saturating at u8::MAX so an out-of-range bps value cannot wrap on
-            // truncation (matches reference fd_vsv_get_commission clamp, W018 A8).
+            // truncation (matches the reference commission clamp).
             commission: (inflation_rewards_commission_bps / 100).min(u8::MAX as u16) as u8,
             votes: VecDeque::with_capacity(MAX_LOCKOUT_HISTORY),
             root_slot: None,
@@ -1066,7 +1091,7 @@ impl VoteState {
             let ec_count = Self::read_u32(data, &mut offset)? as usize;
             // Protocol bound: a vote account may carry at most MAX_EPOCH_CREDITS_HISTORY
             // epoch-credit entries. Reject over-long histories instead of parsing them
-            // (matches reference seek_epoch_credits MAX_EPOCH_CREDITS_HISTORY enforcement).
+            // (matches the reference epoch-credits bound enforcement).
             if ec_count > MAX_EPOCH_CREDITS_HISTORY {
                 return Err(VoteError::InvalidAccountData);
             }
@@ -1218,7 +1243,7 @@ mod tests {
 
     /// W018 upstream sync: a vote account whose serialized epoch-credits count
     /// exceeds MAX_EPOCH_CREDITS_HISTORY must be rejected on deserialize
-    /// (matches reference seek_epoch_credits bound enforcement).
+    /// (matches the reference epoch-credits bound enforcement).
     #[test]
     fn deserialize_rejects_oversized_epoch_credits() {
         let mut data = Vec::new();

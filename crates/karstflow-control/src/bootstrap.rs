@@ -3876,8 +3876,28 @@ impl TransactionSubmitter for DevTransactionSubmitter {
         // the exact blockhash the client got from get_latest_blockhash.
         bank.register_recent_blockhash(deserialized.tx.recent_blockhash);
 
+        // Resolve address lookup tables for V0 transactions so ALT-referenced
+        // accounts are appended to the key list before execution (mirrors the
+        // simulate path). Without this, instructions referencing ALT accounts
+        // fail with "invalid account index".
+        let mut tx = deserialized.tx;
+        if !deserialized.address_table_lookups.is_empty() {
+            let db = bank.accounts();
+            match karstflow_consensus::resolve_address_lookups(
+                &deserialized.address_table_lookups,
+                |key| db.get_published_account(key),
+            ) {
+                Ok(resolved) => {
+                    tx.num_writable_lookup_keys = resolved.writable.len();
+                    tx.account_keys.extend(resolved.writable);
+                    tx.account_keys.extend(resolved.readonly);
+                }
+                Err(e) => return Err(format!("address lookup resolution failed: {e:?}")),
+            }
+        }
+
         let result = bank.process_transaction(
-            &deserialized.tx,
+            &tx,
             &self.backend,
             karstflow_constants::execution::MAX_COMPUTE_UNITS,
         );

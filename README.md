@@ -566,10 +566,26 @@ The runtime is continuously re-baselined against the upstream reference (agave v
 - Durable-nonce accounts required to be static, not lookup-table-resolved (SIMD-242)
 - Per-block and per-account compute-unit limits derived from the active feature set (`raise_block_limits_to_60m`/`100m`, `raise_account_cu_limit`)
 - Feature registry tracking 278 protocol features
+- Byte-exact vote-account wire codec for all on-chain layout versions (`V1_14_11`, `V3`, and the `V4` Alpenglow format), with discriminant-driven decoding — the `V4` variant carries the split-commission collectors, basis-point commissions, pending delegator rewards, and the optional BLS proof-of-possession public key
+- BLS12-381 proof-of-possession verification for Alpenglow validator key registration (min-pk ciphersuite, `ALPENGLOW`-domain message), matching the reference implementation byte-for-byte and validated against its known-answer vectors
 
 Validated against a live single-node validator: the functional + WebSocket E2E suite passes (592 checks, 0 failures; 21 multi-node tests skipped on a single node), alongside 6,100+ unit tests and the conformance suite.
 
-Known limitation (under active work): versioned (v0) transactions that reference accounts through an Address Lookup Table are not yet resolved in the execution path. Legacy and static-key transactions are unaffected.
+Versioned (v0) transactions are fully supported, including account resolution through Address Lookup Tables across the dev, leader-pipeline, replay, and simulation paths.
+
+### Alpenglow Consensus Engine (feature-gated, disabled by default)
+
+The Alpenglow consensus engine is implemented as a self-contained, **disabled-by-default** crate (`karstflow-alpenglow`) so it can be developed and validated ahead of activation without affecting the running validator, which continues to use Tower BFT. The crate is not a dependency of the node binary and is gated behind an `engine` cargo feature (off by default); nothing in it is instantiated until the engine is explicitly enabled.
+
+It provides the full voting-layer protocol:
+
+- **Votor** voting decision engine — notar / skip / notar-fallback / skip-fallback / final voting, per-window timeouts, and the bad-window slashing invariant
+- Five **vote** kinds and five **certificate** kinds with quorum thresholds (20% / 40% / 60% / 80%) and aggregate-signature signer bitmasks
+- Per-slot state machine (vote/stake accounting, certificate creation, safe-to-notar / safe-to-skip, slashable-offence detection)
+- **Finality** tracker (direct, implicit-ancestor, and implicit-skip finalization) and **parent-ready** tracker (valid-parent propagation across skip-connected windows)
+- Central **pool** integrator wiring the above and emitting events to Votor + repair requests
+
+The aggregate-signature layer currently uses a deterministic stub (real signature material is a later hardening step that changes no wire format); all consensus logic is exercised by the crate's unit tests.
 
 ## Hardware Requirements
 

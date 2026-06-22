@@ -4675,7 +4675,7 @@ mod registry_tests {
         }
     }
 
-    /// W029 upstream re-baseline (firedancer 27ee00b29): the new feature
+    /// W029 upstream re-baseline: the new feature
     /// `validate_chained_block_id_2` must be registered, resolvable, and
     /// distinct from the v1 `validate_chained_block_id`.
     #[test]
