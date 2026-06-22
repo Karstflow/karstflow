@@ -1186,6 +1186,7 @@ fn try_detect_durable_nonce(
     accounts: &karstflow_storage::AccountDatabase,
     last_blockhash: &[u8; 32],
     lamports_per_signature: u64,
+    require_static_nonce: bool,
 ) -> Option<DurableNonceInfo> {
     // First instruction must exist and target the System Program
     let first_ix = tx.instructions.first()?;
@@ -1201,6 +1202,15 @@ fn try_detect_durable_nonce(
 
     // Extract nonce account key
     let nonce_key_index = extract_nonce_key_index(&first_ix.account_indices)?;
+
+    // SIMD-242 (`require_static_nonce_account`): the nonce account must be
+    // statically included in the transaction's account keys — a nonce account
+    // resolved from an address lookup table is rejected. Mirrors the reference
+    // `nonce_idx >= acct_addr_cnt` check.
+    if require_static_nonce && nonce_key_index >= tx.static_key_count() {
+        return None;
+    }
+
     let nonce_key = *tx.account_keys.get(nonce_key_index)?;
 
     // Load nonce account
@@ -1357,11 +1367,19 @@ impl Bank {
         } else {
             let last_bh = self.last_blockhash();
             let fee_calc = FeeCalculator::default();
+            let require_static_nonce = self
+                .feature_set()
+                .map(|fs| {
+                    let fs = fs.read().expect("feature_set lock poisoned");
+                    fs.is_active(&crate::features::known_features::require_static_nonce_account())
+                })
+                .unwrap_or(false);
             match try_detect_durable_nonce(
                 transaction,
                 self.accounts(),
                 &last_bh,
                 fee_calc.lamports_per_signature,
+                require_static_nonce,
             ) {
                 Some(nonce_info) => Some(nonce_info),
                 None => {
@@ -4475,6 +4493,56 @@ mod tests {
         let result = bank.process_transaction(&tx, &backend, MAX_COMPUTE_UNITS);
         assert!(result.success, "durable nonce transaction should succeed");
         assert!(result.fee > 0, "fee should be non-zero for 1 signature");
+    }
+
+    /// SIMD-242 (`require_static_nonce_account`): a nonce account resolved from
+    /// an address lookup table (index >= num_static_keys) is not a valid durable
+    /// nonce when the feature is active, but is accepted when inactive.
+    #[test]
+    fn durable_nonce_lookup_table_account_rejected_under_simd242() {
+        let bank = create_test_bank();
+
+        let payer = Pubkey::new_unique();
+        let nonce_key = Pubkey::new_unique();
+        let nonce_value = [0xCC; 32];
+        let nonce_account = create_nonce_account(payer, nonce_value, 5000, 10_000_000);
+        store_test_account(&bank, &nonce_key, &nonce_account);
+
+        let sys_id = SYSTEM_PROGRAM_ID;
+        let advance_data = 4u32.to_le_bytes().to_vec();
+
+        // nonce_key is at index 2 but only indices [0,2) are static keys, so
+        // the nonce account is lookup-table-resolved.
+        let tx = SanitizedTransaction {
+            account_keys: vec![payer, sys_id, nonce_key],
+            recent_blockhash: nonce_value,
+            instructions: vec![CompiledInstruction {
+                program_id_index: 1,
+                account_indices: vec![2],
+                data: advance_data,
+            }],
+            num_signatures: 1,
+            num_readonly_signed: 0,
+            num_readonly_unsigned: 0,
+            signatures: vec![],
+            message_bytes: vec![],
+            num_static_keys: 2,
+            num_writable_lookup_keys: 1,
+        };
+
+        let last_bh = [0x11u8; 32];
+
+        // Feature inactive: durable nonce is detected.
+        assert!(
+            try_detect_durable_nonce(&tx, bank.accounts(), &last_bh, 5000, false).is_some(),
+            "lookup-table nonce should be accepted when SIMD-242 is inactive"
+        );
+
+        // Feature active: durable nonce is rejected (lookup-table account).
+        assert!(
+            try_detect_durable_nonce(&tx, bank.accounts(), &last_bh, 5000, true).is_none(),
+            "lookup-table nonce must be rejected when SIMD-242 is active"
+        );
     }
 
     #[test]
