@@ -244,7 +244,7 @@ impl AddressLookupTableExecutor {
 
     /// Extend the lookup table with additional addresses.
     ///
-    /// Instruction data: [4 bytes type] [4 bytes num_addresses] [32 * n bytes addresses...]
+    /// Instruction data: [4 bytes type] [8 bytes u64 num_addresses] [32 * n bytes addresses...]
     ///
     /// Accounts expected:
     ///   [0] table account (writable)
@@ -290,18 +290,22 @@ impl AddressLookupTableExecutor {
             return Err(LookupTableError::TableDeactivating.message().to_string());
         }
 
-        // Parse new addresses from instruction data
-        if ctx.instruction_data.len() < 8 {
+        // Parse new addresses from instruction data. The canonical encoding is
+        // bincode `ExtendLookupTable { new_addresses: Vec<Pubkey> }`: a 4-byte
+        // enum discriminant followed by a u64 vector length, then the 32-byte
+        // addresses (so the address payload starts at offset 12).
+        const COUNT_END: usize = 12;
+        if ctx.instruction_data.len() < COUNT_END {
             return Err(LookupTableError::InvalidInstruction.message().to_string());
         }
 
-        let num_new_addresses = u32::from_le_bytes(
-            ctx.instruction_data[4..8]
+        let num_new_addresses = u64::from_le_bytes(
+            ctx.instruction_data[4..COUNT_END]
                 .try_into()
                 .map_err(|_| "Failed to parse address count")?,
         ) as usize;
 
-        let expected_data_len = 8 + num_new_addresses * 32;
+        let expected_data_len = COUNT_END + num_new_addresses * 32;
         if ctx.instruction_data.len() < expected_data_len {
             return Err(LookupTableError::InvalidInstruction.message().to_string());
         }
@@ -318,9 +322,32 @@ impl AddressLookupTableExecutor {
         // Build updated table data
         let mut new_table = table_account.clone();
         for i in 0..num_new_addresses {
-            let offset = 8 + i * 32;
+            let offset = COUNT_END + i * 32;
             let addr_bytes = &ctx.instruction_data[offset..offset + 32];
             new_table.data.extend_from_slice(addr_bytes);
+        }
+
+        // Top up the table's rent-exempt reserve for the grown size from the
+        // payer (account index 2), mirroring the canonical ExtendLookupTable
+        // which transfers from the payer so the table stays rent-exempt. The
+        // payer is only required when additional funding is actually needed.
+        let required_lamports = RENT_EXEMPTION_BASE_LAMPORTS.saturating_add(
+            (new_table.data.as_ref().len() as u64).saturating_mul(RENT_EXEMPTION_LAMPORTS_PER_BYTE),
+        );
+        let mut funded_payer: Option<(Pubkey, Account)> = None;
+        if new_table.meta.lamports < required_lamports && ctx.accounts.len() >= 3 {
+            let top_up = required_lamports - new_table.meta.lamports;
+            let (payer_pubkey, payer_account, payer_writable) = &ctx.accounts[2];
+            if !payer_writable {
+                return Err(LookupTableError::AccountNotWritable.message().to_string());
+            }
+            if payer_account.meta.lamports < top_up {
+                return Err("Payer has insufficient funds to extend lookup table".to_string());
+            }
+            let mut new_payer = payer_account.clone();
+            new_payer.meta.lamports = new_payer.meta.lamports.saturating_sub(top_up);
+            new_table.meta.lamports = required_lamports;
+            funded_payer = Some((*payer_pubkey, new_payer));
         }
 
         let compute_used = self
@@ -330,6 +357,9 @@ impl AddressLookupTableExecutor {
 
         let mut outcome = ExecutionOutcome::success(compute_used);
         outcome.modified_accounts.insert(*table_pubkey, new_table);
+        if let Some((payer_pubkey, new_payer)) = funded_payer {
+            outcome.modified_accounts.insert(payer_pubkey, new_payer);
+        }
         outcome.logs.push(format!(
             "Extended lookup table {} with {} addresses (total: {})",
             table_pubkey, num_new_addresses, total_addresses
@@ -626,8 +656,9 @@ mod tests {
         let addr1 = Pubkey::new_unique();
         let addr2 = Pubkey::new_unique();
 
+        // Canonical bincode encoding: 4-byte discriminant + u64 Vec length + addresses.
         let mut instruction_data = constants::INSTRUCTION_EXTEND.to_le_bytes().to_vec();
-        instruction_data.extend_from_slice(&2u32.to_le_bytes()); // 2 addresses
+        instruction_data.extend_from_slice(&2u64.to_le_bytes()); // 2 addresses
         instruction_data.extend_from_slice(addr1.as_bytes());
         instruction_data.extend_from_slice(addr2.as_bytes());
 
@@ -648,6 +679,12 @@ mod tests {
             extended_table.data.len(),
             constants::LOOKUP_TABLE_META_SIZE + 64
         );
+        // Addresses must be stored byte-exactly (regression: a u32 length prefix
+        // mis-parse shifted addresses by 4 bytes, corrupting every entry).
+        let meta = constants::LOOKUP_TABLE_META_SIZE;
+        let table_bytes = extended_table.data.as_ref();
+        assert_eq!(&table_bytes[meta..meta + 32], addr1.as_bytes());
+        assert_eq!(&table_bytes[meta + 32..meta + 64], addr2.as_bytes());
     }
 
     #[test]
@@ -667,7 +704,7 @@ mod tests {
 
         // Try to add one more
         let mut instruction_data = constants::INSTRUCTION_EXTEND.to_le_bytes().to_vec();
-        instruction_data.extend_from_slice(&1u32.to_le_bytes());
+        instruction_data.extend_from_slice(&1u64.to_le_bytes());
         instruction_data.extend_from_slice(Pubkey::new_unique().as_bytes());
 
         let ctx = ExecutionContext::new(

@@ -314,6 +314,68 @@ mod tests {
         data
     }
 
+    fn build_minimal_v0_transaction() -> Vec<u8> {
+        let mut data = Vec::new();
+
+        // 1 signature
+        encode_compact_u16(&mut data, 1);
+        data.extend_from_slice(&[0xAA; 64]);
+
+        // Versioned (V0) prefix: high bit set, version 0.
+        data.push(0x80);
+
+        // Message header: 1 signer, 0 readonly_signed, 1 readonly_unsigned
+        data.push(1);
+        data.push(0);
+        data.push(1);
+
+        // 2 static account keys (fee payer + program)
+        encode_compact_u16(&mut data, 2);
+        data.extend_from_slice(&[0x11; 32]); // fee payer
+        data.extend_from_slice(&[0x22; 32]); // program id
+
+        // Recent blockhash
+        data.extend_from_slice(&[0xBB; 32]);
+
+        // 1 instruction: program_id_index=1, accounts [2,3] (resolved from ALT), 0 data
+        encode_compact_u16(&mut data, 1);
+        data.push(1); // program_id_index
+        encode_compact_u16(&mut data, 2); // 2 accounts
+        data.push(2);
+        data.push(3);
+        encode_compact_u16(&mut data, 0); // 0 bytes data
+
+        // 1 address table lookup: table key, writable=[0], readonly=[1]
+        encode_compact_u16(&mut data, 1); // lookup count
+        data.extend_from_slice(&[0x33; 32]); // table key
+        encode_compact_u16(&mut data, 1); // writable count
+        data.push(0); // writable index
+        encode_compact_u16(&mut data, 1); // readonly count
+        data.push(1); // readonly index
+
+        data
+    }
+
+    #[test]
+    fn deserialize_v0_transaction_extracts_lookups() {
+        let data = build_minimal_v0_transaction();
+        let result = deserialize_transaction(&data).expect("should parse v0");
+        assert_eq!(
+            result.tx.account_keys.len(),
+            2,
+            "static keys only pre-resolution"
+        );
+        assert_eq!(
+            result.address_table_lookups.len(),
+            1,
+            "one ALT lookup parsed"
+        );
+        let (table, writable, readonly) = &result.address_table_lookups[0];
+        assert_eq!(table.as_bytes(), &[0x33; 32]);
+        assert_eq!(writable, &vec![0u8]);
+        assert_eq!(readonly, &vec![1u8]);
+    }
+
     #[test]
     fn deserialize_legacy_transaction() {
         let data = build_minimal_legacy_transaction();
