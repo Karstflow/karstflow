@@ -306,6 +306,15 @@ impl AuthorizedVoters {
     pub fn inner(&self) -> &BTreeMap<u64, Pubkey> {
         &self.authorized_voters
     }
+
+    /// Reconstruct directly from raw (epoch, voter) entries decoded off the
+    /// bincode wire. Used by the byte-exact vote-account codec; bypasses the
+    /// reauthorization validation in `set_authorized_voter`.
+    pub(crate) fn from_entries(entries: impl IntoIterator<Item = (u64, Pubkey)>) -> Self {
+        Self {
+            authorized_voters: entries.into_iter().collect(),
+        }
+    }
 }
 
 /// Circular buffer tracking prior authorized voters.
@@ -358,6 +367,22 @@ impl PriorVoters {
     /// Get all prior voter entries.
     pub fn entries(&self) -> &[(Pubkey, u64, u64)] {
         &self.entries
+    }
+
+    /// Next write index in the circular buffer (the `idx` wire field).
+    pub(crate) fn write_index(&self) -> usize {
+        self.index
+    }
+
+    /// Reconstruct from a wire-decoded buffer. `entries` holds only the
+    /// populated slots (in physical order); `index` is the raw `idx` field and
+    /// `is_full` whether the buffer has wrapped.
+    pub(crate) fn from_wire(entries: Vec<(Pubkey, u64, u64)>, index: usize, is_full: bool) -> Self {
+        Self {
+            entries,
+            index,
+            is_full,
+        }
     }
 }
 
