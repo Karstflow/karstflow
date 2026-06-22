@@ -92,6 +92,11 @@ pub struct VoteState {
     pub votes: Vec<LandedVote>,
     pub root_slot: Option<u64>,
     pub epoch_credits: Vec<(u64, u64, u64)>,
+    /// Authorized-voter BLS public key (48-byte compressed G1), set when the
+    /// account is initialized via the V2 path with a verified proof of
+    /// possession (Alpenglow vote-account groundwork). `None` for accounts
+    /// initialized without one.
+    pub bls_pubkey: Option<[u8; 48]>,
 }
 
 impl VoteState {
@@ -109,6 +114,7 @@ impl VoteState {
             votes: Vec::new(),
             root_slot: None,
             epoch_credits: Vec::new(),
+            bls_pubkey: None,
         }
     }
 
@@ -421,6 +427,14 @@ impl VoteState {
             data.extend_from_slice(&prev_credits.to_le_bytes());
         }
 
+        // Optional BLS pubkey trailer: a presence byte followed by 48 bytes is
+        // appended only when set, so accounts without one serialize identically
+        // to the pre-BLS format (no trailing bytes).
+        if let Some(bls_pubkey) = self.bls_pubkey {
+            data.push(1);
+            data.extend_from_slice(&bls_pubkey);
+        }
+
         data
     }
 
@@ -551,6 +565,19 @@ impl VoteState {
             }
         }
 
+        // Optional BLS pubkey trailer: present only when a presence byte plus a
+        // full 48-byte key remain. Absent trailers (pre-BLS accounts) decode to
+        // `None`.
+        let bls_pubkey =
+            if offset < data.len() && data[offset] == 1 && data.len() >= offset + 1 + 48 {
+                let key: [u8; 48] = data[offset + 1..offset + 1 + 48]
+                    .try_into()
+                    .map_err(|_| VoteError::InvalidAccountData)?;
+                Some(key)
+            } else {
+                None
+            };
+
         Ok(Self {
             node_pubkey,
             authorized_voter,
@@ -559,6 +586,7 @@ impl VoteState {
             votes,
             root_slot,
             epoch_credits,
+            bls_pubkey,
         })
     }
 }
@@ -765,6 +793,47 @@ mod tests {
             assert_eq!(a.lockout.slot, b.lockout.slot);
             assert_eq!(a.lockout.confirmation_count, b.lockout.confirmation_count);
         }
+    }
+
+    #[test]
+    fn vote_state_without_bls_serializes_identically() {
+        let node = Pubkey::new_unique();
+        let voter = Pubkey::new_unique();
+        let withdrawer = Pubkey::new_unique();
+        let mut state = VoteState::new(node, voter, withdrawer, 10);
+        state.process_vote(100, [0u8; 32]).unwrap();
+
+        // bls_pubkey defaults to None, so the trailer must not change the bytes.
+        let bytes = state.serialize();
+        assert_eq!(state.bls_pubkey, None);
+        let roundtrip = VoteState::deserialize(&bytes).unwrap();
+        assert_eq!(roundtrip.bls_pubkey, None);
+        assert_eq!(roundtrip.serialize(), bytes);
+    }
+
+    #[test]
+    fn vote_state_roundtrips_with_bls_pubkey() {
+        let node = Pubkey::new_unique();
+        let voter = Pubkey::new_unique();
+        let withdrawer = Pubkey::new_unique();
+        let mut state = VoteState::new(node, voter, withdrawer, 4);
+        state.process_vote(50, [0u8; 32]).unwrap();
+        let mut bls = [0u8; 48];
+        for (i, b) in bls.iter_mut().enumerate() {
+            *b = i as u8;
+        }
+        state.bls_pubkey = Some(bls);
+
+        let bytes = state.serialize();
+        // The trailer adds exactly the presence byte + 48 key bytes.
+        let mut no_bls = state.clone();
+        no_bls.bls_pubkey = None;
+        assert_eq!(bytes.len(), no_bls.serialize().len() + 1 + 48);
+
+        let roundtrip = VoteState::deserialize(&bytes).unwrap();
+        assert_eq!(roundtrip.bls_pubkey, Some(bls));
+        assert_eq!(roundtrip.node_pubkey, node);
+        assert_eq!(roundtrip.commission, 4);
     }
 
     #[test]

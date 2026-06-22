@@ -344,6 +344,18 @@ pub mod vote_program {
     pub const COMPUTE_COST_UPDATE_COMMISSION: u64 = 300;
     pub const COMPUTE_COST_AUTHORIZE: u64 = 350;
     pub const COMPUTE_COST_BASE_INSTRUCTION: u64 = 200;
+
+    /// Compute units charged for a BLS proof-of-possession verification
+    /// during InitializeAccountV2 (Alpenglow vote-account BLS groundwork).
+    pub const COMPUTE_COST_POP: u64 = 34_500;
+
+    /// Compressed BLS public key length (G1 point) carried by a V2 vote-account
+    /// initialization.
+    pub const VOTE_BLS_PUBKEY_LEN: usize = 48;
+
+    /// Compressed BLS proof-of-possession length (G2 point) carried by a V2
+    /// vote-account initialization.
+    pub const VOTE_BLS_PROOF_LEN: usize = 96;
 }
 
 pub mod system_program {

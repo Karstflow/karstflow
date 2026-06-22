@@ -568,6 +568,7 @@ The runtime is continuously re-baselined against the upstream reference (agave v
 - Feature registry tracking 278 protocol features
 - Byte-exact vote-account wire codec for all on-chain layout versions (`V1_14_11`, `V3`, and the `V4` Alpenglow format), with discriminant-driven decoding — the `V4` variant carries the split-commission collectors, basis-point commissions, pending delegator rewards, and the optional BLS proof-of-possession public key
 - BLS12-381 proof-of-possession verification for Alpenglow validator key registration (min-pk ciphersuite, `ALPENGLOW`-domain message), matching the reference implementation byte-for-byte and validated against its known-answer vectors
+- On-chain `InitializeAccountV2` wires that proof-of-possession into the vote program: when a V2 initialization carries a BLS public key it requires the node identity to sign, verifies the proof over `ALPENGLOW || vote_account || bls_pubkey` (charging the standard proof-of-possession compute cost), and persists the key; V2 initializations without a BLS key remain backward-compatible with the V1 behavior
 
 Validated against a live single-node validator: the functional + WebSocket E2E suite passes (592 checks, 0 failures; 21 multi-node tests skipped on a single node), alongside 6,100+ unit tests and the conformance suite.
 
