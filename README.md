@@ -518,11 +518,11 @@ karstflow/
 
 ## Module Readiness
 
-Current maturity of each subsystem (as of March 2026):
+Current maturity of each subsystem (as of June 2026):
 
 | Module | Maturity | Notes |
 |--------|----------|-------|
-| Consensus | 99% | Tower BFT, GHOST fork choice, bank lifecycle, epoch processing, rewards, leader schedule (multi-epoch), vote processing with lockout sync, optimistic confirmation, commitment tracking, equivocation detection, tower persistence, sysvar cache, 260/260 features |
+| Consensus | 99% | Tower BFT, GHOST fork choice, bank lifecycle, epoch processing, rewards, leader schedule (multi-epoch), vote processing with lockout sync, optimistic confirmation, commitment tracking, equivocation detection, tower persistence, sysvar cache, 278-feature registry |
 | sBPF VM | 98% | All 126 opcodes, 16 builtins with 100% real mutations (zero stubs), 40+ syscalls, ELF loader, program cache, CPI depth enforcement (max 4), Poseidon syscall, ALT deactivation guard, segment-based CU metering. All native programs production-ready: System (13), Vote (17 with full lockout/tower sync), Stake (full lifecycle), Token (18), Token-2022 (43), BPF Loader (9), Loader v4 (7), ALT (5), Config, Compute Budget, Memo, Associated Token, 3 precompiles, ZK ElGamal (13). Remaining: JIT (not planned) |
 | Pipeline Stages | 100% | Full leader pipeline (verify → resolv → pack → exec → PoH → shred → broadcast) with real account state, FEC resolver, replay with orphan buffering + cascade + ALUT + tx verification, dual-mode IPC, CU pacing, smallest-txn tracking, schedule metrics, Prometheus metrics |
 | Network | 97% | Custom QUIC with pool lifecycle hardening, TLS 1.3, gossip (14 CRDS types + vote integration), turbine with real stake weights + XDP + retransmit cache eviction, repair with signed requests, AF_XDP kernel-bypass (4K LOC), TPU forwarding. Remaining: gRPC plugin transport (auxiliary) |
@@ -556,6 +556,20 @@ Core consensus, execution, and storage logic is functionally complete at 99% ref
 - Observability: per-account I/O tracking
 - Resilience: network partition handling, disk I/O backpressure, memory budget enforcement
 - Production tooling: gRPC plugin transport (HTTP/2 + protobuf), ledger-tool equivalent
+
+### v4 / Mainnet Protocol Compatibility
+
+The runtime is continuously re-baselined against the upstream reference (agave v4.1.0-rc.1) to track Solana v4 / mainnet protocol changes. Recent alignment work:
+
+- Transaction account-lock limit pinned to 64 (SIMD-0339 revert)
+- Cross-program-invocation compute-unit model aligned to v4 metering (flat invoke cost + per-byte instruction and account-info accounting, 255 account-info cap)
+- Durable-nonce accounts required to be static, not lookup-table-resolved (SIMD-242)
+- Per-block and per-account compute-unit limits derived from the active feature set (`raise_block_limits_to_60m`/`100m`, `raise_account_cu_limit`)
+- Feature registry tracking 278 protocol features
+
+Validated against a live single-node validator: the functional + WebSocket E2E suite passes (592 checks, 0 failures; 21 multi-node tests skipped on a single node), alongside 6,100+ unit tests and the conformance suite.
+
+Known limitation (under active work): versioned (v0) transactions that reference accounts through an Address Lookup Table are not yet resolved in the execution path. Legacy and static-key transactions are unaffected.
 
 ## Hardware Requirements
 
