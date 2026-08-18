@@ -120,6 +120,19 @@ pub const CRDS_VALUE_MAX_SIZE: usize = 1_188;
 /// Maximum number of CRDS values per gossip message.
 pub const MAX_VALUES_PER_MESSAGE: usize = 18;
 
+/// Minimum `mask_bits` accepted on an inbound pull-request filter.
+///
+/// A pull request partitions the CRDS hash space into `2^mask_bits` buckets and
+/// asks for one of them. Too few bits means one request sweeps a large share of
+/// the table, so the floor bounds how much work a single request can demand.
+///
+/// The value is protocol-derived, not tunable:
+/// `ceil(log2(MIN_NUM_BLOOM_ITEMS / max_items(GOSSIP_MTU * 8, FALSE_RATE, KEYS)))`
+/// evaluates to 6 for the protocol's own constants, and peers enforce the same
+/// floor when deserializing, so accepting less would diverge on which requests
+/// are considered well-formed.
+pub const MIN_PULL_REQUEST_MASK_BITS: u32 = 6;
+
 /// Push gossip fanout.
 pub const PUSH_FANOUT: usize = 6;
 

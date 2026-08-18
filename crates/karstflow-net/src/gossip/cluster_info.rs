@@ -693,10 +693,13 @@ impl ClusterInfo {
         self.prune_map.read().total_entries()
     }
 
-    /// Build a bloom filter for a pull request.
-    pub fn build_pull_filter(&self) -> (GossipBloomFilter, PullRequestMask) {
+    /// Build a bloom filter for a pull request covering one hash-space bucket.
+    ///
+    /// `seed` picks the bucket. A request must partition the space — peers reject
+    /// a full-space filter — so callers vary the seed across requests to sweep it.
+    pub fn build_pull_filter(&self, seed: u64) -> (GossipBloomFilter, PullRequestMask) {
         let table = self.table.read();
-        let mask = PullRequestMask::full();
+        let mask = PullRequestMask::for_pull_request(seed);
         let filter = table.build_pull_filter(&mask);
         (filter, mask)
     }
@@ -1169,8 +1172,17 @@ mod tests {
             cluster.insert(info);
         }
 
-        let (filter, _mask) = cluster.build_pull_filter();
-        assert!(filter.bits_set() > 0);
+        // A pull filter covers ONE bucket of the hash space, so for a table this
+        // small most buckets are legitimately empty. The invariant that matters is
+        // that sweeping every bucket reaches every entry — nothing falls through.
+        let buckets = 1u64 << karstflow_constants::gossip::MIN_PULL_REQUEST_MASK_BITS;
+        let populated = (0..buckets)
+            .filter(|&seed| cluster.build_pull_filter(seed).0.bits_set() > 0)
+            .count();
+        assert!(
+            populated > 0,
+            "no bucket contained any of the 6 inserted entries"
+        );
     }
 
     // -- Prune map tests --

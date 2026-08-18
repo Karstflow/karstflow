@@ -203,14 +203,33 @@ impl PullRequestMask {
 
     /// Create a mask for partitioning based on CRDS table size.
     ///
-    /// The mask_bits is calculated as ceil(log2(total_entries / max_items_per_request)).
+    /// `mask_bits` is `ceil(log2(total_entries / max_items_per_request))`, floored
+    /// at [`MIN_PULL_REQUEST_MASK_BITS`]. The floor is not a tuning choice: peers
+    /// reject a pull request whose `mask_bits` is below it, so a mask computed
+    /// from a small table would produce a request every conforming peer drops.
+    ///
+    /// [`MIN_PULL_REQUEST_MASK_BITS`]: karstflow_constants::gossip::MIN_PULL_REQUEST_MASK_BITS
     pub fn for_partition(total_entries: usize, max_items: usize, random_value: u64) -> Self {
-        if total_entries <= max_items || max_items == 0 {
-            return Self::full();
-        }
-        let partitions = total_entries.div_ceil(max_items);
-        let mask_bits = (64 - (partitions as u64).leading_zeros()).min(63);
+        let floor = karstflow_constants::gossip::MIN_PULL_REQUEST_MASK_BITS;
+        let computed = if total_entries <= max_items || max_items == 0 {
+            0
+        } else {
+            let partitions = total_entries.div_ceil(max_items);
+            64 - (partitions as u64).leading_zeros()
+        };
+        let mask_bits = computed.clamp(floor, 63);
         let mask = random_value | (!0u64 >> mask_bits);
+        Self { mask, mask_bits }
+    }
+
+    /// Create the mask for an outbound pull request asking for one bucket.
+    ///
+    /// `seed` selects which of the `2^mask_bits` buckets to request; vary it
+    /// between requests so successive rounds sweep the whole hash space.
+    pub fn for_pull_request(seed: u64) -> Self {
+        let mask_bits = karstflow_constants::gossip::MIN_PULL_REQUEST_MASK_BITS;
+        let bucket = seed & ((1u64 << mask_bits) - 1);
+        let mask = (bucket << (64 - mask_bits)) | (!0u64 >> mask_bits);
         Self { mask, mask_bits }
     }
 
@@ -368,9 +387,16 @@ mod tests {
 
     #[test]
     fn test_mask_no_partition_needed() {
+        // A table smaller than one request's capacity needs no partitioning on its
+        // own merits, but the protocol floor still applies: peers reject a filter
+        // below it, so an unpartitioned request would simply be dropped.
+        let floor = karstflow_constants::gossip::MIN_PULL_REQUEST_MASK_BITS;
         let mask = PullRequestMask::for_partition(50, 100, 0);
-        assert_eq!(mask.mask_bits, 0);
-        assert!(mask.matches(12345));
+        assert_eq!(mask.mask_bits, floor);
+
+        // The bucket is still reachable — some hash matches it.
+        let start = mask.range_start();
+        assert!(mask.matches(start));
     }
 
     #[test]
@@ -381,5 +407,48 @@ mod tests {
         assert!(start <= end);
         assert!(mask.matches(start));
         assert!(mask.matches(end));
+    }
+
+    #[test]
+    fn outbound_pull_masks_meet_the_protocol_floor() {
+        let floor = karstflow_constants::gossip::MIN_PULL_REQUEST_MASK_BITS;
+
+        // A request built for a tiny table would compute mask_bits below the floor;
+        // peers reject that, so the constructor must lift it.
+        for (entries, max_items) in [(0usize, 100usize), (1, 100), (1000, 100), (10_000, 100)] {
+            let mask = PullRequestMask::for_partition(entries, max_items, 0xDEAD_BEEF_0000_0000);
+            assert!(
+                mask.mask_bits >= floor,
+                "for_partition({entries}, {max_items}) produced mask_bits={} below the floor",
+                mask.mask_bits
+            );
+        }
+
+        for seed in [0u64, 1, 63, 64, u64::MAX] {
+            let mask = PullRequestMask::for_pull_request(seed);
+            assert_eq!(mask.mask_bits, floor);
+        }
+    }
+
+    #[test]
+    fn pull_request_buckets_partition_the_hash_space() {
+        let floor = karstflow_constants::gossip::MIN_PULL_REQUEST_MASK_BITS;
+        let buckets = 1u64 << floor;
+
+        // Every hash falls in exactly one bucket, and every bucket is reachable.
+        for probe in [0u64, 1, u64::MAX / 3, u64::MAX / 2, u64::MAX] {
+            let hits = (0..buckets)
+                .filter(|&seed| PullRequestMask::for_pull_request(seed).matches(probe))
+                .count();
+            assert_eq!(
+                hits, 1,
+                "hash {probe:#x} matched {hits} buckets, expected 1"
+            );
+        }
+
+        let distinct: std::collections::HashSet<u64> = (0..buckets)
+            .map(|seed| PullRequestMask::for_pull_request(seed).mask)
+            .collect();
+        assert_eq!(distinct.len() as u64, buckets, "buckets are not distinct");
     }
 }

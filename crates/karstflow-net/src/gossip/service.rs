@@ -68,6 +68,7 @@ pub struct GossipServiceStats {
     pub receive_errors: Arc<AtomicU64>,
     pub pull_responses_budget_exhausted: Arc<AtomicU64>,
     pub packets_rejected_source_addr: Arc<AtomicU64>,
+    pub pull_requests_rejected_mask_bits: Arc<AtomicU64>,
 }
 
 impl GossipServiceStats {
@@ -90,6 +91,7 @@ impl GossipServiceStats {
             receive_errors: Arc::new(AtomicU64::new(0)),
             pull_responses_budget_exhausted: Arc::new(AtomicU64::new(0)),
             packets_rejected_source_addr: Arc::new(AtomicU64::new(0)),
+            pull_requests_rejected_mask_bits: Arc::new(AtomicU64::new(0)),
         }
     }
 }
@@ -427,6 +429,17 @@ impl GossipService {
 
             WireProtocol::PullRequest(wire_filter, caller_value) => {
                 stats.pull_requests_received.fetch_add(1, Ordering::Relaxed);
+
+                // A filter below the protocol's mask_bits floor is malformed —
+                // peers reject it too. Still take the caller's contact info, so a
+                // peer sending a bad filter stays discoverable.
+                if !wire_filter.is_acceptable() {
+                    stats
+                        .pull_requests_rejected_mask_bits
+                        .fetch_add(1, Ordering::Relaxed);
+                    Self::insert_wire_values(cluster_info, &[caller_value]);
+                    return;
+                }
 
                 // Replenish and check pull response budget.
                 // Use cluster size as proxy for staked count until stake
@@ -771,10 +784,6 @@ impl GossipService {
             return;
         }
 
-        // Build wire CRDS filter from our bloom filter
-        let (bloom, mask) = cluster_info.build_pull_filter();
-        let wire_filter = convert::build_wire_crds_filter(&bloom, &mask);
-
         // Our own signed contact info as the self-value
         let self_info = cluster_info.self_contact_info();
         let mut self_wire = convert::contact_info_to_wire_value(&self_info);
@@ -782,20 +791,27 @@ impl GossipService {
             self_wire.sign(key);
         }
 
-        let message = WireProtocol::PullRequest(wire_filter, self_wire);
+        // One bucket of the hash space per target. A pull request must partition
+        // the space — peers reject a full-space filter — so each target gets its
+        // own bucket and successive rounds sweep the rest.
+        for target in targets {
+            let seed = rand::random::<u64>();
+            let (bloom, mask) = cluster_info.build_pull_filter(seed);
+            let wire_filter = convert::build_wire_crds_filter(&bloom, &mask);
+            let message = WireProtocol::PullRequest(wire_filter, self_wire.clone());
 
-        if let Ok(encoded) = message.encode() {
-            for target in targets {
-                match socket.send_to(&encoded, target.gossip_addr).await {
-                    Ok(_) => {
-                        stats.pull_requests_sent.fetch_add(1, Ordering::Relaxed);
-                        stats
-                            .bytes_sent
-                            .fetch_add(encoded.len() as u64, Ordering::Relaxed);
-                    }
-                    Err(_) => {
-                        stats.send_errors.fetch_add(1, Ordering::Relaxed);
-                    }
+            let Ok(encoded) = message.encode() else {
+                continue;
+            };
+            match socket.send_to(&encoded, target.gossip_addr).await {
+                Ok(_) => {
+                    stats.pull_requests_sent.fetch_add(1, Ordering::Relaxed);
+                    stats
+                        .bytes_sent
+                        .fetch_add(encoded.len() as u64, Ordering::Relaxed);
+                }
+                Err(_) => {
+                    stats.send_errors.fetch_add(1, Ordering::Relaxed);
                 }
             }
         }
