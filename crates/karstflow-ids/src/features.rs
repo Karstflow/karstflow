@@ -110,13 +110,6 @@ pub const ACCOUNT_DATA_DIRECT_MAPPING: Pubkey = Pubkey::new([
     0xb6, 0x2c, 0x57, 0xe4, 0xcb, 0x61, 0x87, 0x3e, 0xae, 0xb4, 0xfd, 0xe3, 0xbc, 0x22, 0x14, 0x93,
 ]);
 
-/// Enables stricter ABI and runtime constraints for BPF programs.
-/// Base58: 3uRVPBpyEJRo1emLCrq38eLRFGcu6uKSpUXqGvU8T7SZ
-pub const STRICTER_ABI_AND_RUNTIME_CONSTRAINTS: Pubkey = Pubkey::new([
-    0x2B, 0x25, 0x44, 0x20, 0xCB, 0x2B, 0x86, 0xA6, 0xF2, 0x48, 0x28, 0x8B, 0xC6, 0x3A, 0xC5, 0xD1,
-    0x38, 0x59, 0x45, 0xF3, 0xB3, 0x68, 0xCC, 0xE9, 0x1B, 0x2E, 0x60, 0x59, 0x61, 0xD1, 0x78, 0xC2,
-]);
-
 /// Depletes the compute meter entirely on non-syscall VM failures.
 /// Base58: 6QjBB3bFgAZEuHo5p3UR4KjwB5C28bks9aJSKAkFksTU
 pub const DEPLETE_CU_METER_ON_VM_FAILURE: Pubkey = Pubkey::new([
@@ -349,7 +342,6 @@ mod tests {
             CREATE_ACCOUNT_ALLOW_PREFUND,
             DELAY_COMMISSION_UPDATES,
             ACCOUNT_DATA_DIRECT_MAPPING,
-            STRICTER_ABI_AND_RUNTIME_CONSTRAINTS,
             DEPLETE_CU_METER_ON_VM_FAILURE,
             BLAKE3_SYSCALL_ENABLED,
             ENABLE_SHA512_SYSCALL,

@@ -13,7 +13,7 @@ use super::FeatureActivation;
 use karstflow_types::Pubkey;
 
 /// Total number of registered protocol features.
-pub const FEATURE_COUNT: usize = 278;
+pub const FEATURE_COUNT: usize = 291;
 
 /// Complete registry of all protocol features.
 ///
@@ -1965,14 +1965,6 @@ pub const FEATURE_REGISTRY: &[(&str, [u8; 32]); FEATURE_COUNT] = &[
         ],
     ),
     (
-        "stricter_abi_and_runtime_constraints",
-        [
-            0x0c, 0xdc, 0xaa, 0x60, 0x4d, 0xd8, 0x04, 0x50, 0x19, 0x27, 0xdb, 0xa5, 0x2d, 0x2a,
-            0x39, 0xcf, 0x51, 0xdb, 0xc9, 0xae, 0xd8, 0x06, 0xc9, 0xda, 0x36, 0x46, 0xb8, 0xf2,
-            0x41, 0x40, 0x59, 0xed,
-        ],
-    ),
-    (
         "account_data_direct_mapping",
         [
             0xa9, 0x99, 0x77, 0xe6, 0xb5, 0x9b, 0x63, 0x35, 0x90, 0xe7, 0x38, 0x63, 0x73, 0x13,
@@ -2245,14 +2237,127 @@ pub const FEATURE_REGISTRY: &[(&str, [u8; 32]); FEATURE_COUNT] = &[
             0xa0, 0x7d, 0x7d, 0x2f,
         ],
     ),
+    (
+        "custom_commission_collector",
+        [
+            0x21, 0xf8, 0xbe, 0xce, 0x1c, 0x74, 0xd8, 0x1d, 0x21, 0xe8, 0x9b, 0xfb, 0x4c, 0xfb,
+            0xb5, 0x28, 0x83, 0x6b, 0xb6, 0x00, 0x94, 0x4d, 0x10, 0x21, 0x9e, 0x32, 0xf5, 0xf1,
+            0x3f, 0xa2, 0x95, 0xce,
+        ],
+    ),
+    (
+        "enable_tx_v1",
+        [
+            0x0d, 0x4f, 0xd7, 0xe8, 0x29, 0xe6, 0x92, 0x9c, 0x56, 0xb8, 0xe2, 0x3f, 0xa7, 0xe8,
+            0x00, 0x6b, 0xcd, 0xc2, 0x52, 0xd9, 0x6c, 0x9b, 0x8b, 0xd8, 0xc3, 0x89, 0x6a, 0x0d,
+            0x2e, 0xcc, 0x35, 0xd5,
+        ],
+    ),
+    (
+        "reduce_slot_time_to_200ms",
+        [
+            0x0a, 0x8c, 0x98, 0x3f, 0x83, 0xc7, 0xc8, 0x2b, 0x9e, 0x34, 0xe0, 0xfa, 0x90, 0x4f,
+            0xc3, 0xd3, 0x31, 0x94, 0xe8, 0x34, 0x59, 0x8f, 0x0c, 0xe6, 0xb7, 0xf2, 0x29, 0x10,
+            0xb5, 0x0d, 0x71, 0xd7,
+        ],
+    ),
+    (
+        "reduce_slot_time_to_250ms",
+        [
+            0x0a, 0x8c, 0x98, 0x37, 0x20, 0x1a, 0xa1, 0x50, 0x65, 0x89, 0xb6, 0x6b, 0xd4, 0x52,
+            0x0e, 0xa9, 0xbb, 0xff, 0xf2, 0x1c, 0xeb, 0x4d, 0x1a, 0x8f, 0x07, 0x53, 0xaa, 0x97,
+            0xae, 0x36, 0xc5, 0xe6,
+        ],
+    ),
+    (
+        "reduce_slot_time_to_300ms",
+        [
+            0x0a, 0x8c, 0x98, 0x36, 0x88, 0x99, 0x6a, 0x91, 0x79, 0x8d, 0x6b, 0xfb, 0x98, 0x23,
+            0x05, 0x98, 0x9b, 0x58, 0x21, 0x93, 0x36, 0xc0, 0x9d, 0x1c, 0xd4, 0x30, 0x18, 0xff,
+            0x7d, 0x39, 0x38, 0xfb,
+        ],
+    ),
+    (
+        "reduce_slot_time_to_350ms",
+        [
+            0x0a, 0x8c, 0x98, 0x30, 0xfb, 0x5b, 0x03, 0xde, 0x02, 0x4b, 0x47, 0xef, 0x92, 0xd3,
+            0xfe, 0xa0, 0x57, 0x5e, 0x9a, 0x1e, 0x5f, 0xd9, 0xd6, 0xcb, 0x6d, 0x19, 0x4b, 0x0f,
+            0x80, 0x49, 0x3c, 0xa6,
+        ],
+    ),
+    (
+        "relax_post_exec_min_balance_check",
+        [
+            0x9c, 0x89, 0x9c, 0x85, 0x3f, 0xc6, 0x53, 0x41, 0xf5, 0x7c, 0xe2, 0x11, 0x9c, 0xd8,
+            0x96, 0x80, 0xed, 0xb2, 0x37, 0x04, 0xab, 0xfa, 0x57, 0x78, 0xc2, 0x5c, 0x0e, 0xbd,
+            0xd2, 0xc1, 0xe2, 0x65,
+        ],
+    ),
+    (
+        "set_lamports_per_byte_to_696",
+        [
+            0x0b, 0x6a, 0x74, 0x87, 0xee, 0x08, 0x84, 0x07, 0x1d, 0xd4, 0xe9, 0xe7, 0x97, 0x29,
+            0x50, 0x32, 0x5d, 0x96, 0x72, 0x7c, 0x04, 0x04, 0x24, 0xe2, 0xc1, 0xf6, 0x4e, 0x90,
+            0x3a, 0x78, 0xda, 0xfb,
+        ],
+    ),
+    (
+        "set_lamports_per_byte_to_1322",
+        [
+            0xeb, 0xcd, 0x13, 0x56, 0x4b, 0xd9, 0xe3, 0xb8, 0x77, 0x18, 0x7f, 0x80, 0x49, 0x2a,
+            0x74, 0x92, 0x7e, 0x4b, 0xf9, 0x66, 0xd1, 0x95, 0xe7, 0x0e, 0xbc, 0x56, 0xda, 0x25,
+            0x84, 0x7b, 0x3e, 0x7e,
+        ],
+    ),
+    (
+        "set_lamports_per_byte_to_2575",
+        [
+            0xdd, 0x53, 0x17, 0x32, 0x99, 0x74, 0x3e, 0x41, 0x0a, 0x19, 0xc8, 0x8e, 0xd1, 0x45,
+            0xa8, 0x4d, 0x09, 0x52, 0x91, 0xc3, 0x27, 0xcb, 0x1a, 0x8a, 0x9b, 0x6e, 0xee, 0xaf,
+            0x46, 0x36, 0x97, 0xd7,
+        ],
+    ),
+    (
+        "set_lamports_per_byte_to_5080",
+        [
+            0x4a, 0x56, 0xbe, 0x1f, 0x51, 0xef, 0x5c, 0x80, 0xcc, 0x02, 0xc6, 0x46, 0x2b, 0xeb,
+            0x7d, 0x8c, 0x22, 0x91, 0xc1, 0x59, 0xdc, 0x1c, 0x2e, 0x08, 0x89, 0x83, 0xdc, 0x4e,
+            0x47, 0xc9, 0x71, 0xa2,
+        ],
+    ),
+    (
+        "set_lamports_per_byte_to_6333",
+        [
+            0x35, 0x0d, 0x9f, 0xc4, 0x1f, 0x1f, 0xd7, 0xf2, 0xdd, 0xce, 0xca, 0xfa, 0x8f, 0x5f,
+            0xae, 0x76, 0xd4, 0x93, 0xdf, 0xa5, 0x5c, 0xf2, 0x66, 0x7d, 0x8b, 0x31, 0x01, 0x35,
+            0x9c, 0x8f, 0x83, 0x5b,
+        ],
+    ),
+    (
+        "set_lamports_per_byte_to_6960",
+        [
+            0x3d, 0xf4, 0x3b, 0x99, 0x54, 0x61, 0x60, 0x0b, 0xf2, 0x9a, 0xa8, 0xf3, 0xab, 0xd8,
+            0x14, 0x37, 0x0d, 0xd1, 0x17, 0xce, 0x0e, 0xc4, 0xd2, 0xcc, 0x9a, 0xb3, 0x43, 0x29,
+            0xf1, 0xe4, 0xb9, 0xbb,
+        ],
+    ),
+    (
+        "upgrade_bpf_stake_program_to_v5_1",
+        [
+            0x0c, 0xd3, 0x92, 0xa1, 0x2c, 0xdc, 0xf8, 0xe8, 0x25, 0x59, 0xf2, 0x43, 0xe3, 0x56,
+            0xbd, 0xed, 0xb3, 0x1f, 0xcd, 0x3d, 0x89, 0x09, 0x4b, 0xaa, 0x8b, 0x4a, 0x5d, 0x64,
+            0xd1, 0x85, 0x32, 0x81,
+        ],
+    ),
 ];
 
 /// Number of features whose behavior has been hardcoded into the runtime.
-pub const CLEANED_UP_COUNT: usize = 186;
+pub const CLEANED_UP_COUNT: usize = 214;
 
 /// Sorted list of feature names that have been cleaned up (hardcoded).
 /// These features are always active regardless of on-chain state.
 const CLEANED_UP_FEATURES: [&str; CLEANED_UP_COUNT] = [
+    "abort_on_invalid_curve",
     "account_hash_ignore_slot",
     "accounts_lt_hash",
     "add_compute_budget_program",
@@ -2282,6 +2387,7 @@ const CLEANED_UP_FEATURES: [&str; CLEANED_UP_COUNT] = [
     "cost_model_requested_write_lock_cost",
     "credits_auto_rewind",
     "curve25519_restrict_msm_length",
+    "curve25519_syscall_enabled",
     "dedupe_config_program_signers",
     "default_units_per_instruction",
     "delay_visibility_of_program_deployment",
@@ -2302,22 +2408,31 @@ const CLEANED_UP_FEATURES: [&str; CLEANED_UP_COUNT] = [
     "disable_rehash_for_rent_epoch",
     "disable_rent_fees_collection",
     "disable_turbine_fanout_experiments",
+    "disable_zk_elgamal_proof_program",
     "do_support_realloc",
     "drop_legacy_shreds",
     "drop_redundant_turbine_path",
     "drop_unchained_merkle_shreds",
     "ed25519_precompile_verify_strict",
     "ed25519_program_enabled",
+    "enable_alt_bn128_compression_syscall",
+    "enable_alt_bn128_syscall",
     "enable_bpf_loader_extend_program_ix",
     "enable_chained_merkle_shreds",
     "enable_durable_nonce",
     "enable_early_verification_of_account_modifications",
     "enable_gossip_duplicate_proof_ingestion",
+    "enable_poseidon_syscall",
     "enable_program_redeployment_cooldown",
     "enable_request_heap_frame_ix",
+    "enable_sbpf_v1_deployment_and_execution",
+    "enable_sbpf_v2_deployment_and_execution",
+    "enable_sbpf_v3_deployment_and_execution",
+    "enable_secp256r1_precompile",
     "enable_tower_sync_ix",
     "enable_transaction_loading_failure_fees",
     "enable_turbine_fanout_experiments",
+    "enable_vote_address_leader_schedule",
     "enforce_fixed_fec_set",
     "epoch_accounts_hash",
     "error_on_syscall_bpf_function_hash_collisions",
@@ -2326,17 +2441,22 @@ const CLEANED_UP_FEATURES: [&str; CLEANED_UP_COUNT] = [
     "filter_stake_delegation_accounts",
     "filter_votes_outside_slot_hashes",
     "fix_alt_bn128_multiplication_input_length",
+    "fix_alt_bn128_pairing_length_check",
     "fix_recent_blockhashes",
     "fixed_memcpy_nonoverlapping_check",
+    "formalize_loaded_transaction_data_size",
     "full_inflation_vote",
     "include_account_index_in_rent_error",
+    "increase_cpi_account_info_limit",
     "incremental_snapshot_only_incremental_hash_calculation",
     "index_erasure_conflict_duplicate_proofs",
     "instructions_sysvar_owned_by_sysvar",
+    "last_restart_slot_sysvar",
     "leave_nonce_on_success",
     "libsecp256k1_0_5_upgrade_enabled",
     "libsecp256k1_fail_on_bad_count",
     "libsecp256k1_fail_on_bad_count2",
+    "limit_instruction_accounts",
     "limit_max_instruction_trace_length",
     "limit_secp256k1_recovery_id",
     "loosen_cpi_size_restriction",
@@ -2346,6 +2466,7 @@ const CLEANED_UP_FEATURES: [&str; CLEANED_UP_COUNT] = [
     "merkle_conflict_duplicate_proofs",
     "migrate_address_lookup_table_program_to_core_bpf",
     "migrate_config_program_to_core_bpf",
+    "migrate_stake_program_to_core_bpf",
     "move_precompile_verification_to_svm",
     "move_serialized_len_ptr_in_cpi",
     "move_stake_and_move_lamports_ixs",
@@ -2361,8 +2482,11 @@ const CLEANED_UP_FEATURES: [&str; CLEANED_UP_COUNT] = [
     "prevent_calling_precompiles_as_programs",
     "prevent_crediting_accounts_that_end_rent_paying",
     "prevent_rent_paying_rent_recipients",
+    "provide_instruction_data_offset_in_vm_r2",
     "quick_bail_on_panic",
+    "raise_account_cu_limit",
     "raise_block_limits_to_50m",
+    "raise_block_limits_to_60m",
     "record_instruction_in_transaction_context_push",
     "reduce_required_deploy_balance",
     "reject_callx_r10",
@@ -2370,6 +2494,7 @@ const CLEANED_UP_FEATURES: [&str; CLEANED_UP_COUNT] = [
     "reject_non_rent_exempt_vote_withdraws",
     "reject_vote_account_close_unless_zero_credit_epoch",
     "relax_authority_signer_check_for_lookup_table_creation",
+    "relax_intrabatch_account_locks",
     "remove_accounts_delta_hash",
     "remove_accounts_executable_flag_checks",
     "remove_bpf_loader_incorrect_program_id",
@@ -2382,6 +2507,7 @@ const CLEANED_UP_FEATURES: [&str; CLEANED_UP_COUNT] = [
     "require_custodian_for_locked_stake_authorize",
     "require_rent_exempt_accounts",
     "require_rent_exempt_split_destination",
+    "require_static_nonce_account",
     "require_static_program_ids_in_transaction",
     "reserve_minimal_cus_for_builtin_instructions",
     "return_data_syscall_enabled",
@@ -2414,6 +2540,7 @@ const CLEANED_UP_FEATURES: [&str; CLEANED_UP_COUNT] = [
     "static_instruction_limit",
     "stop_sibling_instruction_search_at_parent",
     "stop_truncating_strings_in_syscalls",
+    "switch_to_chacha8_turbine",
     "switch_to_new_elf_parser",
     "syscall_saturated_math",
     "system_transfer_zero_check",
@@ -2428,7 +2555,10 @@ const CLEANED_UP_FEATURES: [&str; CLEANED_UP_COUNT] = [
     "update_rewards_from_cached_accounts",
     "update_syscall_base_costs",
     "use_default_units_in_fee_calculation",
+    "validate_chained_block_id",
+    "validate_chained_block_id_2",
     "validate_fee_collector_account",
+    "validator_admission_ticket",
     "verify_tx_signatures_len",
     "versioned_tx_message_enabled",
     "vote_authorize_with_seed",
@@ -2437,7 +2567,9 @@ const CLEANED_UP_FEATURES: [&str; CLEANED_UP_COUNT] = [
     "vote_state_add_vote_latency",
     "vote_state_update_credit_per_dequeue",
     "vote_state_update_root_fix",
+    "vote_state_v4",
     "vote_withdraw_authority_may_change_authorized_voter",
+    "warp_timestamp_again",
     "warp_timestamp_with_a_vengeance",
 ];
 
@@ -4444,14 +4576,6 @@ pub fn raise_account_cu_limit() -> Pubkey {
     ])
 }
 
-pub fn stricter_abi_and_runtime_constraints() -> Pubkey {
-    Pubkey::new([
-        0x0c, 0xdc, 0xaa, 0x60, 0x4d, 0xd8, 0x04, 0x50, 0x19, 0x27, 0xdb, 0xa5, 0x2d, 0x2a, 0x39,
-        0xcf, 0x51, 0xdb, 0xc9, 0xae, 0xd8, 0x06, 0xc9, 0xda, 0x36, 0x46, 0xb8, 0xf2, 0x41, 0x40,
-        0x59, 0xed,
-    ])
-}
-
 pub fn account_data_direct_mapping() -> Pubkey {
     Pubkey::new([
         0xa9, 0x99, 0x77, 0xe6, 0xb5, 0x9b, 0x63, 0x35, 0x90, 0xe7, 0x38, 0x63, 0x73, 0x13, 0x44,
@@ -4604,6 +4728,146 @@ pub fn validator_admission_ticket() -> Pubkey {
     ])
 }
 
+/// SIMD-0232: routes vote-account commission to a custom collector account.
+/// Base58: 3HcSrCTGXTUnrTueHi4DAwNuMxZSsm5xui2Ax3mgxHqf
+pub fn custom_commission_collector() -> Pubkey {
+    Pubkey::new([
+        0x21, 0xf8, 0xbe, 0xce, 0x1c, 0x74, 0xd8, 0x1d, 0x21, 0xe8, 0x9b, 0xfb, 0x4c, 0xfb, 0xb5,
+        0x28, 0x83, 0x6b, 0xb6, 0x00, 0x94, 0x4d, 0x10, 0x21, 0x9e, 0x32, 0xf5, 0xf1, 0x3f, 0xa2,
+        0x95, 0xce,
+    ])
+}
+
+/// Enables version-1 transactions and the larger transaction size envelope.
+/// Base58: txv1aq4pp281K9um3tnPgkfX8UqtFT6wcVW3hNezGLL
+pub fn enable_tx_v1() -> Pubkey {
+    Pubkey::new([
+        0x0d, 0x4f, 0xd7, 0xe8, 0x29, 0xe6, 0x92, 0x9c, 0x56, 0xb8, 0xe2, 0x3f, 0xa7, 0xe8, 0x00,
+        0x6b, 0xcd, 0xc2, 0x52, 0xd9, 0x6c, 0x9b, 0x8b, 0xd8, 0xc3, 0x89, 0x6a, 0x0d, 0x2e, 0xcc,
+        0x35, 0xd5,
+    ])
+}
+
+/// SIMD-552 slot-time ladder: target slot time of 200 ms.
+/// Base58: iBRLjhJnkmDZgNoZRDMW11d8ZV7HvsL3vAyRjZB5npW
+pub fn reduce_slot_time_to_200ms() -> Pubkey {
+    Pubkey::new([
+        0x0a, 0x8c, 0x98, 0x3f, 0x83, 0xc7, 0xc8, 0x2b, 0x9e, 0x34, 0xe0, 0xfa, 0x90, 0x4f, 0xc3,
+        0xd3, 0x31, 0x94, 0xe8, 0x34, 0x59, 0x8f, 0x0c, 0xe6, 0xb7, 0xf2, 0x29, 0x10, 0xb5, 0x0d,
+        0x71, 0xd7,
+    ])
+}
+
+/// SIMD-552 slot-time ladder: target slot time of 250 ms.
+/// Base58: iBRLMc81UjRa8fn8A6eE8bJTnRbgQoPTynM51akENCV
+pub fn reduce_slot_time_to_250ms() -> Pubkey {
+    Pubkey::new([
+        0x0a, 0x8c, 0x98, 0x37, 0x20, 0x1a, 0xa1, 0x50, 0x65, 0x89, 0xb6, 0x6b, 0xd4, 0x52, 0x0e,
+        0xa9, 0xbb, 0xff, 0xf2, 0x1c, 0xeb, 0x4d, 0x1a, 0x8f, 0x07, 0x53, 0xaa, 0x97, 0xae, 0x36,
+        0xc5, 0xe6,
+    ])
+}
+
+/// SIMD-552 slot-time ladder: target slot time of 300 ms.
+/// Base58: iBRLL3k18HST852F1Mf3Lv83waTNQmmqvKDxvYGwQFL
+pub fn reduce_slot_time_to_300ms() -> Pubkey {
+    Pubkey::new([
+        0x0a, 0x8c, 0x98, 0x36, 0x88, 0x99, 0x6a, 0x91, 0x79, 0x8d, 0x6b, 0xfb, 0x98, 0x23, 0x05,
+        0x98, 0x9b, 0x58, 0x21, 0x93, 0x36, 0xc0, 0x9d, 0x1c, 0xd4, 0x30, 0x18, 0xff, 0x7d, 0x39,
+        0x38, 0xfb,
+    ])
+}
+
+/// SIMD-552 slot-time ladder: target slot time of 350 ms.
+/// Base58: iBRL5RuWhw4yqaAZu96RUULHckHTZAoe2b77qaV38JZ
+pub fn reduce_slot_time_to_350ms() -> Pubkey {
+    Pubkey::new([
+        0x0a, 0x8c, 0x98, 0x30, 0xfb, 0x5b, 0x03, 0xde, 0x02, 0x4b, 0x47, 0xef, 0x92, 0xd3, 0xfe,
+        0xa0, 0x57, 0x5e, 0x9a, 0x1e, 0x5f, 0xd9, 0xd6, 0xcb, 0x6d, 0x19, 0x4b, 0x0f, 0x80, 0x49,
+        0x3c, 0xa6,
+    ])
+}
+
+/// Relaxes the post-execution minimum-balance check.
+/// Base58: BY4JhHLahVzS9ynfDz4exzGPbVXhFmJvEyMWsXbDBqME
+pub fn relax_post_exec_min_balance_check() -> Pubkey {
+    Pubkey::new([
+        0x9c, 0x89, 0x9c, 0x85, 0x3f, 0xc6, 0x53, 0x41, 0xf5, 0x7c, 0xe2, 0x11, 0x9c, 0xd8, 0x96,
+        0x80, 0xed, 0xb2, 0x37, 0x04, 0xab, 0xfa, 0x57, 0x78, 0xc2, 0x5c, 0x0e, 0xbd, 0xd2, 0xc1,
+        0xe2, 0x65,
+    ])
+}
+
+/// Rent-reduction ladder: rent-exempt rate of 696 lamports per byte.
+/// Base58: mZdnRh9T2EbDNvqKjkCR3bvo5c816tJaojtE9Xs7iuY
+pub fn set_lamports_per_byte_to_696() -> Pubkey {
+    Pubkey::new([
+        0x0b, 0x6a, 0x74, 0x87, 0xee, 0x08, 0x84, 0x07, 0x1d, 0xd4, 0xe9, 0xe7, 0x97, 0x29, 0x50,
+        0x32, 0x5d, 0x96, 0x72, 0x7c, 0x04, 0x04, 0x24, 0xe2, 0xc1, 0xf6, 0x4e, 0x90, 0x3a, 0x78,
+        0xda, 0xfb,
+    ])
+}
+
+/// Rent-reduction ladder: rent-exempt rate of 1322 lamports per byte.
+/// Base58: GsUBNYNDPdMLHPD37TToHzrzcNcjpC9w5n1EcJk5iTaM
+pub fn set_lamports_per_byte_to_1322() -> Pubkey {
+    Pubkey::new([
+        0xeb, 0xcd, 0x13, 0x56, 0x4b, 0xd9, 0xe3, 0xb8, 0x77, 0x18, 0x7f, 0x80, 0x49, 0x2a, 0x74,
+        0x92, 0x7e, 0x4b, 0xf9, 0x66, 0xd1, 0x95, 0xe7, 0x0e, 0xbc, 0x56, 0xda, 0x25, 0x84, 0x7b,
+        0x3e, 0x7e,
+    ])
+}
+
+/// Rent-reduction ladder: rent-exempt rate of 2575 lamports per byte.
+/// Base58: Ftxb3ZKq7aNqgxDBbP7EonvR2RszZk9ctjdsTX38kQaz
+pub fn set_lamports_per_byte_to_2575() -> Pubkey {
+    Pubkey::new([
+        0xdd, 0x53, 0x17, 0x32, 0x99, 0x74, 0x3e, 0x41, 0x0a, 0x19, 0xc8, 0x8e, 0xd1, 0x45, 0xa8,
+        0x4d, 0x09, 0x52, 0x91, 0xc3, 0x27, 0xcb, 0x1a, 0x8a, 0x9b, 0x6e, 0xee, 0xaf, 0x46, 0x36,
+        0x97, 0xd7,
+    ])
+}
+
+/// Rent-reduction ladder: rent-exempt rate of 5080 lamports per byte.
+/// Base58: 61BtM7BkDEE8Yq5fskEVAQT9mYA8qCejJWoLe5apqg81
+pub fn set_lamports_per_byte_to_5080() -> Pubkey {
+    Pubkey::new([
+        0x4a, 0x56, 0xbe, 0x1f, 0x51, 0xef, 0x5c, 0x80, 0xcc, 0x02, 0xc6, 0x46, 0x2b, 0xeb, 0x7d,
+        0x8c, 0x22, 0x91, 0xc1, 0x59, 0xdc, 0x1c, 0x2e, 0x08, 0x89, 0x83, 0xdc, 0x4e, 0x47, 0xc9,
+        0x71, 0xa2,
+    ])
+}
+
+/// Rent-reduction ladder: rent-exempt rate of 6333 lamports per byte.
+/// Base58: 4a6f7o7iTcA8hRDCrPLkSatnt5Ykxiu36wo5p1Tt12wC
+pub fn set_lamports_per_byte_to_6333() -> Pubkey {
+    Pubkey::new([
+        0x35, 0x0d, 0x9f, 0xc4, 0x1f, 0x1f, 0xd7, 0xf2, 0xdd, 0xce, 0xca, 0xfa, 0x8f, 0x5f, 0xae,
+        0x76, 0xd4, 0x93, 0xdf, 0xa5, 0x5c, 0xf2, 0x66, 0x7d, 0x8b, 0x31, 0x01, 0x35, 0x9c, 0x8f,
+        0x83, 0x5b,
+    ])
+}
+
+/// Rent-reduction ladder: rent-exempt rate of 6960 lamports per byte.
+/// Base58: 5AqsUgSb6cgLizSaNiFn3o9XB7VUtKDtDZfcKEjEDmni
+pub fn set_lamports_per_byte_to_6960() -> Pubkey {
+    Pubkey::new([
+        0x3d, 0xf4, 0x3b, 0x99, 0x54, 0x61, 0x60, 0x0b, 0xf2, 0x9a, 0xa8, 0xf3, 0xab, 0xd8, 0x14,
+        0x37, 0x0d, 0xd1, 0x17, 0xce, 0x0e, 0xc4, 0xd2, 0xcc, 0x9a, 0xb3, 0x43, 0x29, 0xf1, 0xe4,
+        0xb9, 0xbb,
+    ])
+}
+
+/// Upgrades the BPF stake program to version 5.1.
+/// Base58: s51VGwCAgebo2745DSUris72RavoLkXGUmVJosESCXr
+pub fn upgrade_bpf_stake_program_to_v5_1() -> Pubkey {
+    Pubkey::new([
+        0x0c, 0xd3, 0x92, 0xa1, 0x2c, 0xdc, 0xf8, 0xe8, 0x25, 0x59, 0xf2, 0x43, 0xe3, 0x56, 0xbd,
+        0xed, 0xb3, 0x1f, 0xcd, 0x3d, 0x89, 0x09, 0x4b, 0xaa, 0x8b, 0x4a, 0x5d, 0x64, 0xd1, 0x85,
+        0x32, 0x81,
+    ])
+}
+
 #[cfg(test)]
 mod registry_tests {
     use super::*;
@@ -4656,6 +4920,89 @@ mod registry_tests {
                 "{name} name round-trip failed"
             );
             assert!(seen.insert(pk), "duplicate id for {name}");
+        }
+    }
+
+    /// W030 re-baseline: the 14 gates that agave v4.2.1 declares and this registry lacked
+    /// must be registered, resolvable, and have unique non-default ids.
+    #[test]
+    fn w030_synced_features_registered() {
+        let synced = [
+            "custom_commission_collector",
+            "enable_tx_v1",
+            "reduce_slot_time_to_200ms",
+            "reduce_slot_time_to_250ms",
+            "reduce_slot_time_to_300ms",
+            "reduce_slot_time_to_350ms",
+            "relax_post_exec_min_balance_check",
+            "set_lamports_per_byte_to_696",
+            "set_lamports_per_byte_to_1322",
+            "set_lamports_per_byte_to_2575",
+            "set_lamports_per_byte_to_5080",
+            "set_lamports_per_byte_to_6333",
+            "set_lamports_per_byte_to_6960",
+            "upgrade_bpf_stake_program_to_v5_1",
+        ];
+        let mut seen = std::collections::HashSet::new();
+        for name in synced {
+            let pk = feature_id(name).unwrap_or_else(|| panic!("{name} not registered"));
+            assert_ne!(pk, Pubkey::default(), "{name} has default id");
+            assert!(is_known_feature(&pk), "{name} not recognized as known");
+            assert_eq!(
+                feature_name(&pk),
+                Some(name),
+                "{name} name round-trip failed"
+            );
+            assert!(seen.insert(pk), "duplicate id for {name}");
+        }
+    }
+
+    /// The rent-reduction and slot-time gates are ordered ladders, so each rung must be a
+    /// distinct account — a copy-paste of one pubkey across rungs would silently collapse them.
+    #[test]
+    fn w030_ladder_rungs_are_distinct() {
+        for ladder in [
+            &[
+                "set_lamports_per_byte_to_696",
+                "set_lamports_per_byte_to_1322",
+                "set_lamports_per_byte_to_2575",
+                "set_lamports_per_byte_to_5080",
+                "set_lamports_per_byte_to_6333",
+                "set_lamports_per_byte_to_6960",
+            ][..],
+            &[
+                "reduce_slot_time_to_200ms",
+                "reduce_slot_time_to_250ms",
+                "reduce_slot_time_to_300ms",
+                "reduce_slot_time_to_350ms",
+            ][..],
+        ] {
+            let ids: std::collections::HashSet<_> =
+                ladder.iter().map(|n| feature_id_expect(n)).collect();
+            assert_eq!(ids.len(), ladder.len(), "ladder rungs share a pubkey");
+        }
+    }
+
+    /// `stricter_abi_and_runtime_constraints` was carried in this registry under a pubkey that no
+    /// protocol authority declares, so it could never activate. It must stay removed.
+    #[test]
+    fn spurious_feature_stays_removed() {
+        assert!(feature_id("stricter_abi_and_runtime_constraints").is_none());
+    }
+
+    /// `is_cleaned_up` binary-searches this list, so an unsorted entry silently reports `false`.
+    #[test]
+    fn cleaned_up_list_is_sorted_and_counted() {
+        assert_eq!(CLEANED_UP_FEATURES.len(), CLEANED_UP_COUNT);
+        assert!(
+            CLEANED_UP_FEATURES.windows(2).all(|w| w[0] < w[1]),
+            "CLEANED_UP_FEATURES must be sorted and free of duplicates"
+        );
+        for name in CLEANED_UP_FEATURES {
+            assert!(
+                feature_id(name).is_some(),
+                "{name} is marked cleaned-up but is not in the registry"
+            );
         }
     }
 
