@@ -1,6 +1,7 @@
 mod account;
 pub mod compact;
 pub mod hash;
+pub mod loader_state;
 mod pubkey;
 pub mod shred;
 pub mod transaction;
@@ -12,7 +13,8 @@ pub use compact::{
     COMPACT_U16_MAX_ENCODED_SIZE,
 };
 pub use hash::Hash;
-pub use pubkey::{Pubkey, PubkeyError, MAX_SEED_LEN, PUBKEY_BYTES};
+pub use loader_state::{ProgramAccountState, UpgradeableLoaderState};
+pub use pubkey::{Pubkey, PubkeyError, MAX_SEED_LEN, MAX_SIGNER_SEEDS, PUBKEY_BYTES};
 pub use transaction::{
     parse_transaction, serialize_transaction, CompiledInstruction, Message, MessageHeader,
     Signature, Transaction, TransactionParseError, SIGNATURE_BYTES,

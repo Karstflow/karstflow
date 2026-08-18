@@ -2578,6 +2578,41 @@ pub fn is_cleaned_up(name: &str) -> bool {
     CLEANED_UP_FEATURES.binary_search(&name).is_ok()
 }
 
+/// Number of features that have been reverted upstream.
+pub const REVERTED_COUNT: usize = 17;
+
+/// Sorted list of feature names that have been reverted upstream.
+///
+/// A reverted feature has been permanently abandoned by the protocol: its
+/// gate will never activate. The distinction matters when auditing which
+/// gated behavior is missing — for a reverted feature, the absence of the
+/// behavior is correct, not a gap. Disjoint from `CLEANED_UP_FEATURES`,
+/// which is the opposite terminal state (permanently active).
+const REVERTED_FEATURES: [&str; REVERTED_COUNT] = [
+    "blake3_syscall_enabled",
+    "bpf_account_data_direct_mapping",
+    "cap_accounts_data_len",
+    "cap_accounts_data_size_per_block",
+    "deprecate_executable_meta_update_in_bpf_loader",
+    "drop_merkle_shreds",
+    "enable_extend_program_checked",
+    "enable_loader_v4",
+    "include_loaded_accounts_data_size_in_fee_calculation",
+    "increase_tx_account_lock_limit",
+    "keep_merkle_shreds",
+    "lift_cpi_caller_restriction",
+    "programify_feature_gate_program",
+    "remaining_compute_units_syscall_enabled",
+    "stake_minimum_delegation_for_rewards",
+    "stake_redelegate_instruction",
+    "vote_only_retransmitter_signed_fec_sets",
+];
+
+/// Check whether a feature name has been reverted upstream (never activates).
+pub fn is_reverted(name: &str) -> bool {
+    REVERTED_FEATURES.binary_search(&name).is_ok()
+}
+
 /// Look up a feature pubkey by its protocol name.
 ///
 /// Returns the protocol-assigned pubkey for the given feature name,
@@ -2623,6 +2658,7 @@ pub fn all_known_features() -> Vec<FeatureActivation> {
             activation_slot: None,
             description: name,
             cleaned_up: is_cleaned_up(name),
+            reverted: is_reverted(name),
         })
         .collect()
 }
@@ -5004,6 +5040,48 @@ mod registry_tests {
                 "{name} is marked cleaned-up but is not in the registry"
             );
         }
+    }
+
+    /// `is_reverted` binary-searches this list, so an unsorted entry silently reports `false`.
+    #[test]
+    fn reverted_list_is_sorted_and_counted() {
+        assert_eq!(REVERTED_FEATURES.len(), REVERTED_COUNT);
+        assert!(
+            REVERTED_FEATURES.windows(2).all(|w| w[0] < w[1]),
+            "REVERTED_FEATURES must be sorted and free of duplicates"
+        );
+        for name in REVERTED_FEATURES {
+            assert!(
+                feature_id(name).is_some(),
+                "{name} is marked reverted but is not in the registry"
+            );
+        }
+    }
+
+    /// Reverted and cleaned-up are opposite terminal states: permanently
+    /// abandoned versus permanently active. An overlap would mean one of the
+    /// two lists was extracted wrongly.
+    #[test]
+    fn reverted_and_cleaned_up_are_disjoint() {
+        for name in REVERTED_FEATURES {
+            assert!(
+                !is_cleaned_up(name),
+                "{name} is marked both reverted and cleaned-up"
+            );
+        }
+    }
+
+    #[test]
+    fn reverted_features_are_reported_on_activations() {
+        let activations = all_known_features();
+        let reverted: Vec<&str> = activations
+            .iter()
+            .filter(|a| a.reverted)
+            .map(|a| a.description)
+            .collect();
+        assert_eq!(reverted.len(), REVERTED_COUNT);
+        assert!(reverted.contains(&"stake_redelegate_instruction"));
+        assert!(!is_reverted("enshrine_slashing_program"));
     }
 
     #[test]

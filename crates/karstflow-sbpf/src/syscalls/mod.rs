@@ -31,7 +31,7 @@ pub use curve::curve25519;
 pub use hash_ops::blake3_hash;
 pub use logging::{sol_log, sol_log_compute_units, sol_log_data, sol_log_pubkey};
 pub use memory::{sol_memcmp, sol_memcpy, sol_memmove, sol_memset};
-pub use pda::{create_program_address, try_find_program_address};
+pub use pda::{create_program_address, find_program_address, try_find_program_address};
 pub use poseidon::poseidon_hash;
 pub use return_data::{get_return_data, set_return_data};
 pub use runtime::{

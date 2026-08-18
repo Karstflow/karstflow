@@ -9,9 +9,25 @@ use super::state::{
 };
 use crate::{ExecutionContext, ExecutionOutcome};
 use karstflow_constants::stake_program as constants;
+use karstflow_ids::features::{is_feature_active, UPGRADE_BPF_STAKE_PROGRAM_TO_V5};
 use karstflow_ids::{STAKE_PROGRAM_ID, VOTE_PROGRAM_ID};
 use karstflow_types::{Account, AccountData, Pubkey};
 use std::collections::HashMap;
+
+/// The minimum stake delegation in force for this execution.
+///
+/// `upgrade_bpf_stake_program_to_v5` raises it from 1 lamport to 1 SOL. The gate
+/// is not active on mainnet, so the pre-activation value is the live one. With no
+/// sysvar snapshot attached the feature reads inactive, matching the convention
+/// used elsewhere in the program layer.
+fn minimum_delegation(context: &ExecutionContext) -> u64 {
+    let raised = context
+        .sysvar_snapshot
+        .as_ref()
+        .map(|s| is_feature_active(&s.active_features, &UPGRADE_BPF_STAKE_PROGRAM_TO_V5))
+        .unwrap_or(false);
+    constants::minimum_delegation_lamports(raised)
+}
 
 /// Stake program executor with configurable base compute cost.
 #[derive(Debug, Clone)]
@@ -210,11 +226,7 @@ impl StakeProgramExecutor {
             }
             constants::INSTRUCTION_GET_MINIMUM_DELEGATION => {
                 compute_used = compute_used.saturating_add(constants::COMPUTE_COST_AUTHORIZE);
-                return_data = Some(
-                    constants::MINIMUM_DELEGATION_LAMPORTS
-                        .to_le_bytes()
-                        .to_vec(),
-                );
+                return_data = Some(minimum_delegation(context).to_le_bytes().to_vec());
                 logs.push("Returned minimum delegation".to_string());
             }
             constants::INSTRUCTION_DEACTIVATE_DELINQUENT => {
@@ -396,7 +408,7 @@ impl StakeProgramExecutor {
             .lamports
             .saturating_sub(meta.rent_exempt_reserve);
 
-        if stake_amount < constants::MINIMUM_DELEGATION_LAMPORTS {
+        if stake_amount < minimum_delegation(context) {
             return Err(StakeError::InsufficientDelegation.to_string());
         }
 
@@ -1607,21 +1619,21 @@ mod tests {
         );
     }
 
-    #[test]
-    fn delegate_rejects_insufficient_delegation() {
+    /// Attempt a delegation of `stake_amount` lamports above the rent-exempt
+    /// reserve, with `upgrade_bpf_stake_program_to_v5` in the given state.
+    fn try_delegate(stake_amount: u64, v5_active: bool) -> Result<ExecutionOutcome, String> {
         let executor = make_executor();
         let staker = Pubkey::new_unique();
         let withdrawer = Pubkey::new_unique();
 
-        // Just barely above rent exempt but below minimum delegation
-        let lamports = minimum_stake_balance() + 100;
+        let lamports = minimum_stake_balance() + stake_amount;
         let stake_account = make_initialized_account(lamports, staker, withdrawer);
         let vote_account = make_vote_account();
         let voter = Pubkey::new_unique();
 
-        let data = 2u32.to_le_bytes().to_vec();
+        let data = 2u32.to_le_bytes().to_vec(); // DelegateStake
 
-        let context = ExecutionContext::new(
+        let mut context = ExecutionContext::new(
             STAKE_PROGRAM_ID,
             vec![
                 (Pubkey::new_unique(), stake_account, true),
@@ -1633,9 +1645,31 @@ mod tests {
             ],
             data,
         );
+        context.sysvar_snapshot = Some(snapshot_with_v5(v5_active));
 
-        let result = executor.execute(&context);
-        assert!(result.is_err());
+        executor.execute(&context)
+    }
+
+    #[test]
+    fn delegate_floor_moves_with_the_v5_gate() {
+        // 100 lamports sits between the two floors, which is the only amount that
+        // can tell a gated implementation from an ungated one. Asserting either
+        // side alone passes under both, so both sides are required.
+        assert!(
+            try_delegate(100, false).is_ok(),
+            "before the gate the floor is 1 lamport, so 100 must be accepted"
+        );
+        assert!(
+            try_delegate(100, true).is_err(),
+            "after the gate the floor is 1 SOL, so 100 must be refused"
+        );
+    }
+
+    #[test]
+    fn delegate_rejects_insufficient_delegation() {
+        // Below the floor in both feature states.
+        assert!(try_delegate(0, false).is_err());
+        assert!(try_delegate(0, true).is_err());
     }
 
     #[test]
@@ -2002,19 +2036,67 @@ mod tests {
 
     // -- GetMinimumDelegation test --
 
-    #[test]
-    fn get_minimum_delegation_returns_value() {
+    /// A snapshot with `upgrade_bpf_stake_program_to_v5` explicitly set or unset.
+    ///
+    /// Built by hand rather than taken from the environment: dev mode activates
+    /// every feature at slot 0, so a context that inherits the ambient feature set
+    /// cannot express an inactive gate and would make these tests vacuous.
+    fn snapshot_with_v5(active: bool) -> crate::SysvarSnapshot {
+        let mut features = std::collections::HashSet::new();
+        if active {
+            features.insert(UPGRADE_BPF_STAKE_PROGRAM_TO_V5.to_bytes());
+        }
+        crate::SysvarSnapshot {
+            active_features: features,
+            ..crate::SysvarSnapshot::default()
+        }
+    }
+
+    fn query_minimum_delegation(snapshot: Option<crate::SysvarSnapshot>) -> u64 {
         let executor = make_executor();
         let data = 13u32.to_le_bytes().to_vec(); // GetMinimumDelegation
-
-        let context = ExecutionContext::new(STAKE_PROGRAM_ID, vec![], data);
+        let mut context = ExecutionContext::new(STAKE_PROGRAM_ID, vec![], data);
+        context.sysvar_snapshot = snapshot;
 
         let outcome = executor.execute(&context).unwrap();
         assert!(outcome.success);
-        assert!(outcome.return_data.is_some());
-        let rd = outcome.return_data.unwrap();
-        let value = u64::from_le_bytes(rd[..8].try_into().unwrap());
-        assert_eq!(value, constants::MINIMUM_DELEGATION_LAMPORTS);
+        let rd = outcome.return_data.expect("return data");
+        u64::from_le_bytes(rd[..8].try_into().unwrap())
+    }
+
+    #[test]
+    fn get_minimum_delegation_returns_one_lamport_before_v5() {
+        // The value in force on mainnet today.
+        assert_eq!(
+            query_minimum_delegation(Some(snapshot_with_v5(false))),
+            constants::MINIMUM_DELEGATION_LAMPORTS_PRE_V5
+        );
+    }
+
+    #[test]
+    fn get_minimum_delegation_returns_one_sol_after_v5() {
+        assert_eq!(
+            query_minimum_delegation(Some(snapshot_with_v5(true))),
+            constants::MINIMUM_DELEGATION_LAMPORTS
+        );
+    }
+
+    #[test]
+    fn get_minimum_delegation_treats_a_missing_snapshot_as_feature_inactive() {
+        assert_eq!(
+            query_minimum_delegation(None),
+            constants::MINIMUM_DELEGATION_LAMPORTS_PRE_V5
+        );
+    }
+
+    #[test]
+    fn minimum_delegation_lamports_branches_on_the_gate() {
+        assert_eq!(constants::minimum_delegation_lamports(false), 1);
+        assert_eq!(
+            constants::minimum_delegation_lamports(true),
+            1_000_000_000,
+            "1 SOL"
+        );
     }
 
     // -- Redelegate test --

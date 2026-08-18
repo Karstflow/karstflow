@@ -18,6 +18,23 @@ fn is_on_ed25519_curve(bytes: &[u8; 32]) -> bool {
     CompressedEdwardsY(*bytes).decompress().is_some()
 }
 
+/// Derive a program address from seeds, without metering.
+///
+/// Delegates to the canonical implementation beside `Pubkey`, which is where
+/// every caller outside the VM reaches it. Returns `None` when the result lands
+/// on the curve — the caller's signal to try another bump.
+fn derive(seeds: &[&[u8]], program_id: &Pubkey) -> Option<Pubkey> {
+    Pubkey::create_program_address(seeds, program_id)
+}
+
+/// Find the canonical program address for these seeds, outside a VM.
+///
+/// The metering is what makes the syscall different, and metering only makes
+/// sense during execution. Genesis and the runtime need the address itself.
+pub fn find_program_address(seeds: &[&[u8]], program_id: &Pubkey) -> Option<(Pubkey, u8)> {
+    Pubkey::find_program_address(seeds, program_id)
+}
+
 /// Create a program address from seeds and a program ID.
 ///
 /// Computes `SHA256(seeds || program_id || "ProgramDerivedAddress")`.
@@ -42,22 +59,7 @@ pub fn create_program_address(
         }
     }
 
-    // Hash: seeds || program_id || "ProgramDerivedAddress"
-    let mut hasher = Sha256::new();
-    for seed in seeds {
-        hasher.update(seed);
-    }
-    hasher.update(program_id.as_bytes());
-    hasher.update(b"ProgramDerivedAddress");
-    let hash = hasher.finalize();
-
-    let bytes: [u8; 32] = hash.into();
-
-    if is_on_ed25519_curve(&bytes) {
-        return Err(SyscallError::InvalidProgramAddress);
-    }
-
-    Ok(Pubkey::new(bytes))
+    derive(seeds, program_id).ok_or(SyscallError::InvalidProgramAddress)
 }
 
 /// Find a valid PDA by iterating bump seeds from 255 down to 0.
@@ -83,23 +85,14 @@ pub fn try_find_program_address(
         }
     }
 
+    // The loop stays here rather than calling `find_program_address`: each
+    // rejected bump costs compute, and a helper that skipped ahead to the
+    // answer would undercharge a program for the search it actually caused.
     for bump in (0..=255u8).rev() {
         ctx.consume_compute(FIND_PROGRAM_ADDRESS_PER_ITERATION)?;
 
-        let bump_bytes = [bump];
-
-        let mut hasher = Sha256::new();
-        for seed in seeds {
-            hasher.update(seed);
-        }
-        hasher.update(bump_bytes);
-        hasher.update(program_id.as_bytes());
-        hasher.update(b"ProgramDerivedAddress");
-        let hash = hasher.finalize();
-        let bytes: [u8; 32] = hash.into();
-
-        if !is_on_ed25519_curve(&bytes) {
-            return Ok((Pubkey::new(bytes), bump));
+        if let Some(key) = derive(&[seeds, &[&[bump]]].concat(), program_id) {
+            return Ok((key, bump));
         }
     }
 
@@ -215,5 +208,33 @@ mod tests {
         let mut bytes = [0u8; 32];
         bytes[0] = 2;
         assert!(!is_on_ed25519_curve(&bytes));
+    }
+
+    #[test]
+    fn context_free_derivation_agrees_with_the_syscall() {
+        // The two exist so that genesis and a running program can derive the
+        // same address. If they ever disagreed, a program's data would sit
+        // where no client would look for it, and nothing in either path alone
+        // would show it.
+        let program = program_id();
+        let seeds: &[&[u8]] = &[b"programdata", &[7u8; 32]];
+
+        let (expected, expected_bump) =
+            try_find_program_address(&mut ctx(1_000_000), seeds, &program)
+                .expect("syscall derives");
+        let (actual, actual_bump) = find_program_address(seeds, &program).expect("helper derives");
+
+        assert_eq!(actual, expected);
+        assert_eq!(actual_bump, expected_bump);
+    }
+
+    #[test]
+    fn context_free_derivation_rejects_oversized_input() {
+        let program = program_id();
+        let too_long = vec![0u8; MAX_SEED_BYTES + 1];
+        assert!(find_program_address(&[&too_long], &program).is_none());
+
+        let too_many: Vec<&[u8]> = vec![b"x"; MAX_SIGNER_SEEDS];
+        assert!(find_program_address(&too_many, &program).is_none());
     }
 }

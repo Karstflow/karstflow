@@ -36,8 +36,29 @@ pub mod economics {
     /// Approximate number of slots per year at 400ms slot time.
     pub const DEFAULT_SLOTS_PER_YEAR: f64 = 78_892_314.984;
 
-    // Stake constants
-    pub const MIN_STAKE_DELEGATION_LAMPORTS: u64 = 1_000_000_000;
+    /// Rent exemption threshold after `deprecate_rent_exemption_threshold` (SIMD-0194).
+    ///
+    /// The multiplier is folded into `lamports_per_byte_year` when the feature
+    /// activates, leaving the threshold itself at one.
+    pub const SIMD_0194_EXEMPTION_THRESHOLD: f64 = 1.0;
+
+    /// Rent burn percentage after `deprecate_rent_exemption_threshold` (SIMD-0194).
+    pub const SIMD_0194_BURN_PERCENT: u8 = 50;
+
+    /// Rent-per-byte values set by the `set_lamports_per_byte_to_*` features.
+    ///
+    /// The first five step the rate down (SIMD-0437); the last restores the
+    /// legacy value (SIMD-0438) should the reduction need to be undone. Each is
+    /// named for the value it sets, so the feature name and the constant match.
+    pub const LAMPORTS_PER_BYTE_YEAR_6333: u64 = 6_333;
+    pub const LAMPORTS_PER_BYTE_YEAR_5080: u64 = 5_080;
+    pub const LAMPORTS_PER_BYTE_YEAR_2575: u64 = 2_575;
+    pub const LAMPORTS_PER_BYTE_YEAR_1322: u64 = 1_322;
+    pub const LAMPORTS_PER_BYTE_YEAR_696: u64 = 696;
+    pub const LAMPORTS_PER_BYTE_YEAR_6960: u64 = 6_960;
+
+    // Stake constants. The minimum delegation lives in `stake_program` because it
+    // is feature-dependent; see `minimum_delegation_lamports`.
     pub const BASE_NETWORK_SUPPLY_LAMPORTS: u64 = 1_000_000_000;
     pub const TOKEN_UI_DECIMALS_DIVISOR: f64 = 1_000_000_000_f64;
     pub const DEFAULT_VOTE_COMMISSION_PERCENT: u8 = 5;
@@ -430,9 +451,26 @@ pub mod stake_program {
     pub const DEFAULT_WARMUP_COOLDOWN_RATE: f64 = 0.25;
     pub const NEW_WARMUP_COOLDOWN_RATE: f64 = 0.09;
 
-    // Minimum delegation (1 SOL in lamports)
+    // Minimum delegation (1 SOL in lamports), applied once
+    // `upgrade_bpf_stake_program_to_v5` activates.
     pub const MINIMUM_DELEGATION_SOL: u64 = 1;
     pub const MINIMUM_DELEGATION_LAMPORTS: u64 = MINIMUM_DELEGATION_SOL * LAMPORTS_PER_SOL;
+
+    /// Minimum delegation before `upgrade_bpf_stake_program_to_v5` activates.
+    /// This is the value in force on mainnet today.
+    pub const MINIMUM_DELEGATION_LAMPORTS_PRE_V5: u64 = 1;
+
+    /// The minimum stake delegation for the given feature state.
+    ///
+    /// Also determines the minimum balance of a delegated stake account, which
+    /// is the rent-exempt reserve plus this value.
+    pub const fn minimum_delegation_lamports(upgrade_bpf_stake_program_to_v5_active: bool) -> u64 {
+        if upgrade_bpf_stake_program_to_v5_active {
+            MINIMUM_DELEGATION_LAMPORTS
+        } else {
+            MINIMUM_DELEGATION_LAMPORTS_PRE_V5
+        }
+    }
 
     // Minimum delinquent epochs before forced deactivation is allowed
     pub const MINIMUM_DELINQUENT_EPOCHS_FOR_DEACTIVATION: u64 = 5;

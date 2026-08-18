@@ -166,14 +166,22 @@ impl RuntimeSyscallDispatch {
             Box::new(SolCurveMultiscalarMulHandler),
         );
 
-        // ALT-BN128 group operations and compression
+        // ALT-BN128 group operations and compression.
+        // This constructor registers every syscall unconditionally, so the
+        // sub-operation gates are open too. Feature-aware construction goes
+        // through `with_active_feature_ids`.
         dispatch.register_by_name(
             "sol_alt_bn128_group_op",
-            Box::new(SolAltBn128GroupOpHandler),
+            Box::new(SolAltBn128GroupOpHandler {
+                little_endian_enabled: true,
+                g2_enabled: true,
+            }),
         );
         dispatch.register_by_name(
             "sol_alt_bn128_compression",
-            Box::new(SolAltBn128CompressionHandler),
+            Box::new(SolAltBn128CompressionHandler {
+                little_endian_enabled: true,
+            }),
         );
 
         // Poseidon hash
@@ -204,7 +212,8 @@ impl RuntimeSyscallDispatch {
     /// - `enable_get_epoch_stake_syscall` — sol_get_epoch_stake
     pub fn with_features(active_features: &std::collections::HashSet<&str>) -> Self {
         use karstflow_constants::features::{
-            FEATURE_ENABLE_ALT_BN128_COMPRESSION, FEATURE_ENABLE_ALT_BN128_SYSCALL,
+            FEATURE_ALT_BN128_LITTLE_ENDIAN, FEATURE_ENABLE_ALT_BN128_COMPRESSION,
+            FEATURE_ENABLE_ALT_BN128_G2_SYSCALLS, FEATURE_ENABLE_ALT_BN128_SYSCALL,
             FEATURE_ENABLE_BLS12_381_SYSCALL, FEATURE_ENABLE_GET_EPOCH_STAKE,
             FEATURE_ENABLE_POSEIDON_SYSCALL, FEATURE_GET_SYSVAR_SYSCALL,
         };
@@ -274,11 +283,17 @@ impl RuntimeSyscallDispatch {
         dispatch.register_by_name("abort", Box::new(AbortHandler));
         dispatch.register_by_name("sol_panic_", Box::new(SolPanicHandler));
 
-        // Feature-gated: ALT-BN128 group operations
+        // Feature-gated: ALT-BN128 group operations. The syscall itself is gated by
+        // `enable_alt_bn128_syscall`; its little-endian and G2 sub-operations carry
+        // their own gates inside the handler (SIMD-0284 / SIMD-0302).
+        let little_endian_enabled = active_features.contains(FEATURE_ALT_BN128_LITTLE_ENDIAN);
         if active_features.contains(FEATURE_ENABLE_ALT_BN128_SYSCALL) {
             dispatch.register_by_name(
                 "sol_alt_bn128_group_op",
-                Box::new(SolAltBn128GroupOpHandler),
+                Box::new(SolAltBn128GroupOpHandler {
+                    little_endian_enabled,
+                    g2_enabled: active_features.contains(FEATURE_ENABLE_ALT_BN128_G2_SYSCALLS),
+                }),
             );
         }
 
@@ -286,7 +301,9 @@ impl RuntimeSyscallDispatch {
         if active_features.contains(FEATURE_ENABLE_ALT_BN128_COMPRESSION) {
             dispatch.register_by_name(
                 "sol_alt_bn128_compression",
-                Box::new(SolAltBn128CompressionHandler),
+                Box::new(SolAltBn128CompressionHandler {
+                    little_endian_enabled,
+                }),
             );
         }
 
@@ -401,11 +418,22 @@ impl RuntimeSyscallDispatch {
             );
         }
 
-        // Feature-gated: alt_bn128 group operations
+        // Feature-gated: alt_bn128 group operations. The syscall as a whole is gated by
+        // `enable_alt_bn128_syscall`; two families of sub-operations carry separate
+        // gates that the handler enforces per call — the little-endian variants
+        // (SIMD-0284) and the G2 operations (SIMD-0302).
+        let little_endian_enabled =
+            features::is_feature_active(active_features, &features::ALT_BN128_LITTLE_ENDIAN);
         if features::is_feature_active(active_features, &features::ENABLE_ALT_BN128_SYSCALL) {
             dispatch.register_by_name(
                 "sol_alt_bn128_group_op",
-                Box::new(SolAltBn128GroupOpHandler),
+                Box::new(SolAltBn128GroupOpHandler {
+                    little_endian_enabled,
+                    g2_enabled: features::is_feature_active(
+                        active_features,
+                        &features::ENABLE_ALT_BN128_G2_SYSCALLS,
+                    ),
+                }),
             );
         }
 
@@ -416,7 +444,9 @@ impl RuntimeSyscallDispatch {
         ) {
             dispatch.register_by_name(
                 "sol_alt_bn128_compression",
-                Box::new(SolAltBn128CompressionHandler),
+                Box::new(SolAltBn128CompressionHandler {
+                    little_endian_enabled,
+                }),
             );
         }
 
@@ -1754,6 +1784,12 @@ fn curve25519_group_op(
     }
 }
 
+/// Error text for an alt_bn128 operation rejected by an inactive feature gate.
+///
+/// Matches the `SyscallError::InvalidAttribute` outcome: a hard syscall failure
+/// that aborts the instruction, not the soft `Ok(1)` return used for bad points.
+const ALT_BN128_INVALID_ATTRIBUTE: &str = "invalid attribute";
+
 /// sol_alt_bn128_group_op: BN254 elliptic curve group operation.
 ///
 /// r1 = group_op (operation ID with optional LE flag in bit 7)
@@ -1761,7 +1797,12 @@ fn curve25519_group_op(
 /// r3 = input size in bytes
 /// r4 = result address in VM memory
 /// Returns 0 on success, 1 on soft error (invalid point/input).
-struct SolAltBn128GroupOpHandler;
+struct SolAltBn128GroupOpHandler {
+    /// Whether `alt_bn128_little_endian` (SIMD-0284) is active.
+    little_endian_enabled: bool,
+    /// Whether `enable_alt_bn128_g2_syscalls` (SIMD-0302) is active.
+    g2_enabled: bool,
+}
 
 impl SyscallHandler for SolAltBn128GroupOpHandler {
     fn call(
@@ -1773,6 +1814,38 @@ impl SyscallHandler for SolAltBn128GroupOpHandler {
         r4: u64, // result_addr
         _r5: u64,
     ) -> Result<u64, VmError> {
+        // SIMD-0284: the little-endian variants of G1 add, G1 mul and pairing are
+        // rejected until the feature activates. The G2 little-endian variants are
+        // covered by the G2 gate below, not by this one.
+        if !self.little_endian_enabled
+            && matches!(
+                r1,
+                syscalls::ALT_BN128_G1_ADD_LE
+                    | syscalls::ALT_BN128_G1_MUL_LE
+                    | syscalls::ALT_BN128_PAIRING_LE
+            )
+        {
+            return Err(VmError::SyscallError(
+                ALT_BN128_INVALID_ATTRIBUTE.to_string(),
+            ));
+        }
+
+        // SIMD-0302: the G2 operations are rejected until the feature activates,
+        // in both endiannesses.
+        if !self.g2_enabled
+            && matches!(
+                r1,
+                syscalls::ALT_BN128_G2_ADD_BE
+                    | syscalls::ALT_BN128_G2_MUL_BE
+                    | syscalls::ALT_BN128_G2_ADD_LE
+                    | syscalls::ALT_BN128_G2_MUL_LE
+            )
+        {
+            return Err(VmError::SyscallError(
+                ALT_BN128_INVALID_ATTRIBUTE.to_string(),
+            ));
+        }
+
         let input_sz = r3 as usize;
         let input = vm
             .memory
@@ -1827,7 +1900,10 @@ impl SyscallHandler for SolAltBn128GroupOpHandler {
 /// r3 = input size in bytes
 /// r4 = result address in VM memory
 /// Returns 0 on success, 1 on soft error.
-struct SolAltBn128CompressionHandler;
+struct SolAltBn128CompressionHandler {
+    /// Whether `alt_bn128_little_endian` (SIMD-0284) is active.
+    little_endian_enabled: bool,
+}
 
 impl SyscallHandler for SolAltBn128CompressionHandler {
     fn call(
@@ -1839,6 +1915,23 @@ impl SyscallHandler for SolAltBn128CompressionHandler {
         r4: u64, // result_addr
         _r5: u64,
     ) -> Result<u64, VmError> {
+        // SIMD-0284: the little-endian compression variants are rejected until the
+        // feature activates. Compression carries no G2 gate — the big-endian G2
+        // compress/decompress operations are available unconditionally.
+        if !self.little_endian_enabled
+            && matches!(
+                r1,
+                syscalls::ALT_BN128_G1_COMPRESS_LE
+                    | syscalls::ALT_BN128_G2_COMPRESS_LE
+                    | syscalls::ALT_BN128_G1_DECOMPRESS_LE
+                    | syscalls::ALT_BN128_G2_DECOMPRESS_LE
+            )
+        {
+            return Err(VmError::SyscallError(
+                ALT_BN128_INVALID_ATTRIBUTE.to_string(),
+            ));
+        }
+
         let input_sz = r3 as usize;
         let input = vm
             .memory
@@ -4839,5 +4932,176 @@ mod tests {
 
         // Verify signer was tracked
         assert!(ctx.signers.contains(&acct_pk));
+    }
+
+    // -----------------------------------------------------------------------
+    // alt_bn128 sub-operation feature gates (SIMD-0284 little-endian,
+    // SIMD-0302 G2).
+    //
+    // Every test here builds its feature state explicitly. Dev mode activates
+    // the whole registry at slot 0, so a test that leans on the ambient
+    // environment cannot observe a feature gate at all.
+    // -----------------------------------------------------------------------
+
+    /// True when the call was refused by a feature gate rather than by
+    /// anything downstream (bad op id, unreadable memory, invalid point).
+    fn rejected_by_gate(result: &Result<u64, VmError>) -> bool {
+        matches!(result, Err(VmError::SyscallError(msg)) if msg == ALT_BN128_INVALID_ATTRIBUTE)
+    }
+
+    fn call_group_op(little_endian: bool, g2: bool, op: u64) -> Result<u64, VmError> {
+        let handler = SolAltBn128GroupOpHandler {
+            little_endian_enabled: little_endian,
+            g2_enabled: g2,
+        };
+        let mut vm = make_sysvar_test_vm(crate::sysvar_snapshot::SysvarSnapshot::default());
+        handler.call(&mut vm, op, REGION_HEAP_BASE, 0, REGION_HEAP_BASE, 0)
+    }
+
+    fn call_compression(little_endian: bool, op: u64) -> Result<u64, VmError> {
+        let handler = SolAltBn128CompressionHandler {
+            little_endian_enabled: little_endian,
+        };
+        let mut vm = make_sysvar_test_vm(crate::sysvar_snapshot::SysvarSnapshot::default());
+        handler.call(&mut vm, op, REGION_HEAP_BASE, 0, REGION_HEAP_BASE, 0)
+    }
+
+    #[test]
+    fn alt_bn128_le_group_ops_rejected_when_feature_inactive() {
+        for op in [
+            syscalls::ALT_BN128_G1_ADD_LE,
+            syscalls::ALT_BN128_G1_MUL_LE,
+            syscalls::ALT_BN128_PAIRING_LE,
+        ] {
+            assert!(
+                rejected_by_gate(&call_group_op(false, true, op)),
+                "op {op:#x} must be refused while alt_bn128_little_endian is inactive"
+            );
+        }
+    }
+
+    #[test]
+    fn alt_bn128_le_gate_covers_only_the_g1_and_pairing_variants() {
+        // The big-endian forms are outside the gate entirely.
+        for op in [
+            syscalls::ALT_BN128_G1_ADD_BE,
+            syscalls::ALT_BN128_G1_MUL_BE,
+            syscalls::ALT_BN128_PAIRING_BE,
+        ] {
+            assert!(!rejected_by_gate(&call_group_op(false, true, op)));
+        }
+        // The little-endian G2 forms belong to the G2 gate, not this one — with
+        // G2 active they pass even though the LE feature is inactive. Gating them
+        // here would swap one divergence for another.
+        for op in [syscalls::ALT_BN128_G2_ADD_LE, syscalls::ALT_BN128_G2_MUL_LE] {
+            assert!(!rejected_by_gate(&call_group_op(false, true, op)));
+        }
+    }
+
+    #[test]
+    fn alt_bn128_g2_ops_rejected_when_feature_inactive() {
+        for op in [
+            syscalls::ALT_BN128_G2_ADD_BE,
+            syscalls::ALT_BN128_G2_MUL_BE,
+            syscalls::ALT_BN128_G2_ADD_LE,
+            syscalls::ALT_BN128_G2_MUL_LE,
+        ] {
+            assert!(
+                rejected_by_gate(&call_group_op(true, false, op)),
+                "op {op:#x} must be refused while enable_alt_bn128_g2_syscalls is inactive"
+            );
+        }
+    }
+
+    #[test]
+    fn alt_bn128_group_ops_pass_the_gates_when_both_features_active() {
+        for op in [
+            syscalls::ALT_BN128_G1_ADD_LE,
+            syscalls::ALT_BN128_G1_MUL_LE,
+            syscalls::ALT_BN128_PAIRING_LE,
+            syscalls::ALT_BN128_G2_ADD_BE,
+            syscalls::ALT_BN128_G2_MUL_LE,
+        ] {
+            assert!(!rejected_by_gate(&call_group_op(true, true, op)));
+        }
+    }
+
+    #[test]
+    fn alt_bn128_le_compression_ops_rejected_when_feature_inactive() {
+        for op in [
+            syscalls::ALT_BN128_G1_COMPRESS_LE,
+            syscalls::ALT_BN128_G2_COMPRESS_LE,
+            syscalls::ALT_BN128_G1_DECOMPRESS_LE,
+            syscalls::ALT_BN128_G2_DECOMPRESS_LE,
+        ] {
+            assert!(
+                rejected_by_gate(&call_compression(false, op)),
+                "compression op {op:#x} must be refused while alt_bn128_little_endian is inactive"
+            );
+        }
+        // Compression carries no G2 gate: the big-endian G2 forms stay available.
+        for op in [
+            syscalls::ALT_BN128_G2_COMPRESS_BE,
+            syscalls::ALT_BN128_G2_DECOMPRESS_BE,
+        ] {
+            assert!(!rejected_by_gate(&call_compression(false, op)));
+        }
+    }
+
+    #[test]
+    fn alt_bn128_gate_state_follows_the_active_feature_ids() {
+        use karstflow_ids::features as ids;
+
+        let mut active: std::collections::HashSet<[u8; 32]> = std::collections::HashSet::new();
+        active.insert(ids::ENABLE_ALT_BN128_SYSCALL.to_bytes());
+        active.insert(ids::ENABLE_ALT_BN128_COMPRESSION_SYSCALL.to_bytes());
+
+        // Invoke through the dispatcher so the assertion is about the handler the
+        // constructor actually built, not merely about which ids got registered.
+        let invoke = |dispatch: &RuntimeSyscallDispatch, name: &str, op: u64| {
+            let handler = dispatch
+                .handlers
+                .get(&murmur3_hash(name))
+                .expect("syscall registered");
+            let mut vm = make_sysvar_test_vm(crate::sysvar_snapshot::SysvarSnapshot::default());
+            handler.call(&mut vm, op, REGION_HEAP_BASE, 0, REGION_HEAP_BASE, 0)
+        };
+
+        // The syscalls are registered, but both sub-operation gates are shut.
+        let gated = RuntimeSyscallDispatch::with_active_feature_ids(&active);
+        assert!(rejected_by_gate(&invoke(
+            &gated,
+            "sol_alt_bn128_group_op",
+            syscalls::ALT_BN128_G1_ADD_LE
+        )));
+        assert!(rejected_by_gate(&invoke(
+            &gated,
+            "sol_alt_bn128_group_op",
+            syscalls::ALT_BN128_G2_ADD_BE
+        )));
+        assert!(rejected_by_gate(&invoke(
+            &gated,
+            "sol_alt_bn128_compression",
+            syscalls::ALT_BN128_G1_COMPRESS_LE
+        )));
+
+        active.insert(ids::ALT_BN128_LITTLE_ENDIAN.to_bytes());
+        active.insert(ids::ENABLE_ALT_BN128_G2_SYSCALLS.to_bytes());
+        let opened = RuntimeSyscallDispatch::with_active_feature_ids(&active);
+        assert!(!rejected_by_gate(&invoke(
+            &opened,
+            "sol_alt_bn128_group_op",
+            syscalls::ALT_BN128_G1_ADD_LE
+        )));
+        assert!(!rejected_by_gate(&invoke(
+            &opened,
+            "sol_alt_bn128_group_op",
+            syscalls::ALT_BN128_G2_ADD_BE
+        )));
+        assert!(!rejected_by_gate(&invoke(
+            &opened,
+            "sol_alt_bn128_compression",
+            syscalls::ALT_BN128_G1_COMPRESS_LE
+        )));
     }
 }

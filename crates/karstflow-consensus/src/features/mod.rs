@@ -6,12 +6,13 @@
 //! features are currently active and at what slot they were enabled.
 
 mod activation;
+pub mod core_bpf_migration;
 pub mod known_features;
 
 #[cfg(test)]
 mod tests;
 
-pub use activation::{process_feature_activations, FeatureActivation};
+pub use activation::{process_feature_activations, rent_after_activation_hooks, FeatureActivation};
 
 use karstflow_types::Pubkey;
 use std::collections::{HashMap, HashSet};
@@ -73,6 +74,16 @@ impl FeatureSet {
     /// Returns `None` if the feature has not been activated.
     pub fn activated_slot(&self, feature_id: &Pubkey) -> Option<u64> {
         self.active.get(feature_id).copied()
+    }
+
+    /// Whether the given feature activated in exactly this slot.
+    ///
+    /// Distinct from [`is_active`](Self::is_active), which stays true for every
+    /// later slot. Some features are not branches but one-shot state mutations
+    /// applied at the boundary they activate on; those need to fire once and
+    /// never again, which is what this answers.
+    pub fn just_activated(&self, feature_id: &Pubkey, slot: u64) -> bool {
+        self.activated_slot(feature_id) == Some(slot)
     }
 
     /// Activate a feature at the specified slot.

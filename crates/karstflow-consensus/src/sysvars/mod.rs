@@ -121,6 +121,14 @@ impl SysvarCache {
         self.rent.read().expect("rent sysvar lock poisoned").rent
     }
 
+    /// Replace the rent configuration.
+    ///
+    /// Rent is otherwise fixed for the life of the chain; this exists for the
+    /// features that rewrite it at their activation boundary.
+    pub fn set_rent(&self, rent: Rent) {
+        self.rent.write().expect("rent sysvar lock poisoned").rent = rent;
+    }
+
     // -----------------------------------------------------------------------
     // SlotHashes operations
     // -----------------------------------------------------------------------

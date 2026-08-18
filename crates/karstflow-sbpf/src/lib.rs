@@ -52,7 +52,7 @@ pub use address_lookup_table::{
     AddressLookupTableExecutor, LookupTable, LookupTableMeta, LookupTableStatus,
 };
 pub use associated_token_program::AssociatedTokenProgramExecutor;
-pub use bpf_loader::{BpfLoaderExecutor, ProgramAccountState};
+pub use bpf_loader::{BpfLoaderExecutor, ProgramAccountState, UpgradeableLoaderState};
 pub use bpf_loader_deprecated::BpfLoaderDeprecatedExecutor;
 pub use compute_budget_program::{
     extract_compute_budget, ComputeBudgetProgramExecutor, ExtractedComputeBudget,

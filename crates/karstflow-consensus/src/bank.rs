@@ -4,7 +4,10 @@ use crate::blockhash_queue::{BlockhashInfo, BlockhashQueue};
 use crate::clock::calculate_stake_weighted_timestamp;
 use crate::epoch_processing::{AccountDatabaseVoteReader, EpochProcessor};
 use crate::epoch_schedule::EpochScheduleConfig;
-use crate::features::{process_feature_activations, FeatureSet};
+use crate::features::{
+    core_bpf_migration, known_features, process_feature_activations, rent_after_activation_hooks,
+    FeatureSet,
+};
 use crate::reward_application::RewardApplicator;
 use crate::rewards_distribution::RewardsDistributor;
 use crate::signature_status::SignatureStatusCache;
@@ -89,7 +92,9 @@ pub struct Bank {
 
     // Economic configuration
     capitalization: AtomicU64,
-    rent: Rent,
+    /// Rent parameters. Locked because a handful of features rewrite them at
+    /// their activation boundary; otherwise fixed for the life of the chain.
+    rent: RwLock<Rent>,
     inflation: Inflation,
 
     // Sysvar cache (shared across the runtime)
@@ -201,7 +206,7 @@ impl Bank {
             execution_fees: AtomicU64::new(0),
             priority_fees: AtomicU64::new(0),
             capitalization: AtomicU64::new(capitalization),
-            rent,
+            rent: RwLock::new(rent),
             inflation,
             sysvars: Some(Arc::new(sysvar_cache)),
             lthash: RwLock::new(LatticeHashValue::zero()),
@@ -287,7 +292,7 @@ impl Bank {
             execution_fees: AtomicU64::new(0),
             priority_fees: AtomicU64::new(0),
             capitalization: AtomicU64::new(bank_state.capitalization),
-            rent,
+            rent: RwLock::new(rent),
             inflation,
             sysvars: None,
             lthash: RwLock::new(LatticeHashValue::zero()),
@@ -378,7 +383,7 @@ impl Bank {
             execution_fees: AtomicU64::new(0),
             priority_fees: AtomicU64::new(0),
             capitalization: AtomicU64::new(parent.capitalization.load(Ordering::Relaxed)),
-            rent: parent.rent,
+            rent: RwLock::new(parent.rent()),
             inflation: parent.inflation,
             sysvars: parent.sysvars.clone(),
             lthash: RwLock::new(
@@ -629,6 +634,7 @@ impl Bank {
             };
 
         let es = self.epoch_schedule.config();
+        let rent = self.rent();
 
         // Snapshot active feature gate IDs for the execution layer.
         let active_features = if let Some(ref fs_lock) = self.feature_set {
@@ -673,9 +679,9 @@ impl Bank {
             warmup: es.warmup,
             first_normal_epoch: es.first_normal_epoch,
             first_normal_slot: es.first_normal_slot,
-            lamports_per_byte_year: self.rent.lamports_per_byte_year,
-            exemption_threshold: self.rent.exemption_threshold,
-            burn_percent: self.rent.burn_percent,
+            lamports_per_byte_year: rent.lamports_per_byte_year,
+            exemption_threshold: rent.exemption_threshold,
+            burn_percent: rent.burn_percent,
             last_restart_slot: self.sysvars.as_ref().map_or(0, |s| s.last_restart_slot()),
             recent_blockhash: *self.last_blockhash.read().expect("blockhash lock poisoned"),
             lamports_per_signature: self.lamports_per_signature(),
@@ -1256,12 +1262,93 @@ impl Bank {
 
     /// Scan feature accounts and activate any newly created ones.
     fn activate_pending_features(&self) {
-        if let Some(ref features_lock) = self.feature_set {
+        let Some(ref features_lock) = self.feature_set else {
+            return;
+        };
+
+        // Rent is read before the features guard is taken and written after it is
+        // released. Other paths take rent first and features second, so holding
+        // both here would invert the lock order.
+        let current_rent = self.rent();
+        let (updated_rent, migrations, relax_programdata_check) = {
             let mut features = features_lock.write().expect("feature_set lock poisoned");
             let accounts = &self.accounts;
             process_feature_activations(&mut features, self.slot, &|pubkey| {
                 accounts.get_published_account(pubkey).is_some()
             });
+            (
+                rent_after_activation_hooks(&features, self.slot, current_rent),
+                core_bpf_migration::migrations_activating_in(&features, self.slot),
+                features.is_active(&known_features::relax_programdata_account_check_migration()),
+            )
+        };
+
+        // A handful of features rewrite the rent parameters in the slot they
+        // activate. Both the bank and the sysvar carry a copy, and a client
+        // reading the sysvar must see what the runtime is enforcing.
+        if let Some(rent) = updated_rent {
+            *self.rent.write().expect("rent lock poisoned") = rent;
+            if let Some(ref sysvars) = self.sysvars {
+                sysvars.set_rent(rent);
+            }
+        }
+
+        self.run_core_bpf_migrations(&migrations, relax_programdata_check);
+    }
+
+    /// Turn the named builtins into core BPF programs.
+    ///
+    /// Each migration is independent: one declining leaves the others alone,
+    /// and a decline is the normal outcome, because the bytecode has to have
+    /// been uploaded to a fixed buffer address beforehand and on most chains it
+    /// never was.
+    fn run_core_bpf_migrations(
+        &self,
+        migrations: &[core_bpf_migration::CoreBpfMigration],
+        relax_programdata_check: bool,
+    ) {
+        if migrations.is_empty() {
+            return;
+        }
+        let rent = self.rent();
+
+        for config in migrations {
+            let accounts = &self.accounts;
+            let outcome = core_bpf_migration::migrate(
+                config,
+                self.slot,
+                &rent,
+                relax_programdata_check,
+                &|pubkey| accounts.get_published_account(pubkey),
+            );
+
+            // A decline leaves the chain exactly as it was, and is expected
+            // rather than exceptional: the bytecode has to have been uploaded
+            // to a fixed buffer address beforehand, and on most chains it never
+            // was. The account state is the record of which outcome happened —
+            // this crate carries no logger.
+            let Ok(outcome) = outcome else {
+                continue;
+            };
+
+            for (pubkey, account) in &outcome.writes {
+                let previous = self.accounts.get_published_account(pubkey);
+                self.update_account_hash(pubkey, previous.as_ref(), account);
+                self.accounts
+                    .store_published_account(*pubkey, account.clone());
+            }
+
+            // The old accounts' lamports are destroyed and the new ones minted,
+            // so supply moves by the difference rather than by either side.
+            let burned = outcome.lamports_burned;
+            let funded = outcome.lamports_funded;
+            if burned > funded {
+                self.capitalization
+                    .fetch_sub(burned - funded, Ordering::Relaxed);
+            } else if funded > burned {
+                self.capitalization
+                    .fetch_add(funded - burned, Ordering::Relaxed);
+            }
         }
     }
 
@@ -1543,7 +1630,7 @@ impl Bank {
         // After adding fees, account must be rent-exempt
         // (lamports always increase, data size unchanged, so just check post-state)
         let post_lamports = account.meta.lamports.saturating_add(1);
-        let min_balance = self.rent.minimum_balance(account.data.len());
+        let min_balance = self.rent().minimum_balance(account.data.len());
         post_lamports >= min_balance
     }
 
@@ -1582,8 +1669,8 @@ impl Bank {
         self.capitalization.store(capitalization, Ordering::Relaxed);
     }
 
-    pub fn rent(&self) -> &Rent {
-        &self.rent
+    pub fn rent(&self) -> Rent {
+        *self.rent.read().expect("rent lock poisoned")
     }
 
     pub fn inflation(&self) -> &Inflation {
@@ -1660,6 +1747,7 @@ impl Bank {
         let stake_summary = self.build_stake_summary_for_snapshot();
 
         let es = self.epoch_schedule.config();
+        let rent = self.rent();
 
         SnapshotBankState {
             recent_blockhashes,
@@ -1693,9 +1781,9 @@ impl Bank {
                 burn_percent: DEFAULT_FEE_BURN_PERCENT,
             },
             rent: RentConfig {
-                lamports_per_byte_year: self.rent.lamports_per_byte_year,
-                exemption_threshold: self.rent.exemption_threshold,
-                burn_percent: self.rent.burn_percent,
+                lamports_per_byte_year: rent.lamports_per_byte_year,
+                exemption_threshold: rent.exemption_threshold,
+                burn_percent: rent.burn_percent,
                 collector_epoch: self.epoch,
                 collector_slots_per_year: DEFAULT_SLOTS_PER_YEAR,
             },
@@ -2530,6 +2618,175 @@ mod tests {
         // Should not panic — feature activation runs but no features are pending
         let result = child.finish_slot().unwrap();
         assert!(result.epoch_boundary);
+    }
+
+    #[test]
+    fn epoch_boundary_applies_a_rent_activation_hook_to_bank_and_sysvar() {
+        let accounts = Arc::new(AccountDatabase::new());
+        let epoch_schedule = Arc::new(EpochSchedule::default());
+        let leader_schedule = create_test_leader_schedule(0);
+
+        let mut parent = Bank::new_genesis_with_config(
+            accounts.clone(),
+            epoch_schedule.clone(),
+            leader_schedule,
+            1_000_000_000_000,
+            Rent::default(),
+            Inflation::default(),
+        );
+
+        // Every known feature starts inactive, and only the one whose account
+        // exists activates — so this exercises the real selection path rather
+        // than a hand-placed activation.
+        parent.set_feature_set(Arc::new(RwLock::new(FeatureSet::with_known_features())));
+        accounts.store_published_account(
+            crate::features::known_features::deprecate_rent_exemption_threshold(),
+            Account::new(1, vec![1u8], karstflow_ids::FEATURE_PROGRAM_ID),
+        );
+
+        assert_eq!(parent.rent().lamports_per_byte_year, 3_480);
+        assert_eq!(parent.rent().exemption_threshold, 2.0);
+
+        let slot = epoch_schedule.get_first_slot_in_epoch(1);
+        let child = Bank::new_from_parent(&parent, slot, create_test_leader_schedule(1));
+        for _ in 0..TICKS_PER_SLOT {
+            child.register_tick().unwrap();
+        }
+        child.finish_slot().unwrap();
+
+        assert_eq!(child.rent().lamports_per_byte_year, 6_960);
+        assert_eq!(child.rent().exemption_threshold, 1.0);
+
+        // The sysvar has to move with the bank: a client sizing an account from
+        // the sysvar must get the number the runtime will enforce.
+        let sysvar_rent = child.sysvar_cache().expect("sysvar cache").rent();
+        assert_eq!(sysvar_rent.lamports_per_byte_year, 6_960);
+        assert_eq!(sysvar_rent.exemption_threshold, 1.0);
+    }
+
+    #[test]
+    fn an_epoch_boundary_runs_a_core_bpf_migration_that_has_its_buffer() {
+        // R8's hooks nearly shipped as dead code because nothing called them.
+        // This asserts the migration runs from the bank's activation path, not
+        // merely that the module computes the right answer in isolation.
+        let accounts = Arc::new(AccountDatabase::new());
+        let epoch_schedule = Arc::new(EpochSchedule::default());
+
+        let mut parent = Bank::new_genesis_with_config(
+            accounts.clone(),
+            epoch_schedule.clone(),
+            create_test_leader_schedule(0),
+            1_000_000_000_000,
+            Rent::default(),
+            Inflation::default(),
+        );
+
+        // Every feature starts inactive and only the one whose account exists
+        // activates, so the real selection path runs (QB-042: the default dev
+        // environment activates everything at slot 0 and would prove nothing).
+        parent.set_feature_set(Arc::new(RwLock::new(FeatureSet::with_known_features())));
+        let migration = crate::features::core_bpf_migration::configured_migrations()
+            .into_iter()
+            .find(|config| config.verified_build_hash.is_none())
+            .expect("a migration without a pinned build hash");
+        accounts.store_published_account(
+            migration.feature_id,
+            Account::new(1, vec![1u8], karstflow_ids::FEATURE_PROGRAM_ID),
+        );
+
+        // The bytecode has to already be on chain for a migration to have
+        // anything to migrate.
+        let elf = vec![0xEDu8; 96];
+        let mut buffer_data =
+            karstflow_types::UpgradeableLoaderState::Buffer { authority: None }.serialize();
+        buffer_data.extend_from_slice(&elf);
+        accounts.store_published_account(
+            migration.source_buffer,
+            Account::new(5_000, buffer_data, karstflow_ids::BPF_LOADER_PROGRAM_ID),
+        );
+
+        assert!(
+            accounts
+                .get_published_account(&migration.program_id)
+                .is_none(),
+            "a stateless target starts with no account"
+        );
+
+        let slot = epoch_schedule.get_first_slot_in_epoch(1);
+        let child = Bank::new_from_parent(&parent, slot, create_test_leader_schedule(1));
+        for _ in 0..TICKS_PER_SLOT {
+            child.register_tick().unwrap();
+        }
+        child.finish_slot().unwrap();
+
+        let program = accounts
+            .get_published_account(&migration.program_id)
+            .expect("the migrated program account");
+        assert!(program.meta.executable);
+        assert_eq!(program.meta.owner, karstflow_ids::BPF_LOADER_PROGRAM_ID);
+
+        let state =
+            karstflow_types::UpgradeableLoaderState::deserialize(program.data.as_slice()).unwrap();
+        let karstflow_types::UpgradeableLoaderState::Program {
+            programdata_address,
+        } = state
+        else {
+            panic!("expected a Program state, got {state:?}");
+        };
+
+        let programdata = accounts
+            .get_published_account(&programdata_address)
+            .expect("the programdata account");
+        assert_eq!(
+            &programdata.data.as_slice()
+                [karstflow_constants::bpf_loader_program::SIZE_OF_PROGRAMDATA_METADATA..],
+            &elf[..],
+            "the migrated bytecode is the buffer's"
+        );
+
+        let drained = accounts
+            .get_published_account(&migration.source_buffer)
+            .expect("the buffer account still exists");
+        assert_eq!(drained.meta.lamports, 0, "the source buffer is drained");
+    }
+
+    #[test]
+    fn a_core_bpf_migration_without_its_buffer_leaves_the_chain_alone() {
+        // The ordinary outcome on any chain that never received the upload.
+        let accounts = Arc::new(AccountDatabase::new());
+        let epoch_schedule = Arc::new(EpochSchedule::default());
+
+        let mut parent = Bank::new_genesis_with_config(
+            accounts.clone(),
+            epoch_schedule.clone(),
+            create_test_leader_schedule(0),
+            1_000_000_000_000,
+            Rent::default(),
+            Inflation::default(),
+        );
+        parent.set_feature_set(Arc::new(RwLock::new(FeatureSet::with_known_features())));
+        let migration = crate::features::core_bpf_migration::configured_migrations()
+            .into_iter()
+            .next()
+            .expect("at least one migration");
+        accounts.store_published_account(
+            migration.feature_id,
+            Account::new(1, vec![1u8], karstflow_ids::FEATURE_PROGRAM_ID),
+        );
+
+        let slot = epoch_schedule.get_first_slot_in_epoch(1);
+        let child = Bank::new_from_parent(&parent, slot, create_test_leader_schedule(1));
+        for _ in 0..TICKS_PER_SLOT {
+            child.register_tick().unwrap();
+        }
+        child.finish_slot().unwrap();
+
+        assert!(
+            accounts
+                .get_published_account(&migration.program_id)
+                .is_none(),
+            "no buffer, no migration, no account"
+        );
     }
 
     #[test]

@@ -2929,6 +2929,22 @@ impl BankAccessProvider for ConsensusBankAccessProvider {
             .unwrap_or(karstflow_constants::economics::LAMPORTS_PER_SIGNATURE)
     }
 
+    fn is_feature_active(
+        &self,
+        feature_id: &karstflow_types::Pubkey,
+        commitment: karstflow_rpc::RpcCommitment,
+    ) -> bool {
+        self.bank_for_commitment(commitment)
+            .and_then(|bank| bank.feature_set().cloned())
+            .map(|features| {
+                features
+                    .read()
+                    .expect("feature_set lock poisoned")
+                    .is_active(feature_id)
+            })
+            .unwrap_or(false)
+    }
+
     fn get_last_valid_block_height(&self, commitment: karstflow_rpc::RpcCommitment) -> u64 {
         self.get_block_height(commitment)
             .saturating_add(karstflow_constants::ledger::RECENT_BLOCKHASH_VALIDITY_WINDOW)

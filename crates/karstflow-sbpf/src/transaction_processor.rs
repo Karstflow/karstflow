@@ -17,7 +17,7 @@ use karstflow_constants::{
 use karstflow_ids::{
     features::{
         is_feature_active, ENABLE_LOADER_V4, ENABLE_SECP256R1_PRECOMPILE,
-        ZK_ELGAMAL_PROOF_PROGRAM_ENABLED,
+        ENSHRINE_SLASHING_PROGRAM, ZK_ELGAMAL_PROOF_PROGRAM_ENABLED,
     },
     ADDRESS_LOOKUP_TABLE_PROGRAM_ID, ASSOCIATED_TOKEN_PROGRAM_ID, BPF_LOADER_DEPRECATED_PROGRAM_ID,
     BPF_LOADER_PROGRAM_ID, BPF_LOADER_V2_PROGRAM_ID, COMPUTE_BUDGET_PROGRAM_ID, CONFIG_PROGRAM_ID,
@@ -523,6 +523,12 @@ impl TransactionProcessor {
                 .execute(context)
                 .unwrap_or_else(|err| ExecutionOutcome::failure(750, err))
         } else if context.program_id == SLASHING_PROGRAM_ID {
+            // The slashing program requires the enshrine_slashing_program feature gate.
+            if let Some(rejection) =
+                self.reject_if_feature_inactive(context, &ENSHRINE_SLASHING_PROGRAM, "Slashing")
+            {
+                return rejection;
+            }
             self.slashing_program
                 .execute(context)
                 .unwrap_or_else(|err| ExecutionOutcome::failure(2500, err))
@@ -1186,6 +1192,45 @@ mod tests {
         // LoaderV4 with empty data may succeed or fail depending on implementation,
         // but the point is it DISPATCHES (not rejected by feature gate).
         // Check it didn't fail with the feature gate message.
+        if !outcome.success {
+            assert!(!outcome.logs[0].contains("not available"));
+        }
+    }
+
+    #[test]
+    fn slashing_program_rejected_when_feature_inactive() {
+        let processor = TransactionProcessor::new();
+        let ctx = context_with_features(SLASHING_PROGRAM_ID, std::collections::HashSet::new());
+
+        let outcome = processor.execute_instruction(&ctx);
+
+        assert!(!outcome.success);
+        assert!(outcome.logs[0].contains("not available"));
+        assert!(outcome.logs[0].contains("Slashing"));
+    }
+
+    #[test]
+    fn slashing_program_allowed_when_feature_active() {
+        let processor = TransactionProcessor::new();
+        let mut features = std::collections::HashSet::new();
+        features.insert(*ENSHRINE_SLASHING_PROGRAM.as_bytes());
+        let ctx = context_with_features(SLASHING_PROGRAM_ID, features);
+
+        let outcome = processor.execute_instruction(&ctx);
+
+        if !outcome.success {
+            assert!(!outcome.logs[0].contains("not available"));
+        }
+    }
+
+    #[test]
+    fn slashing_program_allowed_without_snapshot() {
+        let processor = TransactionProcessor::new();
+        let ctx = ExecutionContext::new(SLASHING_PROGRAM_ID, vec![], vec![])
+            .with_compute_budget(MAX_COMPUTE_UNITS);
+
+        let outcome = processor.execute_instruction(&ctx);
+
         if !outcome.success {
             assert!(!outcome.logs[0].contains("not available"));
         }

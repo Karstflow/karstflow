@@ -336,3 +336,49 @@ fn build_replay_service_with_consensus_creates_service() {
     );
     assert_eq!(bundle.service.name(), "replay-service");
 }
+
+#[test]
+fn development_genesis_installs_core_programs_as_two_accounts() {
+    // The unit tests on `genesis_program_accounts` prove the pair is built
+    // correctly. This proves it survives installation: the bank must hold both
+    // accounts, and following the pointer from the one the runtime dispatches
+    // must reach the account holding the bytecode.
+    use crate::bootstrap::bootstrap_from_development_genesis;
+    use crate::program_binaries::programdata_address;
+    use karstflow_sbpf::UpgradeableLoaderState;
+
+    let bundle = bootstrap_from_development_genesis(None, None).unwrap();
+    let forks = bundle.bank_forks.read().unwrap();
+    let bank = forks.working_bank();
+
+    for program_id in [
+        karstflow_ids::ADDRESS_LOOKUP_TABLE_PROGRAM_ID,
+        karstflow_ids::CONFIG_PROGRAM_ID,
+        karstflow_ids::FEATURE_PROGRAM_ID,
+    ] {
+        let program = bank
+            .accounts()
+            .get_published_account(&program_id)
+            .unwrap_or_else(|| panic!("program account {program_id} missing from genesis"));
+
+        let state = UpgradeableLoaderState::deserialize(program.data.as_slice())
+            .unwrap_or_else(|e| panic!("program {program_id} is not a Program state: {e}"));
+        let UpgradeableLoaderState::Program {
+            programdata_address: pointer,
+        } = state
+        else {
+            panic!("program {program_id} holds {state:?}, not a pointer");
+        };
+        assert_eq!(pointer, programdata_address(&program_id));
+
+        let programdata = bank
+            .accounts()
+            .get_published_account(&pointer)
+            .unwrap_or_else(|| panic!("programdata account for {program_id} missing"));
+        assert!(
+            programdata.data.as_slice().len()
+                > karstflow_constants::bpf_loader_program::SIZE_OF_PROGRAMDATA_METADATA,
+            "programdata for {program_id} carries no bytecode"
+        );
+    }
+}
