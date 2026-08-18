@@ -15,10 +15,22 @@ pub const SLOTS_PER_WINDOW: u64 = 4;
 /// Number of slots in an epoch.
 pub const SLOTS_PER_EPOCH: u64 = 18_000;
 
+/// Validator Admission Ticket cap.
+pub const VAT_MAX: u64 = 2_000;
+/// Maximum distinct block hashes one slot may equivocate over.
+pub const BLOCK_HASH_EQVOC_MAX: u64 = 7;
+/// Maximum notarize-fallback votes a validator may cast in one slot.
+pub const NOTAR_FALLBACK_VOTE_MAX: u64 = 3;
+/// Maximum notarize-fallback certificates one slot may carry.
+pub const NOTAR_FALLBACK_CERT_MAX: u64 = 4;
+
 /// `DELTA` = 250 ms (base network delay unit), in nanoseconds.
 pub const DELTA_NS: i64 = 250_000_000;
-/// `DELTA_BLOCK` = 400 ms, in nanoseconds.
-pub const DELTA_BLOCK_NS: i64 = 400_000_000;
+/// `DELTA_BLOCK` = 200 ms, in nanoseconds — the target slot time.
+///
+/// Halved from 400 ms upstream alongside the slot-time reduction ladder; the
+/// protocol's block-arrival deadline tracks the slot time it is derived from.
+pub const DELTA_BLOCK_NS: i64 = 200_000_000;
 /// `DELTA_FIRST_SLICE` = 10 ms, in nanoseconds.
 pub const DELTA_FIRST_SLICE_NS: i64 = 10_000_000;
 /// `DELTA_TIMEOUT` = 3 × DELTA = 750 ms, in nanoseconds.
@@ -181,5 +193,38 @@ mod tests {
         assert_eq!(a, b);
         assert_ne!(a, c);
         assert_eq!(BlockId::genesis(0).hash, GENESIS_BLOCK_HASH);
+    }
+
+    /// Protocol constants are pinned so a re-baseline sees drift instead of
+    /// inheriting it silently. Values are those of the upstream engine as landed
+    /// on its mainline (2026-08-18 re-baseline); `DELTA_BLOCK` in particular
+    /// halved from 400 ms to 200 ms and would otherwise have gone unnoticed,
+    /// since nothing in this crate reads it yet.
+    #[test]
+    fn protocol_constants_match_the_upstream_engine() {
+        assert_eq!(SLOTS_PER_WINDOW, 4);
+        assert_eq!(SLOTS_PER_EPOCH, 18_000);
+        assert_eq!(VAT_MAX, 2_000);
+        assert_eq!(BLOCK_HASH_EQVOC_MAX, 7);
+        assert_eq!(NOTAR_FALLBACK_VOTE_MAX, 3);
+        assert_eq!(NOTAR_FALLBACK_CERT_MAX, 4);
+
+        assert_eq!(DELTA_NS, 250_000_000);
+        assert_eq!(DELTA_BLOCK_NS, 200_000_000);
+        assert_eq!(DELTA_FIRST_SLICE_NS, 10_000_000);
+        assert_eq!(DELTA_TIMEOUT_NS, 750_000_000);
+        assert_eq!(DELTA_STANDSTILL_NS, 10_000_000_000);
+
+        // 20 / 40 / 60 / 80 percent over a denominator of 5.
+        assert_eq!(
+            (
+                WEAKEST_QUORUM_NUMER,
+                WEAK_QUORUM_NUMER,
+                QUORUM_NUMER,
+                STRONG_QUORUM_NUMER,
+                QUORUM_DENOM
+            ),
+            (1, 2, 3, 4, 5)
+        );
     }
 }
