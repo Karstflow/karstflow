@@ -63,6 +63,11 @@ integration:
 conformance:
   cargo test -p karstflow-conformance -- --ignored --test-threads=1
 
+# Replay the upstream conformance-vector corpus. Needs KARSTFLOW_TEST_VECTORS
+# pointing at the corpus root; without it the tests report a skip and pass.
+conformance-vectors:
+  cargo test -p karstflow-conformance vector_conformance -- --ignored --test-threads=1 --nocapture
+
 # Initialize a local multi-validator cluster (default: 3 nodes, output: cluster-data/)
 cluster-init n="3" dir="cluster-data":
   cargo run -p karstflow-node -- genesis cluster {{n}} --output-dir {{dir}}
