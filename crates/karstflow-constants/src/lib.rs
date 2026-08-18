@@ -333,17 +333,10 @@ pub mod vote_program {
     pub const VOTE_STATE_V3_SIZE: usize = 3762;
     pub const VOTE_STATE_V4_SIZE: usize = 3762;
 
-    // Default compute units consumed by vote program.
+    /// Compute units the vote program charges for any instruction. The charge
+    /// is flat: the same for every discriminant and the same whether the
+    /// instruction succeeds or fails.
     pub const DEFAULT_COMPUTE_UNITS: u64 = 2100;
-
-    // Vote program compute costs
-    pub const COMPUTE_COST_INITIALIZE: u64 = 500;
-    pub const COMPUTE_COST_VOTE: u64 = 800;
-    pub const COMPUTE_COST_UPDATE_VOTE_STATE: u64 = 1200;
-    pub const COMPUTE_COST_WITHDRAW: u64 = 400;
-    pub const COMPUTE_COST_UPDATE_COMMISSION: u64 = 300;
-    pub const COMPUTE_COST_AUTHORIZE: u64 = 350;
-    pub const COMPUTE_COST_BASE_INSTRUCTION: u64 = 200;
 
     /// Compute units charged for a BLS proof-of-possession verification
     /// during InitializeAccountV2 (Alpenglow vote-account BLS groundwork).
@@ -374,16 +367,10 @@ pub mod system_program {
     pub const MAX_ACCOUNT_DATA_SIZE: u64 = 10 * 1024 * 1024; // 10 MB
     pub const MAX_SEED_LENGTH: usize = 32;
 
-    // Instruction compute costs
+    /// Compute units the system program charges for any instruction. The
+    /// charge is flat: the same for every discriminant and the same whether
+    /// the instruction succeeds or fails.
     pub const COMPUTE_COST_BASE: u64 = 150;
-    pub const COMPUTE_COST_CREATE_ACCOUNT: u64 = 500;
-    pub const COMPUTE_COST_TRANSFER: u64 = 300;
-    pub const COMPUTE_COST_ASSIGN: u64 = 200;
-    pub const COMPUTE_COST_ALLOCATE: u64 = 400;
-    pub const COMPUTE_COST_NONCE_ADVANCE: u64 = 300;
-    pub const COMPUTE_COST_NONCE_WITHDRAW: u64 = 400;
-    pub const COMPUTE_COST_NONCE_INITIALIZE: u64 = 500;
-    pub const COMPUTE_COST_NONCE_AUTHORIZE: u64 = 300;
 }
 
 pub mod stake_program {

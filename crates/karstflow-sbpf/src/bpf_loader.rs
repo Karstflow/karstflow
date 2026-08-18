@@ -227,19 +227,19 @@ impl UpgradeableLoaderState {
 /// Handles all 9 protocol instruction types: InitializeBuffer, Write,
 /// DeployWithMaxDataLen, Upgrade, SetAuthority, Close, ExtendProgram,
 /// SetAuthorityChecked, and ExtendProgramChecked.
-#[derive(Debug, Clone)]
-pub struct BpfLoaderExecutor {
-    base_cost: u64,
-}
+#[derive(Debug, Clone, Default)]
+pub struct BpfLoaderExecutor;
 
 impl BpfLoaderExecutor {
-    pub fn new(base_cost: u64) -> Self {
-        Self { base_cost }
+    pub fn new() -> Self {
+        Self
     }
 
     pub fn execute(&self, context: &ExecutionContext) -> Result<ExecutionOutcome, String> {
         if context.instruction_data.is_empty() {
-            return Ok(ExecutionOutcome::success(self.base_cost));
+            return Ok(ExecutionOutcome::success(
+                constants::UPGRADEABLE_LOADER_COMPUTE_UNITS,
+            ));
         }
 
         if context.instruction_data.len() < 4 {
@@ -255,34 +255,31 @@ impl BpfLoaderExecutor {
         let mut modified_accounts = HashMap::new();
         let mut logs = Vec::new();
 
-        let compute_used = match disc {
+        // Flat per-instruction charge: the same for every discriminant, and
+        // charged whether the instruction succeeds or fails.
+        let compute_used = constants::UPGRADEABLE_LOADER_COMPUTE_UNITS;
+
+        match disc {
             constants::INSTRUCTION_INITIALIZE_BUFFER => {
                 self.execute_initialize_buffer(context, &mut modified_accounts, &mut logs)?;
-                constants::COMPUTE_COST_INITIALIZE_BUFFER
             }
             constants::INSTRUCTION_WRITE => {
                 self.execute_write(context, &mut modified_accounts, &mut logs)?;
-                constants::COMPUTE_COST_WRITE
             }
             constants::INSTRUCTION_DEPLOY_WITH_MAX_DATA_LEN => {
                 self.execute_deploy(context, &mut modified_accounts, &mut logs)?;
-                constants::COMPUTE_COST_DEPLOY
             }
             constants::INSTRUCTION_UPGRADE => {
                 self.execute_upgrade(context, &mut modified_accounts, &mut logs)?;
-                constants::COMPUTE_COST_UPGRADE
             }
             constants::INSTRUCTION_SET_AUTHORITY => {
                 self.execute_set_authority(context, &mut modified_accounts, &mut logs)?;
-                constants::COMPUTE_COST_SET_AUTHORITY
             }
             constants::INSTRUCTION_CLOSE => {
                 self.execute_close(context, &mut modified_accounts, &mut logs)?;
-                constants::COMPUTE_COST_CLOSE
             }
             constants::INSTRUCTION_EXTEND_PROGRAM => {
                 self.execute_extend_program(context, &mut modified_accounts, &mut logs)?;
-                constants::COMPUTE_COST_EXTEND_PROGRAM
             }
             constants::INSTRUCTION_SET_AUTHORITY_CHECKED => {
                 // Requires enable_bpf_loader_set_authority_checked_ix feature gate.
@@ -298,7 +295,6 @@ impl BpfLoaderExecutor {
                     }
                 }
                 self.execute_set_authority_checked(context, &mut modified_accounts, &mut logs)?;
-                constants::COMPUTE_COST_SET_AUTHORITY_CHECKED
             }
             constants::INSTRUCTION_EXTEND_PROGRAM_CHECKED => {
                 // Requires enable_extend_program_checked feature gate.
@@ -311,7 +307,6 @@ impl BpfLoaderExecutor {
                     }
                 }
                 self.execute_extend_program(context, &mut modified_accounts, &mut logs)?;
-                constants::COMPUTE_COST_EXTEND_PROGRAM
             }
             _ => {
                 return Err(format!("Unknown BPF loader instruction: {}", disc));
@@ -1300,9 +1295,39 @@ mod tests {
 
     // ── InitializeBuffer tests ──────────────────────────────────────────
 
+    /// One flat cost for every discriminant, charged on both the success and
+    /// the failure path. The executor previously charged a per-instruction
+    /// surcharge ranging from 500 to 2000 where the protocol charges 2370.
+    #[test]
+    fn every_discriminant_charges_the_same_flat_cost() {
+        let executor = BpfLoaderExecutor::new();
+
+        for discriminant in 0u32..=9 {
+            let mut data = discriminant.to_le_bytes().to_vec();
+            data.extend_from_slice(&[0u8; 32]);
+
+            let context = ExecutionContext::new(
+                BPF_LOADER_PROGRAM_ID,
+                vec![
+                    (Pubkey::new_unique(), Account::default(), true),
+                    (Pubkey::new_unique(), Account::default(), true),
+                ],
+                data,
+            );
+
+            if let Ok(outcome) = executor.execute(&context) {
+                assert_eq!(
+                    outcome.compute_units_consumed,
+                    constants::UPGRADEABLE_LOADER_COMPUTE_UNITS,
+                    "discriminant {discriminant} charged a different cost"
+                );
+            }
+        }
+    }
+
     #[test]
     fn initialize_buffer_sets_authority() {
-        let executor = BpfLoaderExecutor::new(150);
+        let executor = BpfLoaderExecutor::new();
         let buffer_pubkey = Pubkey::new_unique();
         let authority = Pubkey::new_unique();
 
@@ -1326,7 +1351,7 @@ mod tests {
         assert!(outcome.success);
         assert_eq!(
             outcome.compute_units_consumed,
-            constants::COMPUTE_COST_INITIALIZE_BUFFER
+            constants::UPGRADEABLE_LOADER_COMPUTE_UNITS
         );
 
         let modified = &outcome.modified_accounts[&buffer_pubkey];
@@ -1341,7 +1366,7 @@ mod tests {
 
     #[test]
     fn initialize_buffer_rejects_already_initialized() {
-        let executor = BpfLoaderExecutor::new(150);
+        let executor = BpfLoaderExecutor::new();
         let authority = Pubkey::new_unique();
         let buffer_account = make_buffer_account(authority, 100);
 
@@ -1367,7 +1392,7 @@ mod tests {
 
     #[test]
     fn write_stores_data_at_offset() {
-        let executor = BpfLoaderExecutor::new(150);
+        let executor = BpfLoaderExecutor::new();
         let buffer_pubkey = Pubkey::new_unique();
         let authority = Pubkey::new_unique();
         let buffer_account = make_buffer_account(authority, 100);
@@ -1402,7 +1427,7 @@ mod tests {
 
     #[test]
     fn write_rejects_wrong_authority() {
-        let executor = BpfLoaderExecutor::new(150);
+        let executor = BpfLoaderExecutor::new();
         let authority = Pubkey::new_unique();
         let wrong_authority = Pubkey::new_unique();
         let buffer_account = make_buffer_account(authority, 100);
@@ -1428,7 +1453,7 @@ mod tests {
 
     #[test]
     fn write_rejects_overflow() {
-        let executor = BpfLoaderExecutor::new(150);
+        let executor = BpfLoaderExecutor::new();
         let authority = Pubkey::new_unique();
         let buffer_account = make_buffer_account(authority, 10); // Only 10 bytes for ELF
 
@@ -1455,7 +1480,7 @@ mod tests {
 
     #[test]
     fn deploy_creates_program_and_programdata() {
-        let executor = BpfLoaderExecutor::new(150);
+        let executor = BpfLoaderExecutor::new();
         let authority = Pubkey::new_unique();
         let program_pubkey = Pubkey::new_unique();
         let programdata_pubkey = Pubkey::new_unique();
@@ -1554,7 +1579,7 @@ mod tests {
 
     #[test]
     fn simd0500_rejects_sub_v3_deploy_when_active() {
-        let executor = BpfLoaderExecutor::new(150);
+        let executor = BpfLoaderExecutor::new();
         let context = deploy_context_with_version(0, true);
         let result = executor.execute(&context);
         assert!(result.is_err());
@@ -1563,7 +1588,7 @@ mod tests {
 
     #[test]
     fn simd0500_allows_v3_deploy_when_active() {
-        let executor = BpfLoaderExecutor::new(150);
+        let executor = BpfLoaderExecutor::new();
         let context = deploy_context_with_version(SBPF_VERSION_V3, true);
         let outcome = executor.execute(&context).unwrap();
         assert!(outcome.success);
@@ -1571,7 +1596,7 @@ mod tests {
 
     #[test]
     fn simd0500_allows_sub_v3_deploy_when_inactive() {
-        let executor = BpfLoaderExecutor::new(150);
+        let executor = BpfLoaderExecutor::new();
         let context = deploy_context_with_version(0, false);
         let outcome = executor.execute(&context).unwrap();
         assert!(outcome.success);
@@ -1579,7 +1604,7 @@ mod tests {
 
     #[test]
     fn deploy_rejects_already_initialized_program() {
-        let executor = BpfLoaderExecutor::new(150);
+        let executor = BpfLoaderExecutor::new();
         let authority = Pubkey::new_unique();
         let programdata_pubkey = Pubkey::new_unique();
 
@@ -1611,7 +1636,7 @@ mod tests {
 
     #[test]
     fn upgrade_replaces_program_data() {
-        let executor = BpfLoaderExecutor::new(150);
+        let executor = BpfLoaderExecutor::new();
         let authority = Pubkey::new_unique();
         let programdata_pubkey = Pubkey::new_unique();
 
@@ -1653,7 +1678,7 @@ mod tests {
 
     #[test]
     fn upgrade_rejects_immutable_program() {
-        let executor = BpfLoaderExecutor::new(150);
+        let executor = BpfLoaderExecutor::new();
         let authority = Pubkey::new_unique();
         let programdata_pubkey = Pubkey::new_unique();
 
@@ -1684,7 +1709,7 @@ mod tests {
 
     #[test]
     fn set_authority_on_buffer() {
-        let executor = BpfLoaderExecutor::new(150);
+        let executor = BpfLoaderExecutor::new();
         let old_authority = Pubkey::new_unique();
         let new_authority = Pubkey::new_unique();
         let buffer_pubkey = Pubkey::new_unique();
@@ -1717,7 +1742,7 @@ mod tests {
 
     #[test]
     fn set_authority_makes_program_immutable() {
-        let executor = BpfLoaderExecutor::new(150);
+        let executor = BpfLoaderExecutor::new();
         let authority = Pubkey::new_unique();
         let pd_pubkey = Pubkey::new_unique();
         let pd_account = make_programdata_account(100, Some(authority), 200);
@@ -1751,7 +1776,7 @@ mod tests {
 
     #[test]
     fn set_authority_rejects_wrong_authority() {
-        let executor = BpfLoaderExecutor::new(150);
+        let executor = BpfLoaderExecutor::new();
         let authority = Pubkey::new_unique();
         let wrong = Pubkey::new_unique();
         let buffer_account = make_buffer_account(authority, 100);
@@ -1777,7 +1802,7 @@ mod tests {
 
     #[test]
     fn set_authority_checked_requires_both_signers() {
-        let executor = BpfLoaderExecutor::new(150);
+        let executor = BpfLoaderExecutor::new();
         let old_auth = Pubkey::new_unique();
         let new_auth = Pubkey::new_unique();
         let buffer_pubkey = Pubkey::new_unique();
@@ -1814,7 +1839,7 @@ mod tests {
 
     #[test]
     fn close_buffer_transfers_lamports() {
-        let executor = BpfLoaderExecutor::new(150);
+        let executor = BpfLoaderExecutor::new();
         let authority = Pubkey::new_unique();
         let buffer_pubkey = Pubkey::new_unique();
         let recipient_pubkey = Pubkey::new_unique();
@@ -1849,7 +1874,7 @@ mod tests {
 
     #[test]
     fn close_rejects_immutable_buffer() {
-        let executor = BpfLoaderExecutor::new(150);
+        let executor = BpfLoaderExecutor::new();
         let buffer_pubkey = Pubkey::new_unique();
 
         // Buffer with no authority
@@ -1885,7 +1910,7 @@ mod tests {
 
     #[test]
     fn close_rejects_same_recipient() {
-        let executor = BpfLoaderExecutor::new(150);
+        let executor = BpfLoaderExecutor::new();
         let authority = Pubkey::new_unique();
         let account_pubkey = Pubkey::new_unique();
         let buffer_account = make_buffer_account(authority, 100);
@@ -1911,7 +1936,7 @@ mod tests {
 
     #[test]
     fn extend_program_increases_data_len() {
-        let executor = BpfLoaderExecutor::new(150);
+        let executor = BpfLoaderExecutor::new();
         let authority = Pubkey::new_unique();
         let pd_pubkey = Pubkey::new_unique();
 
@@ -1940,7 +1965,7 @@ mod tests {
 
     #[test]
     fn extend_program_rejects_zero_bytes() {
-        let executor = BpfLoaderExecutor::new(150);
+        let executor = BpfLoaderExecutor::new();
         let authority = Pubkey::new_unique();
         let pd_pubkey = Pubkey::new_unique();
 
@@ -1966,7 +1991,7 @@ mod tests {
 
     #[test]
     fn extend_program_rejects_immutable() {
-        let executor = BpfLoaderExecutor::new(150);
+        let executor = BpfLoaderExecutor::new();
         let pd_pubkey = Pubkey::new_unique();
 
         let pd_account = make_programdata_account(50, None, 100); // No authority
@@ -1993,7 +2018,7 @@ mod tests {
 
     #[test]
     fn full_lifecycle_initialize_write_deploy_upgrade_close() {
-        let executor = BpfLoaderExecutor::new(150);
+        let executor = BpfLoaderExecutor::new();
         let authority = Pubkey::new_unique();
         let buffer_pubkey = Pubkey::new_unique();
         let program_pubkey = Pubkey::new_unique();
@@ -2124,7 +2149,7 @@ mod tests {
 
     #[test]
     fn unknown_instruction_rejected() {
-        let executor = BpfLoaderExecutor::new(150);
+        let executor = BpfLoaderExecutor::new();
         let instruction_data = 255u32.to_le_bytes().to_vec();
         let context = ExecutionContext::new(
             BPF_LOADER_PROGRAM_ID,
@@ -2137,7 +2162,7 @@ mod tests {
 
     #[test]
     fn empty_instruction_returns_success() {
-        let executor = BpfLoaderExecutor::new(150);
+        let executor = BpfLoaderExecutor::new();
         let context = ExecutionContext::new(
             BPF_LOADER_PROGRAM_ID,
             vec![(Pubkey::new_unique(), Account::default(), true)],
@@ -2145,12 +2170,15 @@ mod tests {
         );
         let outcome = executor.execute(&context).unwrap();
         assert!(outcome.success);
-        assert_eq!(outcome.compute_units_consumed, 150);
+        assert_eq!(
+            outcome.compute_units_consumed,
+            constants::UPGRADEABLE_LOADER_COMPUTE_UNITS
+        );
     }
 
     #[test]
     fn instruction_data_too_short_rejected() {
-        let executor = BpfLoaderExecutor::new(150);
+        let executor = BpfLoaderExecutor::new();
         let context = ExecutionContext::new(
             BPF_LOADER_PROGRAM_ID,
             vec![(Pubkey::new_unique(), Account::default(), true)],
@@ -2191,7 +2219,7 @@ mod tests {
 
     #[test]
     fn set_authority_checked_rejected_without_feature() {
-        let executor = BpfLoaderExecutor::new(150);
+        let executor = BpfLoaderExecutor::new();
         let ctx = context_with_disc_and_features(
             constants::INSTRUCTION_SET_AUTHORITY_CHECKED,
             std::collections::HashSet::new(),
@@ -2204,7 +2232,7 @@ mod tests {
 
     #[test]
     fn set_authority_checked_allowed_with_feature() {
-        let executor = BpfLoaderExecutor::new(150);
+        let executor = BpfLoaderExecutor::new();
         let mut features = std::collections::HashSet::new();
         features.insert(*ENABLE_BPF_LOADER_SET_AUTHORITY_CHECKED.as_bytes());
         let ctx =
@@ -2220,7 +2248,7 @@ mod tests {
 
     #[test]
     fn extend_program_checked_rejected_without_feature() {
-        let executor = BpfLoaderExecutor::new(150);
+        let executor = BpfLoaderExecutor::new();
         let ctx = context_with_disc_and_features(
             constants::INSTRUCTION_EXTEND_PROGRAM_CHECKED,
             std::collections::HashSet::new(),
@@ -2233,7 +2261,7 @@ mod tests {
 
     #[test]
     fn extend_program_checked_allowed_with_feature() {
-        let executor = BpfLoaderExecutor::new(150);
+        let executor = BpfLoaderExecutor::new();
         let mut features = std::collections::HashSet::new();
         features.insert(*ENABLE_EXTEND_PROGRAM_CHECKED.as_bytes());
         let ctx =
@@ -2281,7 +2309,7 @@ mod tests {
 
     #[test]
     fn extend_program_below_minimum_rejected_when_feature_active() {
-        let executor = BpfLoaderExecutor::new(150);
+        let executor = BpfLoaderExecutor::new();
         let mut features = std::collections::HashSet::new();
         features.insert(*LOADER_V3_MINIMUM_EXTEND_PROGRAM_SIZE.as_bytes());
         // 200 bytes < MINIMUM_EXTEND_PROGRAM_BYTES and far below headroom.
@@ -2296,7 +2324,7 @@ mod tests {
 
     #[test]
     fn extend_program_below_minimum_allowed_when_feature_inactive() {
-        let executor = BpfLoaderExecutor::new(150);
+        let executor = BpfLoaderExecutor::new();
         // Same sub-minimum request, but feature gate not active → legacy behavior.
         let (ctx, pd_pubkey) =
             extend_context_with_features(200, 100, std::collections::HashSet::new());
@@ -2312,7 +2340,7 @@ mod tests {
 
     #[test]
     fn extend_program_to_max_allowed_when_feature_active() {
-        let executor = BpfLoaderExecutor::new(150);
+        let executor = BpfLoaderExecutor::new();
         let mut features = std::collections::HashSet::new();
         features.insert(*LOADER_V3_MINIMUM_EXTEND_PROGRAM_SIZE.as_bytes());
         // old_len = MAX - 100, request exactly the 100-byte headroom: below the

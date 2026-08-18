@@ -23,18 +23,19 @@ const PUBLIC_KEY_SIZE: usize = 32;
 const ENTRY_HEADER_SIZE: usize = 14;
 
 /// Executor for the Ed25519 signature verification precompile.
-pub struct Ed25519PrecompileExecutor {
-    base_cost: u64,
-}
+#[derive(Default)]
+pub struct Ed25519PrecompileExecutor;
 
 impl Ed25519PrecompileExecutor {
-    pub fn new(base_cost: u64) -> Self {
-        Self { base_cost }
+    pub fn new() -> Self {
+        Self
     }
 
     pub fn execute(&self, ctx: &ExecutionContext) -> Result<ExecutionOutcome, String> {
         if ctx.instruction_data.is_empty() {
-            return Ok(ExecutionOutcome::success(self.base_cost));
+            return Ok(ExecutionOutcome::success(
+                precompiles::PRECOMPILE_COMPUTE_UNITS,
+            ));
         }
 
         if ctx.instruction_data.len() < 2 {
@@ -45,19 +46,14 @@ impl Ed25519PrecompileExecutor {
         let _padding = ctx.instruction_data[1]; // Must be 0, but we skip strict check
 
         if num_signatures == 0 {
-            return Ok(ExecutionOutcome::success(self.base_cost));
+            return Ok(ExecutionOutcome::success(
+                precompiles::PRECOMPILE_COMPUTE_UNITS,
+            ));
         }
 
-        // Calculate total compute cost
-        let compute_used = self
-            .base_cost
-            .saturating_add(precompiles::ED25519_VERIFY_COST)
-            .saturating_add(precompiles::ED25519_VERIFY_PER_SIGNATURE * num_signatures as u64);
-
-        // Check that compute budget is sufficient
-        if compute_used > ctx.compute_budget {
-            return Err("Ed25519: compute budget exceeded".to_string());
-        }
+        // A precompile instruction consumes no compute units: its
+        // signature verification is paid for by the transaction fee.
+        let compute_used = precompiles::PRECOMPILE_COMPUTE_UNITS;
 
         // Validate that we have enough data for the entry headers
         let min_data_len = 2 + num_signatures * ENTRY_HEADER_SIZE;
@@ -192,7 +188,7 @@ mod tests {
 
     #[test]
     fn verifies_valid_signature() {
-        let executor = Ed25519PrecompileExecutor::new(150);
+        let executor = Ed25519PrecompileExecutor::new();
 
         let signing_key = SigningKey::from_bytes(&[42u8; 32]);
         let message = b"hello world";
@@ -208,7 +204,7 @@ mod tests {
 
     #[test]
     fn rejects_invalid_signature() {
-        let executor = Ed25519PrecompileExecutor::new(150);
+        let executor = Ed25519PrecompileExecutor::new();
 
         let signing_key = SigningKey::from_bytes(&[42u8; 32]);
         let message = b"hello world";
@@ -226,8 +222,8 @@ mod tests {
     }
 
     #[test]
-    fn deducts_per_signature_cost() {
-        let executor = Ed25519PrecompileExecutor::new(150);
+    fn consumes_no_compute_units() {
+        let executor = Ed25519PrecompileExecutor::new();
 
         let signing_key = SigningKey::from_bytes(&[42u8; 32]);
         let message = b"test";
@@ -236,26 +232,30 @@ mod tests {
         let ctx = ExecutionContext::new(ED25519_PROGRAM_ID, vec![], instruction_data);
 
         let outcome = executor.execute(&ctx).unwrap();
-        let expected_cost =
-            150 + precompiles::ED25519_VERIFY_COST + precompiles::ED25519_VERIFY_PER_SIGNATURE;
-        assert_eq!(outcome.compute_units_consumed, expected_cost);
+        assert_eq!(
+            outcome.compute_units_consumed,
+            precompiles::PRECOMPILE_COMPUTE_UNITS
+        );
     }
 
     #[test]
     fn zero_signatures_succeeds() {
-        let executor = Ed25519PrecompileExecutor::new(150);
+        let executor = Ed25519PrecompileExecutor::new();
 
         let instruction_data = vec![0u8, 0u8]; // 0 signatures
         let ctx = ExecutionContext::new(ED25519_PROGRAM_ID, vec![], instruction_data);
 
         let outcome = executor.execute(&ctx).unwrap();
         assert!(outcome.success);
-        assert_eq!(outcome.compute_units_consumed, 150);
+        assert_eq!(
+            outcome.compute_units_consumed,
+            precompiles::PRECOMPILE_COMPUTE_UNITS
+        );
     }
 
     #[test]
     fn empty_instruction_succeeds() {
-        let executor = Ed25519PrecompileExecutor::new(150);
+        let executor = Ed25519PrecompileExecutor::new();
 
         let ctx = ExecutionContext::new(ED25519_PROGRAM_ID, vec![], vec![]);
         let outcome = executor.execute(&ctx).unwrap();

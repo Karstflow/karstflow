@@ -32,13 +32,12 @@ impl ComputeBudgetError {
 }
 
 /// Executor for Compute Budget program instructions.
-pub struct ComputeBudgetProgramExecutor {
-    base_cost: u64,
-}
+#[derive(Debug, Clone, Default)]
+pub struct ComputeBudgetProgramExecutor;
 
 impl ComputeBudgetProgramExecutor {
-    pub fn new(base_cost: u64) -> Self {
-        Self { base_cost }
+    pub fn new() -> Self {
+        Self
     }
 
     pub fn execute(&self, ctx: &ExecutionContext) -> Result<ExecutionOutcome, String> {
@@ -47,7 +46,9 @@ impl ComputeBudgetProgramExecutor {
         }
 
         let instruction_type = ctx.instruction_data[0];
-        let compute_used = self.base_cost.saturating_add(constants::COMPUTE_COST_BASE);
+        // Flat per-instruction charge: the same for every discriminant, and
+        // charged whether the instruction succeeds or fails.
+        let compute_used = constants::COMPUTE_COST_BASE;
 
         match instruction_type {
             constants::INSTRUCTION_REQUEST_HEAP_FRAME => self.request_heap_frame(ctx, compute_used),
@@ -301,6 +302,35 @@ mod tests {
     use super::*;
     use karstflow_ids::COMPUTE_BUDGET_PROGRAM_ID;
 
+    /// One flat cost for every discriminant. The executor previously added a
+    /// second base on top of this constant and charged 300 where the protocol
+    /// charges 150.
+    #[test]
+    fn every_discriminant_charges_the_same_flat_cost() {
+        let executor = ComputeBudgetProgramExecutor::new();
+
+        for discriminant in [
+            constants::INSTRUCTION_REQUEST_HEAP_FRAME,
+            constants::INSTRUCTION_SET_COMPUTE_UNIT_LIMIT,
+            constants::INSTRUCTION_SET_COMPUTE_UNIT_PRICE,
+            constants::INSTRUCTION_SET_LOADED_ACCOUNTS_DATA_SIZE_LIMIT,
+        ] {
+            let mut data = vec![discriminant];
+            data.extend_from_slice(&[0u8; 8]);
+            if discriminant == constants::INSTRUCTION_REQUEST_HEAP_FRAME {
+                data[1..5].copy_from_slice(&execution::MIN_HEAP_FRAME_BYTES.to_le_bytes());
+            }
+
+            let ctx = ExecutionContext::new(COMPUTE_BUDGET_PROGRAM_ID, vec![], data);
+            let outcome = executor.execute(&ctx).unwrap();
+            assert_eq!(
+                outcome.compute_units_consumed,
+                constants::COMPUTE_COST_BASE,
+                "discriminant {discriminant} charged a different cost"
+            );
+        }
+    }
+
     #[test]
     fn extract_compute_unit_limit() {
         let mut data = vec![constants::INSTRUCTION_SET_COMPUTE_UNIT_LIMIT];
@@ -389,7 +419,7 @@ mod tests {
 
     #[test]
     fn execute_set_compute_unit_limit() {
-        let executor = ComputeBudgetProgramExecutor::new(150);
+        let executor = ComputeBudgetProgramExecutor::new();
 
         let mut instruction_data = vec![constants::INSTRUCTION_SET_COMPUTE_UNIT_LIMIT];
         instruction_data.extend_from_slice(&500_000u32.to_le_bytes());
@@ -403,7 +433,7 @@ mod tests {
 
     #[test]
     fn execute_set_compute_unit_price() {
-        let executor = ComputeBudgetProgramExecutor::new(150);
+        let executor = ComputeBudgetProgramExecutor::new();
 
         let mut instruction_data = vec![constants::INSTRUCTION_SET_COMPUTE_UNIT_PRICE];
         instruction_data.extend_from_slice(&1_000_000u64.to_le_bytes());
@@ -417,7 +447,7 @@ mod tests {
 
     #[test]
     fn execute_request_heap_frame_valid() {
-        let executor = ComputeBudgetProgramExecutor::new(150);
+        let executor = ComputeBudgetProgramExecutor::new();
 
         let mut instruction_data = vec![constants::INSTRUCTION_REQUEST_HEAP_FRAME];
         instruction_data.extend_from_slice(&(64 * 1024u32).to_le_bytes());
@@ -431,7 +461,7 @@ mod tests {
 
     #[test]
     fn execute_request_heap_frame_invalid_size() {
-        let executor = ComputeBudgetProgramExecutor::new(150);
+        let executor = ComputeBudgetProgramExecutor::new();
 
         // Not aligned to HEAP_FRAME_BYTES_GRANULARITY
         let mut instruction_data = vec![constants::INSTRUCTION_REQUEST_HEAP_FRAME];

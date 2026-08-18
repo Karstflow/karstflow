@@ -7,10 +7,8 @@ use super::bls_pop::verify_vote_bls_pop;
 use super::state::{LandedVote, Lockout, VoteError, VoteState};
 use crate::{ExecutionContext, ExecutionOutcome};
 use karstflow_constants::vote_program::{
-    self as constants, COMPUTE_COST_AUTHORIZE, COMPUTE_COST_BASE_INSTRUCTION,
-    COMPUTE_COST_INITIALIZE, COMPUTE_COST_POP, COMPUTE_COST_UPDATE_COMMISSION,
-    COMPUTE_COST_UPDATE_VOTE_STATE, COMPUTE_COST_VOTE, COMPUTE_COST_WITHDRAW, VOTE_AUTHORIZE_VOTER,
-    VOTE_AUTHORIZE_WITHDRAWER, VOTE_BLS_PROOF_LEN, VOTE_BLS_PUBKEY_LEN,
+    self as constants, COMPUTE_COST_POP, VOTE_AUTHORIZE_VOTER, VOTE_AUTHORIZE_WITHDRAWER,
+    VOTE_BLS_PROOF_LEN, VOTE_BLS_PUBKEY_LEN,
 };
 use karstflow_ids::features::{is_feature_active, DELAY_COMMISSION_UPDATES};
 use karstflow_ids::VOTE_PROGRAM_ID;
@@ -44,15 +42,13 @@ fn is_commission_update_allowed(slot: u64, first_normal_slot: u64, slots_per_epo
     relative_slot.saturating_mul(2) <= slots_per_epoch
 }
 
-/// Vote program executor with configurable base compute cost.
-#[derive(Debug, Clone)]
-pub struct VoteProgramExecutor {
-    base_cost: u64,
-}
+/// Vote program executor.
+#[derive(Debug, Clone, Default)]
+pub struct VoteProgramExecutor;
 
 impl VoteProgramExecutor {
-    pub fn new(base_cost: u64) -> Self {
-        Self { base_cost }
+    pub fn new() -> Self {
+        Self
     }
 
     pub fn execute(&self, context: &ExecutionContext) -> Result<ExecutionOutcome, String> {
@@ -70,35 +66,32 @@ impl VoteProgramExecutor {
                 .map_err(|_| "Failed to parse instruction type")?,
         );
 
-        let mut compute_used = self.base_cost.saturating_add(COMPUTE_COST_BASE_INSTRUCTION);
+        // Flat per-instruction charge: the same for every discriminant, and
+        // charged whether the instruction succeeds or fails. The BLS
+        // proof-of-possession path adds its verification cost on top.
+        let mut compute_used = constants::DEFAULT_COMPUTE_UNITS;
         let mut modified_accounts = HashMap::new();
         let mut logs = Vec::new();
 
         match instruction_type {
             constants::INSTRUCTION_INITIALIZE_ACCOUNT => {
-                compute_used = compute_used.saturating_add(COMPUTE_COST_INITIALIZE);
                 self.execute_initialize(context, &mut modified_accounts, &mut logs)?;
             }
             constants::INSTRUCTION_INITIALIZE_ACCOUNT_V2 => {
-                compute_used = compute_used.saturating_add(COMPUTE_COST_INITIALIZE);
                 let pop_cost =
                     self.execute_initialize_v2(context, &mut modified_accounts, &mut logs)?;
                 compute_used = compute_used.saturating_add(pop_cost);
             }
             constants::INSTRUCTION_AUTHORIZE => {
-                compute_used = compute_used.saturating_add(COMPUTE_COST_AUTHORIZE);
                 self.execute_authorize(context, &mut modified_accounts, &mut logs)?;
             }
             constants::INSTRUCTION_AUTHORIZE_CHECKED => {
-                compute_used = compute_used.saturating_add(COMPUTE_COST_AUTHORIZE);
                 self.execute_authorize_checked(context, &mut modified_accounts, &mut logs)?;
             }
             constants::INSTRUCTION_VOTE => {
-                compute_used = compute_used.saturating_add(COMPUTE_COST_VOTE);
                 self.execute_vote(context, &mut modified_accounts, &mut logs)?;
             }
             constants::INSTRUCTION_VOTE_SWITCH => {
-                compute_used = compute_used.saturating_add(COMPUTE_COST_VOTE);
                 // VoteSwitch is identical to Vote but includes a switch proof hash
                 // that is verified at the consensus layer, not here.
                 self.execute_vote(context, &mut modified_accounts, &mut logs)?;
@@ -106,34 +99,27 @@ impl VoteProgramExecutor {
             constants::INSTRUCTION_UPDATE_VOTE_STATE
             | constants::INSTRUCTION_COMPACT_UPDATE_VOTE_STATE
             | constants::INSTRUCTION_TOWER_SYNC => {
-                compute_used = compute_used.saturating_add(COMPUTE_COST_UPDATE_VOTE_STATE);
                 self.execute_vote_state_update(context, &mut modified_accounts, &mut logs)?;
             }
             constants::INSTRUCTION_UPDATE_VOTE_STATE_SWITCH
             | constants::INSTRUCTION_COMPACT_UPDATE_VOTE_STATE_SWITCH
             | constants::INSTRUCTION_TOWER_SYNC_SWITCH => {
-                compute_used = compute_used.saturating_add(COMPUTE_COST_UPDATE_VOTE_STATE);
                 // Switch variants include a proof hash; behavior is otherwise identical.
                 self.execute_vote_state_update(context, &mut modified_accounts, &mut logs)?;
             }
             constants::INSTRUCTION_UPDATE_VALIDATOR_IDENTITY => {
-                compute_used = compute_used.saturating_add(COMPUTE_COST_AUTHORIZE);
                 self.execute_update_validator_identity(context, &mut modified_accounts, &mut logs)?;
             }
             constants::INSTRUCTION_UPDATE_COMMISSION => {
-                compute_used = compute_used.saturating_add(COMPUTE_COST_UPDATE_COMMISSION);
                 self.execute_update_commission(context, &mut modified_accounts, &mut logs)?;
             }
             constants::INSTRUCTION_WITHDRAW => {
-                compute_used = compute_used.saturating_add(COMPUTE_COST_WITHDRAW);
                 self.execute_withdraw(context, &mut modified_accounts, &mut logs)?;
             }
             constants::INSTRUCTION_AUTHORIZE_WITH_SEED => {
-                compute_used = compute_used.saturating_add(COMPUTE_COST_AUTHORIZE);
                 self.execute_authorize_with_seed(context, &mut modified_accounts, &mut logs)?;
             }
             constants::INSTRUCTION_AUTHORIZE_CHECKED_WITH_SEED => {
-                compute_used = compute_used.saturating_add(COMPUTE_COST_AUTHORIZE);
                 self.execute_authorize_checked_with_seed(
                     context,
                     &mut modified_accounts,
@@ -991,6 +977,36 @@ mod tests {
     use super::*;
     use karstflow_types::AccountMeta;
 
+    /// One flat cost for every discriminant. The executor previously charged
+    /// an injected base plus a per-instruction surcharge, landing between 500
+    /// and 1400 where the protocol charges 2100.
+    #[test]
+    fn every_discriminant_charges_the_same_flat_cost() {
+        let executor = VoteProgramExecutor::new();
+
+        for discriminant in 0u32..=15 {
+            let mut data = discriminant.to_le_bytes().to_vec();
+            data.extend_from_slice(&[0u8; 64]);
+
+            let context = ExecutionContext::new(
+                VOTE_PROGRAM_ID,
+                vec![
+                    (Pubkey::new_unique(), Account::default(), true),
+                    (Pubkey::new_unique(), Account::default(), true),
+                ],
+                data,
+            );
+
+            if let Ok(outcome) = executor.execute(&context) {
+                assert_eq!(
+                    outcome.compute_units_consumed,
+                    constants::DEFAULT_COMPUTE_UNITS,
+                    "discriminant {discriminant} charged a different cost"
+                );
+            }
+        }
+    }
+
     fn make_vote_account(vote_state: &VoteState) -> Account {
         Account {
             meta: AccountMeta {
@@ -1031,7 +1047,7 @@ mod tests {
 
     #[test]
     fn initialize_creates_vote_state() {
-        let executor = VoteProgramExecutor::new(150);
+        let executor = VoteProgramExecutor::new();
         let node = Pubkey::new_unique();
         let voter = Pubkey::new_unique();
         let withdrawer = Pubkey::new_unique();
@@ -1060,7 +1076,7 @@ mod tests {
 
     #[test]
     fn initialize_rejects_non_vote_owned_account() {
-        let executor = VoteProgramExecutor::new(150);
+        let executor = VoteProgramExecutor::new();
         let node = Pubkey::new_unique();
         let voter = Pubkey::new_unique();
         let withdrawer = Pubkey::new_unique();
@@ -1133,7 +1149,7 @@ mod tests {
     #[test]
     fn initialize_v2_rejects_short_legacy_data() {
         // A legacy V1-sized init payload is not a valid InitializeAccountV2.
-        let executor = VoteProgramExecutor::new(150);
+        let executor = VoteProgramExecutor::new();
         let mut instruction_data = constants::INSTRUCTION_INITIALIZE_ACCOUNT_V2
             .to_le_bytes()
             .to_vec();
@@ -1152,7 +1168,7 @@ mod tests {
 
     #[test]
     fn initialize_v2_derives_commission_and_fields() {
-        let executor = VoteProgramExecutor::new(150);
+        let executor = VoteProgramExecutor::new();
         let node = Pubkey::new_unique();
         let voter = Pubkey::new_unique();
         let withdrawer = Pubkey::new_unique();
@@ -1184,7 +1200,7 @@ mod tests {
 
     #[test]
     fn initialize_v2_with_valid_bls_stores_pubkey() {
-        let executor = VoteProgramExecutor::new(150);
+        let executor = VoteProgramExecutor::new();
         let node = Pubkey::new_unique();
         let voter = Pubkey::new_unique();
         let withdrawer = Pubkey::new_unique();
@@ -1216,7 +1232,7 @@ mod tests {
 
     #[test]
     fn initialize_v2_rejects_tampered_proof() {
-        let executor = VoteProgramExecutor::new(150);
+        let executor = VoteProgramExecutor::new();
         let node = Pubkey::new_unique();
         let voter = Pubkey::new_unique();
         let withdrawer = Pubkey::new_unique();
@@ -1244,7 +1260,7 @@ mod tests {
 
     #[test]
     fn initialize_v2_requires_node_signer_for_bls() {
-        let executor = VoteProgramExecutor::new(150);
+        let executor = VoteProgramExecutor::new();
         let node = Pubkey::new_unique();
         let voter = Pubkey::new_unique();
         let withdrawer = Pubkey::new_unique();
@@ -1272,7 +1288,7 @@ mod tests {
 
     #[test]
     fn vote_processes_single_slot() {
-        let executor = VoteProgramExecutor::new(150);
+        let executor = VoteProgramExecutor::new();
         let node = Pubkey::new_unique();
         let voter = Pubkey::new_unique();
         let withdrawer = Pubkey::new_unique();
@@ -1305,7 +1321,7 @@ mod tests {
 
     #[test]
     fn vote_processes_multiple_slots() {
-        let executor = VoteProgramExecutor::new(150);
+        let executor = VoteProgramExecutor::new();
         let node = Pubkey::new_unique();
         let voter = Pubkey::new_unique();
         let withdrawer = Pubkey::new_unique();
@@ -1339,7 +1355,7 @@ mod tests {
 
     #[test]
     fn vote_rejects_non_sequential() {
-        let executor = VoteProgramExecutor::new(150);
+        let executor = VoteProgramExecutor::new();
         let node = Pubkey::new_unique();
         let voter = Pubkey::new_unique();
         let withdrawer = Pubkey::new_unique();
@@ -1370,7 +1386,7 @@ mod tests {
 
     #[test]
     fn withdraw_transfers_lamports() {
-        let executor = VoteProgramExecutor::new(150);
+        let executor = VoteProgramExecutor::new();
         let node = Pubkey::new_unique();
         let voter = Pubkey::new_unique();
         let withdrawer = Pubkey::new_unique();
@@ -1407,7 +1423,7 @@ mod tests {
 
     #[test]
     fn withdraw_rejects_insufficient_lamports() {
-        let executor = VoteProgramExecutor::new(150);
+        let executor = VoteProgramExecutor::new();
         let node = Pubkey::new_unique();
         let voter = Pubkey::new_unique();
         let withdrawer = Pubkey::new_unique();
@@ -1445,7 +1461,7 @@ mod tests {
 
     #[test]
     fn update_commission_changes_value() {
-        let executor = VoteProgramExecutor::new(150);
+        let executor = VoteProgramExecutor::new();
         let node = Pubkey::new_unique();
         let voter = Pubkey::new_unique();
         let withdrawer = Pubkey::new_unique();
@@ -1474,7 +1490,7 @@ mod tests {
 
     #[test]
     fn update_commission_accepts_when_withdrawer_signs() {
-        let executor = VoteProgramExecutor::new(150);
+        let executor = VoteProgramExecutor::new();
         let node = Pubkey::new_unique();
         let voter = Pubkey::new_unique();
         let withdrawer = Pubkey::new_unique();
@@ -1509,7 +1525,7 @@ mod tests {
 
     #[test]
     fn update_commission_rejects_when_withdrawer_does_not_sign() {
-        let executor = VoteProgramExecutor::new(150);
+        let executor = VoteProgramExecutor::new();
         let node = Pubkey::new_unique();
         let voter = Pubkey::new_unique();
         let withdrawer = Pubkey::new_unique();
@@ -1541,7 +1557,7 @@ mod tests {
 
     #[test]
     fn withdraw_rejects_when_withdrawer_does_not_sign() {
-        let executor = VoteProgramExecutor::new(150);
+        let executor = VoteProgramExecutor::new();
         let node = Pubkey::new_unique();
         let voter = Pubkey::new_unique();
         let withdrawer = Pubkey::new_unique();
@@ -1591,7 +1607,7 @@ mod tests {
 
     #[test]
     fn update_commission_increase_rejected_in_second_half_of_epoch() {
-        let executor = VoteProgramExecutor::new(150);
+        let executor = VoteProgramExecutor::new();
         let withdrawer = Pubkey::new_unique();
         let vote_state = VoteState::new(Pubkey::new_unique(), Pubkey::new_unique(), withdrawer, 5);
         let vote_pubkey = Pubkey::new_unique();
@@ -1619,7 +1635,7 @@ mod tests {
 
     #[test]
     fn update_commission_decrease_allowed_in_second_half_of_epoch() {
-        let executor = VoteProgramExecutor::new(150);
+        let executor = VoteProgramExecutor::new();
         let withdrawer = Pubkey::new_unique();
         let vote_state = VoteState::new(Pubkey::new_unique(), Pubkey::new_unique(), withdrawer, 50);
         let vote_pubkey = Pubkey::new_unique();
@@ -1645,7 +1661,7 @@ mod tests {
 
     #[test]
     fn update_commission_increase_allowed_when_delay_feature_active() {
-        let executor = VoteProgramExecutor::new(150);
+        let executor = VoteProgramExecutor::new();
         let withdrawer = Pubkey::new_unique();
         let vote_state = VoteState::new(Pubkey::new_unique(), Pubkey::new_unique(), withdrawer, 5);
         let vote_pubkey = Pubkey::new_unique();
@@ -1684,7 +1700,7 @@ mod tests {
 
     #[test]
     fn update_commission_rejects_over_100() {
-        let executor = VoteProgramExecutor::new(150);
+        let executor = VoteProgramExecutor::new();
         let node = Pubkey::new_unique();
         let voter = Pubkey::new_unique();
         let withdrawer = Pubkey::new_unique();
@@ -1709,7 +1725,7 @@ mod tests {
 
     #[test]
     fn authorize_changes_voter() {
-        let executor = VoteProgramExecutor::new(150);
+        let executor = VoteProgramExecutor::new();
         let node = Pubkey::new_unique();
         let voter = Pubkey::new_unique();
         let withdrawer = Pubkey::new_unique();
@@ -1741,7 +1757,7 @@ mod tests {
 
     #[test]
     fn authorize_changes_withdrawer() {
-        let executor = VoteProgramExecutor::new(150);
+        let executor = VoteProgramExecutor::new();
         let node = Pubkey::new_unique();
         let voter = Pubkey::new_unique();
         let withdrawer = Pubkey::new_unique();
@@ -1773,7 +1789,7 @@ mod tests {
 
     #[test]
     fn authorize_checked_changes_voter() {
-        let executor = VoteProgramExecutor::new(150);
+        let executor = VoteProgramExecutor::new();
         let node = Pubkey::new_unique();
         let voter = Pubkey::new_unique();
         let withdrawer = Pubkey::new_unique();
@@ -1813,7 +1829,7 @@ mod tests {
 
     #[test]
     fn update_validator_identity_changes_node() {
-        let executor = VoteProgramExecutor::new(150);
+        let executor = VoteProgramExecutor::new();
         let node = Pubkey::new_unique();
         let voter = Pubkey::new_unique();
         let withdrawer = Pubkey::new_unique();
@@ -1849,7 +1865,7 @@ mod tests {
 
     #[test]
     fn vote_state_update_applies_new_tower() {
-        let executor = VoteProgramExecutor::new(150);
+        let executor = VoteProgramExecutor::new();
         let node = Pubkey::new_unique();
         let voter = Pubkey::new_unique();
         let withdrawer = Pubkey::new_unique();
@@ -1900,7 +1916,7 @@ mod tests {
 
     #[test]
     fn vote_state_update_rejects_invalid_ordering() {
-        let executor = VoteProgramExecutor::new(150);
+        let executor = VoteProgramExecutor::new();
         let node = Pubkey::new_unique();
         let voter = Pubkey::new_unique();
         let withdrawer = Pubkey::new_unique();
@@ -1935,7 +1951,7 @@ mod tests {
 
     #[test]
     fn unknown_instruction_returns_error() {
-        let executor = VoteProgramExecutor::new(150);
+        let executor = VoteProgramExecutor::new();
 
         let instruction_data = vec![255, 0, 0, 0]; // Unknown type 255
 
@@ -1954,7 +1970,7 @@ mod tests {
 
     #[test]
     fn empty_instruction_data_returns_error() {
-        let executor = VoteProgramExecutor::new(150);
+        let executor = VoteProgramExecutor::new();
 
         let context = ExecutionContext::new(
             VOTE_PROGRAM_ID,
@@ -1968,7 +1984,7 @@ mod tests {
 
     #[test]
     fn authorize_with_seed_changes_voter() {
-        let executor = VoteProgramExecutor::new(150);
+        let executor = VoteProgramExecutor::new();
         let node = Pubkey::new_unique();
         let voter = Pubkey::new_unique();
         let withdrawer = Pubkey::new_unique();
@@ -2008,7 +2024,7 @@ mod tests {
 
     #[test]
     fn authorize_checked_with_seed_changes_withdrawer() {
-        let executor = VoteProgramExecutor::new(150);
+        let executor = VoteProgramExecutor::new();
         let node = Pubkey::new_unique();
         let voter = Pubkey::new_unique();
         let withdrawer = Pubkey::new_unique();

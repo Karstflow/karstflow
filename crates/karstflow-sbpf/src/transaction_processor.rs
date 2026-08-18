@@ -9,6 +9,11 @@ use crate::{
     SystemProgramExecutor, Token2022ProgramExecutor, TokenProgramExecutor, VoteProgramExecutor,
     ZkElGamalProofExecutor, MAX_COMPUTE_UNITS,
 };
+use karstflow_constants::{
+    bpf_loader_program as bpf_loader_constants, compute_budget_program as compute_budget_constants,
+    precompiles as precompile_constants, system_program as system_constants,
+    vote_program as vote_constants,
+};
 use karstflow_ids::{
     features::{
         is_feature_active, ENABLE_LOADER_V4, ENABLE_SECP256R1_PRECOMPILE,
@@ -132,6 +137,9 @@ pub struct TransactionProcessor {
     memo_program: MemoProgramExecutor,
     bpf_loader: BpfLoaderExecutor,
     bpf_loader_deprecated: BpfLoaderDeprecatedExecutor,
+    /// The v2 loader shares the deprecated loader's instruction set but
+    /// charges its own flat compute cost.
+    bpf_loader_v2: BpfLoaderDeprecatedExecutor,
     compute_budget_program: ComputeBudgetProgramExecutor,
     address_lookup_table: AddressLookupTableExecutor,
     config_program: ConfigProgramExecutor,
@@ -175,23 +183,28 @@ impl TransactionProcessor {
     /// Internal constructor shared by `new()` and `new_with_cpi()`.
     fn build(bytecode_vm: BytecodeVm, max_compute_units: u64) -> Self {
         Self {
-            system_program: SystemProgramExecutor::new(150),
-            vote_program: VoteProgramExecutor::new(200),
+            system_program: SystemProgramExecutor::new(),
+            vote_program: VoteProgramExecutor::new(),
             stake_program: StakeProgramExecutor::new(250),
             token_program: TokenProgramExecutor::new(300),
             token_2022_program: Token2022ProgramExecutor::new(320),
             associated_token_program: AssociatedTokenProgramExecutor::new(180),
             memo_program: MemoProgramExecutor::new(100),
-            bpf_loader: BpfLoaderExecutor::new(400),
-            bpf_loader_deprecated: BpfLoaderDeprecatedExecutor::new(1140),
-            compute_budget_program: ComputeBudgetProgramExecutor::new(150),
+            bpf_loader: BpfLoaderExecutor::new(),
+            bpf_loader_deprecated: BpfLoaderDeprecatedExecutor::new(
+                bpf_loader_constants::DEPRECATED_LOADER_COMPUTE_UNITS,
+            ),
+            bpf_loader_v2: BpfLoaderDeprecatedExecutor::new(
+                bpf_loader_constants::V2_LOADER_COMPUTE_UNITS,
+            ),
+            compute_budget_program: ComputeBudgetProgramExecutor::new(),
             address_lookup_table: AddressLookupTableExecutor::new(200),
             config_program: ConfigProgramExecutor::new(150),
             loader_v4: LoaderV4Executor::new(200),
-            ed25519_precompile: Ed25519PrecompileExecutor::new(200),
-            secp256k1_precompile: Secp256k1PrecompileExecutor::new(200),
-            secp256r1_precompile: Secp256r1PrecompileExecutor::new(200),
-            zk_elgamal_proof: ZkElGamalProofExecutor::new(200),
+            ed25519_precompile: Ed25519PrecompileExecutor::new(),
+            secp256k1_precompile: Secp256k1PrecompileExecutor::new(),
+            secp256r1_precompile: Secp256r1PrecompileExecutor::new(),
+            zk_elgamal_proof: ZkElGamalProofExecutor::new(),
             feature_gate_program: FeatureGateProgramExecutor::new(750),
             slashing_program: SlashingProgramExecutor::new(2500),
             bytecode_vm,
@@ -388,13 +401,13 @@ impl TransactionProcessor {
     pub fn execute_instruction(&self, context: &ExecutionContext) -> ExecutionOutcome {
         // Route to appropriate program
         if context.program_id == SYSTEM_PROGRAM_ID {
-            self.system_program
-                .execute(context)
-                .unwrap_or_else(|err| ExecutionOutcome::failure(150, err))
+            self.system_program.execute(context).unwrap_or_else(|err| {
+                ExecutionOutcome::failure(system_constants::COMPUTE_COST_BASE, err)
+            })
         } else if context.program_id == VOTE_PROGRAM_ID {
-            self.vote_program
-                .execute(context)
-                .unwrap_or_else(|err| ExecutionOutcome::failure(200, err))
+            self.vote_program.execute(context).unwrap_or_else(|err| {
+                ExecutionOutcome::failure(vote_constants::DEFAULT_COMPUTE_UNITS, err)
+            })
         } else if context.program_id == STAKE_PROGRAM_ID {
             self.stake_program
                 .execute(context)
@@ -417,10 +430,12 @@ impl TransactionProcessor {
                 .execute(context)
                 .unwrap_or_else(|err| ExecutionOutcome::failure(100, err))
         } else if context.program_id == BPF_LOADER_PROGRAM_ID {
-            let outcome = self
-                .bpf_loader
-                .execute(context)
-                .unwrap_or_else(|err| ExecutionOutcome::failure(400, err));
+            let outcome = self.bpf_loader.execute(context).unwrap_or_else(|err| {
+                ExecutionOutcome::failure(
+                    bpf_loader_constants::UPGRADEABLE_LOADER_COMPUTE_UNITS,
+                    err,
+                )
+            });
             // Invalidate the program cache when a program is deployed or upgraded.
             // This ensures the next invocation loads the new bytecode.
             if outcome.success {
@@ -430,18 +445,25 @@ impl TransactionProcessor {
         } else if context.program_id == BPF_LOADER_DEPRECATED_PROGRAM_ID {
             self.bpf_loader_deprecated
                 .execute(context)
-                .unwrap_or_else(|err| ExecutionOutcome::failure(1140, err))
+                .unwrap_or_else(|err| {
+                    ExecutionOutcome::failure(
+                        bpf_loader_constants::DEPRECATED_LOADER_COMPUTE_UNITS,
+                        err,
+                    )
+                })
         } else if context.program_id == BPF_LOADER_V2_PROGRAM_ID {
             // BPF Loader V2 uses the same Write/Finalize logic as deprecated
-            // but with lower compute cost. Route through the deprecated handler
-            // since the instruction format is identical.
-            self.bpf_loader_deprecated
-                .execute(context)
-                .unwrap_or_else(|err| ExecutionOutcome::failure(570, err))
+            // but with lower compute cost, so it routes through a second
+            // instance of the same handler configured with that cost.
+            self.bpf_loader_v2.execute(context).unwrap_or_else(|err| {
+                ExecutionOutcome::failure(bpf_loader_constants::V2_LOADER_COMPUTE_UNITS, err)
+            })
         } else if context.program_id == COMPUTE_BUDGET_PROGRAM_ID {
             self.compute_budget_program
                 .execute(context)
-                .unwrap_or_else(|err| ExecutionOutcome::failure(150, err))
+                .unwrap_or_else(|err| {
+                    ExecutionOutcome::failure(compute_budget_constants::COMPUTE_COST_BASE, err)
+                })
         } else if context.program_id == ADDRESS_LOOKUP_TABLE_PROGRAM_ID {
             self.address_lookup_table
                 .execute(context)
@@ -463,11 +485,15 @@ impl TransactionProcessor {
         } else if context.program_id == ED25519_PROGRAM_ID {
             self.ed25519_precompile
                 .execute(context)
-                .unwrap_or_else(|err| ExecutionOutcome::failure(200, err))
+                .unwrap_or_else(|err| {
+                    ExecutionOutcome::failure(precompile_constants::PRECOMPILE_COMPUTE_UNITS, err)
+                })
         } else if context.program_id == SECP256K1_PROGRAM_ID {
             self.secp256k1_precompile
                 .execute(context)
-                .unwrap_or_else(|err| ExecutionOutcome::failure(200, err))
+                .unwrap_or_else(|err| {
+                    ExecutionOutcome::failure(precompile_constants::PRECOMPILE_COMPUTE_UNITS, err)
+                })
         } else if context.program_id == SECP256R1_PROGRAM_ID {
             // Secp256r1 precompile requires the enable_secp256r1_precompile feature gate.
             if let Some(rejection) =
@@ -477,7 +503,9 @@ impl TransactionProcessor {
             }
             self.secp256r1_precompile
                 .execute(context)
-                .unwrap_or_else(|err| ExecutionOutcome::failure(200, err))
+                .unwrap_or_else(|err| {
+                    ExecutionOutcome::failure(precompile_constants::PRECOMPILE_COMPUTE_UNITS, err)
+                })
         } else if context.program_id == ZK_ELGAMAL_PROOF_PROGRAM_ID {
             // ZK ElGamal proof program requires the enable feature gate.
             if let Some(rejection) = self.reject_if_feature_inactive(
@@ -489,7 +517,7 @@ impl TransactionProcessor {
             }
             self.zk_elgamal_proof
                 .execute(context)
-                .unwrap_or_else(|err| ExecutionOutcome::failure(200, err))
+                .unwrap_or_else(|err| ExecutionOutcome::failure(0, err))
         } else if context.program_id == FEATURE_PROGRAM_ID {
             self.feature_gate_program
                 .execute(context)
@@ -755,12 +783,19 @@ mod tests {
     fn precompile_routing_returns_result() {
         let processor = TransactionProcessor::new();
 
+        // Empty data to a precompile — routes, returns a result, and charges
+        // nothing on either the success or the failure path.
         let ed25519_outcome = processor.process_instruction(ED25519_PROGRAM_ID, vec![], vec![]);
-        // Empty data to a precompile — should route and return a result
-        assert!(ed25519_outcome.compute_units_consumed > 0 || !ed25519_outcome.success);
+        assert_eq!(
+            ed25519_outcome.compute_units_consumed,
+            precompile_constants::PRECOMPILE_COMPUTE_UNITS
+        );
 
         let secp_outcome = processor.process_instruction(SECP256K1_PROGRAM_ID, vec![], vec![]);
-        assert!(secp_outcome.compute_units_consumed > 0 || !secp_outcome.success);
+        assert_eq!(
+            secp_outcome.compute_units_consumed,
+            precompile_constants::PRECOMPILE_COMPUTE_UNITS
+        );
     }
 
     #[test]

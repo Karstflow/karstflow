@@ -55,8 +55,8 @@ pub(crate) struct StubSbpfVm {
 impl StubSbpfVm {
     pub fn new() -> Self {
         Self {
-            system_program: SystemProgramExecutor::new(DEFAULT_INSTRUCTION_BASE_COST),
-            vote_program: VoteProgramExecutor::new(DEFAULT_INSTRUCTION_BASE_COST),
+            system_program: SystemProgramExecutor::new(),
+            vote_program: VoteProgramExecutor::new(),
         }
     }
 
@@ -391,7 +391,17 @@ impl BytecodeVm {
                     return_data: result.return_data,
                 })
             }
-            Err(VmError::ComputeBudgetExceeded) => Err(SbpfExecutionError::ComputeBudgetExceeded),
+            Err(VmError::ComputeBudgetExceeded) => {
+                // The meter reached zero, so the units consumed are the whole
+                // budget — that is arithmetic, not a policy choice. Returning
+                // an error here instead loses the figure: the dispatcher maps
+                // it to a failure charging 0, and a program that burned its
+                // entire allowance is recorded as having cost nothing.
+                Ok(ExecutionOutcome::failure(
+                    context.compute_budget,
+                    SbpfExecutionError::ComputeBudgetExceeded.to_string(),
+                ))
+            }
             Err(e) => {
                 if deplete_on_failure {
                     // When the feature is active, consume the entire budget
@@ -423,6 +433,27 @@ impl std::fmt::Debug for BytecodeVm {
     }
 }
 
+/// The programdata account a deployed program points at, when it is one.
+///
+/// Only the upgradeable loader splits a program across two accounts. For every
+/// other loader the program account carries the bytecode directly, and this
+/// returns `None`.
+fn programdata_address(program: &Account) -> Option<Pubkey> {
+    use karstflow_constants::bpf_loader_program as loader;
+
+    if program.meta.owner != BPF_LOADER_PROGRAM_ID {
+        return None;
+    }
+    let data = program.data.as_slice();
+    if data.len() < loader::SIZE_OF_PROGRAM {
+        return None;
+    }
+    if u32::from_le_bytes(data[0..4].try_into().ok()?) != loader::STATE_PROGRAM {
+        return None;
+    }
+    Some(Pubkey::new_from_array(data[4..36].try_into().ok()?))
+}
+
 impl SbpfVm for BytecodeVm {
     fn execute(&self, context: ExecutionContext) -> SbpfExecutionResult {
         // Find the program account — the executable account whose pubkey matches program_id
@@ -445,7 +476,32 @@ impl SbpfVm for BytecodeVm {
             return Err(SbpfExecutionError::InvalidProgram);
         }
 
-        let elf_bytes = program.data.as_slice();
+        // Where the bytecode actually lives depends on the loader. Under the
+        // upgradeable loader the program account holds only a pointer to a
+        // separate programdata account, and the ELF sits past that account's
+        // metadata header. Reading the program account's own bytes there
+        // yields a 36-byte pointer, not a program.
+        let owned_elf;
+        let elf_bytes = match programdata_address(program) {
+            Some(address) => {
+                let programdata = context
+                    .accounts
+                    .iter()
+                    .find(|(pubkey, ..)| *pubkey == address)
+                    .map(|(_, account, _)| account)
+                    .ok_or(SbpfExecutionError::InvalidProgram)?;
+                let data = programdata.data.as_slice();
+                if data.len()
+                    <= karstflow_constants::bpf_loader_program::SIZE_OF_PROGRAMDATA_METADATA
+                {
+                    return Err(SbpfExecutionError::InvalidAccountData);
+                }
+                owned_elf =
+                    &data[karstflow_constants::bpf_loader_program::SIZE_OF_PROGRAMDATA_METADATA..];
+                owned_elf
+            }
+            None => program.data.as_slice(),
+        };
 
         if elf_bytes.is_empty() {
             return Err(SbpfExecutionError::InvalidAccountData);
@@ -1175,6 +1231,116 @@ mod tests {
             result.is_err(),
             "Without deplete feature, VM error should return Err"
         );
+    }
+
+    /// A program deployed the way the protocol deploys one must be invokable.
+    ///
+    /// Under the upgradeable loader the program account holds only a 36-byte
+    /// pointer and the bytecode lives in a separate programdata account, after
+    /// a 45-byte header. That is the layout this tree's own deploy path
+    /// writes, so a VM that reads the ELF out of the program account can never
+    /// run what its own loader produced.
+    #[test]
+    fn executes_a_program_deployed_under_the_upgradeable_loader() {
+        let fixture_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .join("karstflow-tests/fixtures/programs/hello_log.so");
+
+        if !fixture_path.exists() {
+            return;
+        }
+
+        let elf_bytes = std::fs::read(&fixture_path).unwrap();
+        let program_id = Pubkey::new_unique();
+        let programdata_id = Pubkey::new_unique();
+
+        let mut program_data = vec![0u8; 4];
+        program_data[0] = 2; // UpgradeableLoaderState::Program
+        program_data.extend_from_slice(programdata_id.as_bytes());
+
+        let mut programdata = vec![0u8; 45];
+        programdata[0] = 3; // UpgradeableLoaderState::ProgramData
+        programdata.extend_from_slice(&elf_bytes);
+
+        let loader_owned = |data: Vec<u8>, executable: bool| Account {
+            meta: AccountMeta {
+                lamports: 1,
+                owner: BPF_LOADER_PROGRAM_ID,
+                executable,
+                rent_epoch: 0,
+            },
+            data: AccountData::new(data),
+        };
+
+        let context = ExecutionContext::new(
+            program_id,
+            vec![
+                (program_id, loader_owned(program_data, true), false),
+                (programdata_id, loader_owned(programdata, false), false),
+            ],
+            vec![],
+        )
+        .with_compute_budget(200_000);
+
+        let outcome = BytecodeVm::new().execute(context).unwrap();
+        assert!(
+            outcome.success,
+            "upgradeable-layout program did not execute: {:?}",
+            outcome.logs
+        );
+        assert!(outcome.compute_units_consumed > 0);
+    }
+
+    /// A program that burns its whole allowance must be recorded as having
+    /// burned its whole allowance.
+    ///
+    /// The exhausted meter used to surface as an error, which the dispatcher
+    /// turned into a failure charging 0 — so a program that consumed every
+    /// available unit was billed nothing. The units consumed here are not a
+    /// policy choice: the meter reached zero, so they equal the budget.
+    #[test]
+    fn exhausting_the_budget_charges_the_whole_budget() {
+        let fixture_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .join("karstflow-tests/fixtures/programs/hello_log.so");
+
+        if !fixture_path.exists() {
+            return;
+        }
+
+        let elf_bytes = std::fs::read(&fixture_path).unwrap();
+        let program_id = Pubkey::new_unique();
+        let program_account = Account {
+            meta: AccountMeta {
+                lamports: 1,
+                owner: karstflow_ids::BPF_LOADER_V2_PROGRAM_ID,
+                executable: true,
+                rent_epoch: 0,
+            },
+            data: AccountData::new(elf_bytes),
+        };
+
+        // One unit is not enough to run any program to completion.
+        let context = ExecutionContext::new(
+            program_id,
+            vec![(program_id, program_account, false)],
+            vec![],
+        )
+        .with_compute_budget(1);
+
+        let outcome = BytecodeVm::new().execute(context).unwrap();
+        assert!(!outcome.success);
+        assert_eq!(outcome.compute_units_consumed, 1);
     }
 
     #[test]

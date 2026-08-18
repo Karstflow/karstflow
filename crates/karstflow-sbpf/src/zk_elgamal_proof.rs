@@ -70,13 +70,45 @@ const AUTHORITY_OFFSET: usize = 8;
 // ---------------------------------------------------------------------------
 
 /// ZK ElGamal proof program executor.
-pub struct ZkElGamalProofExecutor {
-    base_cost: u64,
-}
+#[derive(Default)]
+pub struct ZkElGamalProofExecutor;
 
 impl ZkElGamalProofExecutor {
-    pub fn new(base_cost: u64) -> Self {
-        Self { base_cost }
+    pub fn new() -> Self {
+        Self
+    }
+
+    /// Compute units an instruction charges, resolved from its discriminant
+    /// alone.
+    ///
+    /// The charge does not depend on the outcome: a proof that fails
+    /// verification costs exactly what one that succeeds costs, because the
+    /// verification work was done either way.
+    fn compute_cost(discriminant: u8) -> Option<u64> {
+        Some(match discriminant {
+            CLOSE_CONTEXT_STATE => CU_CLOSE_CONTEXT_STATE,
+            VERIFY_ZERO_CIPHERTEXT => CU_VERIFY_ZERO_CIPHERTEXT,
+            VERIFY_CIPHERTEXT_CIPHERTEXT_EQUALITY => CU_VERIFY_CIPHERTEXT_CIPHERTEXT_EQUALITY,
+            VERIFY_CIPHERTEXT_COMMITMENT_EQUALITY => CU_VERIFY_CIPHERTEXT_COMMITMENT_EQUALITY,
+            VERIFY_PUBKEY_VALIDITY => CU_VERIFY_PUBKEY_VALIDITY,
+            VERIFY_PERCENTAGE_WITH_CAP => CU_VERIFY_PERCENTAGE_WITH_CAP,
+            VERIFY_BATCHED_RANGE_PROOF_U64 => CU_VERIFY_BATCHED_RANGE_PROOF_U64,
+            VERIFY_BATCHED_RANGE_PROOF_U128 => CU_VERIFY_BATCHED_RANGE_PROOF_U128,
+            VERIFY_BATCHED_RANGE_PROOF_U256 => CU_VERIFY_BATCHED_RANGE_PROOF_U256,
+            VERIFY_GROUPED_CIPHERTEXT_2_HANDLES_VALIDITY => {
+                CU_VERIFY_GROUPED_CIPHERTEXT_2_HANDLES_VALIDITY
+            }
+            VERIFY_BATCHED_GROUPED_CIPHERTEXT_2_HANDLES_VALIDITY => {
+                CU_VERIFY_BATCHED_GROUPED_CIPHERTEXT_2_HANDLES_VALIDITY
+            }
+            VERIFY_GROUPED_CIPHERTEXT_3_HANDLES_VALIDITY => {
+                CU_VERIFY_GROUPED_CIPHERTEXT_3_HANDLES_VALIDITY
+            }
+            VERIFY_BATCHED_GROUPED_CIPHERTEXT_3_HANDLES_VALIDITY => {
+                CU_VERIFY_BATCHED_GROUPED_CIPHERTEXT_3_HANDLES_VALIDITY
+            }
+            _ => return None,
+        })
     }
 
     pub fn execute(&self, context: &ExecutionContext) -> Result<ExecutionOutcome, String> {
@@ -85,8 +117,10 @@ impl ZkElGamalProofExecutor {
         }
 
         let discriminant = context.instruction_data[0];
+        let cost = Self::compute_cost(discriminant)
+            .ok_or_else(|| format!("unknown ZK proof instruction: {discriminant}"))?;
 
-        match discriminant {
+        let outcome = match discriminant {
             CLOSE_CONTEXT_STATE => self.process_close_context_state(context),
             VERIFY_ZERO_CIPHERTEXT => self.process_verify_proof(context, CU_VERIFY_ZERO_CIPHERTEXT),
             VERIFY_CIPHERTEXT_CIPHERTEXT_EQUALITY => {
@@ -122,8 +156,12 @@ impl ZkElGamalProofExecutor {
                 context,
                 CU_VERIFY_BATCHED_GROUPED_CIPHERTEXT_3_HANDLES_VALIDITY,
             ),
-            _ => Err(format!("unknown ZK proof instruction: {discriminant}")),
-        }
+            _ => unreachable!("compute_cost accepted an unknown discriminant"),
+        };
+
+        // A rejected proof still consumed the verification work, so the cost
+        // is charged whether the instruction succeeded or failed.
+        Ok(outcome.unwrap_or_else(|err| ExecutionOutcome::failure(cost, err)))
     }
 
     /// Close a proof context state account.
@@ -319,7 +357,7 @@ mod tests {
 
     #[test]
     fn empty_instruction_data_rejected() {
-        let executor = ZkElGamalProofExecutor::new(100);
+        let executor = ZkElGamalProofExecutor::new();
         let ctx = make_context(vec![], vec![]);
         let result = executor.execute(&ctx);
         assert!(result.is_err());
@@ -328,7 +366,7 @@ mod tests {
 
     #[test]
     fn unknown_discriminant_rejected() {
-        let executor = ZkElGamalProofExecutor::new(100);
+        let executor = ZkElGamalProofExecutor::new();
         let ctx = make_context(vec![255], vec![]);
         let result = executor.execute(&ctx);
         assert!(result.is_err());
@@ -337,16 +375,17 @@ mod tests {
 
     #[test]
     fn close_context_state_requires_3_accounts() {
-        let executor = ZkElGamalProofExecutor::new(100);
+        let executor = ZkElGamalProofExecutor::new();
         let ctx = make_context(vec![CLOSE_CONTEXT_STATE], vec![]);
         let result = executor.execute(&ctx);
-        assert!(result.is_err());
-        assert!(result.unwrap_err().contains("3 accounts"));
+        let outcome = result.unwrap();
+        assert!(!outcome.success);
+        assert!(outcome.logs.iter().any(|log| log.contains("3 accounts")));
     }
 
     #[test]
     fn close_context_state_validates_owner() {
-        let executor = ZkElGamalProofExecutor::new(100);
+        let executor = ZkElGamalProofExecutor::new();
         let authority = Pubkey::new([0xAA; 32]);
         let wrong_owner_account = Account::new(1000, vec![0u8; 100], Pubkey::new([0xFF; 32]));
         let dest = Account::default();
@@ -361,13 +400,14 @@ mod tests {
             ],
         );
         let result = executor.execute(&ctx);
-        assert!(result.is_err());
-        assert!(result.unwrap_err().contains("not owned"));
+        let outcome = result.unwrap();
+        assert!(!outcome.success);
+        assert!(outcome.logs.iter().any(|log| log.contains("not owned")));
     }
 
     #[test]
     fn close_context_state_validates_authority() {
-        let executor = ZkElGamalProofExecutor::new(100);
+        let executor = ZkElGamalProofExecutor::new();
         let authority = Pubkey::new([0xAA; 32]);
         let wrong_authority = Pubkey::new([0xBB; 32]);
 
@@ -384,13 +424,17 @@ mod tests {
             ],
         );
         let result = executor.execute(&ctx);
-        assert!(result.is_err());
-        assert!(result.unwrap_err().contains("authority mismatch"));
+        let outcome = result.unwrap();
+        assert!(!outcome.success);
+        assert!(outcome
+            .logs
+            .iter()
+            .any(|log| log.contains("authority mismatch")));
     }
 
     #[test]
     fn close_context_state_success() {
-        let executor = ZkElGamalProofExecutor::new(100);
+        let executor = ZkElGamalProofExecutor::new();
         let authority = Pubkey::new([0xAA; 32]);
         let ctx_pubkey = Pubkey::new([1; 32]);
         let dest_pubkey = Pubkey::new([2; 32]);
@@ -423,17 +467,21 @@ mod tests {
 
     #[test]
     fn verify_proof_rejects_invalid_data() {
-        let executor = ZkElGamalProofExecutor::new(100);
+        let executor = ZkElGamalProofExecutor::new();
         // Discriminant 1 = VerifyZeroCiphertext, with insufficient proof data.
         let ctx = make_context(vec![VERIFY_ZERO_CIPHERTEXT, 0, 0, 0, 0, 0], vec![]);
         let result = executor.execute(&ctx);
-        assert!(result.is_err());
-        assert!(result.unwrap_err().contains("proof verification failed"));
+        let outcome = result.unwrap();
+        assert!(!outcome.success);
+        assert!(outcome
+            .logs
+            .iter()
+            .any(|log| log.contains("proof verification failed")));
     }
 
     #[test]
     fn verify_proof_from_account_validates_offset() {
-        let executor = ZkElGamalProofExecutor::new(100);
+        let executor = ZkElGamalProofExecutor::new();
         // 5 bytes = proof from account (1 discriminant + 4 byte offset).
         let mut data = vec![VERIFY_ZERO_CIPHERTEXT];
         data.extend_from_slice(&1000u32.to_le_bytes()); // offset 1000
@@ -442,8 +490,9 @@ mod tests {
 
         let ctx = make_context(data, vec![(Pubkey::new([1; 32]), small_account, false)]);
         let result = executor.execute(&ctx);
-        assert!(result.is_err());
-        assert!(result.unwrap_err().contains("out of bounds"));
+        let outcome = result.unwrap();
+        assert!(!outcome.success);
+        assert!(outcome.logs.iter().any(|log| log.contains("out of bounds")));
     }
 
     // ── Feature gate tests ──────────────────────────────────────
