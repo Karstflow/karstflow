@@ -7,6 +7,7 @@
 
 mod activation;
 pub mod core_bpf_migration;
+pub mod core_bpf_upgrade;
 pub mod known_features;
 
 #[cfg(test)]

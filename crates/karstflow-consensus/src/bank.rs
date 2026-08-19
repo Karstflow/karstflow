@@ -5,8 +5,8 @@ use crate::clock::calculate_stake_weighted_timestamp;
 use crate::epoch_processing::{AccountDatabaseVoteReader, EpochProcessor};
 use crate::epoch_schedule::EpochScheduleConfig;
 use crate::features::{
-    core_bpf_migration, known_features, process_feature_activations, rent_after_activation_hooks,
-    FeatureSet,
+    core_bpf_migration, core_bpf_upgrade, known_features, process_feature_activations,
+    rent_after_activation_hooks, FeatureSet,
 };
 use crate::reward_application::RewardApplicator;
 use crate::rewards_distribution::RewardsDistributor;
@@ -135,6 +135,9 @@ pub struct Bank {
     stake_tracker: Option<Arc<RwLock<StakeTracker>>>,
     stake_history: Option<Arc<RwLock<StakeHistory>>>,
     feature_set: Option<Arc<RwLock<FeatureSet>>>,
+    /// Deploy-time ELF check for the core-BPF upgrade paths. `None` makes them
+    /// decline rather than install unchecked bytecode.
+    elf_validator: Option<Arc<dyn core_bpf_upgrade::ElfValidator>>,
     vote_account_cache: Option<Arc<RwLock<VoteAccountCache>>>,
     rewards_distributor: RwLock<Option<RewardsDistributor>>,
 
@@ -222,6 +225,7 @@ impl Bank {
             stake_tracker: None,
             stake_history: None,
             feature_set: None,
+            elf_validator: None,
             vote_account_cache: None,
             rewards_distributor: RwLock::new(None),
             notifier: None,
@@ -310,6 +314,7 @@ impl Bank {
             stake_tracker: None,
             stake_history: None,
             feature_set: None,
+            elf_validator: None,
             vote_account_cache: None,
             rewards_distributor: RwLock::new(None),
             notifier: None,
@@ -414,6 +419,7 @@ impl Bank {
             stake_tracker: parent.stake_tracker.clone(),
             stake_history: parent.stake_history.clone(),
             feature_set: parent.feature_set.clone(),
+            elf_validator: parent.elf_validator.clone(),
             vote_account_cache: parent.vote_account_cache.clone(),
             rewards_distributor: RwLock::new(
                 parent
@@ -551,6 +557,15 @@ impl Bank {
     /// Attach a feature set for feature activation at epoch boundaries.
     pub fn set_feature_set(&mut self, features: Arc<RwLock<FeatureSet>>) {
         self.feature_set = Some(features);
+    }
+
+    /// Supply the deploy-time ELF check the core-BPF upgrade paths need.
+    ///
+    /// Set on a genesis bank from a crate that can see the execution layer;
+    /// children inherit it through `new_from_parent`. When it is not set the
+    /// upgrade paths decline rather than install unchecked bytecode.
+    pub fn set_elf_validator(&mut self, validator: Arc<dyn core_bpf_upgrade::ElfValidator>) {
+        self.elf_validator = Some(validator);
     }
 
     /// Get a reference to the feature set, if attached.
@@ -1270,7 +1285,7 @@ impl Bank {
         // released. Other paths take rent first and features second, so holding
         // both here would invert the lock order.
         let current_rent = self.rent();
-        let (updated_rent, migrations, relax_programdata_check) = {
+        let (updated_rent, migrations, upgrades, relax_programdata_check) = {
             let mut features = features_lock.write().expect("feature_set lock poisoned");
             let accounts = &self.accounts;
             process_feature_activations(&mut features, self.slot, &|pubkey| {
@@ -1279,6 +1294,7 @@ impl Bank {
             (
                 rent_after_activation_hooks(&features, self.slot, current_rent),
                 core_bpf_migration::migrations_activating_in(&features, self.slot),
+                core_bpf_upgrade::upgrades_activating_in(&features, self.slot),
                 features.is_active(&known_features::relax_programdata_account_check_migration()),
             )
         };
@@ -1294,6 +1310,12 @@ impl Bank {
         }
 
         self.run_core_bpf_migrations(&migrations, relax_programdata_check);
+
+        // Upgrades run after migrations, as upstream orders them: a migration
+        // creates a deployment and an upgrade replaces one, so a slot that
+        // somehow activated both for the same program must do them that way
+        // round.
+        self.run_core_bpf_upgrades(&upgrades, relax_programdata_check);
     }
 
     /// Turn the named builtins into core BPF programs.
@@ -1330,25 +1352,64 @@ impl Bank {
             let Ok(outcome) = outcome else {
                 continue;
             };
+            self.commit_core_bpf_outcome(&outcome);
+        }
+    }
 
-            for (pubkey, account) in &outcome.writes {
-                let previous = self.accounts.get_published_account(pubkey);
-                self.update_account_hash(pubkey, previous.as_ref(), account);
-                self.accounts
-                    .store_published_account(*pubkey, account.clone());
-            }
+    /// Replace the bytecode of the programs whose upgrade features activate in
+    /// this slot.
+    ///
+    /// Same standing as migrations: each is independent, and declining is the
+    /// ordinary outcome because the replacement bytecode has to have been
+    /// uploaded to a fixed buffer address beforehand.
+    fn run_core_bpf_upgrades(
+        &self,
+        upgrades: &[core_bpf_upgrade::ConfiguredUpgrade],
+        relax_programdata_check: bool,
+    ) {
+        if upgrades.is_empty() {
+            return;
+        }
+        let rent = self.rent();
 
-            // The old accounts' lamports are destroyed and the new ones minted,
-            // so supply moves by the difference rather than by either side.
-            let burned = outcome.lamports_burned;
-            let funded = outcome.lamports_funded;
-            if burned > funded {
-                self.capitalization
-                    .fetch_sub(burned - funded, Ordering::Relaxed);
-            } else if funded > burned {
-                self.capitalization
-                    .fetch_add(funded - burned, Ordering::Relaxed);
-            }
+        for config in upgrades {
+            let accounts = &self.accounts;
+            let outcome = core_bpf_upgrade::apply(
+                config,
+                self.slot,
+                &rent,
+                relax_programdata_check,
+                self.elf_validator.as_deref(),
+                &|pubkey| accounts.get_published_account(pubkey),
+            );
+
+            let Ok(outcome) = outcome else {
+                continue;
+            };
+            self.commit_core_bpf_outcome(&outcome);
+        }
+    }
+
+    /// Store the accounts a migration or upgrade produced and move supply by
+    /// what it destroyed and minted.
+    fn commit_core_bpf_outcome(&self, outcome: &core_bpf_migration::MigrationOutcome) {
+        for (pubkey, account) in &outcome.writes {
+            let previous = self.accounts.get_published_account(pubkey);
+            self.update_account_hash(pubkey, previous.as_ref(), account);
+            self.accounts
+                .store_published_account(*pubkey, account.clone());
+        }
+
+        // The old accounts' lamports are destroyed and the new ones minted, so
+        // supply moves by the difference rather than by either side.
+        let burned = outcome.lamports_burned;
+        let funded = outcome.lamports_funded;
+        if burned > funded {
+            self.capitalization
+                .fetch_sub(burned - funded, Ordering::Relaxed);
+        } else if funded > burned {
+            self.capitalization
+                .fetch_add(funded - burned, Ordering::Relaxed);
         }
     }
 
@@ -2787,6 +2848,200 @@ mod tests {
                 .is_none(),
             "no buffer, no migration, no account"
         );
+    }
+
+    #[test]
+    fn an_epoch_boundary_runs_a_core_bpf_upgrade_that_has_its_buffer() {
+        // The upgrade counterpart of the migration test above, and it exists
+        // for the same reason: a mechanism no call site reaches is a mechanism
+        // with no evidence it runs.
+        let accounts = Arc::new(AccountDatabase::new());
+        let epoch_schedule = Arc::new(EpochSchedule::default());
+
+        let mut parent = Bank::new_genesis_with_config(
+            accounts.clone(),
+            epoch_schedule.clone(),
+            create_test_leader_schedule(0),
+            1_000_000_000_000,
+            Rent::default(),
+            Inflation::default(),
+        );
+
+        // QB-042: build the feature set explicitly, or everything is active at
+        // slot 0 and the gate proves nothing.
+        parent.set_feature_set(Arc::new(RwLock::new(FeatureSet::with_known_features())));
+        parent.set_elf_validator(Arc::new(AcceptingElf));
+        let upgrade = crate::features::core_bpf_upgrade::configured_upgrades()
+            .into_iter()
+            .find(|config| config.kind == crate::features::core_bpf_upgrade::UpgradeKind::CoreBpf)
+            .expect("a core-BPF upgrade");
+        accounts.store_published_account(
+            upgrade.feature_id,
+            Account::new(1, vec![1u8], karstflow_ids::FEATURE_PROGRAM_ID),
+        );
+
+        // An upgrade needs an existing deployment to upgrade, which on this
+        // chain the stake program is not — it is a builtin. So the pair is
+        // placed by hand, exactly as a snapshot would carry it.
+        let programdata_id = {
+            let (address, _bump) = karstflow_types::Pubkey::find_program_address(
+                &[upgrade.program_id.as_bytes()],
+                &karstflow_ids::BPF_LOADER_PROGRAM_ID,
+            )
+            .expect("a single 32-byte seed derives");
+            address
+        };
+        let mut program = Account::new(
+            1_000,
+            karstflow_types::UpgradeableLoaderState::Program {
+                programdata_address: programdata_id,
+            }
+            .serialize(),
+            karstflow_ids::BPF_LOADER_PROGRAM_ID,
+        );
+        program.meta.executable = true;
+        accounts.store_published_account(upgrade.program_id, program);
+
+        let mut old_programdata = karstflow_types::UpgradeableLoaderState::ProgramData {
+            slot: 0,
+            upgrade_authority: None,
+        }
+        .serialize();
+        old_programdata.extend_from_slice(&[0xAAu8; 32]);
+        accounts.store_published_account(
+            programdata_id,
+            Account::new(7_000, old_programdata, karstflow_ids::BPF_LOADER_PROGRAM_ID),
+        );
+
+        let elf = vec![0xEDu8; 96];
+        let mut buffer_data =
+            karstflow_types::UpgradeableLoaderState::Buffer { authority: None }.serialize();
+        buffer_data.extend_from_slice(&elf);
+        accounts.store_published_account(
+            upgrade.source_buffer,
+            Account::new(5_000, buffer_data, karstflow_ids::BPF_LOADER_PROGRAM_ID),
+        );
+
+        let slot = epoch_schedule.get_first_slot_in_epoch(1);
+        let child = Bank::new_from_parent(&parent, slot, create_test_leader_schedule(1));
+        for _ in 0..TICKS_PER_SLOT {
+            child.register_tick().unwrap();
+        }
+        child.finish_slot().unwrap();
+
+        let programdata = accounts
+            .get_published_account(&programdata_id)
+            .expect("the programdata account");
+        assert_eq!(
+            &programdata.data.as_slice()
+                [karstflow_constants::bpf_loader_program::SIZE_OF_PROGRAMDATA_METADATA..],
+            &elf[..],
+            "the deployed bytecode is now the buffer's"
+        );
+
+        let drained = accounts
+            .get_published_account(&upgrade.source_buffer)
+            .expect("the buffer account still exists");
+        assert_eq!(drained.meta.lamports, 0, "the source buffer is drained");
+    }
+
+    /// A validator that passes everything, so a test about the wiring is not
+    /// also a test about ELF parsing.
+    #[derive(Debug)]
+    struct AcceptingElf;
+    impl crate::features::core_bpf_upgrade::ElfValidator for AcceptingElf {
+        fn validate_for_deploy(&self, _elf: &[u8]) -> Result<(), String> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn an_upgrade_declines_through_the_bank_when_no_validator_is_wired() {
+        // The fail-closed decision end to end. Everything an upgrade needs is
+        // present except the ability to check the bytecode, and the accounts
+        // are left untouched rather than rewritten unchecked.
+        let accounts = Arc::new(AccountDatabase::new());
+        let epoch_schedule = Arc::new(EpochSchedule::default());
+
+        let mut parent = Bank::new_genesis_with_config(
+            accounts.clone(),
+            epoch_schedule.clone(),
+            create_test_leader_schedule(0),
+            1_000_000_000_000,
+            Rent::default(),
+            Inflation::default(),
+        );
+        parent.set_feature_set(Arc::new(RwLock::new(FeatureSet::with_known_features())));
+        // Deliberately no set_elf_validator.
+
+        let upgrade = crate::features::core_bpf_upgrade::configured_upgrades()
+            .into_iter()
+            .find(|config| config.kind == crate::features::core_bpf_upgrade::UpgradeKind::CoreBpf)
+            .expect("a core-BPF upgrade");
+        accounts.store_published_account(
+            upgrade.feature_id,
+            Account::new(1, vec![1u8], karstflow_ids::FEATURE_PROGRAM_ID),
+        );
+
+        let programdata_id = {
+            let (address, _bump) = karstflow_types::Pubkey::find_program_address(
+                &[upgrade.program_id.as_bytes()],
+                &karstflow_ids::BPF_LOADER_PROGRAM_ID,
+            )
+            .expect("a single 32-byte seed derives");
+            address
+        };
+        let mut program = Account::new(
+            1_000,
+            karstflow_types::UpgradeableLoaderState::Program {
+                programdata_address: programdata_id,
+            }
+            .serialize(),
+            karstflow_ids::BPF_LOADER_PROGRAM_ID,
+        );
+        program.meta.executable = true;
+        accounts.store_published_account(upgrade.program_id, program);
+
+        let original = [0xAAu8; 32];
+        let mut old_programdata = karstflow_types::UpgradeableLoaderState::ProgramData {
+            slot: 0,
+            upgrade_authority: None,
+        }
+        .serialize();
+        old_programdata.extend_from_slice(&original);
+        accounts.store_published_account(
+            programdata_id,
+            Account::new(7_000, old_programdata, karstflow_ids::BPF_LOADER_PROGRAM_ID),
+        );
+
+        let mut buffer_data =
+            karstflow_types::UpgradeableLoaderState::Buffer { authority: None }.serialize();
+        buffer_data.extend_from_slice(&[0xEDu8; 96]);
+        accounts.store_published_account(
+            upgrade.source_buffer,
+            Account::new(5_000, buffer_data, karstflow_ids::BPF_LOADER_PROGRAM_ID),
+        );
+
+        let slot = epoch_schedule.get_first_slot_in_epoch(1);
+        let child = Bank::new_from_parent(&parent, slot, create_test_leader_schedule(1));
+        for _ in 0..TICKS_PER_SLOT {
+            child.register_tick().unwrap();
+        }
+        child.finish_slot().unwrap();
+
+        let programdata = accounts
+            .get_published_account(&programdata_id)
+            .expect("the programdata account");
+        assert_eq!(
+            &programdata.data.as_slice()
+                [karstflow_constants::bpf_loader_program::SIZE_OF_PROGRAMDATA_METADATA..],
+            &original[..],
+            "the deployed bytecode is untouched"
+        );
+        let buffer = accounts
+            .get_published_account(&upgrade.source_buffer)
+            .expect("the buffer account");
+        assert_eq!(buffer.meta.lamports, 5_000, "the buffer is not drained");
     }
 
     #[test]

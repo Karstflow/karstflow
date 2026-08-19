@@ -252,7 +252,12 @@ pub fn build_consensus_infrastructure(
     let leader_schedule = Arc::new(
         LeaderSchedule::new(0, &validators).expect("leader schedule from single validator"),
     );
-    let genesis = Bank::new_genesis(accounts, epoch_schedule, leader_schedule);
+    let mut genesis = Bank::new_genesis(accounts, epoch_schedule, leader_schedule);
+    // The core-BPF upgrade paths refuse to install bytecode they cannot check,
+    // so the check has to be supplied here — this crate can see both the bank
+    // and the execution layer, and the bank's children inherit it.
+    genesis.set_elf_validator(Arc::new(karstflow_execution::SbpfElfValidator::default()));
+    let genesis = genesis;
 
     // Extract real stake data from the bank if available.
     // When restoring from a snapshot, the bank's stake tracker is populated

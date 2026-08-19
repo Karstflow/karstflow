@@ -210,29 +210,16 @@ impl BytecodeVm {
         elf_bytes: &[u8],
         active_features: &std::collections::HashSet<[u8; 32]>,
     ) -> Result<LoadedProgram, SbpfExecutionError> {
-        let program = crate::elf_loader::load_elf(elf_bytes).map_err(|e| {
-            SbpfExecutionError::ExecutionFailed {
-                message: format!("ELF load: {e}"),
-            }
-        })?;
-
         // Merge the VM's base syscall IDs (including CPI handlers) with
         // feature-gated syscall IDs to get the full set of valid call targets.
         let feature_dispatch = RuntimeSyscallDispatch::with_active_feature_ids(active_features);
         let mut syscall_ids = self.syscall_dispatch.registered_ids();
         syscall_ids.extend(feature_dispatch.registered_ids());
-        validation::validate(&program, &syscall_ids).map_err(|errors| {
-            let sample: Vec<String> = errors.iter().take(3).map(|e| e.to_string()).collect();
-            SbpfExecutionError::ExecutionFailed {
-                message: format!(
-                    "validation: {} errors — {}",
-                    errors.len(),
-                    sample.join("; ")
-                ),
-            }
-        })?;
 
-        Ok(program)
+        // The same check the upgrade paths run before installing bytecode.
+        // Shared so the two cannot drift apart.
+        validation::validate_elf_for_deploy(elf_bytes, &syscall_ids)
+            .map_err(|message| SbpfExecutionError::ExecutionFailed { message })
     }
 
     /// Convert execution context accounts to the BPF serialization input format.

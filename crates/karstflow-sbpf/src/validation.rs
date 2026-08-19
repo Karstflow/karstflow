@@ -276,6 +276,55 @@ fn validate_division(
 // Tests
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// Deploy-time validation
+// ---------------------------------------------------------------------------
+
+/// The syscall ids a program may call when it is deployed at a slot with
+/// `active_features` in force.
+///
+/// This is the standard set plus the two CPI entry points plus whatever the
+/// active features add. The CPI ids are hashed by name rather than registered,
+/// because enumerating what a program is allowed to call needs no handler to
+/// call it with — and requiring one would mean inventing an executor purely to
+/// ask a question about names.
+pub fn deploy_syscall_ids(active_features: &HashSet<[u8; 32]>) -> HashSet<u32> {
+    use crate::syscall_dispatch::{murmur3_hash, RuntimeSyscallDispatch};
+
+    let mut ids = RuntimeSyscallDispatch::with_standard_syscalls().registered_ids();
+    ids.insert(murmur3_hash("sol_invoke_signed_c"));
+    ids.insert(murmur3_hash("sol_invoke_signed_rust"));
+    ids.extend(RuntimeSyscallDispatch::with_active_feature_ids(active_features).registered_ids());
+    ids
+}
+
+/// Load `elf` and check it would survive being deployed: it must parse, and
+/// every instruction in it must pass the validation the loader applies before
+/// execution.
+///
+/// Returns the loaded program so a caller that needs it does not parse twice;
+/// callers that only want a verdict discard it. The error is a description, for
+/// a caller that wants to say why.
+///
+/// Used both by the VM's own load path and by the core-BPF upgrade paths, which
+/// must reject a source buffer whose bytecode could never run rather than
+/// install it and fail at first invocation.
+pub fn validate_elf_for_deploy(
+    elf: &[u8],
+    syscall_ids: &HashSet<u32>,
+) -> Result<LoadedProgram, String> {
+    let program = crate::elf_loader::load_elf(elf).map_err(|e| format!("ELF load: {e}"))?;
+    validate(&program, syscall_ids).map_err(|errors| {
+        let sample: Vec<String> = errors.iter().take(3).map(|e| e.to_string()).collect();
+        format!(
+            "validation: {} errors — {}",
+            errors.len(),
+            sample.join("; ")
+        )
+    })?;
+    Ok(program)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

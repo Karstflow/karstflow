@@ -68,6 +68,21 @@ pub enum MigrationError {
     BuildHashMismatch,
     /// The config names an authority the buffer does not carry.
     UpgradeAuthorityMismatch,
+    /// An upgrade target's program account is not marked executable.
+    ProgramAccountNotExecutable,
+    /// An upgrade target's program account is not in the `Program` state, or
+    /// points at an address other than its own derived one.
+    InvalidProgramAccount,
+    /// An upgrade target's programdata account is missing.
+    ProgramDataAccountNotFound,
+    /// An upgrade target's programdata account is not owned by the upgradeable
+    /// loader, or is not in the `ProgramData` state.
+    InvalidProgramDataAccount,
+    /// The buffer's bytecode would not survive being deployed.
+    InvalidBytecode,
+    /// No ELF validator was wired, so the bytecode could not be checked and the
+    /// upgrade declined rather than install it unchecked.
+    NoElfValidator,
 }
 
 /// The accounts a migration writes, and what it does to the money.
@@ -121,7 +136,7 @@ const SLASHING_PROGRAM_BUILD_HASH: [u8; 32] = [
 ];
 
 /// The programdata address a migrated program's bytecode lives at.
-fn programdata_address(program_id: &Pubkey) -> Pubkey {
+pub(crate) fn programdata_address(program_id: &Pubkey) -> Pubkey {
     let (address, _bump) = Pubkey::find_program_address(
         &[program_id.as_bytes()],
         &karstflow_ids::BPF_LOADER_PROGRAM_ID,
@@ -176,7 +191,7 @@ pub fn migrate(
     };
 
     let source = read(&config.source_buffer).ok_or(MigrationError::SourceBufferNotFound)?;
-    let elf = validated_buffer_elf(&source, config)?;
+    let elf = validated_buffer_elf(&source, config.verified_build_hash)?;
 
     // A config that names an authority requires the buffer to carry the same
     // one, so that whoever uploaded the bytecode is the party the migration was
@@ -222,16 +237,11 @@ pub fn migrate(
         .lamports
         .saturating_add(new_programdata.meta.lamports);
 
-    // The source buffer is drained rather than deleted: its bytecode now lives
-    // in the programdata account, and leaving a funded copy behind would let it
-    // be migrated a second time.
-    let drained = Account::default();
-
     Ok(MigrationOutcome {
         writes: vec![
             (config.program_id, new_program),
             (programdata_id, new_programdata),
-            (config.source_buffer, drained),
+            (config.source_buffer, empty_account()),
         ],
         lamports_burned,
         lamports_funded,
@@ -239,10 +249,13 @@ pub fn migrate(
 }
 
 /// The bytecode inside a source buffer, once the buffer has been vouched for.
-fn validated_buffer_elf<'a>(
-    source: &'a Account,
-    config: &CoreBpfMigration,
-) -> Result<&'a [u8], MigrationError> {
+///
+/// `verified_build_hash` is present on migrations that pin a build and absent
+/// on upgrades, which replace bytecode that was already vouched for once.
+pub(crate) fn validated_buffer_elf(
+    source: &Account,
+    verified_build_hash: Option<[u8; 32]>,
+) -> Result<&[u8], MigrationError> {
     if source.meta.owner != karstflow_ids::BPF_LOADER_PROGRAM_ID {
         return Err(MigrationError::IncorrectBufferOwner);
     }
@@ -256,7 +269,7 @@ fn validated_buffer_elf<'a>(
 
     let elf = &data[loader::SIZE_OF_BUFFER_METADATA..];
 
-    if let Some(expected) = config.verified_build_hash {
+    if let Some(expected) = verified_build_hash {
         // A buffer is allocated at the size the deployment will need and
         // written into from the front, so the tail is zeros that were never
         // part of the program. Hashing them would make the check depend on how
@@ -274,7 +287,15 @@ fn validated_buffer_elf<'a>(
     Ok(elf)
 }
 
-fn loader_owned(data: Vec<u8>, lamports: u64, executable: bool) -> Account {
+/// The account a drained source buffer is replaced with.
+///
+/// Zeroed rather than deleted: the bytecode now lives in the programdata
+/// account, and leaving a funded copy behind would let it be consumed twice.
+pub(crate) fn empty_account() -> Account {
+    Account::default()
+}
+
+pub(crate) fn loader_owned(data: Vec<u8>, lamports: u64, executable: bool) -> Account {
     Account {
         data: AccountData::new(data),
         meta: AccountMeta {
