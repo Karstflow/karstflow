@@ -295,7 +295,17 @@ impl EpochProcessor {
     ) -> Result<(), EpochError> {
         let inflation = *bank.inflation();
         let epoch_schedule = *bank.epoch_schedule().as_ref();
-        let calculator = RewardsCalculator::new(inflation, epoch_schedule);
+        // Inflation time is measured from the slot inflation began at, not from
+        // genesis; the two coincide only where none of its trigger features ever
+        // activated.
+        let inflation_start_slot = bank
+            .feature_set()
+            .map(|fs| {
+                let fs = fs.read().expect("feature_set lock poisoned");
+                crate::inflation_start_slot_aligned_to_rewards(&fs, &epoch_schedule)
+            })
+            .unwrap_or(0);
+        let calculator = RewardsCalculator::new(inflation, epoch_schedule, inflation_start_slot);
 
         let (total_rewards, _validator_rate, _foundation_rate) =
             calculator.calculate_epoch_rewards(ctx.new_epoch, ctx.capitalization);
