@@ -340,6 +340,13 @@ pub const RELAX_PROGRAMDATA_ACCOUNT_CHECK_MIGRATION: Pubkey = Pubkey::new([
     0xE7, 0x66, 0x90, 0x8A, 0x06, 0xB4, 0x57, 0xAA, 0xA9, 0x0D, 0x88, 0xB6, 0x2F, 0xD6, 0x4B, 0xA2,
 ]);
 
+/// Forbids a syscall output pointer from targeting the input region.
+/// Base58: EDGMC5kxFxGk4ixsNkGt8bW7QL5hDMXnbwaZvYMwNfzF
+pub const SYSCALL_PARAMETER_ADDRESS_RESTRICTIONS: Pubkey = Pubkey::new([
+    0xC4, 0x4C, 0x41, 0x01, 0x70, 0xB2, 0xBF, 0x14, 0xB6, 0xDF, 0xFE, 0x7B, 0x58, 0x42, 0x2C, 0xEE,
+    0x13, 0x69, 0x3B, 0x78, 0x92, 0x2A, 0x58, 0x3E, 0xC1, 0x18, 0xEE, 0xB8, 0x36, 0x70, 0x77, 0xB8,
+]);
+
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
@@ -404,6 +411,7 @@ mod tests {
             LIMIT_INSTRUCTION_ACCOUNTS,
             VALIDATOR_ADMISSION_TICKET,
             RELAX_PROGRAMDATA_ACCOUNT_CHECK_MIGRATION,
+            SYSCALL_PARAMETER_ADDRESS_RESTRICTIONS,
         ]
     }
 

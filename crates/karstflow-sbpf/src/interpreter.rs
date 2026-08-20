@@ -81,6 +81,10 @@ pub struct VmState {
     pub sbpf_version: SbpfVersion,
     /// Program ID of the currently executing program (needed for PDA derivation in CPI).
     pub program_id: karstflow_types::Pubkey,
+    /// Whether a syscall output pointer is forbidden from targeting the input
+    /// region. Resolved once at VM setup rather than per syscall, because the
+    /// feature set is a hash set and these checks sit on the syscall path.
+    pub syscall_parameter_address_restrictions: bool,
 }
 
 /// A saved function call frame.
@@ -235,6 +239,10 @@ pub fn execute(
 
     let sbpf_version = program.sbpf_version;
 
+    let syscall_parameter_address_restrictions = sysvar_snapshot
+        .active_features
+        .contains(karstflow_ids::features::SYSCALL_PARAMETER_ADDRESS_RESTRICTIONS.as_bytes());
+
     let mut vm = VmState {
         registers: [0u64; REGISTER_COUNT],
         pc: program.entry_point,
@@ -251,6 +259,7 @@ pub fn execute(
         cpi_depth: 0,
         sbpf_version,
         program_id,
+        syscall_parameter_address_restrictions,
     };
 
     // Set initial frame pointer (r10)
@@ -1230,6 +1239,60 @@ mod tests {
             SysvarSnapshot::default(),
             karstflow_types::Pubkey::default(),
         )
+    }
+
+    /// Run a program that immediately calls `sol_get_clock_sysvar`. `execute`
+    /// initialises `r1` to the input region, so the call lands exactly on the
+    /// pointer the address restriction is meant to refuse.
+    fn run_clock_syscall_with_features(active: &[[u8; 32]]) -> Result<VmResult, VmError> {
+        use crate::syscall_dispatch::{murmur3_hash, RuntimeSyscallDispatch};
+
+        let hash = murmur3_hash("sol_get_clock_sysvar");
+        let bytes = make_program_bytes(&[
+            Instruction::new(Opcode::Call as u8, 0, 0, 0, hash as i32),
+            Instruction::new(Opcode::Exit as u8, 0, 0, 0, 0),
+        ]);
+        let program = load_raw(&bytes).unwrap();
+        let memory = MemoryMap::new(&[], TOTAL_STACK_SIZE, DEFAULT_HEAP_SIZE, vec![0u8; 256]);
+
+        let mut snapshot = SysvarSnapshot::default();
+        for id in active {
+            snapshot.active_features.insert(*id);
+        }
+
+        // Production builds the dispatcher from the same feature set it puts in
+        // the snapshot, so the test does too rather than hand-registering.
+        let dispatch = RuntimeSyscallDispatch::with_active_feature_ids(&snapshot.active_features);
+
+        execute(
+            &program,
+            memory,
+            10_000,
+            &dispatch,
+            snapshot,
+            karstflow_types::Pubkey::default(),
+        )
+    }
+
+    #[test]
+    fn address_restriction_is_wired_from_the_active_feature_set() {
+        // Guards the seam rather than the rule: the handler-level tests all set
+        // the flag by hand, so without this a build that never derives the flag
+        // from the feature set passes the entire suite.
+        use karstflow_ids::features::SYSCALL_PARAMETER_ADDRESS_RESTRICTIONS;
+
+        let ungated = run_clock_syscall_with_features(&[]);
+        assert!(
+            ungated.is_ok(),
+            "without the feature the sysvar write into the input region must succeed, got {ungated:?}"
+        );
+
+        let gated =
+            run_clock_syscall_with_features(&[*SYSCALL_PARAMETER_ADDRESS_RESTRICTIONS.as_bytes()]);
+        assert!(
+            gated.is_err(),
+            "activating the feature must reach the VM and refuse the write"
+        );
     }
 
     #[test]

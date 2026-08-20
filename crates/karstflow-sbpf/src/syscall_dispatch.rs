@@ -1281,6 +1281,23 @@ impl SyscallHandler for SolGetReturnDataHandler {
     }
 }
 
+/// Refuse a syscall output pointer that targets the program input region.
+///
+/// A program can otherwise ask a sysvar getter to write over its own serialized
+/// account buffer, which aliases memory the runtime also owns. The restriction
+/// is feature-gated: before activation the write is permitted, so applying it
+/// unconditionally would change behaviour on slots that predate the gate.
+fn reject_input_region_output(vm: &VmState, out_vaddr: u64) -> Result<(), VmError> {
+    if vm.syscall_parameter_address_restrictions
+        && out_vaddr >= karstflow_constants::vm::REGION_INPUT_BASE
+    {
+        return Err(VmError::SyscallError(
+            "invalid pointer: syscall output may not target the input region".to_string(),
+        ));
+    }
+    Ok(())
+}
+
 /// sol_get_clock_sysvar: Write Clock sysvar data to VM memory.
 ///
 /// Serialization layout (40 bytes, little-endian):
@@ -1298,6 +1315,7 @@ impl SyscallHandler for SolGetClockSysvarHandler {
         _r5: u64,
     ) -> Result<u64, VmError> {
         deduct_compute(vm, syscalls::GET_SYSVAR_COST)?;
+        reject_input_region_output(vm, r1)?;
 
         let snap = &vm.sysvar_snapshot;
         let mut buf = [0u8; 40];
@@ -1332,6 +1350,7 @@ impl SyscallHandler for SolGetRentSysvarHandler {
         _r5: u64,
     ) -> Result<u64, VmError> {
         deduct_compute(vm, syscalls::GET_SYSVAR_COST)?;
+        reject_input_region_output(vm, r1)?;
 
         let snap = &vm.sysvar_snapshot;
         let mut buf = [0u8; 17];
@@ -1364,6 +1383,7 @@ impl SyscallHandler for SolGetEpochScheduleHandler {
         _r5: u64,
     ) -> Result<u64, VmError> {
         deduct_compute(vm, syscalls::GET_SYSVAR_COST)?;
+        reject_input_region_output(vm, r1)?;
 
         let snap = &vm.sysvar_snapshot;
         let mut buf = [0u8; 33];
@@ -1397,6 +1417,7 @@ impl SyscallHandler for SolGetLastRestartSlotHandler {
         _r5: u64,
     ) -> Result<u64, VmError> {
         deduct_compute(vm, syscalls::GET_SYSVAR_COST)?;
+        reject_input_region_output(vm, r1)?;
 
         vm.memory
             .write_slice(r1, &vm.sysvar_snapshot.last_restart_slot.to_le_bytes())
@@ -2140,6 +2161,7 @@ impl SyscallHandler for SolGetEpochRewardsSysvarHandler {
         _r5: u64,
     ) -> Result<u64, VmError> {
         deduct_compute(vm, syscalls::GET_EPOCH_REWARDS_SYSVAR_COST)?;
+        reject_input_region_output(vm, r1)?;
 
         let snap = &vm.sysvar_snapshot;
         let mut buf = [0u8; 25];
@@ -2183,6 +2205,7 @@ impl SyscallHandler for SolGetSysvarHandler {
         let cost = syscalls::GET_GENERIC_SYSVAR_BASE_COST
             + syscalls::GET_GENERIC_SYSVAR_PER_BYTE_COST * len as u64;
         deduct_compute(vm, cost)?;
+        reject_input_region_output(vm, r2)?;
 
         if len > syscalls::MAX_GENERIC_SYSVAR_READ_LEN {
             return Ok(2); // Length exceeds limit
@@ -3331,7 +3354,9 @@ mod tests {
     use crate::elf_loader::load_raw;
     use crate::instruction::{Instruction, Opcode};
     use crate::memory::MemoryMap;
-    use karstflow_constants::vm::{DEFAULT_HEAP_SIZE, REGION_HEAP_BASE, TOTAL_STACK_SIZE};
+    use karstflow_constants::vm::{
+        DEFAULT_HEAP_SIZE, REGION_HEAP_BASE, REGION_INPUT_BASE, TOTAL_STACK_SIZE,
+    };
 
     /// Reference CPI compute model (agave v4 / SIMD-0339): flat invoke cost plus
     /// per-component translation costs at CPI_BYTES_PER_UNIT. Guards against
@@ -3752,6 +3777,93 @@ mod tests {
             cpi_depth: 0,
             sbpf_version: crate::elf_loader::SbpfVersion::V0,
             program_id: karstflow_types::Pubkey::default(),
+            syscall_parameter_address_restrictions: false,
+        }
+    }
+
+    /// A VM whose input region is large enough to be a plausible syscall
+    /// output target, so the address restriction is what rejects the write
+    /// rather than an unmapped-memory error.
+    fn make_input_region_vm(restrictions_active: bool) -> VmState {
+        use crate::interpreter::VmState;
+        VmState {
+            registers: [0u64; 11],
+            pc: 0,
+            instruction_count: 0,
+            memory: MemoryMap::new(&[], TOTAL_STACK_SIZE, DEFAULT_HEAP_SIZE, vec![0u8; 512]),
+            call_stack: Vec::new(),
+            compute_meter: 1_000_000,
+            logs: Vec::new(),
+            log_bytes_written: 0,
+            log_truncated: false,
+            return_data: None,
+            heap_position: REGION_HEAP_BASE,
+            sysvar_snapshot: crate::sysvar_snapshot::SysvarSnapshot::default(),
+            cpi_depth: 0,
+            sbpf_version: crate::elf_loader::SbpfVersion::V0,
+            program_id: karstflow_types::Pubkey::default(),
+            syscall_parameter_address_restrictions: restrictions_active,
+        }
+    }
+
+    /// The six sysvar getters upstream guards, each invoked through its handler
+    /// with `r1` as the destination pointer.
+    fn call_sysvar_handler(index: usize, vm: &mut VmState, dst: u64) -> Result<u64, VmError> {
+        match index {
+            0 => SolGetClockSysvarHandler.call(vm, dst, 0, 0, 0, 0),
+            1 => SolGetRentSysvarHandler.call(vm, dst, 0, 0, 0, 0),
+            2 => SolGetEpochScheduleHandler.call(vm, dst, 0, 0, 0, 0),
+            3 => SolGetLastRestartSlotHandler.call(vm, dst, 0, 0, 0, 0),
+            4 => SolGetEpochRewardsSysvarHandler.call(vm, dst, 0, 0, 0, 0),
+            // sol_get_sysvar takes the destination in r2, with the sysvar id in r1.
+            5 => SolGetSysvarHandler.call(vm, REGION_HEAP_BASE, dst, 0, 32, 0),
+            _ => unreachable!("only six guarded sysvar getters"),
+        }
+    }
+
+    const GUARDED_SYSVAR_HANDLERS: usize = 6;
+
+    #[test]
+    fn sysvar_output_into_input_region_is_rejected_when_gated() {
+        for index in 0..GUARDED_SYSVAR_HANDLERS {
+            let mut vm = make_input_region_vm(true);
+            let result = call_sysvar_handler(index, &mut vm, REGION_INPUT_BASE);
+
+            assert!(
+                result.is_err(),
+                "handler {index}: an output pointer in the input region must be refused \
+                 while the restriction is active"
+            );
+        }
+    }
+
+    #[test]
+    fn sysvar_output_into_input_region_is_allowed_when_ungated() {
+        // Pre-activation behaviour must be preserved exactly: the same call
+        // that the gate refuses has to succeed while the gate is inactive,
+        // otherwise the restriction is applied to slots that predate it.
+        for index in 0..GUARDED_SYSVAR_HANDLERS {
+            let mut vm = make_input_region_vm(false);
+            let result = call_sysvar_handler(index, &mut vm, REGION_INPUT_BASE);
+
+            assert!(
+                result.is_ok(),
+                "handler {index}: must still write into the input region while the \
+                 restriction is inactive, got {result:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn sysvar_output_outside_the_input_region_is_unaffected_by_the_gate() {
+        for index in 0..GUARDED_SYSVAR_HANDLERS {
+            let mut vm = make_input_region_vm(true);
+            let result = call_sysvar_handler(index, &mut vm, REGION_HEAP_BASE);
+
+            assert!(
+                result.is_ok(),
+                "handler {index}: the gate must only reject the input region, got {result:?}"
+            );
         }
     }
 
@@ -4514,6 +4626,7 @@ mod tests {
             cpi_depth: 0,
             sbpf_version: crate::elf_loader::SbpfVersion::V0,
             program_id: karstflow_types::Pubkey::default(),
+            syscall_parameter_address_restrictions: false,
         }
     }
 
@@ -4882,6 +4995,7 @@ mod tests {
             cpi_depth: 0,
             sbpf_version: crate::elf_loader::SbpfVersion::V0,
             program_id: karstflow_types::Pubkey::default(),
+            syscall_parameter_address_restrictions: false,
         };
 
         // Write target program ID
