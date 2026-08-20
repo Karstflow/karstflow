@@ -154,7 +154,7 @@ pub fn validate(
         }
 
         // Validate registers
-        validate_registers(insn, op, i, &mut errors);
+        validate_registers(insn, op, version, i, &mut errors);
 
         // Validate jump targets
         if op.is_jump() && op != Opcode::Call && op != Opcode::Syscall && op != Opcode::Exit {
@@ -216,9 +216,26 @@ pub fn validate(
 fn validate_registers(
     insn: &crate::instruction::Instruction,
     op: Opcode,
+    version: SbpfVersion,
     pc: usize,
     errors: &mut Vec<ValidationError>,
 ) {
+    // In V0/V1 this opcode is CALLX and the immediate names the register
+    // holding the target address. Only the general registers may be called:
+    // r10 is the frame pointer and r11 the stack pointer. The immediate is
+    // unsigned, so a negative value is a large selector, not a wrap-around.
+    if op == Opcode::Syscall && !version.callx_uses_src_register() {
+        let selector = insn.immediate as u32;
+        if selector > MAX_DST_REGISTER as u32 {
+            errors.push(ValidationError::InvalidRegister {
+                pc,
+                register: selector.min(u8::MAX as u32) as u8,
+                field: "callx target",
+            });
+        }
+        return;
+    }
+
     // Skip register checks for instructions that don't use them
     if op == Opcode::Ja || op == Opcode::Call || op == Opcode::Exit {
         return;
@@ -491,5 +508,81 @@ mod tests {
         assert!(errors
             .iter()
             .any(|e| matches!(e, ValidationError::MissingExitInstruction)));
+    }
+
+    /// Build a V0 program whose single CALLX selects register `reg`.
+    ///
+    /// In V0/V1 opcode `0x8D` is CALLX and the immediate names the register
+    /// holding the target address.
+    fn callx_program(reg: i32) -> LoadedProgram {
+        let bytes = make_program(&[
+            Instruction::new(Opcode::Syscall as u8, 0, 0, 0, reg),
+            Instruction::new(Opcode::Exit as u8, 0, 0, 0, 0),
+        ]);
+        load_raw(&bytes).unwrap()
+    }
+
+    #[test]
+    fn callx_on_a_general_register_is_accepted() {
+        // The permitted side of the boundary. Without this the rejection
+        // below would also pass against a verifier that refuses every CALLX.
+        for reg in 0..=9 {
+            let program = callx_program(reg);
+            assert!(
+                validate(&program, &empty_syscalls()).is_ok(),
+                "CALLX r{reg} must be accepted"
+            );
+        }
+    }
+
+    #[test]
+    fn callx_above_r9_is_rejected() {
+        // r10 is the frame pointer and r11 the stack pointer; neither may be
+        // a call target. The reference refuses these at verification time.
+        for reg in [10, 11, 15] {
+            let program = callx_program(reg);
+            let errors = validate(&program, &empty_syscalls())
+                .expect_err(&format!("CALLX r{reg} must be rejected"));
+            assert!(
+                errors.iter().any(|e| matches!(
+                    e,
+                    ValidationError::InvalidRegister {
+                        pc: 0,
+                        field: "callx target",
+                        ..
+                    }
+                )),
+                "CALLX r{reg} rejected for the wrong reason: {errors:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn syscall_in_v2_and_v3_is_not_read_as_a_callx_register() {
+        // From V2 the same opcode is SYSCALL and the immediate carries the
+        // syscall target, not a register selector. Applying the CALLX rule
+        // here would reject every real syscall, since targets exceed r9.
+        // Without this test the version guard is unreachable by the suite:
+        // removing it leaves the whole workspace green.
+        for version in [SbpfVersion::V2, SbpfVersion::V3] {
+            let bytes = make_program(&[
+                Instruction::new(Opcode::Syscall as u8, 0, 0, 0, 0x1234_5678),
+                Instruction::new(Opcode::Exit as u8, 0, 0, 0, 0),
+            ]);
+            let mut program = load_raw(&bytes).unwrap();
+            program.sbpf_version = version;
+            assert!(
+                validate(&program, &empty_syscalls()).is_ok(),
+                "{version:?}: SYSCALL immediate must not be checked as a register"
+            );
+        }
+    }
+
+    #[test]
+    fn callx_with_a_negative_immediate_is_rejected() {
+        // The immediate is unsigned upstream, so a negative value here is a
+        // very large selector — not a wrap-around into a legal register.
+        let program = callx_program(-1);
+        assert!(validate(&program, &empty_syscalls()).is_err());
     }
 }
