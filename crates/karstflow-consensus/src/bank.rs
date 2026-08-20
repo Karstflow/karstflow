@@ -1811,6 +1811,7 @@ impl Bank {
         let rent = self.rent();
 
         SnapshotBankState {
+            accounts_lt_hash: *self.lthash().as_bytes(),
             recent_blockhashes,
             last_blockhash,
             max_blockhash_age,
@@ -3222,6 +3223,28 @@ mod tests {
     }
 
     #[test]
+    fn snapshot_state_carries_the_banks_lattice_hash() {
+        let accounts = Arc::new(AccountDatabase::new());
+        let epoch_schedule = Arc::new(EpochSchedule::default());
+        let leader_schedule = create_test_leader_schedule(0);
+
+        let bank = Bank::new_genesis(accounts, epoch_schedule, leader_schedule);
+        let pubkey = Pubkey::new_unique();
+        bank.update_account_hash(
+            &pubkey,
+            None,
+            &Account::new(1000, vec![1, 2, 3], Pubkey::new_unique()),
+        );
+
+        let state = bank.to_snapshot_state();
+        assert_eq!(&state.accounts_lt_hash, bank.lthash().as_bytes());
+        assert!(
+            state.accounts_lt_hash.iter().any(|b| *b != 0),
+            "the snapshot carries a zero hash rather than the bank's"
+        );
+    }
+
+    #[test]
     fn modify_account_subtracts_old_adds_new() {
         let accounts = Arc::new(AccountDatabase::new());
         let epoch_schedule = Arc::new(EpochSchedule::default());
@@ -3807,6 +3830,7 @@ mod tests {
         let max_tick_height = tick_height;
 
         SnapshotBankState {
+            accounts_lt_hash: [0u8; karstflow_constants::crypto::LTHASH_VALUE_BYTES],
             recent_blockhashes: vec![
                 RecentBlockhash {
                     hash: [0xAA; 32],

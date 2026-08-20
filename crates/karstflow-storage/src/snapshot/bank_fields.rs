@@ -10,6 +10,7 @@
 //! configuration, inflation parameters, and stake summaries.
 
 use crate::StorageError;
+use karstflow_constants::crypto::LTHASH_VALUE_BYTES;
 
 // ---------------------------------------------------------------------------
 // Public output types
@@ -22,6 +23,10 @@ use crate::StorageError;
 /// stake delegations) are summarized rather than fully materialized.
 #[derive(Debug, Clone)]
 pub struct SnapshotBankState {
+    /// The bank's lattice accounts hash, written into the snapshot's trailing
+    /// ExtraFields. The reference loader unwraps this field rather than
+    /// defaulting it, so a snapshot without it cannot be loaded there at all.
+    pub accounts_lt_hash: [u8; LTHASH_VALUE_BYTES],
     // -- Blockhash queue --
     /// Recent blockhashes with fee information, ordered by hash_index.
     pub recent_blockhashes: Vec<RecentBlockhash>,
@@ -708,6 +713,10 @@ pub fn parse_bank_state(data: &[u8]) -> Result<SnapshotBankState, StorageError> 
     // Remaining bytes are AccountsDbFields + ExtraFields (not parsed here).
 
     Ok(SnapshotBankState {
+        // The parser stops before ExtraFields, so the hash is not read back
+        // here. A bank restored from a snapshot recomputes it from the
+        // accounts it loaded.
+        accounts_lt_hash: [0u8; LTHASH_VALUE_BYTES],
         recent_blockhashes,
         last_blockhash,
         max_blockhash_age,
@@ -975,7 +984,11 @@ pub fn serialize_full_manifest(state: &SnapshotBankState, layout: &AccountsDbLay
     write_accounts_db_fields(&mut w, layout);
 
     // --- Part 3: ExtraFields (minimal) ---
-    write_extra_fields(&mut w, layout.lamports_per_signature);
+    write_extra_fields(
+        &mut w,
+        layout.lamports_per_signature,
+        &state.accounts_lt_hash,
+    );
 
     w.into_bytes()
 }
@@ -1015,7 +1028,11 @@ fn write_accounts_db_fields(w: &mut BincodeWriter, layout: &AccountsDbLayout) {
     w.write_u64(0);
 }
 
-fn write_extra_fields(w: &mut BincodeWriter, lamports_per_signature: u64) {
+fn write_extra_fields(
+    w: &mut BincodeWriter,
+    lamports_per_signature: u64,
+    accounts_lt_hash: &[u8; LTHASH_VALUE_BYTES],
+) {
     // Field 7: u64 (lamports_per_signature)
     w.write_u64(lamports_per_signature);
 
@@ -1025,8 +1042,20 @@ fn write_extra_fields(w: &mut BincodeWriter, lamports_per_signature: u64) {
     // Field 9: Option<Hash> (obsolete_epoch_accounts_hash) — None
     w.write_u8(0);
 
-    // Remaining ExtraFields (versioned_epoch_stakes, accounts_lt_hash)
-    // are optional with default_on_eof — we stop here.
+    // Field 10: Vec<(Epoch, VersionedEpochStakes)> — empty.
+    //
+    // We have no epoch-stakes structure to serialize, and an empty vec is
+    // exactly what a loader derives for this field when the stream ends here.
+    // It is written only because the fields are positional and field 11 is
+    // unreachable otherwise.
+    w.write_u64(0);
+
+    // Field 11: Option<AccountsLtHash> — the bank's lattice accounts hash.
+    //
+    // Unlike the fields above, this one is not optional in practice: the
+    // reference loader unwraps it and panics on a snapshot that omits it.
+    w.write_u8(1);
+    w.buf.extend_from_slice(accounts_lt_hash);
 }
 
 // ---------------------------------------------------------------------------
@@ -1721,6 +1750,7 @@ mod tests {
     /// Build a `SnapshotBankState` with realistic field values for testing.
     fn build_test_bank_state() -> SnapshotBankState {
         SnapshotBankState {
+            accounts_lt_hash: [0u8; LTHASH_VALUE_BYTES],
             recent_blockhashes: vec![
                 RecentBlockhash {
                     hash: [0xAA; 32],
@@ -2088,6 +2118,38 @@ mod tests {
             "full manifest ({}) should be larger than bank state alone ({})",
             full.len(),
             bank_only.len()
+        );
+    }
+
+    #[test]
+    fn extra_fields_carry_the_accounts_lt_hash() {
+        let mut state = build_test_bank_state();
+        state.accounts_lt_hash = [0x5A; LTHASH_VALUE_BYTES];
+        let layout = AccountsDbLayout {
+            storage_map: vec![],
+            slot: 1000,
+            bank_hash: [0u8; 32],
+            lamports_per_signature: 5000,
+        };
+
+        let full = serialize_full_manifest(&state, &layout);
+
+        // ExtraFields is the manifest's tail. Assert the whole block, not a
+        // window measured from the end — a window from the end cannot tell a
+        // dropped field from a shifted one, because the bytes sliding into it
+        // are zeros either way.
+        let mut expected = Vec::new();
+        expected.extend_from_slice(&5000u64.to_le_bytes()); // 7: lamports_per_signature
+        expected.push(0); // 8: Option<IncrementalSnapshotPersistence> = None
+        expected.push(0); // 9: Option<Hash> = None
+        expected.extend_from_slice(&0u64.to_le_bytes()); // 10: empty Vec
+        expected.push(1); // 11: Option tag = Some
+        expected.extend_from_slice(&[0x5A; LTHASH_VALUE_BYTES]); // 11: the hash
+
+        assert_eq!(
+            &full[full.len() - expected.len()..],
+            &expected[..],
+            "ExtraFields does not match the reference field order"
         );
     }
 
