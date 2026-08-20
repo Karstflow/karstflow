@@ -23,7 +23,7 @@ use karstflow_constants::compute_budget_program::{
     INSTRUCTION_SET_COMPUTE_UNIT_PRICE, INSTRUCTION_SET_LOADED_ACCOUNTS_DATA_SIZE_LIMIT,
 };
 use karstflow_constants::execution::{
-    DEFAULT_INSTRUCTION_COMPUTE_UNIT_LIMIT, MAX_COMPUTE_UNIT_LIMIT,
+    DEFAULT_INSTRUCTION_COMPUTE_UNIT_LIMIT, MAX_COMPUTE_UNIT_LIMIT, MAX_LOADED_ACCOUNTS_DATA_SIZE,
 };
 use karstflow_ids::{
     COMPUTE_BUDGET_PROGRAM_ID, ED25519_PROGRAM_ID, SECP256K1_PROGRAM_ID, SECP256R1_PROGRAM_ID,
@@ -185,15 +185,17 @@ pub fn compute_transaction_cost(
                 .saturating_mul(SECP256R1_PRECOMPILE_COST_PER_SIGNATURE),
         );
 
-    // Loaded accounts data cost: ceil(declared_size / page_size) * page_cost.
-    let loaded_accounts_data_cost =
-        if let Some(declared_size) = budget_params.loaded_accounts_data_size {
-            let pages = declared_size.saturating_add(LOADED_ACCOUNTS_DATA_COST_DIVISOR - 1)
-                / LOADED_ACCOUNTS_DATA_COST_DIVISOR;
-            pages.saturating_mul(LOADED_ACCOUNTS_DATA_PAGE_COST)
-        } else {
-            0
-        };
+    // Loaded accounts data cost: ceil(size / page_size) * page_cost.
+    //
+    // A transaction that declares no limit is not exempt — it receives the
+    // default one and is charged for it, same as a transaction that asked for
+    // that size explicitly.
+    let declared_size = budget_params
+        .loaded_accounts_data_size
+        .unwrap_or(MAX_LOADED_ACCOUNTS_DATA_SIZE);
+    let pages = declared_size.saturating_add(LOADED_ACCOUNTS_DATA_COST_DIVISOR - 1)
+        / LOADED_ACCOUNTS_DATA_COST_DIVISOR;
+    let loaded_accounts_data_cost = pages.saturating_mul(LOADED_ACCOUNTS_DATA_PAGE_COST);
 
     // Heap cost (included in execution cost implicitly, but tracked).
     let _heap_cost = budget_params
@@ -826,6 +828,20 @@ mod tests {
         let cost = compute_transaction_cost(&instructions, 1, 1, false);
         // 64KB = 2 pages of 32KB × 8 CU/page = 16 CU
         assert_eq!(cost.loaded_accounts_data_cost, 16);
+    }
+
+    #[test]
+    fn undeclared_loaded_accounts_data_is_charged_at_the_default_limit() {
+        let sys_id = system_program_id();
+        let instructions = [InstructionView {
+            program_id: &sys_id,
+            data: &[0; 4],
+        }];
+
+        let cost = compute_transaction_cost(&instructions, 1, 1, false);
+        // A transaction that requests no limit still gets the default one, so it
+        // is charged for it: 64MiB = 2048 pages of 32KiB × 8 CU/page.
+        assert_eq!(cost.loaded_accounts_data_cost, 16_384);
     }
 
     // -- Total cost composition test --

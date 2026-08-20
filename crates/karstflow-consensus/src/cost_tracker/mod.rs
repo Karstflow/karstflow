@@ -195,13 +195,12 @@ impl CostTracker {
         // between the check and the add; the atomic adds are safe and the
         // worst case is a slight over-commitment that the validator can handle.
         self.block_cost
-            .fetch_add(cost.compute_units, Ordering::Release);
+            .fetch_add(cost.total_cost, Ordering::Release);
         if cost.is_vote && !self.remove_simple_vote_from_cost_model {
-            self.vote_cost
-                .fetch_add(cost.compute_units, Ordering::Release);
+            self.vote_cost.fetch_add(cost.total_cost, Ordering::Release);
         }
-        for (pubkey, acct_cost) in &cost.writable_accounts {
-            self.account_costs.add(pubkey, *acct_cost);
+        for pubkey in &cost.writable_accounts {
+            self.account_costs.add(pubkey, cost.total_cost);
         }
         if cost.data_size_delta != 0 {
             self.account_data_size_delta
@@ -219,13 +218,12 @@ impl CostTracker {
     /// Remove a previously added transaction cost (e.g. after execution failure).
     pub fn remove(&self, cost: &TransactionCost) {
         self.block_cost
-            .fetch_sub(cost.compute_units, Ordering::Release);
+            .fetch_sub(cost.total_cost, Ordering::Release);
         if cost.is_vote && !self.remove_simple_vote_from_cost_model {
-            self.vote_cost
-                .fetch_sub(cost.compute_units, Ordering::Release);
+            self.vote_cost.fetch_sub(cost.total_cost, Ordering::Release);
         }
-        for (pubkey, acct_cost) in &cost.writable_accounts {
-            self.account_costs.remove(pubkey, *acct_cost);
+        for pubkey in &cost.writable_accounts {
+            self.account_costs.remove(pubkey, cost.total_cost);
         }
         if cost.data_size_delta != 0 {
             // Subtract the delta that was previously added.

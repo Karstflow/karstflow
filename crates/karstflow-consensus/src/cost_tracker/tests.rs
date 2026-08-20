@@ -1,7 +1,7 @@
 use super::*;
 use karstflow_constants::block_limits::{
     MAX_ACCOUNT_DATA_SIZE_DELTA, MAX_BLOCK_COMPUTE_UNITS, MAX_VOTE_COMPUTE_UNITS,
-    MAX_WRITABLE_ACCOUNT_COMPUTE_UNITS, SIGNATURE_COST, TRANSACTION_BASE_COST, WRITE_LOCK_COST,
+    MAX_WRITABLE_ACCOUNT_COMPUTE_UNITS,
 };
 use karstflow_storage::Pubkey;
 
@@ -73,12 +73,12 @@ fn account_cost_limit_exceeded() {
     let tracker = CostTracker::new();
     let account = Pubkey::new_unique();
 
-    let mut cost = TransactionCost::new(1000, false);
-    cost.add_writable_account(account, MAX_WRITABLE_ACCOUNT_COMPUTE_UNITS);
+    let mut cost = TransactionCost::new(MAX_WRITABLE_ACCOUNT_COMPUTE_UNITS, false);
+    cost.add_writable_account(account);
     tracker.try_add(&cost).unwrap();
 
-    let mut cost2 = TransactionCost::new(1000, false);
-    cost2.add_writable_account(account, 1);
+    let mut cost2 = TransactionCost::new(1, false);
+    cost2.add_writable_account(account);
     let err = tracker.try_add(&cost2).unwrap_err();
     assert!(matches!(
         err,
@@ -190,13 +190,13 @@ fn with_raised_account_limit() {
     let tracker = CostTracker::with_limits(limits);
 
     let acct = Pubkey::new_unique();
-    let mut cost = TransactionCost::new(1000, false);
-    cost.add_writable_account(acct, 39_000_000);
+    let mut cost = TransactionCost::new(39_000_000, false);
+    cost.add_writable_account(acct);
     assert!(tracker.try_add(&cost).is_ok());
 
     // Now adding 2M more should exceed 40M account limit
-    let mut cost2 = TransactionCost::new(1000, false);
-    cost2.add_writable_account(acct, 2_000_000);
+    let mut cost2 = TransactionCost::new(2_000_000, false);
+    cost2.add_writable_account(acct);
     let err = tracker.try_add(&cost2).unwrap_err();
     assert!(matches!(
         err,
@@ -253,51 +253,37 @@ fn concurrent_try_add() {
     assert_eq!(tracker.transaction_count(), 800);
 }
 
-// ── transaction cost total calculation ──────────────────────────────
+// ── the transaction total is what every limit is measured in ────────
 
 #[test]
-fn transaction_cost_total_with_no_writable_accounts() {
-    let cost = TransactionCost::new(5000, false);
-    // 5000 (compute) + 3000 (base) + 720 (1 sig) = 8720
-    assert_eq!(
-        cost.total_cost(),
-        5000 + TRANSACTION_BASE_COST + SIGNATURE_COST
-    );
-}
+fn every_writable_account_is_charged_the_whole_transaction_cost() {
+    let tracker = CostTracker::new();
+    let first = Pubkey::new_unique();
+    let second = Pubkey::new_unique();
 
-#[test]
-fn transaction_cost_total_with_writable_accounts() {
     let mut cost = TransactionCost::new(5000, false);
-    cost.add_writable_account(Pubkey::new_unique(), 200);
-    cost.add_writable_account(Pubkey::new_unique(), 300);
-    // 5000 (compute) + 3000 (base) + 720 (1 sig)
-    //   + (200 + 300) (account costs) + 2 * 300 (write lock overhead)
-    let expected = 5000 + TRANSACTION_BASE_COST + SIGNATURE_COST + 200 + 300 + 2 * WRITE_LOCK_COST;
-    assert_eq!(cost.total_cost(), expected);
+    cost.add_writable_account(first);
+    cost.add_writable_account(second);
+    tracker.try_add(&cost).unwrap();
+
+    // Not a share each — the same figure the block was charged.
+    assert_eq!(tracker.account_cost(&first), 5000);
+    assert_eq!(tracker.account_cost(&second), 5000);
+    assert_eq!(tracker.block_cost(), 5000);
 }
 
 #[test]
-fn transaction_cost_total_with_multiple_signatures() {
-    let mut cost = TransactionCost::new(1000, false);
-    cost.signature_count = 3;
-    // 1000 + 3000 + 3*720 = 6160
-    assert_eq!(
-        cost.total_cost(),
-        1000 + TRANSACTION_BASE_COST + 3 * SIGNATURE_COST
-    );
-}
+fn removing_a_transaction_returns_the_whole_cost_to_every_account() {
+    let tracker = CostTracker::new();
+    let account = Pubkey::new_unique();
 
-// ── write lock cost included ────────────────────────────────────────
+    let mut cost = TransactionCost::new(5000, false);
+    cost.add_writable_account(account);
+    tracker.try_add(&cost).unwrap();
+    tracker.remove(&cost);
 
-#[test]
-fn write_lock_cost_per_account() {
-    let mut cost = TransactionCost::new(0, false);
-    cost.add_writable_account(Pubkey::new_unique(), 0);
-    // 0 (compute) + 3000 (base) + 720 (1 sig) + 0 (account cost) + 300 (lock)
-    assert_eq!(
-        cost.total_cost(),
-        TRANSACTION_BASE_COST + SIGNATURE_COST + WRITE_LOCK_COST
-    );
+    assert_eq!(tracker.account_cost(&account), 0);
+    assert_eq!(tracker.block_cost(), 0);
 }
 
 // ── account_cost accessor on tracker ────────────────────────────────
@@ -309,8 +295,8 @@ fn account_cost_accessor() {
 
     assert_eq!(tracker.account_cost(&key), 0);
 
-    let mut cost = TransactionCost::new(500, false);
-    cost.add_writable_account(key, 1234);
+    let mut cost = TransactionCost::new(1234, false);
+    cost.add_writable_account(key);
     tracker.try_add(&cost).unwrap();
 
     assert_eq!(tracker.account_cost(&key), 1234);

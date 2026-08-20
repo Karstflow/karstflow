@@ -19,36 +19,38 @@ pub fn check_limits(
     check_vote_limit: bool,
 ) -> Result<(), CostTrackerError> {
     // Block compute-unit limit.
-    let new_block_cost = current_block_cost.saturating_add(tx_cost.compute_units);
+    let new_block_cost = current_block_cost.saturating_add(tx_cost.total_cost);
     if new_block_cost > limits.block_cost_limit {
         return Err(CostTrackerError::BlockCostLimitExceeded {
             current: current_block_cost,
-            requested: tx_cost.compute_units,
+            requested: tx_cost.total_cost,
             limit: limits.block_cost_limit,
         });
     }
 
     // Vote compute-unit limit (skipped when remove_simple_vote_from_cost_model active).
     if check_vote_limit {
-        let new_vote_cost = current_vote_cost.saturating_add(tx_cost.compute_units);
+        let new_vote_cost = current_vote_cost.saturating_add(tx_cost.total_cost);
         if new_vote_cost > limits.vote_cost_limit {
             return Err(CostTrackerError::VoteCostLimitExceeded {
                 current: current_vote_cost,
-                requested: tx_cost.compute_units,
+                requested: tx_cost.total_cost,
                 limit: limits.vote_cost_limit,
             });
         }
     }
 
-    // Per-account write-lock limit.
-    for (pubkey, cost) in &tx_cost.writable_accounts {
+    // Per-account write-lock limit. Each write-locked account is charged the
+    // transaction's whole cost, so one account cannot absorb more than its
+    // share of the block no matter how the cost is composed.
+    for pubkey in &tx_cost.writable_accounts {
         let current_account_cost = account_cost_fn(pubkey);
-        let new_account_cost = current_account_cost.saturating_add(*cost);
+        let new_account_cost = current_account_cost.saturating_add(tx_cost.total_cost);
         if new_account_cost > limits.account_cost_limit {
             return Err(CostTrackerError::AccountCostLimitExceeded {
                 account: *pubkey,
                 current: current_account_cost,
-                requested: *cost,
+                requested: tx_cost.total_cost,
                 limit: limits.account_cost_limit,
             });
         }
@@ -173,7 +175,7 @@ mod tests {
     fn exceeds_per_account_write_cost() {
         let mut tx = simple_tx(1_000);
         let acct = Pubkey::new_unique();
-        tx.add_writable_account(acct, 1_000);
+        tx.add_writable_account(acct);
 
         let cost_fn = |p: &Pubkey| {
             if *p == acct {
@@ -207,16 +209,6 @@ mod tests {
             result,
             Err(CostTrackerError::AccountDataSizeLimitExceeded { .. })
         ));
-    }
-
-    #[test]
-    fn transaction_cost_total_includes_overhead() {
-        let mut tx = TransactionCost::new(10_000, false);
-        tx.signature_count = 2;
-        tx.add_writable_account(Pubkey::new_unique(), 500);
-
-        let total = tx.total_cost();
-        assert!(total > 10_000);
     }
 
     #[test]

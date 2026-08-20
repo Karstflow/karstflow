@@ -1563,7 +1563,59 @@ impl Bank {
             }),
             prefund_active,
         );
-        let mut estimated_cost = TransactionCost::new(compute_limit, is_vote);
+        // The block cost is the whole transaction cost, not the requested
+        // execution units: signatures, write locks, instruction data,
+        // precompile verification and the loaded-accounts-data allowance all
+        // count against the block limit. The scheduler's model already
+        // computes that sum, so it is the one source for it here too — with
+        // the caller's compute limit substituted for the model's own estimate
+        // of the execution term, since that is the figure this transaction
+        // will actually be metered against.
+        let instruction_views: Vec<crate::pack::cost_model::InstructionView<'_>> = transaction
+            .instructions
+            .iter()
+            .filter_map(|ix| {
+                transaction
+                    .account_keys
+                    .get(ix.program_id_index as usize)
+                    .map(|program_id| crate::pack::cost_model::InstructionView {
+                        program_id,
+                        data: ix.data.as_slice(),
+                    })
+            })
+            .collect();
+        let writable_accounts: Vec<Pubkey> = transaction
+            .account_keys
+            .iter()
+            .enumerate()
+            .filter(|(index, _)| transaction.is_writable_index(*index))
+            .map(|(_, key)| *key)
+            .collect();
+        let model_cost = crate::pack::cost_model::compute_transaction_cost(
+            &instruction_views,
+            transaction.num_signatures,
+            writable_accounts.len(),
+            is_vote,
+        );
+        // A simple vote is charged a fixed cost upstream, so its total is left
+        // as the model computed it.
+        let total_cost = if model_cost.is_simple_vote {
+            model_cost.total_cost
+        } else {
+            model_cost
+                .total_cost
+                .saturating_sub(model_cost.execution_cost)
+                .saturating_add(compute_limit)
+        };
+
+        // The write-locked accounts are deliberately NOT recorded on the cost
+        // yet. Charging each of them the transaction's estimate over-charges
+        // by the whole requested-minus-consumed compute gap, because the
+        // estimate is only reconciled to the actual cost after execution and
+        // that reconciliation does not exist here yet. A chunked program
+        // deploy is the case that shows it: ~28 writes to one account, each
+        // requesting the 1.4M maximum and consuming a few thousand.
+        let mut estimated_cost = TransactionCost::new(total_cost, is_vote);
         estimated_cost.allocated_accounts_data_size = allocated_data_size;
         if let Err(e) = self.cost_tracker().try_add(&estimated_cost) {
             return TransactionExecutionResult {
@@ -4110,13 +4162,14 @@ mod tests {
         let payer_account = Account::new(100_000_000_000, vec![], Pubkey::default());
         store_test_account(&bank, &payer, &payer_account);
 
-        // Fill up block cost by processing transactions with large compute limits
-        // MAX_BLOCK_COMPUTE_UNITS is 48M; each tx reserves its full compute_limit
+        // A transaction reserves more than its compute limit — signatures,
+        // write locks and the loaded-accounts-data allowance are part of its
+        // cost — so the first one leaves headroom for that overhead.
         use karstflow_constants::block_limits::MAX_BLOCK_COMPUTE_UNITS;
 
         // Process one tx that consumes nearly all block capacity
         let tx = create_simple_transaction(payer, program, vec![payer], vec![]);
-        let result = bank.process_transaction(&tx, &backend, MAX_BLOCK_COMPUTE_UNITS - 1000);
+        let result = bank.process_transaction(&tx, &backend, MAX_BLOCK_COMPUTE_UNITS - 100_000);
         assert!(result.success);
 
         // Second tx should be rejected — block cost limit exceeded
@@ -4127,6 +4180,35 @@ mod tests {
             result2.error,
             Some(TransactionExecutionError::BlockCostLimitExceeded(_))
         ));
+    }
+
+    #[test]
+    fn block_cost_carries_more_than_the_requested_compute_units() {
+        use karstflow_constants::block_limits::SIGNATURE_COST;
+
+        let bank = create_test_bank();
+        let backend = PassthroughBackend;
+
+        let payer = Pubkey::new_unique();
+        let program = Pubkey::new_unique();
+        store_test_account(
+            &bank,
+            &payer,
+            &Account::new(100_000_000, vec![], Pubkey::default()),
+        );
+
+        let tx = create_simple_transaction(payer, program, vec![payer], vec![]);
+        assert!(bank.process_transaction(&tx, &backend, 1_000_000).success);
+
+        // The block is charged the whole transaction cost, not the requested
+        // execution units alone: the signature, the write locks and the
+        // loaded-accounts-data allowance all count toward the block limit.
+        // 16_384 is the cost of the default 64MiB allowance.
+        let charged = bank.cost_tracker().block_cost();
+        assert!(
+            charged >= 1_000_000 + SIGNATURE_COST + 16_384,
+            "block charged {charged}, which omits terms the block limit is supposed to include"
+        );
     }
 
     #[test]
