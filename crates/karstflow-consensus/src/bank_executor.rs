@@ -1585,26 +1585,13 @@ impl Bank {
         let budget_params = parse_compute_budget(transaction);
         let priority_fee = calculate_priority_fee(&budget_params);
 
-        // Step 2: Load accounts (with data size limit enforcement)
-        let mut account_state = match self
-            .load_transaction_accounts(transaction, budget_params.loaded_accounts_data_size_limit)
-        {
-            Ok(state) => state,
-            Err(err) => {
-                return TransactionExecutionResult {
-                    success: false,
-                    compute_units_consumed: 0,
-                    fee: 0,
-                    modified_accounts: HashMap::new(),
-                    logs: vec![],
-                    error: Some(err),
-                    vote_updates: vec![],
-                    return_data: None,
-                };
-            }
-        };
-
-        // Step 3: Validate fee payer and debit fee
+        // Step 2: Validate fee payer and compute the fee — before loading.
+        //
+        // The order matters. Fee-payer validity decides whether the
+        // transaction lands at all; once it has landed, a later failure to
+        // load its accounts still leaves it in the block and still charges
+        // it. Loading first would leave no fee computed to charge on that
+        // path.
         //
         // Total fee = execution fee (signatures * rate) + priority fee.
         // Execution fees are subject to 50% burn, priority fees go
@@ -1620,8 +1607,8 @@ impl Bank {
         let rent = self.rent();
 
         let fee_payer = &transaction.account_keys[0];
-        let payer_account = match account_state.get(fee_payer) {
-            Some(acc) if acc.meta.lamports > 0 => acc.clone(),
+        let payer_account = match self.accounts().get_published_account(fee_payer) {
+            Some(acc) if acc.meta.lamports > 0 => acc,
             _ => {
                 return TransactionExecutionResult {
                     success: false,
@@ -1713,6 +1700,31 @@ impl Bank {
                 return_data: None,
             };
         }
+
+        // Step 3: Load accounts (with data size limit enforcement).
+        //
+        // The fee payer already validated, so the transaction has landed. A
+        // failure here is fees-only: it is committed and charged even though
+        // no instruction runs, and only the fee payer is written.
+        let mut account_state = match self
+            .load_transaction_accounts(transaction, budget_params.loaded_accounts_data_size_limit)
+        {
+            Ok(state) => state,
+            Err(err) => {
+                let mut modified_accounts = HashMap::new();
+                modified_accounts.insert(*fee_payer, payer_after_fee);
+                return TransactionExecutionResult {
+                    success: false,
+                    compute_units_consumed: 0,
+                    fee,
+                    modified_accounts,
+                    logs: vec![],
+                    error: Some(err),
+                    vote_updates: vec![],
+                    return_data: None,
+                };
+            }
+        };
 
         // Debit fee from payer upfront (non-refundable)
         account_state.insert(*fee_payer, payer_after_fee);
@@ -4624,6 +4636,122 @@ mod tests {
             result.error,
             Some(TransactionExecutionError::MaxLoadedAccountsDataSizeExceeded { .. })
         ));
+    }
+
+    /// Build a transaction whose accounts cannot be loaded, signed so the fee
+    /// is non-zero. Shared by the two fees-only tests below.
+    fn load_failing_transaction(bank: &Bank, payer: Pubkey) -> SanitizedTransaction {
+        let large_key = Pubkey::new_unique();
+        let large_account = Account::new(1_000_000_000, vec![0u8; 1024], Pubkey::default());
+        store_test_account(bank, &large_key, &large_account);
+
+        let mut limit_data = vec![INSTRUCTION_SET_LOADED_ACCOUNTS_DATA_SIZE_LIMIT];
+        limit_data.extend_from_slice(&100u32.to_le_bytes());
+
+        SanitizedTransaction {
+            account_keys: vec![
+                payer,
+                COMPUTE_BUDGET_PROGRAM_ID,
+                SYSTEM_PROGRAM_ID,
+                large_key,
+            ],
+            recent_blockhash: [0u8; 32],
+            instructions: vec![
+                CompiledInstruction {
+                    program_id_index: 1,
+                    account_indices: vec![],
+                    data: limit_data,
+                },
+                CompiledInstruction {
+                    program_id_index: 2,
+                    account_indices: vec![0, 3],
+                    data: vec![0; 4],
+                },
+            ],
+            num_signatures: 1,
+            num_readonly_signed: 0,
+            num_readonly_unsigned: 0,
+            signatures: vec![],
+            message_bytes: vec![],
+            num_static_keys: 0,
+            num_writable_lookup_keys: 0,
+        }
+    }
+
+    /// A transaction that fails to LOAD is still committed and still charged.
+    ///
+    /// The fee payer was valid, so the transaction landed on chain: upstream
+    /// includes it in the block and collects the fee even though nothing
+    /// executed.
+    #[test]
+    fn load_failure_charges_the_fee_and_commits_the_payer() {
+        let bank = create_test_bank();
+        let backend = PassthroughBackend;
+
+        let payer = Pubkey::new_unique();
+        let starting_lamports = 1_000_000_000;
+        store_test_account(
+            &bank,
+            &payer,
+            &Account::new(starting_lamports, vec![], SYSTEM_PROGRAM_ID),
+        );
+
+        let tx = load_failing_transaction(&bank, payer);
+        let result = bank.process_transaction(&tx, &backend, MAX_COMPUTE_UNITS);
+
+        assert!(!result.success, "the transaction did not execute");
+        assert!(
+            matches!(
+                result.error,
+                Some(TransactionExecutionError::MaxLoadedAccountsDataSizeExceeded { .. })
+            ),
+            "expected a load failure, got {:?}",
+            result.error
+        );
+        assert!(result.fee > 0, "a landed transaction is charged its fee");
+
+        let committed = result
+            .modified_accounts
+            .get(&payer)
+            .expect("the fee payer is committed even though nothing executed");
+        assert_eq!(
+            committed.meta.lamports,
+            starting_lamports - result.fee,
+            "the payer is debited exactly the reported fee"
+        );
+        assert_eq!(
+            result.modified_accounts.len(),
+            1,
+            "only the fee payer is committed on a load failure"
+        );
+    }
+
+    /// A transaction whose FEE PAYER is invalid is a different failure: it
+    /// never lands, so nothing is committed and nothing is charged. Keeping
+    /// the two apart is the point — collapsing them would charge fees upstream
+    /// never collects.
+    #[test]
+    fn fee_payer_failure_commits_nothing_and_charges_nothing() {
+        let bank = create_test_bank();
+        let backend = PassthroughBackend;
+
+        // Owned by a non-system program: not a valid fee payer.
+        let payer = Pubkey::new_unique();
+        store_test_account(
+            &bank,
+            &payer,
+            &Account::new(1_000_000_000, vec![], Pubkey::new_unique()),
+        );
+
+        let tx = load_failing_transaction(&bank, payer);
+        let result = bank.process_transaction(&tx, &backend, MAX_COMPUTE_UNITS);
+
+        assert!(!result.success);
+        assert_eq!(result.fee, 0, "an unlanded transaction is not charged");
+        assert!(
+            result.modified_accounts.is_empty(),
+            "an unlanded transaction commits nothing"
+        );
     }
 
     #[test]
