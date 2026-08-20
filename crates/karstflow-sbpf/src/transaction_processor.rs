@@ -136,7 +136,6 @@ pub struct TransactionProcessor {
     associated_token_program: AssociatedTokenProgramExecutor,
     memo_program: MemoProgramExecutor,
     bpf_loader: BpfLoaderExecutor,
-    bpf_loader_deprecated: BpfLoaderDeprecatedExecutor,
     /// The v2 loader shares the deprecated loader's instruction set but
     /// charges its own flat compute cost.
     bpf_loader_v2: BpfLoaderDeprecatedExecutor,
@@ -191,9 +190,6 @@ impl TransactionProcessor {
             associated_token_program: AssociatedTokenProgramExecutor::new(180),
             memo_program: MemoProgramExecutor::new(100),
             bpf_loader: BpfLoaderExecutor::new(),
-            bpf_loader_deprecated: BpfLoaderDeprecatedExecutor::new(
-                bpf_loader_constants::DEPRECATED_LOADER_COMPUTE_UNITS,
-            ),
             bpf_loader_v2: BpfLoaderDeprecatedExecutor::new(
                 bpf_loader_constants::V2_LOADER_COMPUTE_UNITS,
             ),
@@ -443,14 +439,15 @@ impl TransactionProcessor {
             }
             outcome
         } else if context.program_id == BPF_LOADER_DEPRECATED_PROGRAM_ID {
-            self.bpf_loader_deprecated
-                .execute(context)
-                .unwrap_or_else(|err| {
-                    ExecutionOutcome::failure(
-                        bpf_loader_constants::DEPRECATED_LOADER_COMPUTE_UNITS,
-                        err,
-                    )
-                })
+            // Management instructions to this loader are no longer supported.
+            // The cost is charged first, then the instruction is refused.
+            // Programs *owned* by this loader still execute — that path is
+            // keyed on the account owner, not on the program id, and is
+            // untouched here.
+            ExecutionOutcome::failure(
+                bpf_loader_constants::DEPRECATED_LOADER_COMPUTE_UNITS,
+                "Deprecated loader is no longer supported".to_string(),
+            )
         } else if context.program_id == BPF_LOADER_V2_PROGRAM_ID {
             // BPF Loader V2 uses the same Write/Finalize logic as deprecated
             // but with lower compute cost, so it routes through a second
@@ -1429,5 +1426,48 @@ mod tests {
 
         assert!(msg.is_writable(0));
         assert!(msg.is_writable(1));
+    }
+
+    /// A Write addressed to the deprecated loader must be refused.
+    ///
+    /// The instruction is a well-formed Write that the loader's own executor
+    /// accepts (see `bpf_loader_deprecated::tests::write_to_program_account`),
+    /// so a pass here can only mean the dispatch reached the executor.
+    #[test]
+    fn deprecated_loader_management_instruction_is_unsupported() {
+        let processor = TransactionProcessor::new();
+        let program = Pubkey::new([1u8; 32]);
+        let account = Account {
+            meta: TypesAccountMeta {
+                lamports: 1_000_000,
+                owner: BPF_LOADER_DEPRECATED_PROGRAM_ID,
+                executable: false,
+                rent_epoch: 0,
+            },
+            data: AccountData::new(vec![0; 64]),
+        };
+
+        let mut data = vec![0u8; 8];
+        data[4] = 8;
+        data.extend_from_slice(&[0u8; 8]);
+        data.extend_from_slice(&[0xAA, 0xBB, 0xCC, 0xDD]);
+
+        let context = ExecutionContext::new(
+            BPF_LOADER_DEPRECATED_PROGRAM_ID,
+            vec![(program, account, true)],
+            data,
+        );
+        let outcome = processor.execute_instruction(&context);
+
+        assert!(!outcome.success, "deprecated loader must not execute");
+        assert!(
+            outcome.modified_accounts.is_empty(),
+            "a refused instruction must not write accounts"
+        );
+        // Charged before refusal, matching the reference's ordering.
+        assert_eq!(
+            outcome.compute_units_consumed,
+            bpf_loader_constants::DEPRECATED_LOADER_COMPUTE_UNITS
+        );
     }
 }
