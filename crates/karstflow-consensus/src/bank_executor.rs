@@ -1608,15 +1608,20 @@ impl Bank {
                 .saturating_add(compute_limit)
         };
 
-        // The write-locked accounts are deliberately NOT recorded on the cost
-        // yet. Charging each of them the transaction's estimate over-charges
-        // by the whole requested-minus-consumed compute gap, because the
-        // estimate is only reconciled to the actual cost after execution and
-        // that reconciliation does not exist here yet. A chunked program
-        // deploy is the case that shows it: ~28 writes to one account, each
-        // requesting the 1.4M maximum and consuming a few thousand.
+        // Each write-locked account is charged the transaction's whole cost.
+        // That is only sound because the estimated share is reconciled to the
+        // actual after execution — without it a chunked program deploy, ~28
+        // writes to one account each requesting the 1.4M maximum and consuming
+        // a few thousand, would exhaust the account's budget on compute it
+        // never used.
         let mut estimated_cost = TransactionCost::new(total_cost, is_vote);
         estimated_cost.allocated_accounts_data_size = allocated_data_size;
+        estimated_cost.writable_accounts = writable_accounts;
+        estimated_cost.execution_and_loaded_cost = if model_cost.is_simple_vote {
+            model_cost.execution_cost
+        } else {
+            compute_limit.saturating_add(model_cost.loaded_accounts_data_cost)
+        };
         if let Err(e) = self.cost_tracker().try_add(&estimated_cost) {
             return TransactionExecutionResult {
                 success: false,
@@ -1758,10 +1763,10 @@ impl Bank {
         // The fee payer already validated, so the transaction has landed. A
         // failure here is fees-only: it is committed and charged even though
         // no instruction runs, and only the fee payer is written.
-        let mut account_state = match self
+        let (mut account_state, loaded_data_size) = match self
             .load_transaction_accounts(transaction, budget_params.loaded_accounts_data_size_limit)
         {
-            Ok(state) => state,
+            Ok(loaded) => loaded,
             Err(err) => {
                 let mut modified_accounts = HashMap::new();
                 modified_accounts.insert(*fee_payer, payer_after_fee);
@@ -2117,6 +2122,17 @@ impl Bank {
                 }
             }
 
+            // The reservation was taken from what this transaction asked for.
+            // Now that it has run, give back what it did not use — or charge
+            // what it exceeded — across block, vote and every account it
+            // write-locked.
+            self.cost_tracker().update_execution_cost(
+                &estimated_cost,
+                total_compute.saturating_add(crate::pack::cost_model::loaded_accounts_data_cost(
+                    loaded_data_size,
+                )),
+            );
+
             return TransactionExecutionResult {
                 success: false,
                 compute_units_consumed: total_compute,
@@ -2165,6 +2181,17 @@ impl Bank {
         }
 
         self.write_accounts(&modified);
+
+        // The reservation was taken from what this transaction asked for.
+        // Now that it has run, give back what it did not use — or charge
+        // what it exceeded — across block, vote and every account it
+        // write-locked.
+        self.cost_tracker().update_execution_cost(
+            &estimated_cost,
+            total_compute.saturating_add(crate::pack::cost_model::loaded_accounts_data_cost(
+                loaded_data_size,
+            )),
+        );
 
         // Step 6: Record fees, signatures, and block-level metrics
         self.add_execution_fee(execution_fee);
@@ -2352,7 +2379,7 @@ impl Bank {
         let account_state = match self
             .load_transaction_accounts(transaction, budget_params.loaded_accounts_data_size_limit)
         {
-            Ok(state) => state,
+            Ok((state, _loaded_data_size)) => state,
             Err(err) => {
                 return TransactionSimulationResult {
                     error: Some(format!("{err:?}")),
@@ -2536,7 +2563,7 @@ impl Bank {
         &self,
         transaction: &SanitizedTransaction,
         data_size_limit: u64,
-    ) -> Result<HashMap<Pubkey, Account>, TransactionExecutionError> {
+    ) -> Result<(HashMap<Pubkey, Account>, u64), TransactionExecutionError> {
         let db = self.accounts();
         let mut loaded = HashMap::with_capacity(transaction.account_keys.len());
         let mut accumulated_data_size: u64 = 0;
@@ -2564,7 +2591,7 @@ impl Bank {
             loaded.insert(*key, account);
         }
 
-        Ok(loaded)
+        Ok((loaded, accumulated_data_size))
     }
 
     /// Extract vote updates from a successfully executed transaction.
@@ -4162,17 +4189,15 @@ mod tests {
         let payer_account = Account::new(100_000_000_000, vec![], Pubkey::default());
         store_test_account(&bank, &payer, &payer_account);
 
-        // A transaction reserves more than its compute limit — signatures,
-        // write locks and the loaded-accounts-data allowance are part of its
-        // cost — so the first one leaves headroom for that overhead.
         use karstflow_constants::block_limits::MAX_BLOCK_COMPUTE_UNITS;
 
-        // Process one tx that consumes nearly all block capacity
+        // A modest transaction lands and reconciles down to what it used.
         let tx = create_simple_transaction(payer, program, vec![payer], vec![]);
-        let result = bank.process_transaction(&tx, &backend, MAX_BLOCK_COMPUTE_UNITS - 100_000);
+        let result = bank.process_transaction(&tx, &backend, 1_000);
         assert!(result.success);
 
-        // Second tx should be rejected — block cost limit exceeded
+        // Capacity is checked against what a transaction ASKS for, before it
+        // runs, so one requesting the whole block cannot fit beside it.
         let tx2 = create_simple_transaction(payer, program, vec![payer], vec![]);
         let result2 = bank.process_transaction(&tx2, &backend, MAX_BLOCK_COMPUTE_UNITS);
         assert!(!result2.success);
@@ -4183,7 +4208,7 @@ mod tests {
     }
 
     #[test]
-    fn block_cost_carries_more_than_the_requested_compute_units() {
+    fn block_cost_carries_the_non_execution_terms() {
         use karstflow_constants::block_limits::SIGNATURE_COST;
 
         let bank = create_test_bank();
@@ -4198,16 +4223,81 @@ mod tests {
         );
 
         let tx = create_simple_transaction(payer, program, vec![payer], vec![]);
-        assert!(bank.process_transaction(&tx, &backend, 1_000_000).success);
+        let result = bank.process_transaction(&tx, &backend, 1_000_000);
+        assert!(result.success);
 
-        // The block is charged the whole transaction cost, not the requested
-        // execution units alone: the signature, the write locks and the
-        // loaded-accounts-data allowance all count toward the block limit.
-        // 16_384 is the cost of the default 64MiB allowance.
+        // Execution units are only one term. The signature, the write locks,
+        // the instruction data and the accounts actually loaded are charged
+        // too, and they survive reconciliation because none of them was ever
+        // an estimate.
+        let charged = bank.cost_tracker().block_cost();
+        let consumed = result.compute_units_consumed;
+        assert!(
+            charged >= consumed + SIGNATURE_COST,
+            "block charged {charged} against {consumed} consumed, so the signature term is missing"
+        );
+    }
+
+    #[test]
+    fn an_unused_compute_request_is_returned_to_the_block_and_the_account() {
+        let bank = create_test_bank();
+        let backend = PassthroughBackend;
+
+        let payer = Pubkey::new_unique();
+        let program = Pubkey::new_unique();
+        store_test_account(
+            &bank,
+            &payer,
+            &Account::new(100_000_000, vec![], Pubkey::default()),
+        );
+
+        let tx = create_simple_transaction(payer, program, vec![payer], vec![]);
+        let result = bank.process_transaction(&tx, &backend, 1_400_000);
+        assert!(result.success);
+
+        // The transaction asked for the compute maximum and used almost none
+        // of it. What it did not use is not charged — to the block or to the
+        // account it write-locked.
         let charged = bank.cost_tracker().block_cost();
         assert!(
-            charged >= 1_000_000 + SIGNATURE_COST + 16_384,
-            "block charged {charged}, which omits terms the block limit is supposed to include"
+            charged < 1_400_000,
+            "block charged {charged}, which is the request rather than the work"
+        );
+        assert_eq!(bank.cost_tracker().account_cost(&payer), charged);
+    }
+
+    #[test]
+    fn a_chunked_deploy_stays_far_under_the_per_account_limit() {
+        use karstflow_constants::block_limits::MAX_WRITABLE_ACCOUNT_COMPUTE_UNITS;
+
+        let bank = create_test_bank();
+        let backend = PassthroughBackend;
+
+        let payer = Pubkey::new_unique();
+        let target = Pubkey::new_unique();
+        let program = Pubkey::new_unique();
+        store_test_account(
+            &bank,
+            &payer,
+            &Account::new(100_000_000_000, vec![], Pubkey::default()),
+        );
+        store_test_account(
+            &bank,
+            &target,
+            &Account::new(1_000_000, vec![], Pubkey::default()),
+        );
+
+        // The shape a program deploy has: many transactions writing the same
+        // account, each requesting the compute maximum and consuming a sliver.
+        for _ in 0..40 {
+            let tx = create_simple_transaction(payer, program, vec![payer, target], vec![]);
+            assert!(bank.process_transaction(&tx, &backend, 1_400_000).success);
+        }
+
+        let charged = bank.cost_tracker().account_cost(&target);
+        assert!(
+            charged < MAX_WRITABLE_ACCOUNT_COMPUTE_UNITS / 4,
+            "40 writes charged the account {charged}, near the {MAX_WRITABLE_ACCOUNT_COMPUTE_UNITS} limit"
         );
     }
 

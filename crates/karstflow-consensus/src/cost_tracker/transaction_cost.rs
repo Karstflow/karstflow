@@ -12,6 +12,11 @@ use karstflow_storage::Pubkey;
 pub struct TransactionCost {
     /// Compute units this transaction costs the block.
     pub total_cost: u64,
+    /// The share of `total_cost` that is an estimate rather than a fact — the
+    /// requested execution units plus the declared loaded-accounts-data cost.
+    /// Once the transaction has run, this is the part that gets reconciled to
+    /// what it actually did; the rest is known up front and never moves.
+    pub execution_and_loaded_cost: u64,
     /// Whether this is a vote transaction.
     pub is_vote: bool,
     /// Accounts this transaction write-locks. Each is charged `total_cost`.
@@ -28,6 +33,7 @@ impl TransactionCost {
     pub fn new(total_cost: u64, is_vote: bool) -> Self {
         Self {
             total_cost,
+            execution_and_loaded_cost: 0,
             is_vote,
             writable_accounts: Vec::new(),
             data_size_delta: 0,
@@ -53,6 +59,7 @@ mod tests {
     fn new_defaults() {
         let cost = TransactionCost::new(1000, false);
         assert_eq!(cost.total_cost, 1000);
+        assert_eq!(cost.execution_and_loaded_cost, 0);
         assert!(!cost.is_vote);
         assert!(cost.writable_accounts.is_empty());
         assert_eq!(cost.data_size_delta, 0);

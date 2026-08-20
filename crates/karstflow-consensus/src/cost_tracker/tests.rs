@@ -253,6 +253,73 @@ fn concurrent_try_add() {
     assert_eq!(tracker.transaction_count(), 800);
 }
 
+// ── estimate reconciled to actual ───────────────────────────────────
+
+#[test]
+fn over_estimated_cost_is_returned_to_block_vote_and_accounts() {
+    let tracker = CostTracker::new();
+    let account = Pubkey::new_unique();
+
+    // Reserved 1_000_000 of execution-and-load; only 4_000 was used.
+    let mut cost = TransactionCost::new(1_000_000, false);
+    cost.execution_and_loaded_cost = 1_000_000;
+    cost.add_writable_account(account);
+    tracker.try_add(&cost).unwrap();
+
+    tracker.update_execution_cost(&cost, 4_000);
+
+    assert_eq!(tracker.block_cost(), 4_000);
+    assert_eq!(tracker.account_cost(&account), 4_000);
+}
+
+#[test]
+fn under_estimated_cost_is_charged_to_block_vote_and_accounts() {
+    let tracker = CostTracker::new();
+    let account = Pubkey::new_unique();
+
+    let mut cost = TransactionCost::new(10_000, false);
+    cost.execution_and_loaded_cost = 5_000;
+    cost.add_writable_account(account);
+    tracker.try_add(&cost).unwrap();
+
+    // Consumed more than reserved — the excess is charged, never dropped.
+    tracker.update_execution_cost(&cost, 9_000);
+
+    assert_eq!(tracker.block_cost(), 14_000);
+    assert_eq!(tracker.account_cost(&account), 14_000);
+}
+
+#[test]
+fn a_vote_reconciles_its_vote_bucket_with_the_block() {
+    let tracker = CostTracker::new();
+
+    let mut cost = TransactionCost::new(3_000, true);
+    cost.execution_and_loaded_cost = 3_000;
+    tracker.try_add(&cost).unwrap();
+    assert_eq!(tracker.vote_cost(), 3_000);
+
+    tracker.update_execution_cost(&cost, 1_000);
+
+    assert_eq!(tracker.vote_cost(), 1_000);
+    assert_eq!(tracker.block_cost(), 1_000);
+}
+
+#[test]
+fn an_exact_estimate_reconciles_to_no_change() {
+    let tracker = CostTracker::new();
+    let account = Pubkey::new_unique();
+
+    let mut cost = TransactionCost::new(7_000, false);
+    cost.execution_and_loaded_cost = 6_000;
+    cost.add_writable_account(account);
+    tracker.try_add(&cost).unwrap();
+
+    tracker.update_execution_cost(&cost, 6_000);
+
+    assert_eq!(tracker.block_cost(), 7_000);
+    assert_eq!(tracker.account_cost(&account), 7_000);
+}
+
 // ── the transaction total is what every limit is measured in ────────
 
 #[test]

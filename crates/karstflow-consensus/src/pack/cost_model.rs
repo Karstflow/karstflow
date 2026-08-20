@@ -185,17 +185,13 @@ pub fn compute_transaction_cost(
                 .saturating_mul(SECP256R1_PRECOMPILE_COST_PER_SIGNATURE),
         );
 
-    // Loaded accounts data cost: ceil(size / page_size) * page_cost.
-    //
     // A transaction that declares no limit is not exempt — it receives the
     // default one and is charged for it, same as a transaction that asked for
     // that size explicitly.
     let declared_size = budget_params
         .loaded_accounts_data_size
         .unwrap_or(MAX_LOADED_ACCOUNTS_DATA_SIZE);
-    let pages = declared_size.saturating_add(LOADED_ACCOUNTS_DATA_COST_DIVISOR - 1)
-        / LOADED_ACCOUNTS_DATA_COST_DIVISOR;
-    let loaded_accounts_data_cost = pages.saturating_mul(LOADED_ACCOUNTS_DATA_PAGE_COST);
+    let loaded_accounts_data_cost = loaded_accounts_data_cost(declared_size);
 
     // Heap cost (included in execution cost implicitly, but tracked).
     let _heap_cost = budget_params
@@ -225,6 +221,16 @@ pub fn compute_transaction_cost(
         num_transaction_signatures: num_signatures,
         num_precompile_signatures: total_precompile_sigs,
     }
+}
+
+/// Compute-unit cost of loading `bytes` of account data.
+///
+/// Charged per started 32KiB page, both for the size a transaction declares
+/// before execution and for the size it actually loaded afterwards.
+pub fn loaded_accounts_data_cost(bytes: u64) -> u64 {
+    let pages = bytes.saturating_add(LOADED_ACCOUNTS_DATA_COST_DIVISOR - 1)
+        / LOADED_ACCOUNTS_DATA_COST_DIVISOR;
+    pages.saturating_mul(LOADED_ACCOUNTS_DATA_PAGE_COST)
 }
 
 // ---------------------------------------------------------------------------
