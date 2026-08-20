@@ -1146,6 +1146,32 @@ fn account_loaded_size(account: &Account) -> u64 {
     TRANSACTION_ACCOUNT_BASE_SIZE + account.data.len() as u64
 }
 
+/// Loaded-accounts-data size charged to a transaction that landed but failed to
+/// load its accounts.
+///
+/// `define_ltds_fee_only_semantics` selects between two definitions. With the
+/// gate active it is whatever had been accumulated when loading gave up,
+/// clamped to the transaction's own compute-budget limit. Without it, only the
+/// accounts a fees-only transaction actually writes back count: the fee payer,
+/// plus the nonce when the nonce is a separate account — a transaction paying
+/// its own fee from its nonce account must not be charged for it twice.
+fn fees_only_loaded_size(
+    gate_active: bool,
+    accumulated: u64,
+    data_size_limit: u64,
+    fee_payer: &Pubkey,
+    fee_payer_data_len: u64,
+    nonce: Option<(&Pubkey, u64)>,
+) -> u64 {
+    if gate_active {
+        return accumulated.min(data_size_limit);
+    }
+    match nonce {
+        Some((key, data_len)) if key != fee_payer => fee_payer_data_len.saturating_add(data_len),
+        _ => fee_payer_data_len,
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Instructions sysvar serialization
 // ---------------------------------------------------------------------------
@@ -1768,6 +1794,41 @@ impl Bank {
         {
             Ok(loaded) => loaded,
             Err(err) => {
+                // Nothing executed, so the compute this transaction reserved is
+                // not its cost. Reconcile to zero execution units plus the
+                // loaded-accounts-data size a fees-only transaction is defined
+                // to have — block, vote and every write-locked account move
+                // together, as they did on the two paths that do execute.
+                let accumulated = match &err {
+                    TransactionExecutionError::MaxLoadedAccountsDataSizeExceeded {
+                        loaded, ..
+                    } => *loaded,
+                    _ => 0,
+                };
+                let gate_active = self
+                    .feature_set()
+                    .map(|fs| {
+                        let fs = fs.read().expect("feature_set lock poisoned");
+                        fs.is_active(
+                            &crate::features::known_features::define_ltds_fee_only_semantics(),
+                        )
+                    })
+                    .unwrap_or(false);
+                let loaded_size = fees_only_loaded_size(
+                    gate_active,
+                    accumulated,
+                    budget_params.loaded_accounts_data_size_limit,
+                    fee_payer,
+                    payer_after_fee.data.len() as u64,
+                    durable_nonce
+                        .as_ref()
+                        .map(|n| (&n.nonce_key, n.rollback_account.data.len() as u64)),
+                );
+                self.cost_tracker().update_execution_cost(
+                    &estimated_cost,
+                    crate::pack::cost_model::loaded_accounts_data_cost(loaded_size),
+                );
+
                 let mut modified_accounts = HashMap::new();
                 modified_accounts.insert(*fee_payer, payer_after_fee);
                 return TransactionExecutionResult {
@@ -4298,6 +4359,91 @@ mod tests {
         assert!(
             charged < MAX_WRITABLE_ACCOUNT_COMPUTE_UNITS / 4,
             "40 writes charged the account {charged}, near the {MAX_WRITABLE_ACCOUNT_COMPUTE_UNITS} limit"
+        );
+    }
+
+    #[test]
+    fn fees_only_size_under_the_gate_is_the_load_so_far_clamped_to_the_budget() {
+        let payer = Pubkey::new_unique();
+
+        // Loading gave up past the transaction's own limit, so the clamp binds.
+        assert_eq!(
+            fees_only_loaded_size(true, 5_000, 1_000, &payer, 77, None),
+            1_000
+        );
+        // And when it does not, the accumulated figure stands.
+        assert_eq!(
+            fees_only_loaded_size(true, 400, 1_000, &payer, 77, None),
+            400
+        );
+    }
+
+    #[test]
+    fn fees_only_size_without_the_gate_is_only_what_gets_written_back() {
+        let payer = Pubkey::new_unique();
+        let nonce = Pubkey::new_unique();
+
+        // Not the load so far — only the accounts that survive a fees-only
+        // transaction: the fee payer, and the nonce when it is a separate one.
+        assert_eq!(
+            fees_only_loaded_size(false, 5_000, 1_000, &payer, 77, None),
+            77
+        );
+        assert_eq!(
+            fees_only_loaded_size(false, 5_000, 1_000, &payer, 77, Some((&nonce, 80))),
+            157
+        );
+    }
+
+    #[test]
+    fn fees_only_size_does_not_count_a_fee_payer_nonce_twice() {
+        let payer = Pubkey::new_unique();
+
+        // A transaction may pay its own fee from the nonce account. Its data is
+        // one account's worth, not two.
+        assert_eq!(
+            fees_only_loaded_size(false, 5_000, 1_000, &payer, 77, Some((&payer, 77))),
+            77
+        );
+    }
+
+    #[test]
+    fn a_fees_only_transaction_is_not_charged_the_compute_it_never_ran() {
+        let bank = create_test_bank();
+        let backend = PassthroughBackend;
+
+        let payer = Pubkey::new_unique();
+        store_test_account(
+            &bank,
+            &payer,
+            &Account::new(1_000_000_000, vec![], SYSTEM_PROGRAM_ID),
+        );
+
+        let tx = load_failing_transaction(&bank, payer);
+        let requested = 1_400_000;
+        let result = bank.process_transaction(&tx, &backend, requested);
+
+        assert!(
+            matches!(
+                result.error,
+                Some(TransactionExecutionError::MaxLoadedAccountsDataSizeExceeded { .. })
+            ),
+            "expected a load failure, got {:?}",
+            result.error
+        );
+
+        // The transaction landed and is charged — but nothing executed, so the
+        // compute it reserved is not its cost. Block, and the account it
+        // write-locked, both get it back.
+        let charged = bank.cost_tracker().block_cost();
+        assert!(
+            charged < requested,
+            "block charged {charged} for a transaction that ran nothing, having reserved {requested}"
+        );
+        assert_eq!(
+            bank.cost_tracker().account_cost(&payer),
+            charged,
+            "the fee payer's bucket was not reconciled with the block"
         );
     }
 

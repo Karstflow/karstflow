@@ -4824,6 +4824,18 @@ pub fn reduce_slot_time_to_350ms() -> Pubkey {
     ])
 }
 
+/// Defines the loaded-accounts-data size charged to a fees-only transaction as
+/// the load accumulated before the failure, clamped to the transaction's own
+/// compute-budget limit, rather than the data of the accounts written back.
+/// Base58: LTDSzjZKFJMKHYpNycG1FrWwGGTaFFwqEFjB5GGLNVD
+pub fn define_ltds_fee_only_semantics() -> Pubkey {
+    Pubkey::new([
+        0x04, 0xfb, 0xad, 0x24, 0xc6, 0x0e, 0x2a, 0x90, 0xb8, 0xa3, 0x51, 0xeb, 0x9a, 0xa6, 0x3b,
+        0x69, 0x1b, 0xd3, 0x00, 0x63, 0x95, 0xc3, 0xd8, 0xfb, 0xd8, 0xa5, 0xef, 0xd6, 0x92, 0xf1,
+        0x3f, 0xa0,
+    ])
+}
+
 /// Relaxes the post-execution minimum-balance check.
 /// Base58: BY4JhHLahVzS9ynfDz4exzGPbVXhFmJvEyMWsXbDBqME
 pub fn relax_post_exec_min_balance_check() -> Pubkey {
@@ -5144,6 +5156,10 @@ mod registry_tests {
         assert_eq!(
             enable_durable_nonce(),
             feature_id("enable_durable_nonce").unwrap()
+        );
+        assert_eq!(
+            define_ltds_fee_only_semantics(),
+            feature_id("define_ltds_fee_only_semantics").unwrap()
         );
     }
 
