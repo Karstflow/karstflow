@@ -24,39 +24,36 @@ const MESSAGE_HASH_SIZE: usize = 32;
 const ENTRY_HEADER_SIZE: usize = 11;
 
 /// Executor for the Secp256k1 ECDSA recovery precompile.
-pub struct Secp256k1PrecompileExecutor {
-    base_cost: u64,
-}
+#[derive(Default)]
+pub struct Secp256k1PrecompileExecutor;
 
 impl Secp256k1PrecompileExecutor {
-    pub fn new(base_cost: u64) -> Self {
-        Self { base_cost }
+    pub fn new() -> Self {
+        Self
     }
 
     pub fn execute(&self, ctx: &ExecutionContext) -> Result<ExecutionOutcome, String> {
         if ctx.instruction_data.is_empty() {
-            return Ok(ExecutionOutcome::success(self.base_cost));
+            return Ok(ExecutionOutcome::success(
+                precompiles::PRECOMPILE_COMPUTE_UNITS,
+            ));
         }
 
         let num_signatures = ctx.instruction_data[0] as usize;
 
         if num_signatures == 0 {
-            return Ok(ExecutionOutcome::success(self.base_cost));
+            return Ok(ExecutionOutcome::success(
+                precompiles::PRECOMPILE_COMPUTE_UNITS,
+            ));
         }
 
         if ctx.instruction_data.len() < 2 {
             return Err("Secp256k1: instruction data too short".to_string());
         }
 
-        // Calculate total compute cost
-        let compute_used = self
-            .base_cost
-            .saturating_add(precompiles::SECP256K1_VERIFY_COST)
-            .saturating_add(precompiles::SECP256K1_VERIFY_PER_SIGNATURE * num_signatures as u64);
-
-        if compute_used > ctx.compute_budget {
-            return Err("Secp256k1: compute budget exceeded".to_string());
-        }
+        // A precompile instruction consumes no compute units: its
+        // signature verification is paid for by the transaction fee.
+        let compute_used = precompiles::PRECOMPILE_COMPUTE_UNITS;
 
         // Validate minimum data length
         let min_data_len = 1 + num_signatures * ENTRY_HEADER_SIZE;
@@ -228,34 +225,38 @@ mod tests {
     }
 
     #[test]
-    fn deducts_per_signature_cost() {
-        let executor = Secp256k1PrecompileExecutor::new(150);
+    fn consumes_no_compute_units() {
+        let executor = Secp256k1PrecompileExecutor::new();
 
         let instruction_data = build_real_secp256k1_instruction();
 
         let ctx = ExecutionContext::new(SECP256K1_PROGRAM_ID, vec![], instruction_data);
 
         let outcome = executor.execute(&ctx).unwrap();
-        let expected_cost =
-            150 + precompiles::SECP256K1_VERIFY_COST + precompiles::SECP256K1_VERIFY_PER_SIGNATURE;
-        assert_eq!(outcome.compute_units_consumed, expected_cost);
+        assert_eq!(
+            outcome.compute_units_consumed,
+            precompiles::PRECOMPILE_COMPUTE_UNITS
+        );
     }
 
     #[test]
     fn zero_signatures_succeeds() {
-        let executor = Secp256k1PrecompileExecutor::new(150);
+        let executor = Secp256k1PrecompileExecutor::new();
 
         let instruction_data = vec![0u8]; // 0 signatures
         let ctx = ExecutionContext::new(SECP256K1_PROGRAM_ID, vec![], instruction_data);
 
         let outcome = executor.execute(&ctx).unwrap();
         assert!(outcome.success);
-        assert_eq!(outcome.compute_units_consumed, 150);
+        assert_eq!(
+            outcome.compute_units_consumed,
+            precompiles::PRECOMPILE_COMPUTE_UNITS
+        );
     }
 
     #[test]
     fn empty_instruction_succeeds() {
-        let executor = Secp256k1PrecompileExecutor::new(150);
+        let executor = Secp256k1PrecompileExecutor::new();
 
         let ctx = ExecutionContext::new(SECP256K1_PROGRAM_ID, vec![], vec![]);
         let outcome = executor.execute(&ctx).unwrap();
@@ -264,7 +265,7 @@ mod tests {
 
     #[test]
     fn real_signature_verifies() {
-        let executor = Secp256k1PrecompileExecutor::new(150);
+        let executor = Secp256k1PrecompileExecutor::new();
 
         let instruction_data = build_real_secp256k1_instruction();
         let ctx = ExecutionContext::new(SECP256K1_PROGRAM_ID, vec![], instruction_data);
@@ -276,7 +277,7 @@ mod tests {
 
     #[test]
     fn rejects_truncated_instruction() {
-        let executor = Secp256k1PrecompileExecutor::new(150);
+        let executor = Secp256k1PrecompileExecutor::new();
 
         // 1 signature but only 5 bytes of data (not enough for header)
         let instruction_data = vec![1u8, 0, 0, 0, 0];
@@ -289,7 +290,7 @@ mod tests {
 
     #[test]
     fn rejects_wrong_eth_address() {
-        let executor = Secp256k1PrecompileExecutor::new(150);
+        let executor = Secp256k1PrecompileExecutor::new();
 
         let mut instruction_data = build_real_secp256k1_instruction();
         // Corrupt the eth address (located at offset = 1 + ENTRY_HEADER_SIZE)

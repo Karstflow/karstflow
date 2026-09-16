@@ -14,6 +14,7 @@ karstflow-constants = { workspace = true }
 karstflow-crypto = { workspace = true }
 karstflow-core = { workspace = true }
 karstflow-execution = { workspace = true }
+karstflow-sbpf = { workspace = true }
 karstflow-ids = { workspace = true }
 karstflow-mesh = { workspace = true }
 karstflow-net = { workspace = true }

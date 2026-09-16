@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use karstflow_constants::economics::{
-    MIN_STAKE_DELEGATION_LAMPORTS, RENT_EXEMPTION_BASE_LAMPORTS, RENT_EXEMPTION_LAMPORTS_PER_BYTE,
+    RENT_EXEMPTION_BASE_LAMPORTS, RENT_EXEMPTION_LAMPORTS_PER_BYTE,
 };
 use karstflow_constants::ledger::SLOTS_PER_EPOCH;
 
@@ -75,7 +75,7 @@ pub(super) fn handle(
             build_minimum_balance_for_rent_exemption_response(request)
         }
         RpcMethod::GetStakeMinimumDelegation => {
-            build_stake_minimum_delegation_response(request, snapshot, commitment)
+            build_stake_minimum_delegation_response(request, snapshot, commitment, bank_access)
         }
         RpcMethod::GetEpochInfo => Ok(build_epoch_info_response(snapshot, commitment, bank_access)),
         RpcMethod::GetFirstAvailableBlock => {
@@ -124,6 +124,7 @@ fn build_stake_minimum_delegation_response(
     request: &serde_json::Value,
     snapshot: RpcRuntimeSnapshot,
     commitment: RpcCommitment,
+    bank_access: Option<&Arc<dyn BankAccessProvider>>,
 ) -> Result<serde_json::Value, RpcMethodError> {
     let committed_slot = snapshot.slot_for_commitment(commitment);
     if let Some(min_context_slot) = params::min_context_slot_from_params(request)? {
@@ -132,7 +133,22 @@ fn build_stake_minimum_delegation_response(
         }
     }
 
-    let response = RpcResponse::new(committed_slot, MIN_STAKE_DELEGATION_LAMPORTS);
+    // The answer is feature-dependent: `upgrade_bpf_stake_program_to_v5` raises the
+    // minimum from 1 lamport to 1 SOL. Report what the runtime would enforce, not a
+    // fixed value — a client that sizes a delegation from this number and then has
+    // the transaction rejected is worse served than one told nothing.
+    let raised = bank_access
+        .map(|bank| {
+            bank.is_feature_active(
+                &karstflow_ids::features::UPGRADE_BPF_STAKE_PROGRAM_TO_V5,
+                commitment,
+            )
+        })
+        .unwrap_or(false);
+    let response = RpcResponse::new(
+        committed_slot,
+        karstflow_constants::stake_program::minimum_delegation_lamports(raised),
+    );
     Ok(types::to_value(&response))
 }
 

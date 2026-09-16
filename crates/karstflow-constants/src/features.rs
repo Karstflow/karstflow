@@ -19,6 +19,12 @@ pub const FEATURE_ENABLE_ALT_BN128_SYSCALL: &str = "enable_alt_bn128_syscall";
 /// Feature: enable the sol_alt_bn128_compression syscall (compress/decompress G1/G2).
 pub const FEATURE_ENABLE_ALT_BN128_COMPRESSION: &str = "enable_alt_bn128_compression_syscall";
 
+/// Feature: enable the little-endian alt_bn128 group-op and compression variants (SIMD-0284).
+pub const FEATURE_ALT_BN128_LITTLE_ENDIAN: &str = "alt_bn128_little_endian";
+
+/// Feature: enable the alt_bn128 G2 group operations (SIMD-0302).
+pub const FEATURE_ENABLE_ALT_BN128_G2_SYSCALLS: &str = "enable_alt_bn128_g2_syscalls";
+
 /// Feature: enable the sol_poseidon syscall (Poseidon hash).
 pub const FEATURE_ENABLE_POSEIDON_SYSCALL: &str = "enable_poseidon_syscall";
 

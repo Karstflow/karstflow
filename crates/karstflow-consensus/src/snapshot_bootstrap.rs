@@ -629,6 +629,7 @@ mod tests {
         let tick_height = slot * ticks_per_slot + ticks_per_slot;
 
         SnapshotBankState {
+            accounts_lt_hash: [0u8; karstflow_constants::crypto::LTHASH_VALUE_BYTES],
             recent_blockhashes: vec![],
             last_blockhash: Some([1u8; 32]),
             max_blockhash_age: 300,

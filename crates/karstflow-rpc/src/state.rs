@@ -72,6 +72,16 @@ pub trait BankAccessProvider: Send + Sync {
     /// Get the current lamports-per-signature fee.
     fn get_lamports_per_signature(&self, commitment: RpcCommitment) -> u64;
 
+    /// Whether a feature is active on the bank at the given commitment level.
+    ///
+    /// Needed by methods whose answer is feature-dependent, so that what a client
+    /// is told matches what the runtime would enforce.
+    fn is_feature_active(
+        &self,
+        feature_id: &karstflow_types::Pubkey,
+        commitment: RpcCommitment,
+    ) -> bool;
+
     /// Get the last valid block height for the latest blockhash.
     fn get_last_valid_block_height(&self, commitment: RpcCommitment) -> u64;
 

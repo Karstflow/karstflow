@@ -29,7 +29,7 @@ resolver = "2"
 [workspace.package]
 version = "0.1.0"
 edition = "2021"
-license = "SEE LICENSE IN LICENSE"
+license = "Apache-2.0"
 authors = ["Vladimir Bugaev <boogvar@gmail.com>"]
 description = "High-performance Solana validator implementation in Rust"
 repository = "https://github.com/BoogVAr/karstflow"

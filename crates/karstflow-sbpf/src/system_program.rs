@@ -180,19 +180,72 @@ fn rent_exempt_minimum(
 
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Clone)]
-pub struct SystemProgramExecutor {
-    base_cost: u64,
+/// Bounds-checked cursor over instruction data.
+///
+/// Instruction data arrives from the network and its contents are chosen by the
+/// transaction's sender, including any length field inside it. Reading it with
+/// direct slice indexing turns a malformed transaction into a panic, so the
+/// seed-carrying instructions — whose layout depends on a sender-supplied
+/// length — read through this instead.
+struct DataCursor<'a> {
+    data: &'a [u8],
+    offset: usize,
 }
 
+impl<'a> DataCursor<'a> {
+    /// Start reading `data` at `offset`.
+    fn new(data: &'a [u8], offset: usize) -> Self {
+        Self { data, offset }
+    }
+
+    /// Take the next `len` bytes, or report what was missing.
+    fn take(&mut self, len: usize, field: &str) -> Result<&'a [u8], String> {
+        let end = self
+            .offset
+            .checked_add(len)
+            .ok_or_else(|| format!("Instruction data offset overflow reading {field}"))?;
+        let slice = self
+            .data
+            .get(self.offset..end)
+            .ok_or_else(|| format!("Instruction data too short for {field}"))?;
+        self.offset = end;
+        Ok(slice)
+    }
+
+    /// Read a little-endian `u64`.
+    fn u64(&mut self, field: &str) -> Result<u64, String> {
+        let bytes = self.take(8, field)?;
+        let mut raw = [0u8; 8];
+        raw.copy_from_slice(bytes);
+        Ok(u64::from_le_bytes(raw))
+    }
+
+    /// Read a 32-byte public key.
+    fn pubkey(&mut self, field: &str) -> Result<Pubkey, String> {
+        let bytes = self.take(32, field)?;
+        let mut raw = [0u8; 32];
+        raw.copy_from_slice(bytes);
+        Ok(Pubkey::new(raw))
+    }
+
+    /// Read a UTF-8 seed of `len` bytes.
+    fn seed(&mut self, len: usize) -> Result<&'a str, String> {
+        let bytes = self.take(len, "seed")?;
+        std::str::from_utf8(bytes).map_err(|_| "Invalid UTF-8 in seed".to_string())
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct SystemProgramExecutor;
+
 impl SystemProgramExecutor {
-    pub fn new(base_cost: u64) -> Self {
-        Self { base_cost }
+    pub fn new() -> Self {
+        Self
     }
 
     pub fn execute(&self, context: &ExecutionContext) -> Result<ExecutionOutcome, String> {
         if context.instruction_data.is_empty() {
-            return Ok(ExecutionOutcome::success(self.base_cost));
+            return Ok(ExecutionOutcome::success(constants::COMPUTE_COST_BASE));
         }
 
         if context.instruction_data.len() < 4 {
@@ -205,72 +258,54 @@ impl SystemProgramExecutor {
                 .map_err(|_| "Failed to parse instruction type")?,
         );
 
-        let mut compute_used = constants::COMPUTE_COST_BASE;
+        // Flat per-instruction charge: the same for every discriminant, and
+        // charged whether the instruction succeeds or fails.
+        let compute_used = constants::COMPUTE_COST_BASE;
         let mut modified_accounts = HashMap::new();
         let mut logs = Vec::new();
 
         let result = match instruction_type {
             SYSTEM_PROGRAM_CREATE_ACCOUNT => {
-                compute_used = compute_used.saturating_add(constants::COMPUTE_COST_CREATE_ACCOUNT);
                 self.execute_create_account(context, &mut modified_accounts, &mut logs)
             }
             SYSTEM_PROGRAM_ASSIGN => {
-                compute_used = compute_used.saturating_add(constants::COMPUTE_COST_ASSIGN);
                 self.execute_assign(context, &mut modified_accounts, &mut logs)
             }
             SYSTEM_PROGRAM_TRANSFER => {
-                compute_used = compute_used.saturating_add(constants::COMPUTE_COST_TRANSFER);
                 self.execute_transfer(context, &mut modified_accounts, &mut logs)
             }
             SYSTEM_PROGRAM_ALLOCATE => {
-                compute_used = compute_used.saturating_add(constants::COMPUTE_COST_ALLOCATE);
                 self.execute_allocate(context, &mut modified_accounts, &mut logs)
             }
             SYSTEM_PROGRAM_INITIALIZE_NONCE_ACCOUNT => {
-                compute_used =
-                    compute_used.saturating_add(constants::COMPUTE_COST_NONCE_INITIALIZE);
                 self.execute_initialize_nonce_account(context, &mut modified_accounts, &mut logs)
             }
             SYSTEM_PROGRAM_ADVANCE_NONCE_ACCOUNT => {
-                compute_used = compute_used.saturating_add(constants::COMPUTE_COST_NONCE_ADVANCE);
                 self.execute_advance_nonce_account(context, &mut modified_accounts, &mut logs)
             }
             SYSTEM_PROGRAM_WITHDRAW_NONCE_ACCOUNT => {
-                compute_used = compute_used.saturating_add(constants::COMPUTE_COST_NONCE_WITHDRAW);
                 self.execute_withdraw_nonce_account(context, &mut modified_accounts, &mut logs)
             }
             SYSTEM_PROGRAM_AUTHORIZE_NONCE_ACCOUNT => {
-                compute_used = compute_used.saturating_add(constants::COMPUTE_COST_NONCE_AUTHORIZE);
                 self.execute_authorize_nonce_account(context, &mut modified_accounts, &mut logs)
             }
             SYSTEM_PROGRAM_CREATE_ACCOUNT_WITH_SEED => {
-                compute_used = compute_used.saturating_add(constants::COMPUTE_COST_CREATE_ACCOUNT);
                 self.execute_create_account_with_seed(context, &mut modified_accounts, &mut logs)
             }
             SYSTEM_PROGRAM_ALLOCATE_WITH_SEED => {
-                compute_used = compute_used.saturating_add(constants::COMPUTE_COST_ALLOCATE);
                 self.execute_allocate_with_seed(context, &mut modified_accounts, &mut logs)
             }
             SYSTEM_PROGRAM_ASSIGN_WITH_SEED => {
-                compute_used = compute_used.saturating_add(constants::COMPUTE_COST_ASSIGN);
                 self.execute_assign_with_seed(context, &mut modified_accounts, &mut logs)
             }
             SYSTEM_PROGRAM_TRANSFER_WITH_SEED => {
-                compute_used = compute_used.saturating_add(constants::COMPUTE_COST_TRANSFER);
                 self.execute_transfer_with_seed(context, &mut modified_accounts, &mut logs)
             }
             SYSTEM_PROGRAM_UPGRADE_NONCE_ACCOUNT => {
-                compute_used = compute_used.saturating_add(constants::COMPUTE_COST_NONCE_ADVANCE);
                 self.execute_upgrade_nonce_account(context, &mut modified_accounts, &mut logs)
             }
-            SYSTEM_PROGRAM_CREATE_ACCOUNT_ALLOW_PREFUND => {
-                compute_used = compute_used.saturating_add(constants::COMPUTE_COST_CREATE_ACCOUNT);
-                self.execute_create_account_allow_prefund(
-                    context,
-                    &mut modified_accounts,
-                    &mut logs,
-                )
-            }
+            SYSTEM_PROGRAM_CREATE_ACCOUNT_ALLOW_PREFUND => self
+                .execute_create_account_allow_prefund(context, &mut modified_accounts, &mut logs),
             _ => {
                 logs.push(format!(
                     "System: Unknown instruction type {}",
@@ -1102,42 +1137,21 @@ impl SystemProgramExecutor {
             return Err("AllocateWithSeed instruction data too short".to_string());
         }
 
-        let mut offset = 4;
+        let mut cursor = DataCursor::new(&context.instruction_data, 4);
 
-        let base = Pubkey::new(
-            context.instruction_data[offset..offset + 32]
-                .try_into()
-                .unwrap(),
-        );
-        offset += 32;
+        let base = cursor.pubkey("base pubkey")?;
 
-        let seed_len = u64::from_le_bytes(
-            context.instruction_data[offset..offset + 8]
-                .try_into()
-                .unwrap(),
-        ) as usize;
-        offset += 8;
+        let seed_len = cursor.u64("seed length")? as usize;
 
         if seed_len > MAX_SEED_LEN {
             return Err(SystemProgramError::MaxSeedLengthExceeded.to_string());
         }
 
-        let seed = std::str::from_utf8(&context.instruction_data[offset..offset + seed_len])
-            .map_err(|_| "Invalid UTF-8 in seed")?;
-        offset += seed_len;
+        let seed = cursor.seed(seed_len)?;
 
-        let space = u64::from_le_bytes(
-            context.instruction_data[offset..offset + 8]
-                .try_into()
-                .unwrap(),
-        );
-        offset += 8;
+        let space = cursor.u64("space")?;
 
-        let owner = Pubkey::new(
-            context.instruction_data[offset..offset + 32]
-                .try_into()
-                .unwrap(),
-        );
+        let owner = cursor.pubkey("owner")?;
 
         // Verify address
         let (account_pubkey, account, _) = &context.accounts[0];
@@ -1184,35 +1198,19 @@ impl SystemProgramExecutor {
         }
 
         // Parse: base, seed, owner_to_assign
-        let mut offset = 4;
+        let mut cursor = DataCursor::new(&context.instruction_data, 4);
 
-        let base = Pubkey::new(
-            context.instruction_data[offset..offset + 32]
-                .try_into()
-                .unwrap(),
-        );
-        offset += 32;
+        let base = cursor.pubkey("base pubkey")?;
 
-        let seed_len = u64::from_le_bytes(
-            context.instruction_data[offset..offset + 8]
-                .try_into()
-                .unwrap(),
-        ) as usize;
-        offset += 8;
+        let seed_len = cursor.u64("seed length")? as usize;
 
         if seed_len > MAX_SEED_LEN {
             return Err(SystemProgramError::MaxSeedLengthExceeded.to_string());
         }
 
-        let seed = std::str::from_utf8(&context.instruction_data[offset..offset + seed_len])
-            .map_err(|_| "Invalid UTF-8 in seed")?;
-        offset += seed_len;
+        let seed = cursor.seed(seed_len)?;
 
-        let owner_to_assign = Pubkey::new(
-            context.instruction_data[offset..offset + 32]
-                .try_into()
-                .unwrap(),
-        );
+        let owner_to_assign = cursor.pubkey("owner to assign")?;
 
         // Verify address
         let (account_pubkey, account, _) = &context.accounts[0];
@@ -1250,35 +1248,19 @@ impl SystemProgramExecutor {
         }
 
         // Parse: lamports, from_seed, from_owner, (base is from_pubkey)
-        let mut offset = 4;
+        let mut cursor = DataCursor::new(&context.instruction_data, 4);
 
-        let lamports = u64::from_le_bytes(
-            context.instruction_data[offset..offset + 8]
-                .try_into()
-                .unwrap(),
-        );
-        offset += 8;
+        let lamports = cursor.u64("lamports")?;
 
-        let seed_len = u64::from_le_bytes(
-            context.instruction_data[offset..offset + 8]
-                .try_into()
-                .unwrap(),
-        ) as usize;
-        offset += 8;
+        let seed_len = cursor.u64("seed length")? as usize;
 
         if seed_len > MAX_SEED_LEN {
             return Err(SystemProgramError::MaxSeedLengthExceeded.to_string());
         }
 
-        let seed = std::str::from_utf8(&context.instruction_data[offset..offset + seed_len])
-            .map_err(|_| "Invalid UTF-8 in seed")?;
-        offset += seed_len;
+        let seed = cursor.seed(seed_len)?;
 
-        let from_owner = Pubkey::new(
-            context.instruction_data[offset..offset + 32]
-                .try_into()
-                .unwrap(),
-        );
+        let from_owner = cursor.pubkey("from owner")?;
 
         // from_pubkey is accounts[0], to_pubkey is accounts[1]
         let (from_pubkey, from_account, _) = &context.accounts[0];
@@ -1384,9 +1366,224 @@ mod tests {
     use super::*;
     use karstflow_types::AccountMeta;
 
+    /// Instruction data is sender-controlled, and the seed-carrying
+    /// instructions read a length out of it before reading past that length.
+    /// Every truncation point must therefore produce an error; before this was
+    /// enforced, a short `TransferWithSeed` panicked the execution thread,
+    /// which any sender could trigger with no privilege at all.
+    ///
+    /// The sweep cuts the encoding at every byte rather than at a few chosen
+    /// boundaries, because the interesting cut is the one nobody thought of.
+    fn seed_instruction_truncations_are_rejected(discriminant: u32, well_formed: Vec<u8>) {
+        let executor = SystemProgramExecutor::new();
+
+        let funded = Account {
+            meta: AccountMeta {
+                lamports: 10_000,
+                owner: SYSTEM_PROGRAM_ID,
+                executable: false,
+                rent_epoch: 0,
+            },
+            data: AccountData::empty(),
+        };
+
+        // From 1, not 0: empty instruction data is handled earlier as a no-op
+        // success. Whether that is right is a separate question (logged as
+        // QB-031); it is not this hardening's business to change it.
+        for cut in 1..well_formed.len() {
+            let context = ExecutionContext::new(
+                SYSTEM_PROGRAM_ID,
+                vec![
+                    (Pubkey::new_unique(), funded.clone(), true),
+                    (Pubkey::new_unique(), Account::zeroed(), true),
+                ],
+                well_formed[..cut].to_vec(),
+            );
+            // The contract is "does not panic and does not silently succeed on
+            // data that was cut short", not any particular error string.
+            let outcome = executor.execute(&context);
+            assert!(
+                outcome.is_err() || !outcome.unwrap().success,
+                "discriminant {discriminant} accepted data truncated to {cut} bytes"
+            );
+        }
+    }
+
+    /// The system program charges one flat cost for every instruction it
+    /// accepts, and charges it whether the instruction succeeds or fails.
+    /// karstflow previously added a per-discriminant surcharge on top of a
+    /// base, which made every fixture in the upstream corpus disagree on
+    /// compute units even where the state transition was correct.
+    #[test]
+    fn every_discriminant_charges_the_same_flat_cost() {
+        let executor = SystemProgramExecutor::new();
+
+        // Both a well-formed Transfer and a malformed one: the cost is a
+        // property of the instruction being dispatched, not of its outcome.
+        let mut transfer = SYSTEM_PROGRAM_TRANSFER.to_le_bytes().to_vec();
+        transfer.extend_from_slice(&1_000u64.to_le_bytes());
+
+        for discriminant in 0u32..=13 {
+            let mut data = discriminant.to_le_bytes().to_vec();
+            data.extend_from_slice(&[0u8; 64]);
+
+            let context = ExecutionContext::new(
+                SYSTEM_PROGRAM_ID,
+                vec![
+                    (Pubkey::new_unique(), Account::default(), true),
+                    (Pubkey::new_unique(), Account::default(), true),
+                ],
+                data,
+            );
+
+            if let Ok(outcome) = executor.execute(&context) {
+                assert_eq!(
+                    outcome.compute_units_consumed,
+                    constants::COMPUTE_COST_BASE,
+                    "discriminant {discriminant} charged a different cost"
+                );
+            }
+        }
+
+        let funded = Account {
+            meta: AccountMeta {
+                lamports: 10_000,
+                owner: SYSTEM_PROGRAM_ID,
+                executable: false,
+                rent_epoch: 0,
+            },
+            data: AccountData::empty(),
+        };
+        let context = ExecutionContext::new(
+            SYSTEM_PROGRAM_ID,
+            vec![
+                (Pubkey::new_unique(), funded, true),
+                (Pubkey::new_unique(), Account::default(), true),
+            ],
+            transfer,
+        );
+        let outcome = executor.execute(&context).unwrap();
+        assert!(outcome.success);
+        assert_eq!(outcome.compute_units_consumed, constants::COMPUTE_COST_BASE);
+    }
+
+    fn seed_payload(discriminant: u32, prefix: &[u8], seed: &str, suffix: &[u8]) -> Vec<u8> {
+        let mut data = discriminant.to_le_bytes().to_vec();
+        data.extend_from_slice(prefix);
+        data.extend_from_slice(&(seed.len() as u64).to_le_bytes());
+        data.extend_from_slice(seed.as_bytes());
+        data.extend_from_slice(suffix);
+        data
+    }
+
+    #[test]
+    fn allocate_with_seed_rejects_every_truncation() {
+        let base = Pubkey::new_unique();
+        let owner = Pubkey::new_unique();
+        let mut suffix = 100u64.to_le_bytes().to_vec();
+        suffix.extend_from_slice(owner.as_bytes());
+        seed_instruction_truncations_are_rejected(
+            SYSTEM_PROGRAM_ALLOCATE_WITH_SEED,
+            seed_payload(
+                SYSTEM_PROGRAM_ALLOCATE_WITH_SEED,
+                base.as_bytes(),
+                "a-seed",
+                &suffix,
+            ),
+        );
+    }
+
+    #[test]
+    fn assign_with_seed_rejects_every_truncation() {
+        let base = Pubkey::new_unique();
+        let owner = Pubkey::new_unique();
+        seed_instruction_truncations_are_rejected(
+            SYSTEM_PROGRAM_ASSIGN_WITH_SEED,
+            seed_payload(
+                SYSTEM_PROGRAM_ASSIGN_WITH_SEED,
+                base.as_bytes(),
+                "a-seed",
+                owner.as_bytes(),
+            ),
+        );
+    }
+
+    #[test]
+    fn transfer_with_seed_rejects_every_truncation() {
+        let owner = Pubkey::new_unique();
+        seed_instruction_truncations_are_rejected(
+            SYSTEM_PROGRAM_TRANSFER_WITH_SEED,
+            seed_payload(
+                SYSTEM_PROGRAM_TRANSFER_WITH_SEED,
+                &500u64.to_le_bytes(),
+                "a-seed",
+                owner.as_bytes(),
+            ),
+        );
+    }
+
+    #[test]
+    fn create_account_with_seed_rejects_every_truncation() {
+        // Not one of the converted handlers: it already carried the post-seed
+        // guard the other three were missing. Covered so the class stays closed
+        // if that guard is ever refactored away.
+        let base = Pubkey::new_unique();
+        let owner = Pubkey::new_unique();
+        let mut suffix = owner.as_bytes().to_vec();
+        suffix.extend_from_slice(&5_000u64.to_le_bytes());
+        suffix.extend_from_slice(&100u64.to_le_bytes());
+        seed_instruction_truncations_are_rejected(
+            SYSTEM_PROGRAM_CREATE_ACCOUNT_WITH_SEED,
+            seed_payload(
+                SYSTEM_PROGRAM_CREATE_ACCOUNT_WITH_SEED,
+                base.as_bytes(),
+                "a-seed",
+                &suffix,
+            ),
+        );
+    }
+
+    #[test]
+    fn a_seed_length_beyond_the_buffer_is_an_error_not_a_panic() {
+        // The precise shape the corpus found: the declared seed length is
+        // legal on its own, but longer than the bytes that actually follow.
+        let executor = SystemProgramExecutor::new();
+        let mut data = SYSTEM_PROGRAM_TRANSFER_WITH_SEED.to_le_bytes().to_vec();
+        data.extend_from_slice(&500u64.to_le_bytes());
+        data.extend_from_slice(&24u64.to_le_bytes());
+        data.extend_from_slice(b"only-eight");
+
+        let context = ExecutionContext::new(
+            SYSTEM_PROGRAM_ID,
+            vec![
+                (Pubkey::new_unique(), Account::zeroed(), true),
+                (Pubkey::new_unique(), Account::zeroed(), true),
+            ],
+            data,
+        );
+        assert!(executor.execute(&context).is_err());
+    }
+
+    #[test]
+    fn a_seed_length_near_the_integer_limit_is_an_error_not_a_panic() {
+        // u64::MAX as usize would overflow the offset arithmetic on the way to
+        // the bounds check, so the cursor has to reject it before adding.
+        let executor = SystemProgramExecutor::new();
+        let mut data = SYSTEM_PROGRAM_ASSIGN_WITH_SEED.to_le_bytes().to_vec();
+        data.extend_from_slice(Pubkey::new_unique().as_bytes());
+        data.extend_from_slice(&u64::MAX.to_le_bytes());
+
+        let context = ExecutionContext::new(
+            SYSTEM_PROGRAM_ID,
+            vec![(Pubkey::new_unique(), Account::zeroed(), true)],
+            data,
+        );
+        assert!(executor.execute(&context).is_err());
+    }
+
     #[test]
     fn system_create_account_success() {
-        let executor = SystemProgramExecutor::new(150);
+        let executor = SystemProgramExecutor::new();
 
         let from_account = Account {
             meta: AccountMeta {
@@ -1422,7 +1619,7 @@ mod tests {
 
     #[test]
     fn system_transfer_insufficient_lamports() {
-        let executor = SystemProgramExecutor::new(150);
+        let executor = SystemProgramExecutor::new();
 
         let from_account = Account {
             meta: AccountMeta {
@@ -1460,7 +1657,7 @@ mod tests {
 
     #[test]
     fn system_allocate_success() {
-        let executor = SystemProgramExecutor::new(150);
+        let executor = SystemProgramExecutor::new();
 
         let account = Account {
             meta: AccountMeta {
@@ -1488,7 +1685,7 @@ mod tests {
 
     #[test]
     fn system_create_account_already_in_use() {
-        let executor = SystemProgramExecutor::new(150);
+        let executor = SystemProgramExecutor::new();
 
         let from_account = Account {
             meta: AccountMeta {
@@ -1557,7 +1754,7 @@ mod tests {
 
     #[test]
     fn create_account_allow_prefund_rejected_without_feature() {
-        let executor = SystemProgramExecutor::new(150);
+        let executor = SystemProgramExecutor::new();
         let new_owner = Pubkey::new_unique();
         let mut context = ExecutionContext::new(
             SYSTEM_PROGRAM_ID,
@@ -1573,7 +1770,7 @@ mod tests {
 
     #[test]
     fn create_account_allow_prefund_on_prefunded_account() {
-        let executor = SystemProgramExecutor::new(150);
+        let executor = SystemProgramExecutor::new();
         let new_owner = Pubkey::new_unique();
         let to_pubkey = Pubkey::new_unique();
 
@@ -1607,7 +1804,7 @@ mod tests {
 
     #[test]
     fn create_account_allow_prefund_transfers_from_funder() {
-        let executor = SystemProgramExecutor::new(150);
+        let executor = SystemProgramExecutor::new();
         let new_owner = Pubkey::new_unique();
         let to_pubkey = Pubkey::new_unique();
         let from_pubkey = Pubkey::new_unique();
@@ -1650,7 +1847,7 @@ mod tests {
 
     #[test]
     fn create_account_allow_prefund_rejects_account_in_use() {
-        let executor = SystemProgramExecutor::new(150);
+        let executor = SystemProgramExecutor::new();
         let new_owner = Pubkey::new_unique();
 
         // Non-empty data → already in use, even with the feature active.
@@ -1672,7 +1869,7 @@ mod tests {
 
     #[test]
     fn system_allocate_already_allocated() {
-        let executor = SystemProgramExecutor::new(150);
+        let executor = SystemProgramExecutor::new();
 
         // Account already has data
         let mut account = Account {
@@ -1817,7 +2014,7 @@ mod tests {
 
     #[test]
     fn system_initialize_nonce_account() {
-        let executor = SystemProgramExecutor::new(150);
+        let executor = SystemProgramExecutor::new();
         let authority = Pubkey::new_unique();
 
         let account = make_uninitialized_nonce_account(2_000_000);
@@ -1857,7 +2054,7 @@ mod tests {
 
     #[test]
     fn system_initialize_nonce_rejects_already_initialized() {
-        let executor = SystemProgramExecutor::new(150);
+        let executor = SystemProgramExecutor::new();
         let authority = Pubkey::new_unique();
         let nonce = [0xDD; 32];
 
@@ -1880,7 +2077,7 @@ mod tests {
 
     #[test]
     fn system_initialize_nonce_rejects_no_blockhash() {
-        let executor = SystemProgramExecutor::new(150);
+        let executor = SystemProgramExecutor::new();
         let authority = Pubkey::new_unique();
 
         let account = make_uninitialized_nonce_account(1_000_000);
@@ -1907,7 +2104,7 @@ mod tests {
 
     #[test]
     fn system_advance_nonce_account() {
-        let executor = SystemProgramExecutor::new(150);
+        let executor = SystemProgramExecutor::new();
         let authority = Pubkey::new_unique();
         let old_nonce = [0x11; 32];
 
@@ -1942,7 +2139,7 @@ mod tests {
 
     #[test]
     fn system_advance_nonce_rejects_uninitialized() {
-        let executor = SystemProgramExecutor::new(150);
+        let executor = SystemProgramExecutor::new();
 
         let account = make_uninitialized_nonce_account(1_000_000);
 
@@ -1962,7 +2159,7 @@ mod tests {
 
     #[test]
     fn system_advance_nonce_rejects_same_blockhash() {
-        let executor = SystemProgramExecutor::new(150);
+        let executor = SystemProgramExecutor::new();
         let authority = Pubkey::new_unique();
 
         // Create nonce that already matches the durable nonce derived from current blockhash
@@ -1993,7 +2190,7 @@ mod tests {
 
     #[test]
     fn system_withdraw_nonce_account() {
-        let executor = SystemProgramExecutor::new(150);
+        let executor = SystemProgramExecutor::new();
         let authority = Pubkey::new_unique();
         let nonce = [0x33; 32];
 
@@ -2030,7 +2227,7 @@ mod tests {
 
     #[test]
     fn system_withdraw_nonce_close_account() {
-        let executor = SystemProgramExecutor::new(150);
+        let executor = SystemProgramExecutor::new();
         let authority = Pubkey::new_unique();
         let nonce = [0x33; 32]; // different from derived nonce
 
@@ -2067,7 +2264,7 @@ mod tests {
 
     #[test]
     fn system_withdraw_nonce_insufficient_for_rent() {
-        let executor = SystemProgramExecutor::new(150);
+        let executor = SystemProgramExecutor::new();
         let authority = Pubkey::new_unique();
         let nonce = [0x33; 32];
 
@@ -2104,7 +2301,7 @@ mod tests {
 
     #[test]
     fn system_authorize_nonce_account() {
-        let executor = SystemProgramExecutor::new(150);
+        let executor = SystemProgramExecutor::new();
         let authority = Pubkey::new_unique();
         let nonce = [0x44; 32];
 
@@ -2142,7 +2339,7 @@ mod tests {
 
     #[test]
     fn system_authorize_nonce_rejects_wrong_signer() {
-        let executor = SystemProgramExecutor::new(150);
+        let executor = SystemProgramExecutor::new();
         let authority = Pubkey::new_unique();
         let wrong_signer = Pubkey::new_unique();
         let nonce = [0x44; 32];
@@ -2175,7 +2372,7 @@ mod tests {
 
     #[test]
     fn system_upgrade_nonce_account() {
-        let executor = SystemProgramExecutor::new(150);
+        let executor = SystemProgramExecutor::new();
         let authority = Pubkey::new_unique();
         let old_nonce = [0x55; 32];
 
@@ -2227,7 +2424,7 @@ mod tests {
 
     #[test]
     fn system_upgrade_nonce_rejects_already_current() {
-        let executor = SystemProgramExecutor::new(150);
+        let executor = SystemProgramExecutor::new();
         let authority = Pubkey::new_unique();
         let nonce = [0x55; 32];
 

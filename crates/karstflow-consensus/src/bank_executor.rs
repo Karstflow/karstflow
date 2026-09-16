@@ -681,6 +681,72 @@ impl RentState {
             }
         }
     }
+
+    /// Pre-execution rent state.
+    ///
+    /// SIMD-0392 (`relax_post_exec_min_balance_check`): once active, an account
+    /// that would be rent-paying is treated as rent-exempt going in, which is
+    /// what lets the post-execution rule below accept a balance that does not
+    /// decrease.
+    fn pre_exec(account: &Account, rent: &crate::Rent, relax: bool) -> Self {
+        let state = Self::from_account(account, rent);
+        if relax && matches!(state, RentState::RentPaying { .. }) {
+            RentState::RentExempt
+        } else {
+            state
+        }
+    }
+
+    /// Post-execution rent state.
+    ///
+    /// With `relax` clear this is the unconditional rule. With it set, SIMD-0392
+    /// adds one acceptance: an account that was rent-exempt before and did not
+    /// lose lamports stays rent-exempt even if it now sits below the minimum —
+    /// which happens when the rent floor itself rises under the account.
+    fn post_exec(
+        account: &Account,
+        rent: &crate::Rent,
+        pre_state: &RentState,
+        pre_exec_balance: u64,
+        relax: bool,
+    ) -> Self {
+        if !relax {
+            return Self::from_account(account, rent);
+        }
+        let lamports = account.meta.lamports;
+        if lamports == 0 {
+            return RentState::Uninitialized;
+        }
+        if rent.is_exempt(lamports, account.data.len()) {
+            return RentState::RentExempt;
+        }
+        if lamports >= pre_exec_balance && *pre_state == RentState::RentExempt {
+            return RentState::RentExempt;
+        }
+        RentState::RentPaying {
+            lamports,
+            data_len: account.data.len(),
+        }
+    }
+}
+
+/// Whether SIMD-0392's relaxation applies to one account in the post-execution
+/// sweep.
+///
+/// Narrower than the bare feature bit: the account must not have grown, must
+/// have been rent-exempt going in, and must have kept its owner. Each term
+/// excludes a way an account could end up below the rent floor through its own
+/// change rather than through the floor moving.
+fn relax_rent_exempt_criteria(
+    feature_active: bool,
+    pre: &Account,
+    post: &Account,
+    pre_state: &RentState,
+) -> bool {
+    feature_active
+        && pre.data.len() >= post.data.len()
+        && *pre_state == RentState::RentExempt
+        && pre.meta.owner == post.meta.owner
 }
 
 /// Check if a rent state transition is allowed.
@@ -787,6 +853,38 @@ fn is_reserved_key(pubkey: &Pubkey) -> bool {
         || *pubkey == karstflow_ids::SYSVAR_PROGRAM_ID
         || *pubkey == karstflow_ids::FEATURE_PROGRAM_ID
         || *pubkey == karstflow_ids::ADDRESS_LOOKUP_TABLE_PROGRAM_ID
+}
+
+/// The programdata account a program in this instruction points at, when it is
+/// an upgradeable deployment.
+///
+/// Only the upgradeable loader splits a program in two. Every other loader
+/// keeps the bytecode in the program account, and this returns `None` — as it
+/// also does for an account whose first bytes are an ELF header rather than the
+/// `Program` discriminant, which is what a program written in the older layout
+/// under this owner looks like.
+fn programdata_address_of(
+    accounts: &[(Pubkey, Account, bool, bool)],
+    program_id: &Pubkey,
+) -> Option<Pubkey> {
+    use karstflow_constants::bpf_loader_program as loader;
+
+    let program = accounts
+        .iter()
+        .find(|(pubkey, _, _, _)| pubkey == program_id)
+        .map(|(_, account, _, _)| account)?;
+
+    if program.meta.owner != karstflow_ids::BPF_LOADER_PROGRAM_ID {
+        return None;
+    }
+    let data = program.data.as_slice();
+    if data.len() < loader::SIZE_OF_PROGRAM {
+        return None;
+    }
+    if u32::from_le_bytes(data[0..4].try_into().ok()?) != loader::STATE_PROGRAM {
+        return None;
+    }
+    Some(Pubkey::new_from_array(data[4..36].try_into().ok()?))
 }
 
 /// Determine if an account is truly writable for a given instruction.
@@ -1046,6 +1144,32 @@ fn account_loaded_size(account: &Account) -> u64 {
         return 0;
     }
     TRANSACTION_ACCOUNT_BASE_SIZE + account.data.len() as u64
+}
+
+/// Loaded-accounts-data size charged to a transaction that landed but failed to
+/// load its accounts.
+///
+/// `define_ltds_fee_only_semantics` selects between two definitions. With the
+/// gate active it is whatever had been accumulated when loading gave up,
+/// clamped to the transaction's own compute-budget limit. Without it, only the
+/// accounts a fees-only transaction actually writes back count: the fee payer,
+/// plus the nonce when the nonce is a separate account — a transaction paying
+/// its own fee from its nonce account must not be charged for it twice.
+fn fees_only_loaded_size(
+    gate_active: bool,
+    accumulated: u64,
+    data_size_limit: u64,
+    fee_payer: &Pubkey,
+    fee_payer_data_len: u64,
+    nonce: Option<(&Pubkey, u64)>,
+) -> u64 {
+    if gate_active {
+        return accumulated.min(data_size_limit);
+    }
+    match nonce {
+        Some((key, data_len)) if key != fee_payer => fee_payer_data_len.saturating_add(data_len),
+        _ => fee_payer_data_len,
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1465,8 +1589,65 @@ impl Bank {
             }),
             prefund_active,
         );
-        let mut estimated_cost = TransactionCost::new(compute_limit, is_vote);
+        // The block cost is the whole transaction cost, not the requested
+        // execution units: signatures, write locks, instruction data,
+        // precompile verification and the loaded-accounts-data allowance all
+        // count against the block limit. The scheduler's model already
+        // computes that sum, so it is the one source for it here too — with
+        // the caller's compute limit substituted for the model's own estimate
+        // of the execution term, since that is the figure this transaction
+        // will actually be metered against.
+        let instruction_views: Vec<crate::pack::cost_model::InstructionView<'_>> = transaction
+            .instructions
+            .iter()
+            .filter_map(|ix| {
+                transaction
+                    .account_keys
+                    .get(ix.program_id_index as usize)
+                    .map(|program_id| crate::pack::cost_model::InstructionView {
+                        program_id,
+                        data: ix.data.as_slice(),
+                    })
+            })
+            .collect();
+        let writable_accounts: Vec<Pubkey> = transaction
+            .account_keys
+            .iter()
+            .enumerate()
+            .filter(|(index, _)| transaction.is_writable_index(*index))
+            .map(|(_, key)| *key)
+            .collect();
+        let model_cost = crate::pack::cost_model::compute_transaction_cost(
+            &instruction_views,
+            transaction.num_signatures,
+            writable_accounts.len(),
+            is_vote,
+        );
+        // A simple vote is charged a fixed cost upstream, so its total is left
+        // as the model computed it.
+        let total_cost = if model_cost.is_simple_vote {
+            model_cost.total_cost
+        } else {
+            model_cost
+                .total_cost
+                .saturating_sub(model_cost.execution_cost)
+                .saturating_add(compute_limit)
+        };
+
+        // Each write-locked account is charged the transaction's whole cost.
+        // That is only sound because the estimated share is reconciled to the
+        // actual after execution — without it a chunked program deploy, ~28
+        // writes to one account each requesting the 1.4M maximum and consuming
+        // a few thousand, would exhaust the account's budget on compute it
+        // never used.
+        let mut estimated_cost = TransactionCost::new(total_cost, is_vote);
         estimated_cost.allocated_accounts_data_size = allocated_data_size;
+        estimated_cost.writable_accounts = writable_accounts;
+        estimated_cost.execution_and_loaded_cost = if model_cost.is_simple_vote {
+            model_cost.execution_cost
+        } else {
+            compute_limit.saturating_add(model_cost.loaded_accounts_data_cost)
+        };
         if let Err(e) = self.cost_tracker().try_add(&estimated_cost) {
             return TransactionExecutionResult {
                 success: false,
@@ -1487,26 +1668,13 @@ impl Bank {
         let budget_params = parse_compute_budget(transaction);
         let priority_fee = calculate_priority_fee(&budget_params);
 
-        // Step 2: Load accounts (with data size limit enforcement)
-        let mut account_state = match self
-            .load_transaction_accounts(transaction, budget_params.loaded_accounts_data_size_limit)
-        {
-            Ok(state) => state,
-            Err(err) => {
-                return TransactionExecutionResult {
-                    success: false,
-                    compute_units_consumed: 0,
-                    fee: 0,
-                    modified_accounts: HashMap::new(),
-                    logs: vec![],
-                    error: Some(err),
-                    vote_updates: vec![],
-                    return_data: None,
-                };
-            }
-        };
-
-        // Step 3: Validate fee payer and debit fee
+        // Step 2: Validate fee payer and compute the fee — before loading.
+        //
+        // The order matters. Fee-payer validity decides whether the
+        // transaction lands at all; once it has landed, a later failure to
+        // load its accounts still leaves it in the block and still charges
+        // it. Loading first would leave no fee computed to charge on that
+        // path.
         //
         // Total fee = execution fee (signatures * rate) + priority fee.
         // Execution fees are subject to 50% burn, priority fees go
@@ -1516,11 +1684,14 @@ impl Bank {
         let total_signatures = transaction.num_signatures.saturating_add(precompile_sigs);
         let execution_fee = fee_calculator.calculate_fee(total_signatures);
         let fee = execution_fee.saturating_add(priority_fee);
-        let rent = crate::Rent::default();
+        // The bank's parameters, not the compile-time defaults: the two agree at
+        // genesis, but a feature that rewrites rent at its activation boundary
+        // would never reach the rent-state checks below if this read a constant.
+        let rent = self.rent();
 
         let fee_payer = &transaction.account_keys[0];
-        let payer_account = match account_state.get(fee_payer) {
-            Some(acc) if acc.meta.lamports > 0 => acc.clone(),
+        let payer_account = match self.accounts().get_published_account(fee_payer) {
+            Some(acc) if acc.meta.lamports > 0 => acc,
             _ => {
                 return TransactionExecutionResult {
                     success: false,
@@ -1576,11 +1747,27 @@ impl Bank {
             };
         }
 
-        // Validate rent state transition after fee deduction
-        let pre_rent_state = RentState::from_account(&payer_account, &rent);
+        // Validate rent state transition after fee deduction.
+        // On this path SIMD-0392's flag is simply the feature bit; the account-loop
+        // site below narrows it further.
+        let relax_min_balance = self
+            .feature_set()
+            .map(|fs| {
+                let fs = fs.read().expect("feature_set lock poisoned");
+                fs.is_active(&crate::features::known_features::relax_post_exec_min_balance_check())
+            })
+            .unwrap_or(false);
+        let pre_rent_state = RentState::pre_exec(&payer_account, &rent, relax_min_balance);
+        let payer_pre_balance = payer_account.meta.lamports;
         let mut payer_after_fee = payer_account;
         payer_after_fee.meta.lamports = payer_after_fee.meta.lamports.saturating_sub(fee);
-        let post_rent_state = RentState::from_account(&payer_after_fee, &rent);
+        let post_rent_state = RentState::post_exec(
+            &payer_after_fee,
+            &rent,
+            &pre_rent_state,
+            payer_pre_balance,
+            relax_min_balance,
+        );
 
         if !is_rent_transition_allowed(&pre_rent_state, &post_rent_state) {
             return TransactionExecutionResult {
@@ -1596,6 +1783,66 @@ impl Bank {
                 return_data: None,
             };
         }
+
+        // Step 3: Load accounts (with data size limit enforcement).
+        //
+        // The fee payer already validated, so the transaction has landed. A
+        // failure here is fees-only: it is committed and charged even though
+        // no instruction runs, and only the fee payer is written.
+        let (mut account_state, loaded_data_size) = match self
+            .load_transaction_accounts(transaction, budget_params.loaded_accounts_data_size_limit)
+        {
+            Ok(loaded) => loaded,
+            Err(err) => {
+                // Nothing executed, so the compute this transaction reserved is
+                // not its cost. Reconcile to zero execution units plus the
+                // loaded-accounts-data size a fees-only transaction is defined
+                // to have — block, vote and every write-locked account move
+                // together, as they did on the two paths that do execute.
+                let accumulated = match &err {
+                    TransactionExecutionError::MaxLoadedAccountsDataSizeExceeded {
+                        loaded, ..
+                    } => *loaded,
+                    _ => 0,
+                };
+                let gate_active = self
+                    .feature_set()
+                    .map(|fs| {
+                        let fs = fs.read().expect("feature_set lock poisoned");
+                        fs.is_active(
+                            &crate::features::known_features::define_ltds_fee_only_semantics(),
+                        )
+                    })
+                    .unwrap_or(false);
+                let loaded_size = fees_only_loaded_size(
+                    gate_active,
+                    accumulated,
+                    budget_params.loaded_accounts_data_size_limit,
+                    fee_payer,
+                    payer_after_fee.data.len() as u64,
+                    durable_nonce
+                        .as_ref()
+                        .map(|n| (&n.nonce_key, n.rollback_account.data.len() as u64)),
+                );
+                self.cost_tracker().update_execution_cost(
+                    &estimated_cost,
+                    crate::pack::cost_model::loaded_accounts_data_cost(loaded_size),
+                );
+
+                let mut modified_accounts = HashMap::new();
+                modified_accounts.insert(*fee_payer, payer_after_fee);
+                return TransactionExecutionResult {
+                    success: false,
+                    compute_units_consumed: 0,
+                    fee,
+                    modified_accounts,
+                    logs: vec![],
+                    error: Some(err),
+                    vote_updates: vec![],
+                    return_data: None,
+                };
+            }
+        };
 
         // Debit fee from payer upfront (non-refundable)
         account_state.insert(*fee_payer, payer_after_fee);
@@ -1707,6 +1954,29 @@ impl Bank {
                 instr_accounts.push((program_id, program_account, false, false));
             }
 
+            // The upgradeable loader splits a program across two accounts, and
+            // a caller invoking such a program has no reason to name the second
+            // one — that address is an implementation detail of the deployment.
+            // So the runtime supplies it, or the bytecode is unreachable.
+            //
+            // Read-only and unsigned: it is here to be read, not to widen what
+            // the instruction may touch. A transaction that declares the
+            // account itself keeps its own entry, flags included.
+            if let Some(address) = programdata_address_of(&instr_accounts, &program_id) {
+                if !instr_accounts.iter().any(|(pk, _, _, _)| *pk == address) {
+                    // Loaded from the database rather than from `account_state`,
+                    // which holds only what the transaction names — and the
+                    // whole point is that this account is not named.
+                    if let Some(account) = modified
+                        .get(&address)
+                        .cloned()
+                        .or_else(|| self.accounts().get_published_account(&address))
+                    {
+                        instr_accounts.push((address, account, false, false));
+                    }
+                }
+            }
+
             // Clone instruction data once for both InstructionInfo and sibling recording.
             let instruction_data = instruction.data.clone();
 
@@ -1787,8 +2057,20 @@ impl Bank {
                     return None;
                 }
                 let pre_account = account_state.get(pubkey).cloned().unwrap_or_default();
-                let pre_state = RentState::from_account(&pre_account, &rent);
-                let post_state = RentState::from_account(post_account, &rent);
+                let pre_state = RentState::pre_exec(&pre_account, &rent, relax_min_balance);
+                let relax_criteria = relax_rent_exempt_criteria(
+                    relax_min_balance,
+                    &pre_account,
+                    post_account,
+                    &pre_state,
+                );
+                let post_state = RentState::post_exec(
+                    post_account,
+                    &rent,
+                    &pre_state,
+                    pre_account.meta.lamports,
+                    relax_criteria,
+                );
                 if !is_rent_transition_allowed(&pre_state, &post_state) {
                     Some(*pubkey)
                 } else {
@@ -1901,6 +2183,17 @@ impl Bank {
                 }
             }
 
+            // The reservation was taken from what this transaction asked for.
+            // Now that it has run, give back what it did not use — or charge
+            // what it exceeded — across block, vote and every account it
+            // write-locked.
+            self.cost_tracker().update_execution_cost(
+                &estimated_cost,
+                total_compute.saturating_add(crate::pack::cost_model::loaded_accounts_data_cost(
+                    loaded_data_size,
+                )),
+            );
+
             return TransactionExecutionResult {
                 success: false,
                 compute_units_consumed: total_compute,
@@ -1949,6 +2242,17 @@ impl Bank {
         }
 
         self.write_accounts(&modified);
+
+        // The reservation was taken from what this transaction asked for.
+        // Now that it has run, give back what it did not use — or charge
+        // what it exceeded — across block, vote and every account it
+        // write-locked.
+        self.cost_tracker().update_execution_cost(
+            &estimated_cost,
+            total_compute.saturating_add(crate::pack::cost_model::loaded_accounts_data_cost(
+                loaded_data_size,
+            )),
+        );
 
         // Step 6: Record fees, signatures, and block-level metrics
         self.add_execution_fee(execution_fee);
@@ -2136,7 +2440,7 @@ impl Bank {
         let account_state = match self
             .load_transaction_accounts(transaction, budget_params.loaded_accounts_data_size_limit)
         {
-            Ok(state) => state,
+            Ok((state, _loaded_data_size)) => state,
             Err(err) => {
                 return TransactionSimulationResult {
                     error: Some(format!("{err:?}")),
@@ -2320,7 +2624,7 @@ impl Bank {
         &self,
         transaction: &SanitizedTransaction,
         data_size_limit: u64,
-    ) -> Result<HashMap<Pubkey, Account>, TransactionExecutionError> {
+    ) -> Result<(HashMap<Pubkey, Account>, u64), TransactionExecutionError> {
         let db = self.accounts();
         let mut loaded = HashMap::with_capacity(transaction.account_keys.len());
         let mut accumulated_data_size: u64 = 0;
@@ -2348,7 +2652,7 @@ impl Bank {
             loaded.insert(*key, account);
         }
 
-        Ok(loaded)
+        Ok((loaded, accumulated_data_size))
     }
 
     /// Extract vote updates from a successfully executed transaction.
@@ -3709,6 +4013,172 @@ mod tests {
         assert!(r2.success); // not rejected as duplicate
     }
 
+    // -----------------------------------------------------------------------
+    // SIMD-0392 relax_post_exec_min_balance_check
+    //
+    // The flag is passed explicitly in every case below. Dev mode activates the
+    // whole feature registry at slot 0, so a test that took the flag from the
+    // ambient environment could only ever exercise one branch.
+    // -----------------------------------------------------------------------
+
+    /// An account with the given balance and a data length whose rent-exempt
+    /// minimum is comfortably above `rent_paying_balance()`.
+    fn rent_test_account(lamports: u64, owner: Pubkey) -> Account {
+        Account::new(lamports, vec![0u8; 100], owner)
+    }
+
+    #[test]
+    fn pre_exec_promotes_rent_paying_only_when_relaxed() {
+        let rent = crate::Rent::default();
+        let account = rent_test_account(1, Pubkey::default());
+        assert!(
+            matches!(
+                RentState::from_account(&account, &rent),
+                RentState::RentPaying { .. }
+            ),
+            "fixture must be rent-paying for this test to mean anything"
+        );
+
+        assert!(matches!(
+            RentState::pre_exec(&account, &rent, false),
+            RentState::RentPaying { .. }
+        ));
+        assert_eq!(
+            RentState::pre_exec(&account, &rent, true),
+            RentState::RentExempt
+        );
+    }
+
+    #[test]
+    fn pre_exec_leaves_the_other_states_alone() {
+        let rent = crate::Rent::default();
+        let empty = rent_test_account(0, Pubkey::default());
+        let funded = rent_test_account(10_000_000_000, Pubkey::default());
+        for relax in [false, true] {
+            assert_eq!(
+                RentState::pre_exec(&empty, &rent, relax),
+                RentState::Uninitialized
+            );
+            assert_eq!(
+                RentState::pre_exec(&funded, &rent, relax),
+                RentState::RentExempt
+            );
+        }
+    }
+
+    #[test]
+    fn post_exec_accepts_a_non_decreasing_balance_only_when_relaxed() {
+        let rent = crate::Rent::default();
+        // Below the rent-exempt minimum, but not lower than it went in — the one
+        // case SIMD-0392 adds.
+        let account = rent_test_account(500, Pubkey::default());
+
+        assert!(matches!(
+            RentState::post_exec(&account, &rent, &RentState::RentExempt, 500, false),
+            RentState::RentPaying { .. }
+        ));
+        assert_eq!(
+            RentState::post_exec(&account, &rent, &RentState::RentExempt, 500, true),
+            RentState::RentExempt
+        );
+    }
+
+    #[test]
+    fn post_exec_relaxation_requires_both_of_its_conditions() {
+        let rent = crate::Rent::default();
+        let account = rent_test_account(500, Pubkey::default());
+
+        // Balance decreased → not relaxed away.
+        assert!(matches!(
+            RentState::post_exec(&account, &rent, &RentState::RentExempt, 501, true),
+            RentState::RentPaying { .. }
+        ));
+        // Was not rent-exempt going in → not relaxed away.
+        assert!(matches!(
+            RentState::post_exec(
+                &account,
+                &rent,
+                &RentState::RentPaying {
+                    lamports: 500,
+                    data_len: 100
+                },
+                500,
+                true
+            ),
+            RentState::RentPaying { .. }
+        ));
+    }
+
+    #[test]
+    fn post_exec_zero_and_exempt_balances_are_unaffected_by_the_flag() {
+        let rent = crate::Rent::default();
+        let empty = rent_test_account(0, Pubkey::default());
+        let funded = rent_test_account(10_000_000_000, Pubkey::default());
+        for relax in [false, true] {
+            assert_eq!(
+                RentState::post_exec(&empty, &rent, &RentState::RentExempt, 5, relax),
+                RentState::Uninitialized
+            );
+            assert_eq!(
+                RentState::post_exec(&funded, &rent, &RentState::RentExempt, 5, relax),
+                RentState::RentExempt
+            );
+        }
+    }
+
+    /// Each of the four terms is flipped alone against the SAME function the
+    /// account loop calls. An all-terms-true assertion would pass even with a
+    /// term dropped from the implementation, and a copy of the predicate written
+    /// here would only test the transcription rather than the code.
+    #[test]
+    fn account_loop_relaxation_needs_every_term() {
+        let owner = Pubkey::new_unique();
+        let other_owner = Pubkey::new_unique();
+        let pre = rent_test_account(10_000_000_000, owner);
+        let same_size = rent_test_account(500, owner);
+
+        assert!(relax_rent_exempt_criteria(
+            true,
+            &pre,
+            &same_size,
+            &RentState::RentExempt
+        ));
+
+        // feature inactive
+        assert!(!relax_rent_exempt_criteria(
+            false,
+            &pre,
+            &same_size,
+            &RentState::RentExempt
+        ));
+        // account grew
+        let grown = Account::new(500, vec![0u8; 200], owner);
+        assert!(!relax_rent_exempt_criteria(
+            true,
+            &pre,
+            &grown,
+            &RentState::RentExempt
+        ));
+        // was not rent-exempt going in
+        assert!(!relax_rent_exempt_criteria(
+            true,
+            &pre,
+            &same_size,
+            &RentState::RentPaying {
+                lamports: 1,
+                data_len: 100
+            }
+        ));
+        // owner changed
+        let reowned = rent_test_account(500, other_owner);
+        assert!(!relax_rent_exempt_criteria(
+            true,
+            &pre,
+            &reowned,
+            &RentState::RentExempt
+        ));
+    }
+
     #[test]
     fn rent_state_transition_validation() {
         // Test the rent state transition rules directly
@@ -3780,16 +4250,15 @@ mod tests {
         let payer_account = Account::new(100_000_000_000, vec![], Pubkey::default());
         store_test_account(&bank, &payer, &payer_account);
 
-        // Fill up block cost by processing transactions with large compute limits
-        // MAX_BLOCK_COMPUTE_UNITS is 48M; each tx reserves its full compute_limit
         use karstflow_constants::block_limits::MAX_BLOCK_COMPUTE_UNITS;
 
-        // Process one tx that consumes nearly all block capacity
+        // A modest transaction lands and reconciles down to what it used.
         let tx = create_simple_transaction(payer, program, vec![payer], vec![]);
-        let result = bank.process_transaction(&tx, &backend, MAX_BLOCK_COMPUTE_UNITS - 1000);
+        let result = bank.process_transaction(&tx, &backend, 1_000);
         assert!(result.success);
 
-        // Second tx should be rejected — block cost limit exceeded
+        // Capacity is checked against what a transaction ASKS for, before it
+        // runs, so one requesting the whole block cannot fit beside it.
         let tx2 = create_simple_transaction(payer, program, vec![payer], vec![]);
         let result2 = bank.process_transaction(&tx2, &backend, MAX_BLOCK_COMPUTE_UNITS);
         assert!(!result2.success);
@@ -3797,6 +4266,185 @@ mod tests {
             result2.error,
             Some(TransactionExecutionError::BlockCostLimitExceeded(_))
         ));
+    }
+
+    #[test]
+    fn block_cost_carries_the_non_execution_terms() {
+        use karstflow_constants::block_limits::SIGNATURE_COST;
+
+        let bank = create_test_bank();
+        let backend = PassthroughBackend;
+
+        let payer = Pubkey::new_unique();
+        let program = Pubkey::new_unique();
+        store_test_account(
+            &bank,
+            &payer,
+            &Account::new(100_000_000, vec![], Pubkey::default()),
+        );
+
+        let tx = create_simple_transaction(payer, program, vec![payer], vec![]);
+        let result = bank.process_transaction(&tx, &backend, 1_000_000);
+        assert!(result.success);
+
+        // Execution units are only one term. The signature, the write locks,
+        // the instruction data and the accounts actually loaded are charged
+        // too, and they survive reconciliation because none of them was ever
+        // an estimate.
+        let charged = bank.cost_tracker().block_cost();
+        let consumed = result.compute_units_consumed;
+        assert!(
+            charged >= consumed + SIGNATURE_COST,
+            "block charged {charged} against {consumed} consumed, so the signature term is missing"
+        );
+    }
+
+    #[test]
+    fn an_unused_compute_request_is_returned_to_the_block_and_the_account() {
+        let bank = create_test_bank();
+        let backend = PassthroughBackend;
+
+        let payer = Pubkey::new_unique();
+        let program = Pubkey::new_unique();
+        store_test_account(
+            &bank,
+            &payer,
+            &Account::new(100_000_000, vec![], Pubkey::default()),
+        );
+
+        let tx = create_simple_transaction(payer, program, vec![payer], vec![]);
+        let result = bank.process_transaction(&tx, &backend, 1_400_000);
+        assert!(result.success);
+
+        // The transaction asked for the compute maximum and used almost none
+        // of it. What it did not use is not charged — to the block or to the
+        // account it write-locked.
+        let charged = bank.cost_tracker().block_cost();
+        assert!(
+            charged < 1_400_000,
+            "block charged {charged}, which is the request rather than the work"
+        );
+        assert_eq!(bank.cost_tracker().account_cost(&payer), charged);
+    }
+
+    #[test]
+    fn a_chunked_deploy_stays_far_under_the_per_account_limit() {
+        use karstflow_constants::block_limits::MAX_WRITABLE_ACCOUNT_COMPUTE_UNITS;
+
+        let bank = create_test_bank();
+        let backend = PassthroughBackend;
+
+        let payer = Pubkey::new_unique();
+        let target = Pubkey::new_unique();
+        let program = Pubkey::new_unique();
+        store_test_account(
+            &bank,
+            &payer,
+            &Account::new(100_000_000_000, vec![], Pubkey::default()),
+        );
+        store_test_account(
+            &bank,
+            &target,
+            &Account::new(1_000_000, vec![], Pubkey::default()),
+        );
+
+        // The shape a program deploy has: many transactions writing the same
+        // account, each requesting the compute maximum and consuming a sliver.
+        for _ in 0..40 {
+            let tx = create_simple_transaction(payer, program, vec![payer, target], vec![]);
+            assert!(bank.process_transaction(&tx, &backend, 1_400_000).success);
+        }
+
+        let charged = bank.cost_tracker().account_cost(&target);
+        assert!(
+            charged < MAX_WRITABLE_ACCOUNT_COMPUTE_UNITS / 4,
+            "40 writes charged the account {charged}, near the {MAX_WRITABLE_ACCOUNT_COMPUTE_UNITS} limit"
+        );
+    }
+
+    #[test]
+    fn fees_only_size_under_the_gate_is_the_load_so_far_clamped_to_the_budget() {
+        let payer = Pubkey::new_unique();
+
+        // Loading gave up past the transaction's own limit, so the clamp binds.
+        assert_eq!(
+            fees_only_loaded_size(true, 5_000, 1_000, &payer, 77, None),
+            1_000
+        );
+        // And when it does not, the accumulated figure stands.
+        assert_eq!(
+            fees_only_loaded_size(true, 400, 1_000, &payer, 77, None),
+            400
+        );
+    }
+
+    #[test]
+    fn fees_only_size_without_the_gate_is_only_what_gets_written_back() {
+        let payer = Pubkey::new_unique();
+        let nonce = Pubkey::new_unique();
+
+        // Not the load so far — only the accounts that survive a fees-only
+        // transaction: the fee payer, and the nonce when it is a separate one.
+        assert_eq!(
+            fees_only_loaded_size(false, 5_000, 1_000, &payer, 77, None),
+            77
+        );
+        assert_eq!(
+            fees_only_loaded_size(false, 5_000, 1_000, &payer, 77, Some((&nonce, 80))),
+            157
+        );
+    }
+
+    #[test]
+    fn fees_only_size_does_not_count_a_fee_payer_nonce_twice() {
+        let payer = Pubkey::new_unique();
+
+        // A transaction may pay its own fee from the nonce account. Its data is
+        // one account's worth, not two.
+        assert_eq!(
+            fees_only_loaded_size(false, 5_000, 1_000, &payer, 77, Some((&payer, 77))),
+            77
+        );
+    }
+
+    #[test]
+    fn a_fees_only_transaction_is_not_charged_the_compute_it_never_ran() {
+        let bank = create_test_bank();
+        let backend = PassthroughBackend;
+
+        let payer = Pubkey::new_unique();
+        store_test_account(
+            &bank,
+            &payer,
+            &Account::new(1_000_000_000, vec![], SYSTEM_PROGRAM_ID),
+        );
+
+        let tx = load_failing_transaction(&bank, payer);
+        let requested = 1_400_000;
+        let result = bank.process_transaction(&tx, &backend, requested);
+
+        assert!(
+            matches!(
+                result.error,
+                Some(TransactionExecutionError::MaxLoadedAccountsDataSizeExceeded { .. })
+            ),
+            "expected a load failure, got {:?}",
+            result.error
+        );
+
+        // The transaction landed and is charged — but nothing executed, so the
+        // compute it reserved is not its cost. Block, and the account it
+        // write-locked, both get it back.
+        let charged = bank.cost_tracker().block_cost();
+        assert!(
+            charged < requested,
+            "block charged {charged} for a transaction that ran nothing, having reserved {requested}"
+        );
+        assert_eq!(
+            bank.cost_tracker().account_cost(&payer),
+            charged,
+            "the fee payer's bucket was not reconciled with the block"
+        );
     }
 
     #[test]
@@ -3937,6 +4585,76 @@ mod tests {
             result.error,
             Some(TransactionExecutionError::InsufficientFee { .. })
         ));
+    }
+
+    /// A bank whose genesis rent is `rent` rather than the default.
+    fn create_test_bank_with_rent(rent: crate::Rent) -> Bank {
+        let accounts = Arc::new(AccountDatabase::new());
+        let epoch_schedule = Arc::new(EpochSchedule::default());
+        let validator = Pubkey::new_unique();
+        let leader_schedule = Arc::new(LeaderSchedule::new(0, &[(validator, 1000)]).unwrap());
+        let bank = Bank::new_genesis_with_config(
+            accounts,
+            epoch_schedule,
+            leader_schedule,
+            1_000_000_000_000,
+            rent,
+            crate::Inflation::default(),
+        );
+        use crate::blockhash_queue::BlockhashInfo;
+        let info = BlockhashInfo::new(Pubkey::from([0u8; 32]), 5000, 0);
+        bank.blockhash_queue().write().unwrap().register_hash(info);
+        bank
+    }
+
+    #[test]
+    fn fee_payer_rent_minimum_follows_the_bank_rent_not_the_default() {
+        // The nonce path is where the fee check consumes a rent-derived minimum,
+        // so it is the cheapest place to observe which rent the executor read.
+        // Asserting only the default-rent case would pass even if the executor
+        // ignored the bank entirely — both cases are required.
+        let mut data = vec![0u8; NONCE_ACCOUNT_SIZE];
+        data[0..4].copy_from_slice(&1u32.to_le_bytes()); // version = current
+        data[4..8].copy_from_slice(&1u32.to_le_bytes()); // state = initialized
+
+        let default_rent = crate::Rent::default();
+        let funded = default_rent
+            .minimum_balance(NONCE_ACCOUNT_SIZE)
+            .saturating_add(1_000_000);
+
+        let run = |rent: crate::Rent| {
+            let bank = create_test_bank_with_rent(rent);
+            let payer = Pubkey::new_unique();
+            let program = Pubkey::new_unique();
+            store_test_account(
+                &bank,
+                &payer,
+                &Account::new(funded, data.clone(), SYSTEM_PROGRAM_ID),
+            );
+            let tx = create_simple_transaction(payer, program, vec![payer], vec![]);
+            bank.process_transaction(&tx, &PassthroughBackend, MAX_COMPUTE_UNITS)
+        };
+
+        let at_default = run(default_rent);
+        assert!(
+            at_default.success,
+            "balance covers the default-rent minimum plus the fee: {:?}",
+            at_default.error
+        );
+
+        // Ten times the per-byte rate puts the same balance below the reserve.
+        let mut raised = default_rent;
+        raised.lamports_per_byte_year = default_rent.lamports_per_byte_year * 10;
+        let at_raised = run(raised);
+        assert!(!at_raised.success);
+        assert!(
+            matches!(
+                at_raised.error,
+                Some(TransactionExecutionError::InsufficientFee { .. })
+            ),
+            "expected the raised rent to price the payer out, got {:?}",
+            at_raised.error
+        );
     }
 
     #[test]
@@ -4236,6 +4954,122 @@ mod tests {
             result.error,
             Some(TransactionExecutionError::MaxLoadedAccountsDataSizeExceeded { .. })
         ));
+    }
+
+    /// Build a transaction whose accounts cannot be loaded, signed so the fee
+    /// is non-zero. Shared by the two fees-only tests below.
+    fn load_failing_transaction(bank: &Bank, payer: Pubkey) -> SanitizedTransaction {
+        let large_key = Pubkey::new_unique();
+        let large_account = Account::new(1_000_000_000, vec![0u8; 1024], Pubkey::default());
+        store_test_account(bank, &large_key, &large_account);
+
+        let mut limit_data = vec![INSTRUCTION_SET_LOADED_ACCOUNTS_DATA_SIZE_LIMIT];
+        limit_data.extend_from_slice(&100u32.to_le_bytes());
+
+        SanitizedTransaction {
+            account_keys: vec![
+                payer,
+                COMPUTE_BUDGET_PROGRAM_ID,
+                SYSTEM_PROGRAM_ID,
+                large_key,
+            ],
+            recent_blockhash: [0u8; 32],
+            instructions: vec![
+                CompiledInstruction {
+                    program_id_index: 1,
+                    account_indices: vec![],
+                    data: limit_data,
+                },
+                CompiledInstruction {
+                    program_id_index: 2,
+                    account_indices: vec![0, 3],
+                    data: vec![0; 4],
+                },
+            ],
+            num_signatures: 1,
+            num_readonly_signed: 0,
+            num_readonly_unsigned: 0,
+            signatures: vec![],
+            message_bytes: vec![],
+            num_static_keys: 0,
+            num_writable_lookup_keys: 0,
+        }
+    }
+
+    /// A transaction that fails to LOAD is still committed and still charged.
+    ///
+    /// The fee payer was valid, so the transaction landed on chain: upstream
+    /// includes it in the block and collects the fee even though nothing
+    /// executed.
+    #[test]
+    fn load_failure_charges_the_fee_and_commits_the_payer() {
+        let bank = create_test_bank();
+        let backend = PassthroughBackend;
+
+        let payer = Pubkey::new_unique();
+        let starting_lamports = 1_000_000_000;
+        store_test_account(
+            &bank,
+            &payer,
+            &Account::new(starting_lamports, vec![], SYSTEM_PROGRAM_ID),
+        );
+
+        let tx = load_failing_transaction(&bank, payer);
+        let result = bank.process_transaction(&tx, &backend, MAX_COMPUTE_UNITS);
+
+        assert!(!result.success, "the transaction did not execute");
+        assert!(
+            matches!(
+                result.error,
+                Some(TransactionExecutionError::MaxLoadedAccountsDataSizeExceeded { .. })
+            ),
+            "expected a load failure, got {:?}",
+            result.error
+        );
+        assert!(result.fee > 0, "a landed transaction is charged its fee");
+
+        let committed = result
+            .modified_accounts
+            .get(&payer)
+            .expect("the fee payer is committed even though nothing executed");
+        assert_eq!(
+            committed.meta.lamports,
+            starting_lamports - result.fee,
+            "the payer is debited exactly the reported fee"
+        );
+        assert_eq!(
+            result.modified_accounts.len(),
+            1,
+            "only the fee payer is committed on a load failure"
+        );
+    }
+
+    /// A transaction whose FEE PAYER is invalid is a different failure: it
+    /// never lands, so nothing is committed and nothing is charged. Keeping
+    /// the two apart is the point — collapsing them would charge fees upstream
+    /// never collects.
+    #[test]
+    fn fee_payer_failure_commits_nothing_and_charges_nothing() {
+        let bank = create_test_bank();
+        let backend = PassthroughBackend;
+
+        // Owned by a non-system program: not a valid fee payer.
+        let payer = Pubkey::new_unique();
+        store_test_account(
+            &bank,
+            &payer,
+            &Account::new(1_000_000_000, vec![], Pubkey::new_unique()),
+        );
+
+        let tx = load_failing_transaction(&bank, payer);
+        let result = bank.process_transaction(&tx, &backend, MAX_COMPUTE_UNITS);
+
+        assert!(!result.success);
+        assert_eq!(result.fee, 0, "an unlanded transaction is not charged");
+        assert!(
+            result.modified_accounts.is_empty(),
+            "an unlanded transaction commits nothing"
+        );
     }
 
     #[test]
@@ -6167,6 +7001,206 @@ mod tests {
         assert!(
             result.logs.iter().any(|l| l.contains("Log truncated")),
             "should contain truncation sentinel"
+        );
+    }
+
+    /// Resolves bytecode the way the VM does: an upgradeable program account
+    /// carries a pointer, and the bytecode lives in the account it names.
+    ///
+    /// The point of duplicating that logic here rather than asserting on the
+    /// account list is that it fails the same way the VM fails. A test that
+    /// only counted accounts would pass against an account injected in the
+    /// wrong shape.
+    struct ElfResolvingBackend;
+
+    impl ExecutionBackend for ElfResolvingBackend {
+        fn execute_instruction(
+            &self,
+            instruction: &InstructionInfo,
+            _remaining: u64,
+        ) -> InstructionResult {
+            use karstflow_constants::bpf_loader_program as loader;
+
+            let program = instruction
+                .accounts
+                .iter()
+                .find(|(pk, _, _, _)| *pk == instruction.program_id)
+                .map(|(_, a, _, _)| a);
+            let Some(program) = program else {
+                return failed("program account absent");
+            };
+
+            let data = program.data.as_slice();
+            let points_elsewhere = program.meta.owner == karstflow_ids::BPF_LOADER_PROGRAM_ID
+                && data.len() >= loader::SIZE_OF_PROGRAM
+                && u32::from_le_bytes(data[0..4].try_into().unwrap()) == loader::STATE_PROGRAM;
+
+            let elf = if points_elsewhere {
+                let address = Pubkey::new_from_array(data[4..36].try_into().unwrap());
+                let Some(programdata) = instruction
+                    .accounts
+                    .iter()
+                    .find(|(pk, _, _, _)| *pk == address)
+                    .map(|(_, a, _, _)| a)
+                else {
+                    return failed("programdata account absent");
+                };
+                let bytes = programdata.data.as_slice();
+                if bytes.len() <= loader::SIZE_OF_PROGRAMDATA_METADATA {
+                    return failed("programdata too short");
+                }
+                bytes[loader::SIZE_OF_PROGRAMDATA_METADATA..].to_vec()
+            } else {
+                data.to_vec()
+            };
+
+            InstructionResult {
+                success: true,
+                compute_units_consumed: 1,
+                modified_accounts: HashMap::new(),
+                logs: vec![format!("elf {} bytes", elf.len())],
+                error: None,
+                return_data: None,
+            }
+        }
+    }
+
+    fn failed(message: &str) -> InstructionResult {
+        InstructionResult {
+            success: false,
+            compute_units_consumed: 0,
+            modified_accounts: HashMap::new(),
+            logs: vec![message.to_string()],
+            error: Some(message.to_string()),
+            return_data: None,
+        }
+    }
+
+    /// Program + programdata accounts in the layout the deploy path writes.
+    fn deployed_upgradeable_program(elf: &[u8]) -> (Pubkey, Account, Pubkey, Account) {
+        use karstflow_constants::bpf_loader_program as loader;
+
+        let program_id = Pubkey::new_unique();
+        let programdata_id = Pubkey::new_unique();
+
+        let mut program_data = vec![0u8; loader::SIZE_OF_PROGRAM];
+        program_data[0..4].copy_from_slice(&loader::STATE_PROGRAM.to_le_bytes());
+        program_data[4..36].copy_from_slice(programdata_id.as_bytes());
+
+        let mut programdata_data = vec![0u8; loader::SIZE_OF_PROGRAMDATA_METADATA];
+        programdata_data[0..4].copy_from_slice(&loader::STATE_PROGRAM_DATA.to_le_bytes());
+        programdata_data.extend_from_slice(elf);
+
+        let owned = |data: Vec<u8>| Account {
+            data: AccountData::new(data),
+            meta: karstflow_storage::AccountMeta {
+                lamports: 1_000_000,
+                owner: karstflow_ids::BPF_LOADER_PROGRAM_ID,
+                executable: true,
+                rent_epoch: 0,
+            },
+        };
+
+        (
+            program_id,
+            owned(program_data),
+            programdata_id,
+            owned(programdata_data),
+        )
+    }
+
+    #[test]
+    fn programdata_account_reaches_the_execution_backend() {
+        // The transaction names the program and never names its programdata
+        // account, which is how every real invocation of an upgradeable
+        // program looks — the caller has no reason to know that address.
+        // Without the runtime supplying it, the bytecode is unreachable.
+        let bank = create_test_bank();
+        let elf = vec![0xABu8; 128];
+        let (program_id, program, programdata_id, programdata) = deployed_upgradeable_program(&elf);
+
+        let payer = Pubkey::new_unique();
+        store_test_account(
+            &bank,
+            &payer,
+            &Account {
+                meta: karstflow_storage::AccountMeta {
+                    lamports: 10_000_000,
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+        );
+        store_test_account(&bank, &program_id, &program);
+        store_test_account(&bank, &programdata_id, &programdata);
+
+        let tx = create_simple_transaction(payer, program_id, vec![payer], vec![]);
+        let result = bank.process_transaction(&tx, &ElfResolvingBackend, MAX_COMPUTE_UNITS);
+
+        assert!(
+            result.success,
+            "upgradeable program should execute: {:?}",
+            result.error
+        );
+        assert!(
+            result.logs.iter().any(|l| l.contains("elf 128 bytes")),
+            "backend should have resolved the full ELF, got {:?}",
+            result.logs
+        );
+    }
+
+    #[test]
+    fn a_declared_programdata_account_is_not_injected_twice() {
+        // A transaction may name the programdata account itself. Appending a
+        // second copy would give the instruction two entries for one address,
+        // and the writable flag on the injected copy would be the one that
+        // silently won.
+        let bank = create_test_bank();
+        let (program_id, program, programdata_id, programdata) =
+            deployed_upgradeable_program(&[0x11u8; 64]);
+
+        let payer = Pubkey::new_unique();
+        store_test_account(
+            &bank,
+            &payer,
+            &Account {
+                meta: karstflow_storage::AccountMeta {
+                    lamports: 10_000_000,
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+        );
+        store_test_account(&bank, &program_id, &program);
+        store_test_account(&bank, &programdata_id, &programdata);
+
+        let tx = create_simple_transaction(payer, program_id, vec![payer, programdata_id], vec![]);
+
+        struct CountingBackend;
+        impl ExecutionBackend for CountingBackend {
+            fn execute_instruction(
+                &self,
+                instruction: &InstructionInfo,
+                _remaining: u64,
+            ) -> InstructionResult {
+                InstructionResult {
+                    success: true,
+                    compute_units_consumed: 1,
+                    modified_accounts: HashMap::new(),
+                    logs: vec![format!("accounts {}", instruction.accounts.len())],
+                    error: None,
+                    return_data: None,
+                }
+            }
+        }
+
+        let result = bank.process_transaction(&tx, &CountingBackend, MAX_COMPUTE_UNITS);
+        assert!(result.success, "{:?}", result.error);
+        // payer, programdata, program — three, not four.
+        assert!(
+            result.logs.iter().any(|l| l.contains("accounts 3")),
+            "declared programdata should not be duplicated, got {:?}",
+            result.logs
         );
     }
 }

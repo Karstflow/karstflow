@@ -3,17 +3,31 @@
 /// Each instruction parses its data, validates signers and account ownership,
 /// loads and modifies the vote state, serializes the result, and returns
 /// modified accounts.
+use super::bls_pop::verify_vote_bls_pop;
 use super::state::{LandedVote, Lockout, VoteError, VoteState};
 use crate::{ExecutionContext, ExecutionOutcome};
 use karstflow_constants::vote_program::{
-    self as constants, COMPUTE_COST_AUTHORIZE, COMPUTE_COST_BASE_INSTRUCTION,
-    COMPUTE_COST_INITIALIZE, COMPUTE_COST_UPDATE_COMMISSION, COMPUTE_COST_UPDATE_VOTE_STATE,
-    COMPUTE_COST_VOTE, COMPUTE_COST_WITHDRAW, VOTE_AUTHORIZE_VOTER, VOTE_AUTHORIZE_WITHDRAWER,
+    self as constants, COMPUTE_COST_POP, VOTE_AUTHORIZE_VOTER, VOTE_AUTHORIZE_WITHDRAWER,
+    VOTE_BLS_PROOF_LEN, VOTE_BLS_PUBKEY_LEN,
 };
 use karstflow_ids::features::{is_feature_active, DELAY_COMMISSION_UPDATES};
 use karstflow_ids::VOTE_PROGRAM_ID;
 use karstflow_types::{Account, AccountData, Pubkey};
 use std::collections::HashMap;
+
+/// Byte offsets within canonical `InitializeAccountV2` instruction data (after
+/// the 4-byte type discriminant): node, authorized_voter, BLS pubkey, BLS proof
+/// of possession, authorized_withdrawer, then the inflation-rewards commission.
+const V2_NODE_OFF: usize = 4;
+const V2_VOTER_OFF: usize = 36;
+const V2_BLS_PUBKEY_OFF: usize = 68;
+const V2_BLS_PROOF_OFF: usize = V2_BLS_PUBKEY_OFF + VOTE_BLS_PUBKEY_LEN;
+const V2_WITHDRAWER_OFF: usize = V2_BLS_PROOF_OFF + VOTE_BLS_PROOF_LEN;
+const V2_INFL_BPS_OFF: usize = V2_WITHDRAWER_OFF + 32;
+/// Total instruction-data length: discriminant + node + voter + bls48 + proof96
+/// + withdrawer + inflation_bps(2) + inflation_collector(32) + revenue_bps(2)
+/// + revenue_collector(32).
+const VOTE_INIT_V2_LEN: usize = V2_INFL_BPS_OFF + 2 + 32 + 2 + 32;
 
 /// Whether a vote-commission increase is allowed at the given slot.
 ///
@@ -28,15 +42,13 @@ fn is_commission_update_allowed(slot: u64, first_normal_slot: u64, slots_per_epo
     relative_slot.saturating_mul(2) <= slots_per_epoch
 }
 
-/// Vote program executor with configurable base compute cost.
-#[derive(Debug, Clone)]
-pub struct VoteProgramExecutor {
-    base_cost: u64,
-}
+/// Vote program executor.
+#[derive(Debug, Clone, Default)]
+pub struct VoteProgramExecutor;
 
 impl VoteProgramExecutor {
-    pub fn new(base_cost: u64) -> Self {
-        Self { base_cost }
+    pub fn new() -> Self {
+        Self
     }
 
     pub fn execute(&self, context: &ExecutionContext) -> Result<ExecutionOutcome, String> {
@@ -54,35 +66,32 @@ impl VoteProgramExecutor {
                 .map_err(|_| "Failed to parse instruction type")?,
         );
 
-        let mut compute_used = self.base_cost.saturating_add(COMPUTE_COST_BASE_INSTRUCTION);
+        // Flat per-instruction charge: the same for every discriminant, and
+        // charged whether the instruction succeeds or fails. The BLS
+        // proof-of-possession path adds its verification cost on top.
+        let mut compute_used = constants::DEFAULT_COMPUTE_UNITS;
         let mut modified_accounts = HashMap::new();
         let mut logs = Vec::new();
 
         match instruction_type {
             constants::INSTRUCTION_INITIALIZE_ACCOUNT => {
-                compute_used = compute_used.saturating_add(COMPUTE_COST_INITIALIZE);
                 self.execute_initialize(context, &mut modified_accounts, &mut logs)?;
             }
             constants::INSTRUCTION_INITIALIZE_ACCOUNT_V2 => {
-                compute_used = compute_used.saturating_add(COMPUTE_COST_INITIALIZE);
-                // V2 is identical to V1 in behavior but for newer state format.
-                // Since our VoteState already supports the latest format, delegate.
-                self.execute_initialize(context, &mut modified_accounts, &mut logs)?;
+                let pop_cost =
+                    self.execute_initialize_v2(context, &mut modified_accounts, &mut logs)?;
+                compute_used = compute_used.saturating_add(pop_cost);
             }
             constants::INSTRUCTION_AUTHORIZE => {
-                compute_used = compute_used.saturating_add(COMPUTE_COST_AUTHORIZE);
                 self.execute_authorize(context, &mut modified_accounts, &mut logs)?;
             }
             constants::INSTRUCTION_AUTHORIZE_CHECKED => {
-                compute_used = compute_used.saturating_add(COMPUTE_COST_AUTHORIZE);
                 self.execute_authorize_checked(context, &mut modified_accounts, &mut logs)?;
             }
             constants::INSTRUCTION_VOTE => {
-                compute_used = compute_used.saturating_add(COMPUTE_COST_VOTE);
                 self.execute_vote(context, &mut modified_accounts, &mut logs)?;
             }
             constants::INSTRUCTION_VOTE_SWITCH => {
-                compute_used = compute_used.saturating_add(COMPUTE_COST_VOTE);
                 // VoteSwitch is identical to Vote but includes a switch proof hash
                 // that is verified at the consensus layer, not here.
                 self.execute_vote(context, &mut modified_accounts, &mut logs)?;
@@ -90,34 +99,27 @@ impl VoteProgramExecutor {
             constants::INSTRUCTION_UPDATE_VOTE_STATE
             | constants::INSTRUCTION_COMPACT_UPDATE_VOTE_STATE
             | constants::INSTRUCTION_TOWER_SYNC => {
-                compute_used = compute_used.saturating_add(COMPUTE_COST_UPDATE_VOTE_STATE);
                 self.execute_vote_state_update(context, &mut modified_accounts, &mut logs)?;
             }
             constants::INSTRUCTION_UPDATE_VOTE_STATE_SWITCH
             | constants::INSTRUCTION_COMPACT_UPDATE_VOTE_STATE_SWITCH
             | constants::INSTRUCTION_TOWER_SYNC_SWITCH => {
-                compute_used = compute_used.saturating_add(COMPUTE_COST_UPDATE_VOTE_STATE);
                 // Switch variants include a proof hash; behavior is otherwise identical.
                 self.execute_vote_state_update(context, &mut modified_accounts, &mut logs)?;
             }
             constants::INSTRUCTION_UPDATE_VALIDATOR_IDENTITY => {
-                compute_used = compute_used.saturating_add(COMPUTE_COST_AUTHORIZE);
                 self.execute_update_validator_identity(context, &mut modified_accounts, &mut logs)?;
             }
             constants::INSTRUCTION_UPDATE_COMMISSION => {
-                compute_used = compute_used.saturating_add(COMPUTE_COST_UPDATE_COMMISSION);
                 self.execute_update_commission(context, &mut modified_accounts, &mut logs)?;
             }
             constants::INSTRUCTION_WITHDRAW => {
-                compute_used = compute_used.saturating_add(COMPUTE_COST_WITHDRAW);
                 self.execute_withdraw(context, &mut modified_accounts, &mut logs)?;
             }
             constants::INSTRUCTION_AUTHORIZE_WITH_SEED => {
-                compute_used = compute_used.saturating_add(COMPUTE_COST_AUTHORIZE);
                 self.execute_authorize_with_seed(context, &mut modified_accounts, &mut logs)?;
             }
             constants::INSTRUCTION_AUTHORIZE_CHECKED_WITH_SEED => {
-                compute_used = compute_used.saturating_add(COMPUTE_COST_AUTHORIZE);
                 self.execute_authorize_checked_with_seed(
                     context,
                     &mut modified_accounts,
@@ -207,6 +209,105 @@ impl VoteProgramExecutor {
         modified_accounts.insert(vote_pubkey, vote_account);
 
         Ok(())
+    }
+
+    // -----------------------------------------------------------------------
+    // InitializeAccountV2
+    // -----------------------------------------------------------------------
+
+    /// Initialize a new vote account, registering the authorized-voter BLS
+    /// public key with a proof of possession (Alpenglow V4 vote account).
+    ///
+    /// Canonical instruction-data layout after the 4-byte type discriminant:
+    ///   [4..36]    node_pubkey (32 bytes)
+    ///   [36..68]   authorized_voter (32 bytes)
+    ///   [68..116]  authorized_voter BLS pubkey (48 bytes)
+    ///   [116..212] BLS proof of possession (96 bytes)
+    ///   [212..244] authorized_withdrawer (32 bytes)
+    ///   [244..246] inflation_rewards_commission_bps (u16, little-endian)
+    ///   [246..278] inflation_rewards_collector (32 bytes)
+    ///   [278..280] block_revenue_commission_bps (u16, little-endian)
+    ///   [280..312] block_revenue_collector (32 bytes)
+    ///
+    /// The node identity must have signed and the proof of possession is
+    /// verified over `"ALPENGLOW" || vote_account_pubkey || bls_pubkey`; an
+    /// invalid proof rejects the instruction. The bespoke vote-account storage
+    /// keeps node/voter/withdrawer/commission and the BLS pubkey; the basis-
+    /// point commission is folded into the legacy percentage and the split-
+    /// commission collectors are validated for length but not yet persisted.
+    ///
+    /// Returns the additional compute units charged for proof-of-possession
+    /// verification.
+    fn execute_initialize_v2(
+        &self,
+        context: &ExecutionContext,
+        modified_accounts: &mut HashMap<Pubkey, Account>,
+        logs: &mut Vec<String>,
+    ) -> Result<u64, String> {
+        logs.push("Vote: InitializeAccountV2".to_string());
+
+        if context.accounts.is_empty() {
+            return Err("InitializeAccountV2 requires at least 1 account".to_string());
+        }
+
+        if context.instruction_data.len() < VOTE_INIT_V2_LEN {
+            return Err("InitializeAccountV2 instruction data too short".to_string());
+        }
+
+        let node_pubkey = read_pubkey(&context.instruction_data, V2_NODE_OFF)?;
+        let authorized_voter = read_pubkey(&context.instruction_data, V2_VOTER_OFF)?;
+        let bls_pubkey: [u8; VOTE_BLS_PUBKEY_LEN] = context.instruction_data
+            [V2_BLS_PUBKEY_OFF..V2_BLS_PUBKEY_OFF + VOTE_BLS_PUBKEY_LEN]
+            .try_into()
+            .map_err(|_| "Failed to read BLS pubkey".to_string())?;
+        let bls_proof: [u8; VOTE_BLS_PROOF_LEN] = context.instruction_data
+            [V2_BLS_PROOF_OFF..V2_BLS_PROOF_OFF + VOTE_BLS_PROOF_LEN]
+            .try_into()
+            .map_err(|_| "Failed to read BLS proof of possession".to_string())?;
+        let authorized_withdrawer = read_pubkey(&context.instruction_data, V2_WITHDRAWER_OFF)?;
+        let inflation_rewards_commission_bps = u16::from_le_bytes(
+            context.instruction_data[V2_INFL_BPS_OFF..V2_INFL_BPS_OFF + 2]
+                .try_into()
+                .map_err(|_| "Failed to read commission".to_string())?,
+        );
+        // The bespoke vote-account stores a legacy u8 percentage; derive it
+        // from the basis-point commission, saturating to avoid truncation wrap.
+        let commission = (inflation_rewards_commission_bps / 100).min(u8::MAX as u16) as u8;
+
+        let (vote_pubkey, mut vote_account, writable) = context.accounts[0].clone();
+
+        if !writable {
+            return Err("Vote account must be writable".to_string());
+        }
+
+        if vote_account.meta.owner != VOTE_PROGRAM_ID {
+            return Err("Vote account not owned by vote program".to_string());
+        }
+
+        // The node identity must authorize the new account.
+        if !context.signers.is_empty() && !context.is_signer(&node_pubkey) {
+            return Err("InitializeAccountV2 requires the node identity to sign".to_string());
+        }
+
+        // Verify the proof of possession over the vote account pubkey before
+        // the BLS key is stored.
+        let vote_account_pubkey: [u8; 32] = *vote_pubkey.as_bytes();
+        if !verify_vote_bls_pop(&vote_account_pubkey, &bls_pubkey, &bls_proof) {
+            return Err("BLS proof of possession verification failed".to_string());
+        }
+
+        let mut vote_state = VoteState::new(
+            node_pubkey,
+            authorized_voter,
+            authorized_withdrawer,
+            commission,
+        );
+        vote_state.bls_pubkey = Some(bls_pubkey);
+
+        vote_account.data = AccountData::new(vote_state.serialize());
+        modified_accounts.insert(vote_pubkey, vote_account);
+
+        Ok(COMPUTE_COST_POP)
     }
 
     // -----------------------------------------------------------------------
@@ -876,6 +977,36 @@ mod tests {
     use super::*;
     use karstflow_types::AccountMeta;
 
+    /// One flat cost for every discriminant. The executor previously charged
+    /// an injected base plus a per-instruction surcharge, landing between 500
+    /// and 1400 where the protocol charges 2100.
+    #[test]
+    fn every_discriminant_charges_the_same_flat_cost() {
+        let executor = VoteProgramExecutor::new();
+
+        for discriminant in 0u32..=15 {
+            let mut data = discriminant.to_le_bytes().to_vec();
+            data.extend_from_slice(&[0u8; 64]);
+
+            let context = ExecutionContext::new(
+                VOTE_PROGRAM_ID,
+                vec![
+                    (Pubkey::new_unique(), Account::default(), true),
+                    (Pubkey::new_unique(), Account::default(), true),
+                ],
+                data,
+            );
+
+            if let Ok(outcome) = executor.execute(&context) {
+                assert_eq!(
+                    outcome.compute_units_consumed,
+                    constants::DEFAULT_COMPUTE_UNITS,
+                    "discriminant {discriminant} charged a different cost"
+                );
+            }
+        }
+    }
+
     fn make_vote_account(vote_state: &VoteState) -> Account {
         Account {
             meta: AccountMeta {
@@ -916,7 +1047,7 @@ mod tests {
 
     #[test]
     fn initialize_creates_vote_state() {
-        let executor = VoteProgramExecutor::new(150);
+        let executor = VoteProgramExecutor::new();
         let node = Pubkey::new_unique();
         let voter = Pubkey::new_unique();
         let withdrawer = Pubkey::new_unique();
@@ -945,7 +1076,7 @@ mod tests {
 
     #[test]
     fn initialize_rejects_non_vote_owned_account() {
-        let executor = VoteProgramExecutor::new(150);
+        let executor = VoteProgramExecutor::new();
         let node = Pubkey::new_unique();
         let voter = Pubkey::new_unique();
         let withdrawer = Pubkey::new_unique();
@@ -972,9 +1103,192 @@ mod tests {
         assert!(result.unwrap_err().contains("not owned by vote program"));
     }
 
+    // -- InitializeAccountV2 (BLS proof-of-possession) ---------------------
+
+    fn hx(s: &str) -> Vec<u8> {
+        (0..s.len())
+            .step_by(2)
+            .map(|i| u8::from_str_radix(&s[i..i + 2], 16).unwrap())
+            .collect()
+    }
+
+    // Known-answer vectors (shared with the BLS PoP verifier): a valid
+    // proof of possession for vote account `0123..ef` and BLS pubkey `b877..`.
+    const KAT_VOTE_HEX: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+    const KAT_BLS_HEX: &str =
+        "b8778284f744f6ae2791145183ef8fcb66dcd6602da8ca1add3e6828904db482708fb1d9bd2cbeb72320cdef56d173bc";
+    const KAT_PROOF_HEX: &str = "b21b2bc4933e1d2cd32e9b976cc89a98d14f45c89356bb67afab0bc48a6ff9c2d3c4d2394d68706077e5dd7596459da70227c70f2f14adbfbcf6b46ae34f970f88b49dd8185f705333f682eb27674e8abbdf21519dd01424f6993713c9e4632d";
+
+    /// Build canonical `InitializeAccountV2` instruction data. `commission_bps`
+    /// is the inflation-rewards commission in basis points; both split-
+    /// commission collectors are filled with the voter pubkey (their exact
+    /// value is validated for length but not persisted by the bespoke state).
+    fn make_initialize_v2_data(
+        node: &Pubkey,
+        voter: &Pubkey,
+        withdrawer: &Pubkey,
+        commission_bps: u16,
+        bls_pubkey: &[u8],
+        bls_proof: &[u8],
+    ) -> Vec<u8> {
+        let mut data = constants::INSTRUCTION_INITIALIZE_ACCOUNT_V2
+            .to_le_bytes()
+            .to_vec();
+        data.extend_from_slice(node.as_bytes()); // [4..36]
+        data.extend_from_slice(voter.as_bytes()); // [36..68]
+        data.extend_from_slice(bls_pubkey); // [68..116]
+        data.extend_from_slice(bls_proof); // [116..212]
+        data.extend_from_slice(withdrawer.as_bytes()); // [212..244]
+        data.extend_from_slice(&commission_bps.to_le_bytes()); // [244..246]
+        data.extend_from_slice(voter.as_bytes()); // inflation_collector [246..278]
+        data.extend_from_slice(&0u16.to_le_bytes()); // revenue_bps [278..280]
+        data.extend_from_slice(voter.as_bytes()); // revenue_collector [280..312]
+        data
+    }
+
+    #[test]
+    fn initialize_v2_rejects_short_legacy_data() {
+        // A legacy V1-sized init payload is not a valid InitializeAccountV2.
+        let executor = VoteProgramExecutor::new();
+        let mut instruction_data = constants::INSTRUCTION_INITIALIZE_ACCOUNT_V2
+            .to_le_bytes()
+            .to_vec();
+        instruction_data.resize(101, 0);
+
+        let context = ExecutionContext::new(
+            VOTE_PROGRAM_ID,
+            vec![(Pubkey::new_unique(), make_empty_vote_account(), true)],
+            instruction_data,
+        );
+
+        let result = executor.execute(&context);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("too short"));
+    }
+
+    #[test]
+    fn initialize_v2_derives_commission_and_fields() {
+        let executor = VoteProgramExecutor::new();
+        let node = Pubkey::new_unique();
+        let voter = Pubkey::new_unique();
+        let withdrawer = Pubkey::new_unique();
+        let bls = hx(KAT_BLS_HEX);
+        let proof = hx(KAT_PROOF_HEX);
+
+        // 750 bps -> 7% legacy commission; also checks node/withdrawer offsets.
+        let instruction_data =
+            make_initialize_v2_data(&node, &voter, &withdrawer, 750, &bls, &proof);
+        let vote_pubkey = Pubkey::new_from_array(hx(KAT_VOTE_HEX).try_into().unwrap());
+
+        let mut signers = std::collections::HashSet::new();
+        signers.insert(node);
+        let context = ExecutionContext::new(
+            VOTE_PROGRAM_ID,
+            vec![(vote_pubkey, make_empty_vote_account(), true)],
+            instruction_data,
+        )
+        .with_signers(signers);
+
+        let outcome = executor.execute(&context).unwrap();
+        assert!(outcome.success);
+        let modified = outcome.modified_accounts.get(&vote_pubkey).unwrap();
+        let state = VoteState::deserialize(modified.data.as_ref()).unwrap();
+        assert_eq!(state.node_pubkey, node);
+        assert_eq!(state.authorized_withdrawer, withdrawer);
+        assert_eq!(state.commission, 7);
+    }
+
+    #[test]
+    fn initialize_v2_with_valid_bls_stores_pubkey() {
+        let executor = VoteProgramExecutor::new();
+        let node = Pubkey::new_unique();
+        let voter = Pubkey::new_unique();
+        let withdrawer = Pubkey::new_unique();
+        let bls = hx(KAT_BLS_HEX);
+        let proof = hx(KAT_PROOF_HEX);
+
+        let instruction_data =
+            make_initialize_v2_data(&node, &voter, &withdrawer, 300, &bls, &proof);
+        // The PoP is bound to the vote account pubkey, so it must equal the KAT.
+        let vote_pubkey = Pubkey::new_from_array(hx(KAT_VOTE_HEX).try_into().unwrap());
+
+        let mut signers = std::collections::HashSet::new();
+        signers.insert(node);
+        let context = ExecutionContext::new(
+            VOTE_PROGRAM_ID,
+            vec![(vote_pubkey, make_empty_vote_account(), true)],
+            instruction_data,
+        )
+        .with_signers(signers);
+
+        let outcome = executor.execute(&context).unwrap();
+        assert!(outcome.success);
+        // The PoP verification compute cost is charged.
+        assert!(outcome.compute_units_consumed >= COMPUTE_COST_POP);
+        let modified = outcome.modified_accounts.get(&vote_pubkey).unwrap();
+        let state = VoteState::deserialize(modified.data.as_ref()).unwrap();
+        assert_eq!(state.bls_pubkey, Some(bls.as_slice().try_into().unwrap()));
+    }
+
+    #[test]
+    fn initialize_v2_rejects_tampered_proof() {
+        let executor = VoteProgramExecutor::new();
+        let node = Pubkey::new_unique();
+        let voter = Pubkey::new_unique();
+        let withdrawer = Pubkey::new_unique();
+        let bls = hx(KAT_BLS_HEX);
+        let mut proof = hx(KAT_PROOF_HEX);
+        proof[0] ^= 0x01;
+
+        let instruction_data =
+            make_initialize_v2_data(&node, &voter, &withdrawer, 300, &bls, &proof);
+        let vote_pubkey = Pubkey::new_from_array(hx(KAT_VOTE_HEX).try_into().unwrap());
+
+        let mut signers = std::collections::HashSet::new();
+        signers.insert(node);
+        let context = ExecutionContext::new(
+            VOTE_PROGRAM_ID,
+            vec![(vote_pubkey, make_empty_vote_account(), true)],
+            instruction_data,
+        )
+        .with_signers(signers);
+
+        let result = executor.execute(&context);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("proof of possession"));
+    }
+
+    #[test]
+    fn initialize_v2_requires_node_signer_for_bls() {
+        let executor = VoteProgramExecutor::new();
+        let node = Pubkey::new_unique();
+        let voter = Pubkey::new_unique();
+        let withdrawer = Pubkey::new_unique();
+        let bls = hx(KAT_BLS_HEX);
+        let proof = hx(KAT_PROOF_HEX);
+
+        let instruction_data =
+            make_initialize_v2_data(&node, &voter, &withdrawer, 300, &bls, &proof);
+        let vote_pubkey = Pubkey::new_from_array(hx(KAT_VOTE_HEX).try_into().unwrap());
+
+        // Signer set is non-empty but does not include the node identity.
+        let mut signers = std::collections::HashSet::new();
+        signers.insert(withdrawer);
+        let context = ExecutionContext::new(
+            VOTE_PROGRAM_ID,
+            vec![(vote_pubkey, make_empty_vote_account(), true)],
+            instruction_data,
+        )
+        .with_signers(signers);
+
+        let result = executor.execute(&context);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("node identity to sign"));
+    }
+
     #[test]
     fn vote_processes_single_slot() {
-        let executor = VoteProgramExecutor::new(150);
+        let executor = VoteProgramExecutor::new();
         let node = Pubkey::new_unique();
         let voter = Pubkey::new_unique();
         let withdrawer = Pubkey::new_unique();
@@ -1007,7 +1321,7 @@ mod tests {
 
     #[test]
     fn vote_processes_multiple_slots() {
-        let executor = VoteProgramExecutor::new(150);
+        let executor = VoteProgramExecutor::new();
         let node = Pubkey::new_unique();
         let voter = Pubkey::new_unique();
         let withdrawer = Pubkey::new_unique();
@@ -1041,7 +1355,7 @@ mod tests {
 
     #[test]
     fn vote_rejects_non_sequential() {
-        let executor = VoteProgramExecutor::new(150);
+        let executor = VoteProgramExecutor::new();
         let node = Pubkey::new_unique();
         let voter = Pubkey::new_unique();
         let withdrawer = Pubkey::new_unique();
@@ -1072,7 +1386,7 @@ mod tests {
 
     #[test]
     fn withdraw_transfers_lamports() {
-        let executor = VoteProgramExecutor::new(150);
+        let executor = VoteProgramExecutor::new();
         let node = Pubkey::new_unique();
         let voter = Pubkey::new_unique();
         let withdrawer = Pubkey::new_unique();
@@ -1109,7 +1423,7 @@ mod tests {
 
     #[test]
     fn withdraw_rejects_insufficient_lamports() {
-        let executor = VoteProgramExecutor::new(150);
+        let executor = VoteProgramExecutor::new();
         let node = Pubkey::new_unique();
         let voter = Pubkey::new_unique();
         let withdrawer = Pubkey::new_unique();
@@ -1147,7 +1461,7 @@ mod tests {
 
     #[test]
     fn update_commission_changes_value() {
-        let executor = VoteProgramExecutor::new(150);
+        let executor = VoteProgramExecutor::new();
         let node = Pubkey::new_unique();
         let voter = Pubkey::new_unique();
         let withdrawer = Pubkey::new_unique();
@@ -1176,7 +1490,7 @@ mod tests {
 
     #[test]
     fn update_commission_accepts_when_withdrawer_signs() {
-        let executor = VoteProgramExecutor::new(150);
+        let executor = VoteProgramExecutor::new();
         let node = Pubkey::new_unique();
         let voter = Pubkey::new_unique();
         let withdrawer = Pubkey::new_unique();
@@ -1211,7 +1525,7 @@ mod tests {
 
     #[test]
     fn update_commission_rejects_when_withdrawer_does_not_sign() {
-        let executor = VoteProgramExecutor::new(150);
+        let executor = VoteProgramExecutor::new();
         let node = Pubkey::new_unique();
         let voter = Pubkey::new_unique();
         let withdrawer = Pubkey::new_unique();
@@ -1243,7 +1557,7 @@ mod tests {
 
     #[test]
     fn withdraw_rejects_when_withdrawer_does_not_sign() {
-        let executor = VoteProgramExecutor::new(150);
+        let executor = VoteProgramExecutor::new();
         let node = Pubkey::new_unique();
         let voter = Pubkey::new_unique();
         let withdrawer = Pubkey::new_unique();
@@ -1293,7 +1607,7 @@ mod tests {
 
     #[test]
     fn update_commission_increase_rejected_in_second_half_of_epoch() {
-        let executor = VoteProgramExecutor::new(150);
+        let executor = VoteProgramExecutor::new();
         let withdrawer = Pubkey::new_unique();
         let vote_state = VoteState::new(Pubkey::new_unique(), Pubkey::new_unique(), withdrawer, 5);
         let vote_pubkey = Pubkey::new_unique();
@@ -1321,7 +1635,7 @@ mod tests {
 
     #[test]
     fn update_commission_decrease_allowed_in_second_half_of_epoch() {
-        let executor = VoteProgramExecutor::new(150);
+        let executor = VoteProgramExecutor::new();
         let withdrawer = Pubkey::new_unique();
         let vote_state = VoteState::new(Pubkey::new_unique(), Pubkey::new_unique(), withdrawer, 50);
         let vote_pubkey = Pubkey::new_unique();
@@ -1347,7 +1661,7 @@ mod tests {
 
     #[test]
     fn update_commission_increase_allowed_when_delay_feature_active() {
-        let executor = VoteProgramExecutor::new(150);
+        let executor = VoteProgramExecutor::new();
         let withdrawer = Pubkey::new_unique();
         let vote_state = VoteState::new(Pubkey::new_unique(), Pubkey::new_unique(), withdrawer, 5);
         let vote_pubkey = Pubkey::new_unique();
@@ -1386,7 +1700,7 @@ mod tests {
 
     #[test]
     fn update_commission_rejects_over_100() {
-        let executor = VoteProgramExecutor::new(150);
+        let executor = VoteProgramExecutor::new();
         let node = Pubkey::new_unique();
         let voter = Pubkey::new_unique();
         let withdrawer = Pubkey::new_unique();
@@ -1411,7 +1725,7 @@ mod tests {
 
     #[test]
     fn authorize_changes_voter() {
-        let executor = VoteProgramExecutor::new(150);
+        let executor = VoteProgramExecutor::new();
         let node = Pubkey::new_unique();
         let voter = Pubkey::new_unique();
         let withdrawer = Pubkey::new_unique();
@@ -1443,7 +1757,7 @@ mod tests {
 
     #[test]
     fn authorize_changes_withdrawer() {
-        let executor = VoteProgramExecutor::new(150);
+        let executor = VoteProgramExecutor::new();
         let node = Pubkey::new_unique();
         let voter = Pubkey::new_unique();
         let withdrawer = Pubkey::new_unique();
@@ -1475,7 +1789,7 @@ mod tests {
 
     #[test]
     fn authorize_checked_changes_voter() {
-        let executor = VoteProgramExecutor::new(150);
+        let executor = VoteProgramExecutor::new();
         let node = Pubkey::new_unique();
         let voter = Pubkey::new_unique();
         let withdrawer = Pubkey::new_unique();
@@ -1515,7 +1829,7 @@ mod tests {
 
     #[test]
     fn update_validator_identity_changes_node() {
-        let executor = VoteProgramExecutor::new(150);
+        let executor = VoteProgramExecutor::new();
         let node = Pubkey::new_unique();
         let voter = Pubkey::new_unique();
         let withdrawer = Pubkey::new_unique();
@@ -1551,7 +1865,7 @@ mod tests {
 
     #[test]
     fn vote_state_update_applies_new_tower() {
-        let executor = VoteProgramExecutor::new(150);
+        let executor = VoteProgramExecutor::new();
         let node = Pubkey::new_unique();
         let voter = Pubkey::new_unique();
         let withdrawer = Pubkey::new_unique();
@@ -1602,7 +1916,7 @@ mod tests {
 
     #[test]
     fn vote_state_update_rejects_invalid_ordering() {
-        let executor = VoteProgramExecutor::new(150);
+        let executor = VoteProgramExecutor::new();
         let node = Pubkey::new_unique();
         let voter = Pubkey::new_unique();
         let withdrawer = Pubkey::new_unique();
@@ -1637,7 +1951,7 @@ mod tests {
 
     #[test]
     fn unknown_instruction_returns_error() {
-        let executor = VoteProgramExecutor::new(150);
+        let executor = VoteProgramExecutor::new();
 
         let instruction_data = vec![255, 0, 0, 0]; // Unknown type 255
 
@@ -1656,7 +1970,7 @@ mod tests {
 
     #[test]
     fn empty_instruction_data_returns_error() {
-        let executor = VoteProgramExecutor::new(150);
+        let executor = VoteProgramExecutor::new();
 
         let context = ExecutionContext::new(
             VOTE_PROGRAM_ID,
@@ -1670,7 +1984,7 @@ mod tests {
 
     #[test]
     fn authorize_with_seed_changes_voter() {
-        let executor = VoteProgramExecutor::new(150);
+        let executor = VoteProgramExecutor::new();
         let node = Pubkey::new_unique();
         let voter = Pubkey::new_unique();
         let withdrawer = Pubkey::new_unique();
@@ -1710,7 +2024,7 @@ mod tests {
 
     #[test]
     fn authorize_checked_with_seed_changes_withdrawer() {
-        let executor = VoteProgramExecutor::new(150);
+        let executor = VoteProgramExecutor::new();
         let node = Pubkey::new_unique();
         let voter = Pubkey::new_unique();
         let withdrawer = Pubkey::new_unique();

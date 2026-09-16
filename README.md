@@ -568,6 +568,7 @@ The runtime is continuously re-baselined against the upstream reference (agave v
 - Feature registry tracking 278 protocol features
 - Byte-exact vote-account wire codec for all on-chain layout versions (`V1_14_11`, `V3`, and the `V4` Alpenglow format), with discriminant-driven decoding — the `V4` variant carries the split-commission collectors, basis-point commissions, pending delegator rewards, and the optional BLS proof-of-possession public key
 - BLS12-381 proof-of-possession verification for Alpenglow validator key registration (min-pk ciphersuite, `ALPENGLOW`-domain message), matching the reference implementation byte-for-byte and validated against its known-answer vectors
+- On-chain `InitializeAccountV2` parses the canonical Alpenglow instruction layout (node, authorized voter, BLS public key, proof of possession, withdrawer, then the split-commission basis-point fields and collectors): it requires the node identity to sign, verifies the proof over `ALPENGLOW || vote_account || bls_pubkey` (charging the standard proof-of-possession compute cost), and persists the BLS key alongside the vote state
 
 Validated against a live single-node validator: the functional + WebSocket E2E suite passes (592 checks, 0 failures; 21 multi-node tests skipped on a single node), alongside 6,100+ unit tests and the conformance suite.
 
@@ -727,15 +728,21 @@ See [`SECURITY.md`](SECURITY.md) for details and contact information.
 
 ## Contributing
 
-External contributions are not accepted at this time.
-See [`CONTRIBUTING.md`](CONTRIBUTING.md) for details.
+Contributions are welcome. See [`CONTRIBUTING.md`](CONTRIBUTING.md) — sign off your commits
+(`git commit -s`) and make sure `just ci` passes.
 
 ## License
 
-Copyright (c) 2025–2026 Vladimir Bugaev (boogvar). All rights reserved.
+Copyright (c) 2025–2026 Vladimir Bugaev (boogvar).
 
-This software is proprietary. No license is granted to use, copy, modify, or distribute it without prior express written permission.
+Licensed under the Apache License, Version 2.0. See [`LICENSE`](LICENSE).
 
-For licensing inquiries, collaboration, or investment opportunities, contact: **boogvar@gmail.com**
+Karstflow embeds third-party Apache-2.0 sBPF program binaries; attribution and checksums are in
+[`NOTICE`](NOTICE) and [`THIRD_PARTY_LICENSES.md`](THIRD_PARTY_LICENSES.md).
 
-See [`LICENSE`](LICENSE) for full terms.
+"Karstflow" and the Karstflow logo are trademarks — the license covers the code, not the name.
+See [`TRADEMARK.md`](TRADEMARK.md).
+
+"Solana" is a trademark of the Solana Foundation. Karstflow is an independent implementation and
+is not affiliated with, endorsed by, or sponsored by the Solana Foundation, Solana Labs or Anza
+Technology.

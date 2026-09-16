@@ -252,7 +252,12 @@ pub fn build_consensus_infrastructure(
     let leader_schedule = Arc::new(
         LeaderSchedule::new(0, &validators).expect("leader schedule from single validator"),
     );
-    let genesis = Bank::new_genesis(accounts, epoch_schedule, leader_schedule);
+    let mut genesis = Bank::new_genesis(accounts, epoch_schedule, leader_schedule);
+    // The core-BPF upgrade paths refuse to install bytecode they cannot check,
+    // so the check has to be supplied here — this crate can see both the bank
+    // and the execution layer, and the bank's children inherit it.
+    genesis.set_elf_validator(Arc::new(karstflow_execution::SbpfElfValidator::default()));
+    let genesis = genesis;
 
     // Extract real stake data from the bank if available.
     // When restoring from a snapshot, the bank's stake tracker is populated
@@ -2927,6 +2932,22 @@ impl BankAccessProvider for ConsensusBankAccessProvider {
         self.bank_for_commitment(commitment)
             .map(|bank| bank.lamports_per_signature())
             .unwrap_or(karstflow_constants::economics::LAMPORTS_PER_SIGNATURE)
+    }
+
+    fn is_feature_active(
+        &self,
+        feature_id: &karstflow_types::Pubkey,
+        commitment: karstflow_rpc::RpcCommitment,
+    ) -> bool {
+        self.bank_for_commitment(commitment)
+            .and_then(|bank| bank.feature_set().cloned())
+            .map(|features| {
+                features
+                    .read()
+                    .expect("feature_set lock poisoned")
+                    .is_active(feature_id)
+            })
+            .unwrap_or(false)
     }
 
     fn get_last_valid_block_height(&self, commitment: karstflow_rpc::RpcCommitment) -> u64 {

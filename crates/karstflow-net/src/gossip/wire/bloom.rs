@@ -34,6 +34,18 @@ pub struct WireCrdsFilter {
     pub mask_bits: u32,
 }
 
+impl WireCrdsFilter {
+    /// Whether an inbound filter is well-formed enough to answer.
+    ///
+    /// Peers reject pull requests below the protocol's `mask_bits` floor, so a
+    /// request under it is malformed rather than merely greedy: answering it
+    /// would both diverge from peers on well-formedness and let one request
+    /// sweep a large share of the CRDS table.
+    pub fn is_acceptable(&self) -> bool {
+        self.mask_bits >= karstflow_constants::gossip::MIN_PULL_REQUEST_MASK_BITS
+    }
+}
+
 impl WireBloom {
     /// Convert from the internal bloom filter representation.
     pub fn from_internal(bloom: &GossipBloomFilter) -> Self {
@@ -218,5 +230,34 @@ mod tests {
             false_positives < 200,
             "too many false positives: {false_positives}"
         );
+    }
+
+    #[test]
+    fn pull_filter_below_mask_bits_floor_is_rejected() {
+        let internal = GossipBloomFilter::new(64);
+        let mut filter = WireBloom::from_internal(&internal);
+        filter.num_bits_set = 0;
+        let floor = karstflow_constants::gossip::MIN_PULL_REQUEST_MASK_BITS;
+
+        for bits in 0..floor {
+            let f = WireCrdsFilter {
+                filter: filter.clone(),
+                mask: !0u64,
+                mask_bits: bits,
+            };
+            assert!(
+                !f.is_acceptable(),
+                "mask_bits={bits} is below the floor and must be rejected"
+            );
+        }
+
+        for bits in [floor, floor + 1, 63] {
+            let f = WireCrdsFilter {
+                filter: filter.clone(),
+                mask: !0u64,
+                mask_bits: bits,
+            };
+            assert!(f.is_acceptable(), "mask_bits={bits} must be accepted");
+        }
     }
 }

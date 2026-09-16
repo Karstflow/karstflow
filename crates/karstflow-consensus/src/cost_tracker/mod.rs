@@ -195,13 +195,12 @@ impl CostTracker {
         // between the check and the add; the atomic adds are safe and the
         // worst case is a slight over-commitment that the validator can handle.
         self.block_cost
-            .fetch_add(cost.compute_units, Ordering::Release);
+            .fetch_add(cost.total_cost, Ordering::Release);
         if cost.is_vote && !self.remove_simple_vote_from_cost_model {
-            self.vote_cost
-                .fetch_add(cost.compute_units, Ordering::Release);
+            self.vote_cost.fetch_add(cost.total_cost, Ordering::Release);
         }
-        for (pubkey, acct_cost) in &cost.writable_accounts {
-            self.account_costs.add(pubkey, *acct_cost);
+        for pubkey in &cost.writable_accounts {
+            self.account_costs.add(pubkey, cost.total_cost);
         }
         if cost.data_size_delta != 0 {
             self.account_data_size_delta
@@ -216,16 +215,49 @@ impl CostTracker {
         Ok(())
     }
 
+    /// Reconcile a reserved cost against what the transaction actually did.
+    ///
+    /// The block reserves capacity from the compute budget a transaction
+    /// *requests*. That request is routinely far larger than the work — asking
+    /// for too little is fatal and asking for too much is free, provided the
+    /// difference is given back here. Block, vote and every write-locked
+    /// account move together, because all three were charged the same figure.
+    pub fn update_execution_cost(&self, cost: &TransactionCost, actual_execution_and_loaded: u64) {
+        let estimated = cost.execution_and_loaded_cost;
+        if actual_execution_and_loaded == estimated {
+            return;
+        }
+
+        if actual_execution_and_loaded > estimated {
+            let extra = actual_execution_and_loaded - estimated;
+            self.block_cost.fetch_add(extra, Ordering::Release);
+            if cost.is_vote && !self.remove_simple_vote_from_cost_model {
+                self.vote_cost.fetch_add(extra, Ordering::Release);
+            }
+            for pubkey in &cost.writable_accounts {
+                self.account_costs.add(pubkey, extra);
+            }
+        } else {
+            let refund = estimated - actual_execution_and_loaded;
+            self.block_cost.fetch_sub(refund, Ordering::Release);
+            if cost.is_vote && !self.remove_simple_vote_from_cost_model {
+                self.vote_cost.fetch_sub(refund, Ordering::Release);
+            }
+            for pubkey in &cost.writable_accounts {
+                self.account_costs.remove(pubkey, refund);
+            }
+        }
+    }
+
     /// Remove a previously added transaction cost (e.g. after execution failure).
     pub fn remove(&self, cost: &TransactionCost) {
         self.block_cost
-            .fetch_sub(cost.compute_units, Ordering::Release);
+            .fetch_sub(cost.total_cost, Ordering::Release);
         if cost.is_vote && !self.remove_simple_vote_from_cost_model {
-            self.vote_cost
-                .fetch_sub(cost.compute_units, Ordering::Release);
+            self.vote_cost.fetch_sub(cost.total_cost, Ordering::Release);
         }
-        for (pubkey, acct_cost) in &cost.writable_accounts {
-            self.account_costs.remove(pubkey, *acct_cost);
+        for pubkey in &cost.writable_accounts {
+            self.account_costs.remove(pubkey, cost.total_cost);
         }
         if cost.data_size_delta != 0 {
             // Subtract the delta that was previously added.

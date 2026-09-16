@@ -11,6 +11,7 @@
 pub mod diff;
 pub mod fixture;
 pub mod harness;
+pub mod vectors;
 
 #[cfg(test)]
 mod tests;

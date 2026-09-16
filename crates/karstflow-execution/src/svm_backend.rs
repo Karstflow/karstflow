@@ -448,3 +448,66 @@ mod tests {
         assert!(snap.sibling_instructions[1].accounts.is_empty());
     }
 }
+
+// ---------------------------------------------------------------------------
+// Deploy-time ELF validation for the core-BPF upgrade paths
+// ---------------------------------------------------------------------------
+
+/// Deploy-time ELF check, bridged from consensus to the sBPF validator.
+///
+/// The same shape as `SbpfBackend` and for the same reason: consensus states
+/// what it needs as a trait, and the concrete answer lives here, where both
+/// crates are visible.
+#[derive(Debug, Default)]
+pub struct SbpfElfValidator {
+    /// Feature ids active when the check runs. Empty means the base syscall set,
+    /// which is the conservative reading: a program calling a syscall that only
+    /// a feature enables is rejected rather than admitted on trust.
+    active_features: std::collections::HashSet<[u8; 32]>,
+}
+
+impl SbpfElfValidator {
+    /// A validator that admits the syscalls `active_features` enable, on top of
+    /// the base set.
+    pub fn with_active_features(active_features: std::collections::HashSet<[u8; 32]>) -> Self {
+        Self { active_features }
+    }
+}
+
+impl karstflow_consensus::features::core_bpf_upgrade::ElfValidator for SbpfElfValidator {
+    fn validate_for_deploy(&self, elf: &[u8]) -> Result<(), String> {
+        let syscall_ids = karstflow_sbpf::validation::deploy_syscall_ids(&self.active_features);
+        karstflow_sbpf::validation::validate_elf_for_deploy(elf, &syscall_ids).map(|_| ())
+    }
+}
+
+#[cfg(test)]
+mod elf_validator_tests {
+    use super::SbpfElfValidator;
+    use karstflow_consensus::features::core_bpf_upgrade::ElfValidator;
+
+    #[test]
+    fn arbitrary_bytes_are_not_a_deployable_program() {
+        // The whole point of wiring a real validator: this is what a source
+        // buffer holding something other than a program looks like, and the
+        // upgrade paths must refuse it.
+        let validator = SbpfElfValidator::default();
+        assert!(validator.validate_for_deploy(b"not an ELF at all").is_err());
+    }
+
+    #[test]
+    fn an_empty_buffer_is_not_a_deployable_program() {
+        let validator = SbpfElfValidator::default();
+        assert!(validator.validate_for_deploy(&[]).is_err());
+    }
+
+    #[test]
+    fn a_truncated_elf_header_is_rejected() {
+        // Starts like an ELF and is not one — the case a magic-byte check would
+        // wave through.
+        let validator = SbpfElfValidator::default();
+        assert!(validator
+            .validate_for_deploy(b"\x7fELF\x02\x01\x01")
+            .is_err());
+    }
+}

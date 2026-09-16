@@ -108,13 +108,10 @@ impl PriorityQueue {
         let total = self.pending.len() + self.votes.len();
         if total >= self.capacity {
             // Try to evict lowest-priority non-vote transaction
-            if let Some(worst) = self.pending.peek() {
-                if !entry.is_vote && entry.compute_unit_price <= worst.compute_unit_price {
-                    // New transaction is no better than worst — reject
-                    return None;
-                }
-            } else {
-                // Only votes in queue, can't evict
+            // Only votes in queue, can't evict
+            let worst = self.pending.peek()?;
+            if !entry.is_vote && entry.compute_unit_price <= worst.compute_unit_price {
+                // New transaction is no better than worst — reject
                 return None;
             }
 

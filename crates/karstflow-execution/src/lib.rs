@@ -18,7 +18,7 @@ pub use engine::{
     RuntimeStateWriteIntent, StorageBackedRuntimeAdapter, SyntheticRuntimeAdapter,
 };
 pub use errors::ExecutionError;
-pub use svm_backend::SbpfBackend;
+pub use svm_backend::{SbpfBackend, SbpfElfValidator};
 pub use types::{
     ExecutionBatch, ExecutionFailureClass, ExecutionOutcome, ForkChoiceDirective,
     LeaderGateDirective, LeaderGateState, ReplayBoundaryState, RetryDirective, RetryPolicy,

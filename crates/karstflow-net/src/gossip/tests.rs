@@ -153,7 +153,12 @@ async fn test_cluster_info_bloom_filter_pull_response() {
 
     assert_eq!(cluster.size(), 5);
 
-    // Build a bloom filter and verify it has content
-    let (filter, _mask) = cluster.build_pull_filter();
-    assert!(filter.bits_set() > 0);
+    // A pull filter covers one bucket of the hash space, so an individual bucket
+    // is often empty for a table this small. Sweeping every bucket must reach the
+    // entries — that is the property a pull round actually depends on.
+    let buckets = 1u64 << karstflow_constants::gossip::MIN_PULL_REQUEST_MASK_BITS;
+    let populated = (0..buckets)
+        .filter(|&seed| cluster.build_pull_filter(seed).0.bits_set() > 0)
+        .count();
+    assert!(populated > 0, "no bucket contained any of the 5 peers");
 }

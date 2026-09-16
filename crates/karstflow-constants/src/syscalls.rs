@@ -132,11 +132,27 @@ pub const ALT_BN128_G2_MUL_BE: u64 = 6;
 /// Bit flag that converts a big-endian op ID to its little-endian variant (SIMD-0284).
 pub const ALT_BN128_LITTLE_ENDIAN_FLAG: u64 = 0x80;
 
+// alt_bn128 group operation IDs (little-endian variants). Spelled out rather than
+// computed because they are used as match patterns by the SIMD-0284/0302 gates.
+pub const ALT_BN128_G1_ADD_LE: u64 = ALT_BN128_G1_ADD_BE | ALT_BN128_LITTLE_ENDIAN_FLAG;
+pub const ALT_BN128_G1_MUL_LE: u64 = ALT_BN128_G1_MUL_BE | ALT_BN128_LITTLE_ENDIAN_FLAG;
+pub const ALT_BN128_PAIRING_LE: u64 = ALT_BN128_PAIRING_BE | ALT_BN128_LITTLE_ENDIAN_FLAG;
+pub const ALT_BN128_G2_ADD_LE: u64 = ALT_BN128_G2_ADD_BE | ALT_BN128_LITTLE_ENDIAN_FLAG;
+pub const ALT_BN128_G2_MUL_LE: u64 = ALT_BN128_G2_MUL_BE | ALT_BN128_LITTLE_ENDIAN_FLAG;
+
 // alt_bn128 compression operation IDs (big-endian variants)
 pub const ALT_BN128_G1_COMPRESS_BE: u64 = 0;
 pub const ALT_BN128_G1_DECOMPRESS_BE: u64 = 1;
 pub const ALT_BN128_G2_COMPRESS_BE: u64 = 2;
 pub const ALT_BN128_G2_DECOMPRESS_BE: u64 = 3;
+
+// alt_bn128 compression operation IDs (little-endian variants).
+pub const ALT_BN128_G1_COMPRESS_LE: u64 = ALT_BN128_G1_COMPRESS_BE | ALT_BN128_LITTLE_ENDIAN_FLAG;
+pub const ALT_BN128_G1_DECOMPRESS_LE: u64 =
+    ALT_BN128_G1_DECOMPRESS_BE | ALT_BN128_LITTLE_ENDIAN_FLAG;
+pub const ALT_BN128_G2_COMPRESS_LE: u64 = ALT_BN128_G2_COMPRESS_BE | ALT_BN128_LITTLE_ENDIAN_FLAG;
+pub const ALT_BN128_G2_DECOMPRESS_LE: u64 =
+    ALT_BN128_G2_DECOMPRESS_BE | ALT_BN128_LITTLE_ENDIAN_FLAG;
 
 // alt_bn128 point sizes
 pub const ALT_BN128_G1_POINT_SIZE: usize = 64;

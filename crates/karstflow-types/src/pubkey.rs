@@ -5,6 +5,19 @@ use thiserror::Error;
 
 pub const PUBKEY_BYTES: usize = 32;
 pub const MAX_SEED_LEN: usize = 32;
+/// Maximum number of seeds a program address may be derived from.
+pub const MAX_SIGNER_SEEDS: usize = 16;
+
+/// Domain separator that keeps derived addresses out of the space reachable by
+/// `create_with_seed`.
+const PDA_MARKER: &[u8] = b"ProgramDerivedAddress";
+
+/// Whether these bytes decode to a point on the ed25519 curve.
+fn is_on_ed25519_curve(bytes: &[u8; PUBKEY_BYTES]) -> bool {
+    curve25519_dalek::edwards::CompressedEdwardsY(*bytes)
+        .decompress()
+        .is_some()
+}
 
 #[derive(Error, Debug, Clone, PartialEq, Eq)]
 pub enum PubkeyError {
@@ -75,7 +88,6 @@ impl Pubkey {
 
         // Check that owner doesn't contain ProgramDerivedAddress marker
         // (prevents misuse of create_with_seed for PDA derivation)
-        const PDA_MARKER: &[u8] = b"ProgramDerivedAddress";
         if owner.0.len() >= 11 + PDA_MARKER.len()
             && &owner.0[11..11 + PDA_MARKER.len()] == PDA_MARKER
         {
@@ -90,6 +102,42 @@ impl Pubkey {
         let hash = hasher.finalize();
 
         Ok(Pubkey(hash.into()))
+    }
+
+    /// Derive a program address from seeds, or `None` if it lands on the curve.
+    ///
+    /// A program-derived address must not be a valid ed25519 point, because a
+    /// point could have a private key behind it and the whole guarantee is that
+    /// nobody can sign for these.
+    pub fn create_program_address(seeds: &[&[u8]], program_id: &Pubkey) -> Option<Pubkey> {
+        if seeds.len() > MAX_SIGNER_SEEDS || seeds.iter().any(|s| s.len() > MAX_SEED_LEN) {
+            return None;
+        }
+        let mut hasher = Sha256::new();
+        for seed in seeds {
+            hasher.update(seed);
+        }
+        hasher.update(program_id.0);
+        hasher.update(PDA_MARKER);
+        let bytes: [u8; PUBKEY_BYTES] = hasher.finalize().into();
+
+        (!is_on_ed25519_curve(&bytes)).then_some(Pubkey(bytes))
+    }
+
+    /// Find the canonical program address for these seeds, and its bump.
+    ///
+    /// Bumps are tried from 255 downwards and the first off-curve result wins,
+    /// so the answer is deterministic and every party derives the same address.
+    /// Callers inside the VM must meter the search themselves — this does not.
+    pub fn find_program_address(seeds: &[&[u8]], program_id: &Pubkey) -> Option<(Pubkey, u8)> {
+        if seeds.len() >= MAX_SIGNER_SEEDS || seeds.iter().any(|s| s.len() > MAX_SEED_LEN) {
+            return None;
+        }
+        (0..=u8::MAX).rev().find_map(|bump| {
+            let bump_seed = [bump];
+            let with_bump = [seeds, &[&bump_seed[..]]].concat();
+            Self::create_program_address(&with_bump, program_id).map(|key| (key, bump))
+        })
     }
 }
 

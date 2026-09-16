@@ -63,12 +63,13 @@ pub const MINIMUM_EXTEND_PROGRAM_BYTES: usize = 10 * 1024;
 
 // ── Compute costs ───────────────────────────────────────────────────────
 
-pub const COMPUTE_COST_INITIALIZE_BUFFER: u64 = 500;
-pub const COMPUTE_COST_WRITE: u64 = 1_000;
-pub const COMPUTE_COST_DEPLOY: u64 = 2_000;
-pub const COMPUTE_COST_UPGRADE: u64 = 2_000;
-pub const COMPUTE_COST_SET_AUTHORITY: u64 = 500;
-pub const COMPUTE_COST_CLOSE: u64 = 500;
-pub const COMPUTE_COST_EXTEND_PROGRAM: u64 = 1_500;
-pub const COMPUTE_COST_SET_AUTHORITY_CHECKED: u64 = 500;
-pub const DEFAULT_COMPUTE_UNITS: u64 = 750;
+/// Compute units the upgradeable loader charges for any of its management
+/// instructions. The charge is flat: the same for every discriminant and the
+/// same whether the instruction succeeds or fails.
+pub const UPGRADEABLE_LOADER_COMPUTE_UNITS: u64 = 2_370;
+
+/// Compute units the v2 loader charges, on the same flat terms.
+pub const V2_LOADER_COMPUTE_UNITS: u64 = 570;
+
+/// Compute units the deprecated loader charges, on the same flat terms.
+pub const DEPRECATED_LOADER_COMPUTE_UNITS: u64 = 1_140;

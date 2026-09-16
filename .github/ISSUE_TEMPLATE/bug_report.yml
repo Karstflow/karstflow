@@ -7,8 +7,8 @@ body:
       value: |
         Thanks for reporting a bug. Please fill out the details below.
 
-        **Note:** This is a proprietary project. External contributions (PRs) are
-        not accepted without prior written agreement. Bug reports are welcome.
+        **Do not report security vulnerabilities here** — see SECURITY.md and
+        report them privately instead.
 
   - type: textarea
     id: description

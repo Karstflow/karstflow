@@ -65,14 +65,27 @@ pub struct RewardsCalculator {
     pub inflation: Inflation,
     /// Epoch schedule for slot/epoch conversion
     pub epoch_schedule: EpochSchedule,
+    /// Slot from which inflation time is measured, aligned to the reward
+    /// accrual boundary. Zero on a cluster that has always had inflation on.
+    pub inflation_start_slot: u64,
 }
 
 impl RewardsCalculator {
     /// Create a new rewards calculator.
-    pub fn new(inflation: Inflation, epoch_schedule: EpochSchedule) -> Self {
+    ///
+    /// `inflation_start_slot` is the reward-aligned slot inflation began at, as
+    /// produced by [`inflation_start_slot_aligned_to_rewards`].
+    ///
+    /// [`inflation_start_slot_aligned_to_rewards`]: crate::inflation_start_slot_aligned_to_rewards
+    pub fn new(
+        inflation: Inflation,
+        epoch_schedule: EpochSchedule,
+        inflation_start_slot: u64,
+    ) -> Self {
         Self {
             inflation,
             epoch_schedule,
+            inflation_start_slot,
         }
     }
 
@@ -83,8 +96,12 @@ impl RewardsCalculator {
     /// and epoch duration as a fraction of a year.
     pub fn calculate_epoch_rewards(&self, epoch: u64, total_supply: u64) -> (u64, f64, f64) {
         let slots_in_epoch = self.epoch_schedule.get_slots_in_epoch(epoch) as f64;
-        let slot = self.epoch_schedule.get_first_slot_in_epoch(epoch) as f64;
-        let year = slot / DEFAULT_SLOTS_PER_YEAR;
+        let slot = self.epoch_schedule.get_first_slot_in_epoch(epoch);
+        // Elapsed inflation time, not absolute slot height: an epoch at or
+        // before the start sits at year zero rather than running the curve
+        // backwards.
+        let elapsed_slots = slot.saturating_sub(self.inflation_start_slot) as f64;
+        let year = elapsed_slots / DEFAULT_SLOTS_PER_YEAR;
 
         let validator_rate = self.inflation.validator_rate(year);
         let foundation_rate = self.inflation.foundation_rate(year);
@@ -193,7 +210,68 @@ mod tests {
     use super::*;
 
     fn default_calculator() -> RewardsCalculator {
-        RewardsCalculator::new(Inflation::default(), EpochSchedule::default())
+        RewardsCalculator::new(Inflation::default(), EpochSchedule::default(), 0)
+    }
+
+    #[test]
+    fn inflation_start_slot_shifts_the_rate_back_along_the_curve() {
+        // Inflation tapers, so measuring elapsed time from a later start slot
+        // must place a given epoch earlier on the curve and pay a higher rate.
+        // With the start pinned to zero the two calculators agree, which is the
+        // defect this asserts against.
+        let epoch = 40;
+        let supply = 1_000_000_000_000_u64;
+        let schedule = EpochSchedule::default();
+        let start = schedule.get_first_slot_in_epoch(30);
+
+        let from_zero = RewardsCalculator::new(Inflation::default(), schedule, 0);
+        let from_start = RewardsCalculator::new(Inflation::default(), schedule, start);
+
+        let (rewards_zero, rate_zero, _) = from_zero.calculate_epoch_rewards(epoch, supply);
+        let (rewards_start, rate_start, _) = from_start.calculate_epoch_rewards(epoch, supply);
+
+        assert!(
+            rate_start > rate_zero,
+            "a later inflation start must yield a higher rate at the same epoch \
+             (start={rate_start}, zero={rate_zero})"
+        );
+        assert!(rewards_start > rewards_zero);
+    }
+
+    #[test]
+    fn epoch_at_the_inflation_start_sits_at_year_zero() {
+        // The first accrual epoch must land at the top of the curve regardless
+        // of how far into the cluster's life inflation began.
+        let supply = 1_000_000_000_000_u64;
+        let schedule = EpochSchedule::default();
+        let start_epoch = 30;
+        let start = schedule.get_first_slot_in_epoch(start_epoch);
+
+        let calc = RewardsCalculator::new(Inflation::default(), schedule, start);
+        let (_, rate_at_start, _) = calc.calculate_epoch_rewards(start_epoch, supply);
+
+        let genesis = RewardsCalculator::new(Inflation::default(), schedule, 0);
+        let (_, rate_at_genesis, _) = genesis.calculate_epoch_rewards(0, supply);
+
+        assert_eq!(rate_at_start, rate_at_genesis);
+    }
+
+    #[test]
+    fn epoch_before_the_inflation_start_does_not_run_the_curve_backwards() {
+        // A pre-start epoch must saturate at year zero rather than produce a
+        // negative elapsed time and an out-of-range rate.
+        let supply = 1_000_000_000_000_u64;
+        let schedule = EpochSchedule::default();
+        let calc = RewardsCalculator::new(
+            Inflation::default(),
+            schedule,
+            schedule.get_first_slot_in_epoch(30),
+        );
+
+        let (_, rate_before, _) = calc.calculate_epoch_rewards(5, supply);
+        let (_, rate_at_start, _) = calc.calculate_epoch_rewards(30, supply);
+
+        assert_eq!(rate_before, rate_at_start);
     }
 
     #[test]

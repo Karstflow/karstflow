@@ -941,7 +941,42 @@ mod tests {
             None,
         );
         assert!(payload.contains(r#""slot":77"#));
-        assert!(payload.contains(r#""value":1000000000"#));
+        // With no bank the gate reads inactive, which is the mainnet value.
+        assert_eq!(stake_minimum_delegation_value(&payload), 1);
+    }
+
+    /// Pull the numeric value out of a `getStakeMinimumDelegation` payload.
+    ///
+    /// Parsed rather than substring-matched: `"value":1000000000` contains
+    /// `"value":1`, so a `contains` assertion for the pre-activation value passes
+    /// on the post-activation answer and cannot see the gate at all.
+    fn stake_minimum_delegation_value(payload: &str) -> u64 {
+        let parsed: serde_json::Value = serde_json::from_str(payload).expect("json payload");
+        parsed["result"]["value"].as_u64().expect("numeric value")
+    }
+
+    #[test]
+    fn rpc_stake_minimum_delegation_follows_the_v5_gate() {
+        let request = r#"{"jsonrpc":"2.0","id":268,"method":"getStakeMinimumDelegation","params":[{"commitment":"processed"}]}"#;
+
+        let ungated: Arc<dyn BankAccessProvider> = Arc::new(MockBankAccess::new());
+        let payload = render_json_rpc_response(request, false, None, Some(&ungated));
+        assert_eq!(
+            stake_minimum_delegation_value(&payload),
+            1,
+            "before upgrade_bpf_stake_program_to_v5 the minimum is 1 lamport"
+        );
+
+        let gated: Arc<dyn BankAccessProvider> = Arc::new(
+            MockBankAccess::new()
+                .with_feature(&karstflow_ids::features::UPGRADE_BPF_STAKE_PROGRAM_TO_V5),
+        );
+        let payload = render_json_rpc_response(request, false, None, Some(&gated));
+        assert_eq!(
+            stake_minimum_delegation_value(&payload),
+            1_000_000_000,
+            "after activation the minimum is 1 SOL"
+        );
     }
 
     #[test]
@@ -3363,6 +3398,10 @@ mod tests {
         lamports_per_sig: u64,
         transaction_count: u64,
         capitalization: u64,
+        /// Explicit feature state. Empty by default, which is the mainnet-shaped
+        /// case — dev mode activates everything, so a mock that inherited that
+        /// default could not express an inactive gate at all.
+        active_features: std::collections::HashSet<[u8; 32]>,
     }
 
     impl MockBankAccess {
@@ -3374,7 +3413,13 @@ mod tests {
                 lamports_per_sig: 5000,
                 transaction_count: 999,
                 capitalization: 500_000_000_000,
+                active_features: std::collections::HashSet::new(),
             }
+        }
+
+        fn with_feature(mut self, feature_id: &karstflow_types::Pubkey) -> Self {
+            self.active_features.insert(feature_id.to_bytes());
+            self
         }
 
         fn with_account(
@@ -3431,6 +3476,14 @@ mod tests {
 
         fn get_lamports_per_signature(&self, _commitment: crate::state::RpcCommitment) -> u64 {
             self.lamports_per_sig
+        }
+
+        fn is_feature_active(
+            &self,
+            feature_id: &karstflow_types::Pubkey,
+            _commitment: crate::state::RpcCommitment,
+        ) -> bool {
+            self.active_features.contains(&feature_id.to_bytes())
         }
 
         fn get_last_valid_block_height(&self, _commitment: crate::state::RpcCommitment) -> u64 {
