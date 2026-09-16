@@ -1,0 +1,50 @@
+Karstflow
+Copyright 2025-2026 Vladimir Bugaev (boogvar)
+
+This product includes software developed by Vladimir Bugaev (boogvar),
+licensed under the Apache License, Version 2.0. See the LICENSE file.
+
+--------------------------------------------------------------------------
+THIRD-PARTY COMPONENTS
+--------------------------------------------------------------------------
+
+This distribution embeds and redistributes pre-compiled sBPF program
+binaries that are the work of third parties. They are located in
+crates/karstflow-control/src/programs/ and are linked into the binary at
+compile time so that a node started from genesis has real on-chain program
+code available.
+
+All of them are licensed under the Apache License, Version 2.0, the same
+license that governs this product. Full attribution, versions and checksums
+are recorded in THIRD_PARTY_LICENSES.md.
+
+  Solana Program Library
+  Copyright Solana Labs, Anza Technology, and the Solana Program Library
+  contributors. Licensed under the Apache License, Version 2.0.
+    - spl_token 3.5.0
+    - spl_token_2022 10.0.0
+    - spl_memo 1.0.0
+    - spl_memo 3.0.0
+    - spl_associated_token_account 1.1.1
+
+  Solana core-BPF programs
+  Copyright Anza Technology and contributors. Licensed under the Apache
+  License, Version 2.0.
+    - address_lookup_table 3.0.0
+    - config 3.0.0
+    - feature_gate 0.0.1
+    - stake 1.0.1
+
+These binaries are redistributed unmodified.
+
+--------------------------------------------------------------------------
+TRADEMARKS
+--------------------------------------------------------------------------
+
+"Karstflow" and the Karstflow logo are trademarks of Vladimir Bugaev
+(boogvar). The Apache License, Version 2.0 does not grant permission to use
+them. See TRADEMARK.md.
+
+"Solana" is a trademark of the Solana Foundation. Karstflow is an
+independent implementation and is not affiliated with, endorsed by, or
+sponsored by the Solana Foundation, Solana Labs or Anza Technology.

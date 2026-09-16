@@ -5,6 +5,10 @@
 //! genesis accounts so nodes starting from genesis have real program code.
 //!
 //! Programs sourced from: agave/program-binaries (Solana Labs)
+//!
+//! They are third-party Apache-2.0 works redistributed unmodified. Attribution,
+//! versions and checksums live in `NOTICE` and `THIRD_PARTY_LICENSES.md` at the
+//! repository root; see also `programs/README.md`.
 
 use karstflow_constants::bpf_loader_program::SIZE_OF_PROGRAM;
 use karstflow_constants::economics::{

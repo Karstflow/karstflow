@@ -7,8 +7,7 @@ body:
       value: |
         Thanks for the suggestion! Please describe the feature you'd like.
 
-        **Note:** This is a proprietary project. Feature requests are tracked
-        internally. External PRs are not accepted without prior written agreement.
+        If you plan to implement it yourself, say so — see CONTRIBUTING.md.
 
   - type: textarea
     id: problem

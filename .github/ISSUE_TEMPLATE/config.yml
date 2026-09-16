@@ -3,6 +3,6 @@ contact_links:
   - name: Security Vulnerability
     url: https://github.com/BoogVAr/karstflow/security/policy
     about: Report security issues privately. See SECURITY.md for details.
-  - name: Licensing & Collaboration
-    url: https://github.com/BoogVAr/karstflow#license
-    about: For licensing inquiries, partnerships, or investment opportunities — see contact details in README.
+  - name: Contributing
+    url: https://github.com/BoogVAr/karstflow/blob/main/CONTRIBUTING.md
+    about: How to build, test and submit a change.

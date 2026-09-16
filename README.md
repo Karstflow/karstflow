@@ -728,15 +728,21 @@ See [`SECURITY.md`](SECURITY.md) for details and contact information.
 
 ## Contributing
 
-External contributions are not accepted at this time.
-See [`CONTRIBUTING.md`](CONTRIBUTING.md) for details.
+Contributions are welcome. See [`CONTRIBUTING.md`](CONTRIBUTING.md) — sign off your commits
+(`git commit -s`) and make sure `just ci` passes.
 
 ## License
 
-Copyright (c) 2025–2026 Vladimir Bugaev (boogvar). All rights reserved.
+Copyright (c) 2025–2026 Vladimir Bugaev (boogvar).
 
-This software is proprietary. No license is granted to use, copy, modify, or distribute it without prior express written permission.
+Licensed under the Apache License, Version 2.0. See [`LICENSE`](LICENSE).
 
-For licensing inquiries, collaboration, or investment opportunities, contact: **boogvar@gmail.com**
+Karstflow embeds third-party Apache-2.0 sBPF program binaries; attribution and checksums are in
+[`NOTICE`](NOTICE) and [`THIRD_PARTY_LICENSES.md`](THIRD_PARTY_LICENSES.md).
 
-See [`LICENSE`](LICENSE) for full terms.
+"Karstflow" and the Karstflow logo are trademarks — the license covers the code, not the name.
+See [`TRADEMARK.md`](TRADEMARK.md).
+
+"Solana" is a trademark of the Solana Foundation. Karstflow is an independent implementation and
+is not affiliated with, endorsed by, or sponsored by the Solana Foundation, Solana Labs or Anza
+Technology.

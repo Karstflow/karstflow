@@ -1,6 +1,11 @@
-**External contributions are not accepted.**
+## What this changes
 
-This is a proprietary project. Pull requests from external contributors
-will be closed without review unless a prior written agreement exists.
+<!-- What changed and why. Link the issue if there is one. -->
 
-For collaboration inquiries, contact: boogvar@gmail.com
+## Checklist
+
+- [ ] `just ci` passes (fmt-check + lint + test)
+- [ ] Behaviour changes are covered by tests
+- [ ] Commits are signed off (`git commit -s`) — see [CONTRIBUTING.md](../CONTRIBUTING.md)
+- [ ] If a third-party binary under `crates/karstflow-control/src/programs/` changed,
+      `NOTICE` and `THIRD_PARTY_LICENSES.md` are updated in this PR
