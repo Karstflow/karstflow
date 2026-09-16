@@ -5,21 +5,40 @@ Karstflow is licensed under the Apache License, Version 2.0. Contributions are w
 ## License of contributions
 
 By submitting a contribution you agree that it is licensed under the Apache License,
-Version 2.0, per §5 of that license. No separate agreement is required.
+Version 2.0, per §5 of that license. **There is no CLA** — nothing to sign, no account to
+create, and no rights are transferred to the maintainer beyond what Apache-2.0 already grants
+to everyone.
 
-Sign off every commit with the [Developer Certificate of Origin](https://developercertificate.org/):
+What is required is a sign-off certifying where the code came from, under the
+[Developer Certificate of Origin](DCO) (DCO 1.1 — the full text is in the `DCO` file):
 
 ```sh
 git commit -s
 ```
 
-The sign-off is your statement that you wrote the contribution, or otherwise have the right to
-submit it under the project's license.
+which appends one line to your commit message:
+
+```
+Signed-off-by: Jane Developer <jane@example.com>
+```
+
+Three things make that line meaningful, so please get them right:
+
+- **Use your real name** and a **reachable email address.** A `users.noreply.github.com`
+  address or a handle does not identify anyone; commits signed off that way will be asked to be
+  amended.
+- The sign-off must match the commit author.
+- **If you are contributing in the course of employment**, confirm that your employer permits
+  it before you submit. Code written on company time or equipment often belongs to the company,
+  not to you, and the sign-off is your statement that you have the right to submit it.
 
 Do not submit code you do not have the right to relicense — in particular, do not copy source
 from another validator implementation into this repository. Karstflow is an independent
 implementation; studying a specification or a reference implementation is fine, copying its
 code is not.
+
+Forgot the sign-off? Amend the last commit with `git commit --amend -s`, or for a branch,
+`git rebase --signoff main`.
 
 ## Before you open a pull request
 
